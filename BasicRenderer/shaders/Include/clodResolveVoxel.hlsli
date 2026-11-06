@@ -328,9 +328,9 @@ bool ResolveClodVoxelCommonSampleFromPackedCluster(
     {
         return false;
     }
-    StructuredBuffer<uint> visibleClusterTransformIndices =
+    StructuredBuffer<uint2> visibleClusterTransformIndices =
         ResourceDescriptorHeap[VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
-    const uint assemblyTransformIndex = visibleClusterTransformIndices[visibleClusterIndex];
+    const uint assemblyTransformIndex = visibleClusterTransformIndices[visibleClusterIndex].x;
 
     PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(instanceIndex);
     // Match voxel rasterization: reconstruct the hit using the same transient
@@ -343,7 +343,7 @@ bool ResolveClodVoxelCommonSampleFromPackedCluster(
     const CLodMeshMetadata metadata = metadataBuffer[offsets.clodMeshMetadataIndex];
 
     StructuredBuffer<ClusterLODGroup> groups = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
-    const ClusterLODGroup group = groups[metadata.groupsBase + localGroupId];
+    const ClusterLODGroup group = groups[localGroupId];
     if ((group.flags & CLOD_GROUP_FLAG_IS_VOXEL) == 0u ||
         localPageIndex < group.pageMapBase ||
         localPageIndex >= group.pageMapBase + group.pageCount)

@@ -463,6 +463,8 @@ namespace CLodCache {
 			return true;
 		}
 
+		static constexpr uint32_t kMaterialSlotSectionTag = 0x4C4F534Du; // MSOL
+
 		std::vector<std::byte> SerializeMetadata(
 			uint64_t buildConfigHash,
 			const ClusterLODPrebuiltData& prebuiltData,
@@ -511,6 +513,13 @@ namespace CLodCache {
 			WritePod(out, prebuiltData.rootPartIndex);
 			WritePod(out, prebuiltData.maxDepth);
 			WritePod(out, prebuiltData.maxTraversalDepth);
+			// Optional trailing section: material slots. Absent for single-material meshes, so their metadata is
+			// byte-identical to before.
+			if (prebuiltData.materialSlotCount > 1u || !prebuiltData.assemblyTransformMaterialBases.empty()) {
+				WritePod(out, kMaterialSlotSectionTag);
+				WritePod(out, prebuiltData.materialSlotCount);
+				WriteVectorPod(out, prebuiltData.assemblyTransformMaterialBases);
+			}
 
 			return out;
 		}
@@ -566,6 +575,14 @@ namespace CLodCache {
 			if (!ReadPod(blob, offset, out.prebuiltData.rootPartIndex)) return false;
 			if (!ReadPod(blob, offset, out.prebuiltData.maxDepth)) return false;
 			if (!ReadPod(blob, offset, out.prebuiltData.maxTraversalDepth)) return false;
+			out.prebuiltData.materialSlotCount = 1u;
+			out.prebuiltData.assemblyTransformMaterialBases.clear();
+			if (offset < blob.size()) {
+				uint32_t tag = 0u;
+				if (!ReadPod(blob, offset, tag) || tag != kMaterialSlotSectionTag) return false;
+				if (!ReadPod(blob, offset, out.prebuiltData.materialSlotCount)) return false;
+				if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblyTransformMaterialBases)) return false;
+			}
 
 			return offset == blob.size();
 		}

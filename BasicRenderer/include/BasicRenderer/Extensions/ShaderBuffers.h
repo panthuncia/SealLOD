@@ -198,7 +198,19 @@ struct PerMeshInstanceCB {
     // catches a metadata slot whose contents were replaced by another mesh.
     unsigned int expectedClodMeshIdentityLo = 0u;
     unsigned int expectedClodMeshIdentityHi = 0u;
+    // Hierarchy roots: Builtin::CLod::MaterialPalettes rows. Count 0 or 1 means the mesh's own material (PerMeshCB).
+    unsigned int materialPaletteBase = 0u;
+    unsigned int materialPaletteCount = 0u;
 };
+
+// One root palette row: a material's bindings, as PerMeshCB carries them for a single-material mesh.
+struct CLodMaterialPaletteEntry {
+    unsigned int materialDataIndex = 0u;
+    unsigned int materialEvalCompileFlagsID = 0u;
+    unsigned int materialReyesEvalCompileFlagsID = 0u;
+    unsigned int rasterBucketIndex = 0u;
+};
+static_assert(sizeof(CLodMaterialPaletteEntry) == 16u);
 
 using PerInstanceTransformCB = PerObjectCB;
 
@@ -758,13 +770,16 @@ struct CLodMeshMetadata
     uint nodeBoneLimit;
     uint meshIdentityLo;
     uint meshIdentityHi;
-    uint meshIdentityClass;
+    uint materialSlotCount; // >1: descriptors store a material slot (word 15)
     float coarseCutSphere[4]{};
     float coarseCutRefineError = -1.0f;
     float coarseCutMinError = 0.0f;
-    uint32_t coarseCutPadding[2]{};
+    uint32_t perMeshBufferIndex = 0u; // this mesh's own PerMeshBuffer row: a part's geometry fields
+    uint32_t meshFlags = 0u; // CLOD_MESH_FLAG_*
 };
 static_assert(sizeof(CLodMeshMetadata) == 128, "CLodMeshMetadata must match the HLSL structured-buffer layout");
+// A hierarchy root: its portals open other meshes (parts) with transforms, which ray tracing places per row.
+inline constexpr uint32_t CLOD_MESH_FLAG_PART_PORTAL_ROOT = 1u << 0;
 
 struct CLodHierarchyLevelInfo
 {
@@ -852,13 +867,20 @@ struct VisibleCluster {
 inline constexpr uint32_t PackedVisibleClusterViewBits = 8u;
 inline constexpr uint32_t PackedVisibleClusterInstanceBits = 24u;
 inline constexpr uint32_t PackedVisibleClusterLocalMeshletBits = 14u;
-inline constexpr uint32_t PackedVisibleClusterGroupBits = 20u;
+inline constexpr uint32_t PackedVisibleClusterGroupBits = 21u; // 20 in words 1-2, the 21st in word 3 bit 30
+// Global CLod index spaces, bounded by what the packed records hold.
+inline constexpr uint64_t CLodMaxGlobalGroups = 1ull << PackedVisibleClusterGroupBits;
+inline constexpr uint64_t CLodMaxGlobalNodes = 1ull << 29; // TraverseNodeRecord node id
+inline constexpr uint64_t CLodMaxGlobalPageMapEntries = 1ull << 20; // voxel clusters pack their page-map slot in 20 bits
 inline constexpr uint32_t PackedVisibleClusterPageDescriptorBits = 20u;
 inline constexpr uint32_t PackedVisibleClusterPageOffsetLowBits = 10u;
 inline constexpr uint32_t PackedVisibleClusterPageOffsetHighBits = 4u;
-inline constexpr uint32_t PackedVisibleClusterPageOffsetShift = 14u;
+// Page offsets in 4 KiB units, 14 bits: slabs of up to 64 MiB (PagePool::kMaxSlabBytes).
+inline constexpr uint32_t PackedVisibleClusterPageOffsetShift = 12u;
 inline constexpr uint32_t PackedVisibleClusterInvalidShadowClipmapIndex = 0xFFFFFFFFu;
 inline constexpr uint32_t PackedVisibleClusterStrideBytes = 16u;
+// Per visible cluster beside the packed record: (assembly transform index, material palette index).
+inline constexpr uint32_t CLodVisibleClusterSideBandStride = 2u * sizeof(uint32_t);
 inline constexpr uint32_t PackedVisibleClusterVsmClipmapBits = 5u;
 inline constexpr uint32_t PackedVisibleClusterVsmBlockCoordBits = 5u;
 inline constexpr uint32_t PackedVisibleClusterVsmLocalPageBits = 2u;
@@ -889,13 +911,14 @@ inline VisibleCluster DecodePackedVisibleCluster(const std::byte* data)
     cluster.viewID = word0 & 0xFFu;
     cluster.instanceID = (word0 >> PackedVisibleClusterViewBits) & 0xFFFFFFu;
     cluster.localMeshletIndex = word1 & 0x3FFFu;
-    cluster.groupID = ((word1 >> PackedVisibleClusterLocalMeshletBits) & 0x3FFFFu) | ((word2 & 0x3u) << 18u);
+    cluster.groupID = ((word1 >> PackedVisibleClusterLocalMeshletBits) & 0x3FFFFu) | ((word2 & 0x3u) << 18u) |
+        (((word3 >> 30u) & 0x1u) << 20u);
     cluster.pageSlabDescriptorIndex = (word2 >> 2u) & 0xFFFFFu;
     const uint32_t pageOffsetUnits =
         ((word2 >> 22u) & 0x3FFu) |
         (((word3 >> 25u) & 0xFu) << PackedVisibleClusterPageOffsetLowBits);
     cluster.pageSlabByteOffset = pageOffsetUnits << PackedVisibleClusterPageOffsetShift;
-    cluster.virtualShadowPayload = word3 & ~(0xFu << 25u);
+    cluster.virtualShadowPayload = word3 & ~((0xFu << 25u) | (1u << 30u));
 
     const uint32_t encodedClipmapIndex =
         (word3 >> PackedVisibleClusterVsmClipmapShift) & PackedVisibleClusterVsmClipmapMask;

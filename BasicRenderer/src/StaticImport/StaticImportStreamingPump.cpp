@@ -193,6 +193,12 @@ namespace br::staticimport
 						++duplicateKeys;
 						continue;
 					}
+					// A hierarchy root's parts register first: its upload resolves its portals to their nodes.
+					for (const auto& part : request.mesh->GetPortalParts()) {
+						if (part && !part->GetPerMeshBufferView() && queuedMeshesToRegister.insert(part.get()).second) {
+							meshesToRegister.push_back(part);
+						}
+					}
 					if (!request.mesh->GetPerMeshBufferView() && queuedMeshesToRegister.insert(request.mesh.get()).second) {
 						meshesToRegister.push_back(request.mesh);
 					}
@@ -269,11 +275,39 @@ namespace br::staticimport
 						const auto rasterBucketIndex = materialManager->AcquireRasterBucket(ComposeDirectStaticRasterFlags(*request.mesh, *request.material));
 						request.mesh->SetRasterBucketIndex(rasterBucketIndex);
 					}
+					std::vector<CLodMaterialPaletteEntry> palette;
+					const auto& paletteMaterials = request.mesh->GetMaterialPalette();
+					if (paletteMaterials.size() > 1u) {
+						BT_ZONE_SCOPE("SARP::LiveSceneBridge::DrainTemplateRequests::PrepareTemplateRows::Palette");
+						bool paletteReady = request.paletteMaterialDataIndices.size() == paletteMaterials.size();
+						for (const auto& paletteMaterial : paletteMaterials) {
+							paletteReady = paletteReady && paletteMaterial && IsMaterialReadyForTemplatePublication(*paletteMaterial);
+						}
+						if (!paletteReady) {
+							++missingMaterialHeightTexture;
+							retryRequests.push_back(request);
+							continue;
+						}
+						palette.reserve(paletteMaterials.size());
+						for (std::size_t entry = 0; entry < paletteMaterials.size(); ++entry) {
+							const auto& paletteMaterial = *paletteMaterials[entry];
+							const auto variants = ComposeMaterialEvalVariantSet(*request.mesh, paletteMaterial);
+							CLodMaterialPaletteEntry row{};
+							row.materialDataIndex = request.paletteMaterialDataIndices[entry];
+							row.materialEvalCompileFlagsID = materialManager->AcquireCompileFlagsSlot(variants.regular);
+							row.materialReyesEvalCompileFlagsID = variants.hasDistinctReyes
+								? materialManager->AcquireCompileFlagsSlot(variants.reyes)
+								: row.materialEvalCompileFlagsID;
+							row.rasterBucketIndex = materialManager->AcquireRasterBucket(
+								ComposeDirectStaticRasterFlags(*request.mesh, paletteMaterial));
+							palette.push_back(row);
+						}
+					}
 					keys.push_back(request.key);
 					meshes.push_back(request.mesh);
 					materials.push_back(request.material);
 					templateSourceRequests.push_back(request);
-					templateRequests.push_back({ request.mesh, request.material });
+					templateRequests.push_back({ request.mesh, request.material, std::move(palette) });
 				}
 				BT_PLOT("SARP.StaticImportService.TemplateMissingMeshBuffer", static_cast<int64_t>(missingMeshBuffer));
 				BT_PLOT("SARP.StaticImportService.TemplateMissingMaterialHeightTexture", static_cast<int64_t>(missingMaterialHeightTexture));
@@ -319,6 +353,17 @@ namespace br::staticimport
 										materialManager->ReleaseCompileFlagsSlot(materialEvalVariants.reyes);
 									}
 									materialManager->ReleaseRasterBucket(ComposeDirectStaticRasterFlags(*pendingRequest.mesh, *pendingRequest.material));
+									const auto& paletteMaterials = pendingRequest.mesh->GetMaterialPalette();
+									if (paletteMaterials.size() > 1u && i < templateRequests.size() &&
+										templateRequests[i].palette.size() == paletteMaterials.size()) {
+										for (const auto& paletteMaterial : paletteMaterials) {
+											const auto variants = ComposeMaterialEvalVariantSet(*pendingRequest.mesh, *paletteMaterial);
+											materialManager->ReleaseCompileFlagsSlot(variants.regular);
+											if (variants.hasDistinctReyes) materialManager->ReleaseCompileFlagsSlot(variants.reyes);
+											materialManager->ReleaseRasterBucket(
+												ComposeDirectStaticRasterFlags(*pendingRequest.mesh, *paletteMaterial));
+										}
+									}
 								}
 								retryRequests.push_back(templateSourceRequests[i]);
 							}

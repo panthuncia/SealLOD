@@ -214,7 +214,7 @@ private:
 	std::vector<uint32_t> m_activeTextureStreamingFeedbackIDs;
 	std::unordered_set<uint32_t> m_activeTextureStreamingFeedbackIDSet;
 	mutable std::mutex m_activeFeedbackMutex;
-	std::mutex m_textureStreamingFeedbackMutex;
+	mutable std::mutex m_textureStreamingFeedbackMutex;
 	std::vector<std::pair<uint32_t, uint32_t>> m_pendingTextureStreamingFeedback;
 	std::vector<uint32_t> m_dirtyTextureStreamingIDs;
 	std::unordered_set<uint32_t> m_dirtyTextureStreamingIDSet;

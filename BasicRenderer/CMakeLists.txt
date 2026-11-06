@@ -787,6 +787,11 @@ add_executable(CachePackTests "tests/CachePackTests.cpp")
 target_link_libraries(CachePackTests PRIVATE ${PROJECT_NAME})
 target_compile_features(CachePackTests PRIVATE cxx_std_23)
 
+add_executable(MergeHierarchyTests "tests/MergeHierarchyTests.cpp")
+target_link_libraries(MergeHierarchyTests PRIVATE CLodBuildCore)
+target_compile_features(MergeHierarchyTests PRIVATE cxx_std_23)
+target_compile_definitions(MergeHierarchyTests PRIVATE NOMINMAX)
+
 add_executable(CLodCacheFormatTests "tests/CLodCacheFormatTests.cpp")
 target_link_libraries(CLodCacheFormatTests PRIVATE CLodBuildCore)
 target_compile_features(CLodCacheFormatTests PRIVATE cxx_std_23)
@@ -1868,6 +1873,7 @@ add_test(NAME BoundedSpscQueueTests COMMAND BoundedSpscQueueTests)
 add_test(NAME TaskSchedulerManagerTests COMMAND TaskSchedulerManagerTests)
 add_test(NAME CachePackTests COMMAND CachePackTests)
 add_test(NAME CLodCacheFormatTests COMMAND CLodCacheFormatTests)
+add_test(NAME MergeHierarchyTests COMMAND MergeHierarchyTests)
 add_test(NAME AsyncStateGraphTests COMMAND AsyncStateGraphTests)
 if(WIN32)
     add_test(NAME GraphJobTests COMMAND GraphJobTests)
@@ -1888,6 +1894,7 @@ if(WIN32)
         TaskSchedulerManagerTests
         CachePackTests
         CLodCacheFormatTests
+        MergeHierarchyTests
         AsyncStateGraphTests
         GraphJobTests
         CLodCoordinatorTests

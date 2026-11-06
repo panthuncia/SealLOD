@@ -1042,6 +1042,8 @@ void CLodStreamingSystem::ResetStreamingStateForShutdown() {
 		// retiring pages directly instead of putting them through the normal
 		// frame-delayed retirement path: the latter is cleared just below and used to
 		// strand every pinned page whenever a recipe replacement recreated CLod.
+		spdlog::info("CLod streaming shutdown: {:.1f} MiB of streaming pages allocated since start, {} ticks",
+			static_cast<double>(m_streamedPageBytesTotal) / 1048576.0, m_streamingDiagnosticTick);
 		std::vector<uint32_t> pinnedPagesToFree;
 		pinnedPagesToFree.reserve(m_pagePinnedStorage.size());
 		for (uint32_t page = 0; page < static_cast<uint32_t>(m_pagePinnedStorage.size()); ++page) {
@@ -2200,13 +2202,15 @@ void CLodStreamingSystem::InitializePageLru(ICLodGeometryStorage* meshManager) {
     m_readyStreamingCompletionWaitersByPage.clear();
     m_readyStreamingCompletionWaitersByPage.resize(totalPages);
     m_pageProtectedThisUpdate.assign(totalPages, 0u);
+    m_pageLastUseTick.assign(totalPages, 0u);
+    m_slabRebalance = {};
 
     {
         ZoneScopedN("CLodStreamingSystem::InitializePageLru::PopulateFreePages");
         for (uint32_t classIndex = 0u;
             classIndex < PagePool::GetPageSizeClassCount();
             ++classIndex) {
-            const uint32_t classSize = 16u * 1024u << classIndex;
+            const uint32_t classSize = pool->GetClassPageSize(classIndex);
             for (uint32_t page : pool->GetGeneralPageIDs(classSize)) {
                 m_pageLrus[classIndex].Insert(page);
             }
@@ -2270,6 +2274,7 @@ void CLodStreamingSystem::EnsurePageTrackingCapacity(ICLodGeometryStorage* meshM
         m_pageResidentGroups.resize(totalPages);
         m_readyStreamingCompletionWaitersByPage.resize(totalPages);
         m_pageProtectedThisUpdate.resize(totalPages, 0u);
+        m_pageLastUseTick.resize(totalPages, 0u);
     }
 }
 
@@ -3364,6 +3369,12 @@ void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
         {
             ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::ProtectReferencedPages::Reset");
             BeginPageProtectionUpdate();
+        }
+        if (meshManager != nullptr) {
+            // Between protection updates, so a draining slab's pages in use are evictable too: their groups fall back
+            // to a parent and stream again into the class's slack.
+            ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::AdvanceSlabRebalance");
+            AdvanceSlabRebalance(meshManager);
         }
         {
             ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::ProtectReferencedPages::UsedGroups");

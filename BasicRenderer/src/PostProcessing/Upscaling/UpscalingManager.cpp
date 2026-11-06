@@ -524,6 +524,14 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
             }
             return;
         }
+        // Ray reconstruction's own allocations are invisible to the render graph's memory accounting.
+        static uint32_t stateQueries = 0u;
+        if (++stateQueries == 300u || stateQueries == 1200u) {
+            sl::DLSSDState state{};
+            if (slDLSSDGetState(myViewport, state) == sl::Result::eOk) {
+                spdlog::info("DLSS Ray Reconstruction estimated VRAM: {:.1f} MiB", static_cast<double>(state.estimatedVRAMUsageInBytes) / 1048576.0);
+            }
+        }
     }
 
     sl::Constants consts = {};

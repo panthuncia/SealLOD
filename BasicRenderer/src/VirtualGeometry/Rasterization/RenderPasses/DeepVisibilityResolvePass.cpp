@@ -51,7 +51,7 @@ DeepVisibilityResolveBindings DeepVisibilityResolvePass::Declare(org::PassBuilde
             Builtin::Light::BufferGroup,
             Builtin::PerObjectBuffer,
             Builtin::NormalMatrixBuffer,
-            Builtin::PerMeshBuffer,
+            Builtin::PerMeshBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases,
             Builtin::PerMeshInstanceBuffer,
             Builtin::InstanceDrawRecordBuffer,
             Builtin::PerInstanceTransformBuffer,

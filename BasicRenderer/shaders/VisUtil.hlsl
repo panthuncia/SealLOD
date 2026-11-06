@@ -33,8 +33,15 @@ uint GetMaterialIdFromCluster(uint clusterIndex,
     uint drawRecordIndex = CLodVisibleClusterInstanceID(packedCluster);
     PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDraw(drawRecordIndex);
     PerMeshBuffer meshBuffer = perMeshBuffer[instanceData.perMeshBufferIndex];
+    uint paletteIndex = 0u;
+    if (CLodTemplateHasPalette(instanceData) && VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX != 0xFFFFFFFFu)
+    {
+        StructuredBuffer<uint2> sideBand = ResourceDescriptorHeap[VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
+        paletteIndex = sideBand[clusterIndex].y;
+    }
+    const CLodMaterialPaletteEntry material = CLodResolveMaterial(instanceData, meshBuffer, paletteIndex);
 
-    return isReyesPatch ? meshBuffer.materialReyesEvalCompileFlagsID : meshBuffer.materialEvalCompileFlagsID;
+    return isReyesPatch ? material.materialReyesEvalCompileFlagsID : material.materialEvalCompileFlagsID;
 }
 
 bool IsSARPGrassVisibilityCluster(uint clusterIndex)

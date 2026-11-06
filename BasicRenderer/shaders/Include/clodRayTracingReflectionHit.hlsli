@@ -13,7 +13,7 @@ struct CLodRtReflectionHit
     float t;
     float coneWidth;
     float3 origin;
-    float pad0;
+    uint transformIndex; // CLodRtHit::transformIndex
     float3 direction;
     float pad1;
 };

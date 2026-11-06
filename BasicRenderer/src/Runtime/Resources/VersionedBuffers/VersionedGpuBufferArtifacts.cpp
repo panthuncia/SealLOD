@@ -20,6 +20,7 @@
 #include "Resources/Resource.h"
 #include "Utilities/Utilities.h"
 #include <BasicTelemetry/Telemetry.h>
+#include <spdlog/spdlog.h>
 
 namespace br::render {
 namespace {
@@ -188,7 +189,34 @@ VersionedBufferRuntime::VersionedBufferRuntime(std::uint32_t framesInFlight)
 
 void VersionedBufferRuntime::NotifyFrameRetirement() noexcept {
     // Retirement notifications arrive from several threads; each is one epoch (the clock keeps the maximum).
-    m_clock->Advance(m_retirements.fetch_add(1, std::memory_order_acq_rel) + 1u);
+    const std::uint64_t epoch = m_retirements.fetch_add(1, std::memory_order_acq_rel) + 1u;
+    m_clock->Advance(epoch);
+    if (epoch % kTrimInterval == 0u) TrimPools();
+}
+
+void VersionedBufferRuntime::TrimPools() noexcept {
+    std::unique_lock lock(m_poolsMutex, std::try_to_lock);
+    if (!lock.owns_lock()) return; // another thread is trimming
+    try {
+        std::uint64_t releasedBytes = 0;
+        std::erase_if(m_pools, [](const WatchedPool& watched) { return watched.pool.expired(); });
+        for (auto& watched : m_pools) {
+            const auto pool = watched.pool.lock();
+            if (!pool) continue;
+            const auto before = pool->Count();
+            const std::uint64_t acquisitions = before.allocated + before.reused;
+            const bool idle = acquisitions == watched.acquisitions;
+            watched.acquisitions = acquisitions;
+            pool->Trim(idle ? std::optional<std::uint32_t>(0u) : std::nullopt);
+            const auto after = pool->Count();
+            releasedBytes += before.bytes > after.bytes ? before.bytes - after.bytes : 0u;
+        }
+        if (releasedBytes != 0u) basic_telemetry::AddCounter("SARP.VersionedBuffer.TrimmedBytes", static_cast<std::int64_t>(releasedBytes));
+    } catch (const std::exception& exception) {
+        spdlog::error("Versioned buffer pool trim failed: {}", exception.what());
+    } catch (...) {
+        spdlog::error("Versioned buffer pool trim failed");
+    }
 }
 
 std::shared_ptr<VersionedGpuBufferBackingPool> VersionedBufferRuntime::CreatePool(std::string name) const {
@@ -220,7 +248,10 @@ std::shared_ptr<VersionedGpuBufferBackingPool> VersionedBufferRuntime::CreatePoo
     config.name = std::move(name);
     config.maxPerClass = m_framesInFlight * 2u + 2u;
     config.framesInFlight = m_framesInFlight;
-    return org::services::BackingPool::Create(std::move(hooks), m_clock, std::move(config));
+    auto pool = org::services::BackingPool::Create(std::move(hooks), m_clock, std::move(config));
+    std::lock_guard lock(m_poolsMutex);
+    m_pools.push_back({ pool, 0u });
+    return pool;
 }
 
 void AcknowledgePublishedVersion(std::shared_ptr<const PublishedGpuBufferVersion>& published,

@@ -158,6 +158,8 @@ MeshManager::MeshManager() {
 	m_clusterLODAssemblyBoneRemaps = org::DynamicBuffer::CreateShared(sizeof(ClusterLODAssemblyBoneRemap), 10000, "clusterLODAssemblyBoneRemaps");
 	m_clusterLODAssemblyBoneRemapIndices = org::DynamicBuffer::CreateShared(sizeof(uint32_t), 10000, "clusterLODAssemblyBoneRemapIndices");
 	m_clodGroupPageMap = org::DynamicBuffer::CreateShared(sizeof(GroupPageMapEntry), 10000, "clodGroupPageMap");
+	m_clodAssemblyMaterialBases = org::DynamicBuffer::CreateShared(sizeof(uint32_t), 10000, "clodAssemblyMaterialBases");
+	m_clodMaterialPalettes = org::DynamicBuffer::CreateShared(sizeof(CLodMaterialPaletteEntry), 1024, "clodMaterialPalettes");
 
 	m_clodSharedGroupChunks->SetUploadPolicyTag(org::runtime::UploadPolicyTag::Coalesced);
 	m_clodGroupPageMap->SetUploadPolicyTag(org::runtime::UploadPolicyTag::Coalesced);
@@ -198,16 +200,19 @@ MeshManager::MeshManager() {
 	m_resources[Builtin::CLod::AssemblyBoneRemaps] = m_clusterLODAssemblyBoneRemaps;
 	m_resources[Builtin::CLod::AssemblyBoneRemapIndices] = m_clusterLODAssemblyBoneRemapIndices;
 	m_resources[Builtin::CLod::GroupPageMap] = m_clodGroupPageMap;
+	m_resources[Builtin::CLod::AssemblyMaterialBases] = m_clodAssemblyMaterialBases;
+	m_resources[Builtin::CLod::MaterialPalettes] = m_clodMaterialPalettes;
 
 	// Page pool
 	{
 		PagePool::Config ppConfig;
-		ppConfig.slabSize     = 128 * 1024 * 1024;  // 128 MB
+		ppConfig.slabSize     = 64 * 1024 * 1024;   // The unit of growth and of rebalancing between classes
 		ppConfig.pinnedSlabSize = 4 * 1024 * 1024;  // Small per-class pinned growth
-		ppConfig.numStreamingSlabs = 16;             // Shared 1 GiB cap across classes
-		// Full-Skyrim telemetry: 1/1/1/2/3 slabs for 16/32/64/128/256 KiB.
-		// This consumes the same eight 128 MiB slabs as the old fixed pool.
-		ppConfig.initialStreamingSlabs = { 2u, 2u, 2u, 4u, 6u };
+		// A cap, not a size: each class starts at one slab and grows only when the pages it would evict are in use; at the
+		// cap, a slab of a class with a slab of slack changes class (CLodStreamingSystem::RequestSlabRebalance). A split
+		// fixed at startup thrashed: the path-traced merged r100 scene streamed 550 MiB/s through one full class.
+		ppConfig.numStreamingSlabs = 36;            // 2.25 GiB
+		ppConfig.initialStreamingSlabs = { 0u, 0u, 1u, 1u, 1u, 1u, 1u };
 		// Forced-leaf evaluation renders of one large asset can need more than the cap, and over it they evict their
 		// own pages and fall back to coarser groups without saying so. See docs/clod-evaluation.md.
 		if (const char* slabs = std::getenv("BASICRENDERER_CLOD_PAGE_POOL_SLABS")) {
@@ -803,6 +808,14 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 			mesh->GetCLodAssemblyTransforms().size() * sizeof(ClusterLODAssemblyTransform),
 			sizeof(ClusterLODAssemblyTransform));
 	}
+	std::unique_ptr<org::BufferView> clusterLODAssemblyMaterialBasesView = nullptr;
+	if (!mesh->GetCLodAssemblyTransforms().empty()) {
+		// One per assembly transform: the palette offset of the portal occurrence that transform places.
+		std::vector<uint32_t> materialBases = mesh->GetCLodAssemblyTransformMaterialBases();
+		materialBases.resize(mesh->GetCLodAssemblyTransforms().size(), 0u);
+		clusterLODAssemblyMaterialBasesView = m_clodAssemblyMaterialBases->AddData(
+			materialBases.data(), materialBases.size() * sizeof(uint32_t), sizeof(uint32_t));
+	}
 	std::unique_ptr<org::BufferView> clusterLODAssemblyInstancesView = nullptr;
 	if (!mesh->GetCLodAssemblyInstances().empty()) {
 		clusterLODAssemblyInstancesView = m_clusterLODAssemblyInstances->AddData(
@@ -1043,8 +1056,11 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 				const ClusterLODNodeRangeAlloc range = levelIndex < lodNodeRanges.size()
 					? lodNodeRanges[levelIndex]
 					: ClusterLODNodeRangeAlloc{};
-				levelInfos[levelIndex].rootNode = lodLevelRoots[levelIndex];
-				levelInfos[levelIndex].nodeRangeOffset = range.offset;
+				// Node indices are global on the GPU (see RebaseCLodHierarchyForUpload).
+				levelInfos[levelIndex].rootNode = lodLevelRoots[levelIndex] +
+					static_cast<uint32_t>(clusterLODNodesView->GetOffset() / sizeof(ClusterLODNode));
+				levelInfos[levelIndex].nodeRangeOffset = range.offset +
+					static_cast<uint32_t>(clusterLODNodesView->GetOffset() / sizeof(ClusterLODNode));
 				levelInfos[levelIndex].nodeRangeCount = range.count;
 			}
 			hierarchyLevelInfoView = m_clodHierarchyLevelInfos->AddData(
@@ -1090,8 +1106,86 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 			spdlog::error("MeshManager::AddMesh: CLOD node skinning global base exceeds uint32_t range for mesh globalID={}", mesh->GetGlobalID());
 			return false;
 		}
+		std::vector<ClusterLODGroup> gpuGroups; // uploaded once the metadata row (the part) is known
+		// The GPU copies of the hierarchy name groups, segments, nodes, page-map slots and assembly instances by
+		// global index, so traversal follows them without any per-mesh base. The CPU copies (streaming, ray
+		// tracing) stay mesh-local.
+		{
+			ZoneScopedN("MeshManager::AddMesh::RebaseHierarchyForUpload");
+			const uint32_t segmentsBase = static_cast<uint32_t>(clusterLODSegmentsView->GetOffset() / sizeof(ClusterLODGroupSegment));
+			const uint32_t nodesBase = static_cast<uint32_t>(clusterLODNodesView->GetOffset() / sizeof(ClusterLODNode));
+			const uint32_t assemblyInstanceBase = clusterLODAssemblyInstancesView != nullptr
+				? static_cast<uint32_t>(clusterLODAssemblyInstancesView->GetOffset() / sizeof(ClusterLODAssemblyInstance)) : 0u;
+			const uint32_t assemblyTransformBase = clusterLODAssemblyTransformsView != nullptr
+				? static_cast<uint32_t>(clusterLODAssemblyTransformsView->GetOffset() / sizeof(ClusterLODAssemblyTransform)) : 0u;
+			const uint64_t groupEnd = static_cast<uint64_t>(groupsBase) + mesh->GetCLodGroups().size();
+			const uint64_t nodeEnd = static_cast<uint64_t>(nodesBase) + mesh->GetCLodNodes().size();
+			if (groupEnd > CLodMaxGlobalGroups || nodeEnd > CLodMaxGlobalNodes ||
+				static_cast<uint64_t>(pageMapGlobalBase) + totalPageMapEntries > CLodMaxGlobalPageMapEntries) {
+				spdlog::error(
+					"MeshManager::AddMesh: global CLOD index space exhausted for mesh globalID={} (groups end {} of {}, nodes end {} of {}, page map end {} of {})",
+					mesh->GetGlobalID(), groupEnd, CLodMaxGlobalGroups, nodeEnd, CLodMaxGlobalNodes,
+					static_cast<uint64_t>(pageMapGlobalBase) + totalPageMapEntries, CLodMaxGlobalPageMapEntries);
+				return false;
+			}
+
+			gpuGroups = mesh->GetCLodGroups();
+			for (ClusterLODGroup& group : gpuGroups) {
+				group.firstSegment += segmentsBase;
+				group.pageMapBase += pageMapGlobalBase;
+				if (group.parentGroupId >= 0) group.parentGroupId += static_cast<int32_t>(groupsBase);
+			}
+			std::vector<ClusterLODGroupSegment> gpuSegments = mesh->GetCLodSegments();
+			for (ClusterLODGroupSegment& segment : gpuSegments) {
+				if (segment.refinedGroup >= 0) segment.refinedGroup += static_cast<int32_t>(groupsBase);
+				segment.pageIndex += pageMapGlobalBase;
+			}
+			std::vector<ClusterLODNode> gpuNodes = mesh->GetCLodNodes();
+			for (ClusterLODNode& node : gpuNodes) {
+				switch (node.range.isGroup) {
+				case CLOD_NODE_INTERNAL:
+					node.range.indexOrOffset += nodesBase;
+					continue;
+				case CLOD_NODE_SEGMENT_LEAF:
+					node.range.indexOrOffset += segmentsBase;
+					break;
+				case CLOD_NODE_INSTANCE_ROOT:
+					node.range.indexOrOffset += assemblyInstanceBase;
+					break;
+				default: // voxel leaf: indexOrOffset is the first section segment within its group
+					break;
+				}
+				node.range.ownerGroupId += groupsBase;
+				if (node.range.countMinusOne != 0u) node.range.countMinusOne += groupsBase; // refined group + 1
+			}
+			m_clusterLODSegments->UpdateView(clusterLODSegmentsView.get(), gpuSegments.data());
+			m_clusterLODNodes->UpdateView(clusterLODNodesView.get(), gpuNodes.data());
+			if (clusterLODAssemblyInstancesView) {
+				std::vector<ClusterLODAssemblyInstance> gpuInstances = mesh->GetCLodAssemblyInstances();
+				const auto& portalParts = mesh->GetPortalParts();
+				for (ClusterLODAssemblyInstance& instance : gpuInstances) {
+					if ((instance.flags & CLOD_ASSEMBLY_INSTANCE_FLAG_PART_PORTAL) != 0u) {
+						const Mesh* part = instance.stackDepth < portalParts.size() ? portalParts[instance.stackDepth].get() : nullptr;
+						if (part == nullptr || part->GetCLodNodesView() == nullptr) {
+							spdlog::error("MeshManager::AddMesh: hierarchy root globalID={} names part {} before it is registered",
+								mesh->GetGlobalID(), instance.stackDepth);
+							return false;
+						}
+						instance.targetRootNode += static_cast<uint32_t>(part->GetCLodNodesView()->GetOffset() / sizeof(ClusterLODNode));
+						instance.stackDepth = 1u;
+					} else {
+						instance.targetRootNode += nodesBase;
+					}
+					if (instance.transformIndex != CLOD_ASSEMBLY_TRANSFORM_SENTINEL) instance.transformIndex += assemblyTransformBase;
+				}
+				m_clusterLODAssemblyInstances->UpdateView(clusterLODAssemblyInstancesView.get(), gpuInstances.data());
+			}
+		}
+
 		CLodMeshMetadata clodMeshMetadata{};
 		clodMeshMetadata.groupsBase = groupsBase;
+		clodMeshMetadata.perMeshBufferIndex = static_cast<uint32_t>(mesh->GetPerMeshBufferView()->GetOffset() / sizeof(PerMeshCB));
+		clodMeshMetadata.meshFlags = mesh->GetPortalParts().empty() ? 0u : CLOD_MESH_FLAG_PART_PORTAL_ROOT;
 		{
 			// What it takes to know an instance selects exactly the coarsest level, without traversing it.
 			const auto& groups = mesh->GetCLodGroups();
@@ -1130,7 +1224,8 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 		}
 		clodMeshMetadata.segmentsBase = static_cast<uint32_t>(clusterLODSegmentsView->GetOffset() / sizeof(ClusterLODGroupSegment));
 		clodMeshMetadata.lodNodesBase = static_cast<uint32_t>(clusterLODNodesView->GetOffset() / sizeof(ClusterLODNode));
-		clodMeshMetadata.rootNode = mesh->GetCLodRootNodeIndex();
+		clodMeshMetadata.rootNode = mesh->GetCLodRootNodeIndex() +
+			static_cast<uint32_t>(clusterLODNodesView->GetOffset() / sizeof(ClusterLODNode)); // global
 		clodMeshMetadata.groupChunkTableBase = (sharedGroupChunksView != nullptr)
 			? static_cast<uint32_t>(sharedGroupChunksView->GetOffset() / sizeof(ClusterLODGroupChunk))
 			: 0u;
@@ -1163,7 +1258,7 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 		const uint64_t meshIdentity = mesh->GetGlobalID();
 		clodMeshMetadata.meshIdentityLo = static_cast<uint32_t>(meshIdentity);
 		clodMeshMetadata.meshIdentityHi = static_cast<uint32_t>(meshIdentity >> 32u);
-		clodMeshMetadata.meshIdentityClass = 0u;
+		clodMeshMetadata.materialSlotCount = mesh->GetCLodMaterialSlotCount();
 		sharedState->ownedMeshMetadataView = m_clodMeshMetadata->AddData(&clodMeshMetadata, sizeof(CLodMeshMetadata), sizeof(CLodMeshMetadata));
 		if (!sharedState->ownedMeshMetadataView) {
 			spdlog::error("MeshManager::AddMesh: failed to allocate logical mesh metadata view for mesh globalID={}", mesh->GetGlobalID());
@@ -1172,6 +1267,12 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 		if (sharedState->ownedMeshMetadataView != nullptr) {
 			sharedState->clodMeshMetadataIndex = static_cast<uint32_t>(sharedState->ownedMeshMetadataView->GetOffset() / sizeof(CLodMeshMetadata));
 		}
+		// The GPU copy of every group names its part (this metadata row) where the CPU copy keeps firstGroupVertex,
+		// which no shader reads: whatever reaches a group (a portal, a run record) finds the part's tables from it,
+		// so no traversal record has to name a mesh.
+		for (ClusterLODGroup& group : gpuGroups) group.firstGroupVertex = sharedState->clodMeshMetadataIndex;
+		m_clusterLODGroups->UpdateView(clusterLODGroupsView.get(), gpuGroups.data());
+		sharedState->ownedAssemblyMaterialBasesView = std::move(clusterLODAssemblyMaterialBasesView);
 		{
 			const auto& nodes = mesh->GetCLodNodes();
 			const auto& lodLevelRootsForLog = mesh->GetCLodLodLevelRoots();
@@ -1288,6 +1389,7 @@ void MeshManager::AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes
 	size_t clodNodeSkinningInfoBytes = 0;
 	size_t clodNodeBoneIndexBytes = 0;
 	size_t clodAssemblyTransformsBytes = 0;
+	size_t clodAssemblyMaterialBasesBytes = 0;
 	size_t clodAssemblyInstancesBytes = 0;
 	size_t clodAssemblyBoneRemapsBytes = 0;
 	size_t clodAssemblyBoneRemapIndicesBytes = 0;
@@ -1311,6 +1413,7 @@ void MeshManager::AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes
 				clodNodeBoneIndexBytes += std::max<size_t>(mesh->GetCLodNodeBoneIndices().size(), 1u) * sizeof(uint32_t);
 			}
 			clodAssemblyTransformsBytes += mesh->GetCLodAssemblyTransforms().size() * sizeof(ClusterLODAssemblyTransform);
+			clodAssemblyMaterialBasesBytes += mesh->GetCLodAssemblyTransforms().size() * sizeof(uint32_t);
 			clodAssemblyInstancesBytes += mesh->GetCLodAssemblyInstances().size() * sizeof(ClusterLODAssemblyInstance);
 			clodAssemblyBoneRemapsBytes += mesh->GetCLodAssemblyBoneRemaps().size() * sizeof(ClusterLODAssemblyBoneRemap);
 			clodAssemblyBoneRemapIndicesBytes += mesh->GetCLodAssemblyBoneRemapIndices().size() * sizeof(uint32_t);
@@ -1362,6 +1465,7 @@ void MeshManager::AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes
 			m_clusterLODNodeSkinningInfos->CanAllocateBytes(clodNodeSkinningInfoBytes) &&
 			m_clusterLODNodeBoneIndices->CanAllocateBytes(clodNodeBoneIndexBytes) &&
 			m_clusterLODAssemblyTransforms->CanAllocateBytes(clodAssemblyTransformsBytes) &&
+			m_clodAssemblyMaterialBases->CanAllocateBytes(clodAssemblyMaterialBasesBytes) &&
 			m_clusterLODAssemblyInstances->CanAllocateBytes(clodAssemblyInstancesBytes) &&
 			m_clusterLODAssemblyBoneRemaps->CanAllocateBytes(clodAssemblyBoneRemapsBytes) &&
 			m_clusterLODAssemblyBoneRemapIndices->CanAllocateBytes(clodAssemblyBoneRemapIndicesBytes) &&
@@ -1378,6 +1482,7 @@ void MeshManager::AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes
 			m_clusterLODNodeSkinningInfos->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodNodeSkinningInfoBytes, 512ull * 1024ull));
 			m_clusterLODNodeBoneIndices->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodNodeBoneIndexBytes, 512ull * 1024ull));
 			m_clusterLODAssemblyTransforms->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodAssemblyTransformsBytes, 512ull * 1024ull));
+			m_clodAssemblyMaterialBases->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodAssemblyMaterialBasesBytes, 128ull * 1024ull));
 			m_clusterLODAssemblyInstances->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodAssemblyInstancesBytes, 512ull * 1024ull));
 			m_clusterLODAssemblyBoneRemaps->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodAssemblyBoneRemapsBytes, 512ull * 1024ull));
 			m_clusterLODAssemblyBoneRemapIndices->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodAssemblyBoneRemapIndicesBytes, 512ull * 1024ull));
@@ -1398,6 +1503,7 @@ void MeshManager::AddMeshesBulk(const std::vector<std::shared_ptr<Mesh>>& meshes
 		m_clusterLODNodeSkinningInfos->ReserveCpuShadowAdditionalBytes(clodNodeSkinningInfoBytes);
 		m_clusterLODNodeBoneIndices->ReserveCpuShadowAdditionalBytes(clodNodeBoneIndexBytes);
 		m_clusterLODAssemblyTransforms->ReserveCpuShadowAdditionalBytes(clodAssemblyTransformsBytes);
+		m_clodAssemblyMaterialBases->ReserveCpuShadowAdditionalBytes(clodAssemblyMaterialBasesBytes);
 		m_clusterLODAssemblyInstances->ReserveCpuShadowAdditionalBytes(clodAssemblyInstancesBytes);
 		m_clusterLODAssemblyBoneRemaps->ReserveCpuShadowAdditionalBytes(clodAssemblyBoneRemapsBytes);
 		m_clusterLODAssemblyBoneRemapIndices->ReserveCpuShadowAdditionalBytes(clodAssemblyBoneRemapIndicesBytes);
@@ -1470,6 +1576,7 @@ void MeshManager::PrepareStaticMeshTemplateResources(const std::vector<br::rende
 	size_t clodNodeSkinningInfoBytes = 0;
 	size_t clodNodeBoneIndexBytes = 0;
 	size_t clodAssemblyTransformsBytes = 0;
+	size_t clodAssemblyMaterialBasesBytes = 0;
 	size_t clodAssemblyInstancesBytes = 0;
 	size_t clodAssemblyBoneRemapsBytes = 0;
 	size_t clodAssemblyBoneRemapIndicesBytes = 0;
@@ -1502,6 +1609,7 @@ void MeshManager::PrepareStaticMeshTemplateResources(const std::vector<br::rende
 					clodNodeBoneIndexBytes += std::max<size_t>(mesh->GetCLodNodeBoneIndices().size(), 1u) * sizeof(uint32_t);
 				}
 				clodAssemblyTransformsBytes += mesh->GetCLodAssemblyTransforms().size() * sizeof(ClusterLODAssemblyTransform);
+			clodAssemblyMaterialBasesBytes += mesh->GetCLodAssemblyTransforms().size() * sizeof(uint32_t);
 				clodAssemblyInstancesBytes += mesh->GetCLodAssemblyInstances().size() * sizeof(ClusterLODAssemblyInstance);
 				clodAssemblyBoneRemapsBytes += mesh->GetCLodAssemblyBoneRemaps().size() * sizeof(ClusterLODAssemblyBoneRemap);
 				clodAssemblyBoneRemapIndicesBytes += mesh->GetCLodAssemblyBoneRemapIndices().size() * sizeof(uint32_t);
@@ -1590,6 +1698,7 @@ void MeshManager::PrepareStaticMeshTemplateResources(const std::vector<br::rende
 		m_clusterLODNodeSkinningInfos->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodNodeSkinningInfoBytes, 512ull * 1024ull));
 		m_clusterLODNodeBoneIndices->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodNodeBoneIndexBytes, 512ull * 1024ull));
 		m_clusterLODAssemblyTransforms->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodAssemblyTransformsBytes, 512ull * 1024ull));
+			m_clodAssemblyMaterialBases->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodAssemblyMaterialBasesBytes, 128ull * 1024ull));
 		m_clusterLODAssemblyInstances->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodAssemblyInstancesBytes, 512ull * 1024ull));
 		m_clusterLODAssemblyBoneRemaps->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodAssemblyBoneRemapsBytes, 512ull * 1024ull));
 		m_clusterLODAssemblyBoneRemapIndices->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(clodAssemblyBoneRemapIndicesBytes, 512ull * 1024ull));
@@ -1604,6 +1713,19 @@ void MeshManager::PrepareStaticMeshTemplateResources(const std::vector<br::rende
 		m_perMeshInstanceBuffers->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(templateRowsToAdd * sizeof(PerMeshInstanceCB), 256ull * 1024ull));
 		m_perMeshInstanceClodOffsets->RequestAsyncReserveBytes(ReserveBytesWithImportHeadroom(templateRowsToAdd * sizeof(MeshInstanceClodOffsets), 256ull * 1024ull));
 	}
+}
+
+// Palette rows are immutable and keyed by content, so every root with the same materials shares one range. Like
+// static templates themselves, they live as long as the manager.
+uint32_t MeshManager::AcquireMaterialPaletteRows(const std::vector<CLodMaterialPaletteEntry>& palette) {
+	std::string key(reinterpret_cast<const char*>(palette.data()), palette.size() * sizeof(CLodMaterialPaletteEntry));
+	std::lock_guard lock(m_materialPaletteMutex);
+	if (const auto it = m_materialPaletteRows.find(key); it != m_materialPaletteRows.end()) return it->second;
+	auto view = m_clodMaterialPalettes->AddData(palette.data(), palette.size() * sizeof(CLodMaterialPaletteEntry), sizeof(CLodMaterialPaletteEntry));
+	const uint32_t base = view ? static_cast<uint32_t>(view->GetOffset() / sizeof(CLodMaterialPaletteEntry)) : 0u;
+	m_materialPaletteViews.push_back(std::move(view));
+	m_materialPaletteRows.emplace(std::move(key), base);
+	return base;
 }
 
 std::vector<br::render::StaticMeshTemplateRegistration> MeshManager::AddStaticMeshTemplatesBulk(const std::vector<br::render::StaticMeshTemplateRequest>& requests) {
@@ -1668,6 +1790,10 @@ std::vector<br::render::StaticMeshTemplateRegistration> MeshManager::AddStaticMe
 				}
 			}
 			row.perMeshBufferIndex = static_cast<uint32_t>(request.mesh->GetPerMeshBufferView()->GetOffset() / sizeof(PerMeshCB));
+			if (request.palette.size() > 1u) {
+				row.materialPaletteBase = AcquireMaterialPaletteRows(request.palette);
+				row.materialPaletteCount = static_cast<uint32_t>(request.palette.size());
+			}
 
 			std::shared_ptr<CLodSharedStreamingState> sharedState;
 			if (auto sharedIt = m_clodSharedStreamingStateByMesh.find(request.mesh.get()); sharedIt != m_clodSharedStreamingStateByMesh.end()) {
@@ -1775,6 +1901,17 @@ std::vector<br::render::StaticMeshTemplateRegistration> MeshManager::AddStaticMe
 					m_clodStreamingStateByInstanceIndex[state.meshInstanceIndex] = std::move(state);
 					if (wasInactive) {
 						PublishCLodStreamingDomainEventForSharedState(br::render::CLodStreamingDomainEventKind::ActiveRangeAdded, sharedState);
+					}
+				}
+			}
+			// A hierarchy root's parts are only ever reached through it: its template keeps them streaming.
+			if (request.mesh) {
+				for (const auto& part : request.mesh->GetPortalParts()) {
+					const auto partIt = part ? m_clodSharedStreamingStateByMesh.find(part.get()) : m_clodSharedStreamingStateByMesh.end();
+					if (partIt == m_clodSharedStreamingStateByMesh.end() || !partIt->second) continue;
+					auto& partState = partIt->second;
+					if (partState->activeInstanceCount++ == 0u && partState->groupCount > 0u) {
+						PublishCLodStreamingDomainEventForSharedState(br::render::CLodStreamingDomainEventKind::ActiveRangeAdded, partState);
 					}
 				}
 			}
@@ -2183,7 +2320,9 @@ void MeshManager::SetRendererStateServices(br::render::RendererStateRequestServi
 		std::tuple{ org::ResourceIdentifier{ Builtin::CLod::AssemblyTransforms }, m_clusterLODAssemblyTransforms, 12ull, uint32_t(sizeof(ClusterLODAssemblyTransform)) },
 		std::tuple{ org::ResourceIdentifier{ Builtin::CLod::AssemblyInstances }, m_clusterLODAssemblyInstances, 13ull, uint32_t(sizeof(ClusterLODAssemblyInstance)) },
 		std::tuple{ org::ResourceIdentifier{ Builtin::CLod::AssemblyBoneRemaps }, m_clusterLODAssemblyBoneRemaps, 14ull, uint32_t(sizeof(ClusterLODAssemblyBoneRemap)) },
-		std::tuple{ org::ResourceIdentifier{ Builtin::CLod::AssemblyBoneRemapIndices }, m_clusterLODAssemblyBoneRemapIndices, 15ull, uint32_t(sizeof(uint32_t)) }
+		std::tuple{ org::ResourceIdentifier{ Builtin::CLod::AssemblyBoneRemapIndices }, m_clusterLODAssemblyBoneRemapIndices, 15ull, uint32_t(sizeof(uint32_t)) },
+		std::tuple{ org::ResourceIdentifier{ Builtin::CLod::AssemblyMaterialBases }, m_clodAssemblyMaterialBases, 17ull, uint32_t(sizeof(uint32_t)) },
+		std::tuple{ org::ResourceIdentifier{ Builtin::CLod::MaterialPalettes }, m_clodMaterialPalettes, 18ull, uint32_t(sizeof(CLodMaterialPaletteEntry)) }
 	};
 	// GroupChunks and GroupPageMap are mutable CLOD residency state, not immutable
 	// mesh topology. CLodStreamingSystem owns their stable backing and updates it

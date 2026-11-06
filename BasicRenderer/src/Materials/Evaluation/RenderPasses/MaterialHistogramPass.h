@@ -17,7 +17,8 @@
 
 struct MaterialHistogramBindings {
     org::PipelineState pipeline;
-    org::DeclaredViewToken visibleClusters, reyesDiceQueue;
+    org::DeclaredViewToken visibleClusters, reyesDiceQueue, sideBand;
+    bool hasSideBand = false;
     bool hasReyesDiceQueue = false;
     uint32_t patchVisibilityIndexBase = 0;
 };
@@ -31,6 +32,7 @@ public:
     explicit MaterialHistogramPass(const MaterialEvaluationBuildInputs& inputs)
         : m_visibleClusterResource(inputs.visibleClusters),
           m_reyesDiceQueueResource(inputs.reyesDiceQueue),
+          m_sideBandResource(inputs.visibleClusterTransformIndices),
           m_patchVisibilityIndexBase(CLodReyesPatchVisibilityIndexBase(inputs.visibleClusterCapacity)) {
         if (!m_visibleClusterResource)
             throw std::invalid_argument("MaterialHistogramPass requires the published visible-cluster resource");
@@ -41,6 +43,10 @@ public:
         if (m_reyesDiceQueueResource) {
             bindings.reyesDiceQueue = b.ShaderResource(m_reyesDiceQueueResource);
             bindings.hasReyesDiceQueue = true;
+        }
+        if (m_sideBandResource) {
+            bindings.sideBand = b.ShaderResource(m_sideBandResource);
+            bindings.hasSideBand = true;
         }
         bindings.patchVisibilityIndexBase = m_patchVisibilityIndexBase;
         // This pass buckets every visibility pixel by material compile-flag
@@ -62,7 +68,7 @@ public:
                               //Builtin::PrimaryCamera::VisibleClusterTable,
                               Builtin::PerMeshInstanceBuffer,
                               Builtin::InstanceDrawRecordBuffer,
-                              Builtin::PerMeshBuffer,
+                              Builtin::PerMeshBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases,
                               Builtin::PerMaterialDataBuffer);
         b.UnorderedAccess("Builtin::VisUtil::MaterialPixelCountBuffer");
 		b.ConstantBuffer(Builtin::PerFrameBuffer);
@@ -97,6 +103,8 @@ public:
             ? context.Index(bindings.reyesDiceQueue)
             : 0xFFFFFFFFu;
         constants[VISBUF_REYES_PATCH_INDEX_BASE] = bindings.patchVisibilityIndexBase;
+        constants[VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] =
+            bindings.hasSideBand ? context.Index(bindings.sideBand) : 0xFFFFFFFFu;
         {
             // These are the two values VisUtil.hlsl tests to decide whether a
             // pixel is a Reyes patch. Logged at record time because that is
@@ -117,5 +125,6 @@ public:
 private:
     std::shared_ptr<org::GloballyIndexedResource> m_visibleClusterResource;
     std::shared_ptr<org::GloballyIndexedResource> m_reyesDiceQueueResource;
+    std::shared_ptr<org::GloballyIndexedResource> m_sideBandResource;
     uint32_t m_patchVisibilityIndexBase = 0u;
 };

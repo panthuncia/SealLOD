@@ -34,10 +34,20 @@
 
 namespace {
     constexpr std::uint32_t kInvalidDescriptor = 0xffffffffu;
-    // RVT source sampling normally refines this further through feedback. Keep a
-    // modest guaranteed floor so cached pages cannot make the source look idle
-    // and collapse it to a one-mip image before newly exposed pages are rendered.
+    // Layer textures stream by feedback, which RVT generation records only while it renders pages; a page that was
+    // short of a mip asks again until it arrives (TerrainRvtRefreshStalePagesCS). Keep a modest guaranteed floor so a
+    // newly exposed page never renders from a one-mip image while its finer mips load.
     constexpr std::uint32_t kTerrainTextureMaximumResidentTopMip = 2u;
+    // SARP_TERRAIN_TEXTURE_FLOOR_MIP=<n>: debug override of that floor (a coarse floor makes RVT pages render short of
+    // mips at any camera, which exercises the page refresh).
+    std::uint32_t TerrainTextureMaximumResidentTopMip()
+    {
+        static const std::uint32_t floorMip = [] {
+            const char* value = std::getenv("SARP_TERRAIN_TEXTURE_FLOOR_MIP");
+            return value && value[0] ? static_cast<std::uint32_t>(std::atoi(value)) : kTerrainTextureMaximumResidentTopMip;
+        }();
+        return floorMip;
+    }
 
     bool TerrainTextureDiagnosticsEnabled()
     {
@@ -332,7 +342,8 @@ namespace {
         std::vector<std::shared_ptr<TextureAsset>>& retainedTextures,
         bool generateMipmaps,
         std::uint32_t& textureIndex,
-        std::uint32_t& samplerIndex)
+        std::uint32_t& samplerIndex,
+        bool streamMips = false)
     {
         textureIndex = kInvalidDescriptor;
         samplerIndex = kInvalidDescriptor;
@@ -340,11 +351,12 @@ namespace {
             return false;
         }
 
-		// Terrain source textures can disappear behind RVT hits for long periods,
-		// so ordinary material feedback is not a reliable residency signal for
-		// them. Keep their complete mip chains resident while the RVT transition is
-		// being validated; stable IDs still provide descriptor publication.
-		texture->SetMipStreamingSuppressed(true);
+		// Layer textures (streamMips) are sampled through their stable streaming IDs and stream by feedback. The
+		// stochastic Gaussian and inverse-LUT textures are sampled through raw descriptors with no streaming ID, so they
+		// keep their complete mip chains.
+		// SARP_TERRAIN_TEXTURES_FULL=1: debug reference, every terrain texture keeps its complete mip chain.
+		static const bool fullResidency = [] { const char* v = std::getenv("SARP_TERRAIN_TEXTURES_FULL"); return v && v[0] == '1'; }();
+		texture->SetMipStreamingSuppressed(!streamMips || fullResidency);
         texture->SetGenerateMipmaps(generateMipmaps);
         if (textureFactory) {
             if (materialManager) {
@@ -559,7 +571,8 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
                 m_layerTextures,
                 true,
                 layer.diffuseTextureIndex,
-                layer.diffuseSamplerIndex)) {
+                layer.diffuseSamplerIndex,
+                true)) {
                 ++uploadedDiffuseLayerCount;
             }
             layer.diffuseStreamingTextureID = TerrainStreamingTextureID(source.diffuse);
@@ -585,7 +598,8 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
                     m_layerTextures,
                     true,
                     layer.normalTextureIndex,
-                    layer.normalSamplerIndex)) {
+                    layer.normalSamplerIndex,
+                    true)) {
                 layer.normalChannels = NormalChannelsForTexture(source.normal);
                 ++uploadedNormalLayerCount;
             }
@@ -612,7 +626,8 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
                 m_layerTextures,
                 true,
                 layer.heightTextureIndex,
-                layer.heightSamplerIndex)) {
+                layer.heightSamplerIndex,
+                true)) {
                 ++uploadedHeightLayerCount;
             }
             layer.heightStreamingTextureID = TerrainStreamingTextureID(source.height);
@@ -638,7 +653,8 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
                 m_layerTextures,
                 true,
                 layer.rmaosTextureIndex,
-                layer.rmaosSamplerIndex)) {
+                layer.rmaosSamplerIndex,
+                true)) {
                 ++uploadedRmaosLayerCount;
             }
             layer.rmaosStreamingTextureID = TerrainStreamingTextureID(source.rmaos);
@@ -815,8 +831,9 @@ std::uint32_t TerrainManager::SetActiveTerrain(const TerrainMaterialDesc& desc, 
                 {},
                 "terrain-layer:" + std::to_string(pending.layerIndex),
                 TextureStreamingBindingOptions{
-                    .allowIdleCoarsening = false,
-                    .maximumResidentTopMip = kTerrainTextureMaximumResidentTopMip,
+                    // Pages keep what they were rendered with, so an unrequested layer can drop to the floor.
+                    .allowIdleCoarsening = true,
+                    .maximumResidentTopMip = TerrainTextureMaximumResidentTopMip(),
                 });
             if (bindingID != 0u) {
                 m_streamingBindingIDs.push_back(bindingID);

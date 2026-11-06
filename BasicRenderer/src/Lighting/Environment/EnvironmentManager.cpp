@@ -1,6 +1,8 @@
 #include "Lighting/Environment/EnvironmentManager.h"
 
+#include <chrono>
 #include <filesystem>
+#include <DirectXTex.h>
 #include <BasicTelemetry/Tracy.h>
 #include <spdlog/spdlog.h>
 #include <rhi.h>
@@ -77,7 +79,76 @@ std::unique_ptr<Environment> EnvironmentManager::CreateEnvironment(std::wstring 
 	return std::move(env);
 }
 
+namespace {
+
+// The skybox as BC6H: 32 MiB at 2048 a face instead of 192 MiB of RGBA16F, for the sky raster and path tracing read
+// (RGB only; alpha is unused). The GPU encodes it once, and the next launch loads the result. Written under a temporary
+// name, so a cache is either complete or absent.
+void WriteCompressedSkybox(const std::shared_ptr<TextureSourceData>& data, const std::filesystem::path& destination) {
+	if (!data || data->subresources.empty()) {
+		spdlog::warn("EnvironmentManager: BC6H compression of the skybox failed");
+		return;
+	}
+	const auto& desc = data->desc;
+	DirectX::TexMetadata metadata{};
+	metadata.width = desc.imageDimensions[0].width;
+	metadata.height = desc.imageDimensions[0].height;
+	metadata.depth = 1;
+	metadata.arraySize = (std::max)(1u, desc.arraySize) * (desc.isCubemap ? 6u : 1u);
+	metadata.mipLevels = data->subresources.size() / metadata.arraySize;
+	metadata.miscFlags = desc.isCubemap ? DirectX::TEX_MISC_TEXTURECUBE : 0u;
+	metadata.format = DXGI_FORMAT_BC6H_UF16;
+	metadata.dimension = DirectX::TEX_DIMENSION_TEXTURE2D;
+	DirectX::ScratchImage image;
+	if (FAILED(image.Initialize(metadata))) return;
+	for (size_t slice = 0; slice < metadata.arraySize; ++slice) {
+		for (size_t mip = 0; mip < metadata.mipLevels; ++mip) {
+			const DirectX::Image* target = image.GetImage(mip, slice, 0);
+			const auto& bytes = data->subresources[slice * metadata.mipLevels + mip];
+			if (!target || !bytes || bytes->size() != target->slicePitch) {
+				spdlog::warn("EnvironmentManager: BC6H skybox subresource {} has the wrong size", slice * metadata.mipLevels + mip);
+				return;
+			}
+			std::memcpy(target->pixels, bytes->data(), bytes->size());
+		}
+	}
+	auto temporary = destination;
+	temporary += L".tmp";
+	std::error_code error;
+	if (FAILED(DirectX::SaveToDDSFile(image.GetImages(), image.GetImageCount(), metadata, DirectX::DDS_FLAGS_NONE, temporary.c_str()))) {
+		spdlog::warn("EnvironmentManager: could not write '{}'", temporary.string());
+		std::filesystem::remove(temporary, error);
+		return;
+	}
+	std::filesystem::rename(temporary, destination, error);
+	if (error) {
+		spdlog::warn("EnvironmentManager: could not move '{}' into place: {}", temporary.string(), error.message());
+		std::filesystem::remove(temporary, error);
+		return;
+	}
+	spdlog::info("EnvironmentManager: wrote the BC6H skybox cache '{}'", destination.filename().string());
+}
+
+void SubmitSkyboxCompression(const EnvironmentManager::Bc6hCompressorFn& compressor,
+	const std::filesystem::path& source, const std::filesystem::path& destination) {
+	const auto started = std::chrono::steady_clock::now();
+	auto data = LoadTextureSourceDataFromDDSFilePath(source.string(), false, "skybox BC6H compression");
+	if (!data) {
+		spdlog::warn("EnvironmentManager: could not read '{}' to compress it", source.string());
+		return;
+	}
+	const bool submitted = compressor(std::move(data), "Skybox", [destination, started](std::shared_ptr<TextureSourceData> blocks) {
+		WriteCompressedSkybox(blocks, destination);
+		spdlog::info("EnvironmentManager: skybox BC6H compression took {:.2f} s",
+			std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count());
+	});
+	if (!submitted) spdlog::info("EnvironmentManager: GPU BC6H compression unavailable; the skybox stays RGBA16F");
+}
+
+} // namespace
+
 EnvironmentManager::~EnvironmentManager() {
+	if (m_skyboxCompression.valid()) m_skyboxCompression.wait();
 	std::lock_guard<std::mutex> lock(*m_environmentUpdateMutex);
 	m_pendingSourceLoads->alive = false;
 }
@@ -85,14 +156,26 @@ EnvironmentManager::~EnvironmentManager() {
 void EnvironmentManager::SetFromHDRI(Environment* e, std::string hdriPath) {
 	// A processed environment is cached as its cubemap; otherwise its HDRI is converted.
 	const auto skyboxPath = GetCacheFilePath(e->GetName() + L"_environment.dds", L"environments");
-	const bool cachedCubemap = std::filesystem::exists(skyboxPath);
+	const auto compressedSkyboxPath = GetCacheFilePath(e->GetName() + L"_environment_bc6h.dds", L"environments");
+	const bool compressedCubemap = std::filesystem::exists(compressedSkyboxPath);
+	const bool cachedCubemap = compressedCubemap || std::filesystem::exists(skyboxPath);
 	br::textures::TextureRequest request;
 	request.preparation = br::textures::TexturePreparation::LoadOnly;
-	if (cachedCubemap) {
+	if (compressedCubemap) {
+		request.source = br::textures::MakeFileTextureSource(compressedSkyboxPath);
+		request.debugName = "Skybox cubemap";
+	}
+	else if (cachedCubemap) {
 		request.source = br::textures::MakeFileTextureSource(skyboxPath);
 		request.allowRTV = true;
 		request.allowUAV = true;
 		request.debugName = "Skybox cubemap";
+		if (m_bc6hCompressor && !m_skyboxCompression.valid()) {
+			m_skyboxCompression = std::async(std::launch::async, [compressor = m_bc6hCompressor,
+				source = std::filesystem::path(skyboxPath), destination = std::filesystem::path(compressedSkyboxPath)] {
+				SubmitSkyboxCompression(compressor, source, destination);
+			});
+		}
 	}
 	else {
 		request.source = br::textures::MakeFileTextureSource(hdriPath);

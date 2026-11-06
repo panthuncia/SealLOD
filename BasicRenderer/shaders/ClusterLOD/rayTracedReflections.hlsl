@@ -61,6 +61,7 @@ void CLodRtReflectionTraceCS(uint3 id : SV_DispatchThreadID)
         const CLodRtHit hit = CLodRtTrace(scene, clasInfo, ray, RAY_FLAG_CULL_BACK_FACING_TRIANGLES, 0xFFu, pixelSpread);
         if (hit.hit) {
             record.drawRecord = hit.drawRecord;
+            record.transformIndex = hit.transformIndex;
             record.clasSlot = hit.clasSlot;
             record.primitive = hit.primitive;
             record.frontFace = hit.frontFace ? 1u : 0u;

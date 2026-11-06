@@ -57,7 +57,7 @@ RasterBucketHistogramBindings RasterBucketHistogramPass::Declare(org::PassBuilde
         builder.ShaderResource(m_visibleClustersBuffer), builder.ShaderResource(m_visibleClustersCounterBuffer),
         builder.IndirectArguments(m_histogramIndirectCommand), builder.UnorderedAccess(m_histogramBuffer)};
     builder.ShaderResource(
-            Builtin::PerMeshBuffer,
+            Builtin::PerMeshBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases,
             Builtin::PerMeshInstanceBuffer,
             Builtin::InstanceDrawRecordBuffer,
             Builtin::PerInstanceTransformBuffer,
@@ -72,6 +72,10 @@ RasterBucketHistogramBindings RasterBucketHistogramPass::Declare(org::PassBuilde
     }
     if (m_readBaseCounterBuffer) {
         bindings.readBaseCounter = builder.ShaderResource(m_readBaseCounterBuffer);
+    }
+    if (m_sideBandBuffer) {
+        bindings.sideBand = builder.ShaderResource(m_sideBandBuffer);
+        bindings.hasSideBand = true;
     }
 
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
@@ -113,6 +117,8 @@ void RasterBucketHistogramPass::Record(const RasterBucketHistogramBindings& bind
     c[CLOD_HISTOGRAM_REYES_OWNERSHIP_BITSET_DESCRIPTOR_INDEX] =
         bindings.hasReyesOwnership ? context.Index(bindings.reyesOwnership) : 0xFFFFFFFFu;
     c[CLOD_HISTOGRAM_NUM_RASTER_BUCKETS] = frame.numBuckets;
+    c[CLOD_HISTOGRAM_VISIBLE_CLUSTER_SIDE_BAND_DESCRIPTOR_INDEX] =
+        bindings.hasSideBand ? context.Index(bindings.sideBand) : 0xFFFFFFFFu;
     c[CLOD_HISTOGRAM_READ_MODE_FLAGS] = (bindings.readReverse ? CLOD_HISTOGRAM_READ_FLAG_REVERSED : 0u)
         | (bindings.hasReyesOwnership ? CLOD_HISTOGRAM_READ_FLAG_SKIP_REYES_OWNED : 0u);
     c[CLOD_HISTOGRAM_READ_CAPACITY] = bindings.visibleCapacity;

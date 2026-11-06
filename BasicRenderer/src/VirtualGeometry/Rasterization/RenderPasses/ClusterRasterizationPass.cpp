@@ -102,7 +102,7 @@ ClusterRasterBindings ClusterRasterizationPass::Declare(org::PassBuilder& builde
     builder.ShaderResource(
             Builtin::PerObjectBuffer,
             Builtin::NormalMatrixBuffer,
-            Builtin::PerMeshBuffer,
+            Builtin::PerMeshBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases,
             Builtin::PerMeshInstanceBuffer,
             Builtin::InstanceDrawRecordBuffer,
             Builtin::PerInstanceTransformBuffer,

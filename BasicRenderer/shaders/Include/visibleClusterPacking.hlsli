@@ -4,7 +4,8 @@
 #include "include/clodVirtualShadowClipmap.hlsli"
 
 static const uint CLOD_PACKED_VISIBLE_CLUSTER_STRIDE = 16u;
-static const uint CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_SHIFT = 14u;
+// Page offsets in 4 KiB units, 14 bits: slabs of up to 64 MiB (PagePool::kMaxSlabBytes).
+static const uint CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_SHIFT = 12u;
 static const uint CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_LOW_MASK = 0x3FFu;
 static const uint CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_HIGH_MASK = 0xFu;
 static const uint CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_HIGH_WORD_SHIFT = 25u;
@@ -104,9 +105,10 @@ uint CLodVisibleClusterLocalMeshletIndex(uint4 packedCluster)
     return packedCluster.y & 0x3FFFu;
 }
 
+// Global group index (21 bits: 18 in y, 2 in z, 1 in w bit 30).
 uint CLodVisibleClusterGroupID(uint4 packedCluster)
 {
-    return ((packedCluster.y >> 14u) & 0x3FFFFu) | ((packedCluster.z & 0x3u) << 18u);
+    return ((packedCluster.y >> 14u) & 0x3FFFFu) | ((packedCluster.z & 0x3u) << 18u) | (((packedCluster.w >> 30u) & 0x1u) << 20u);
 }
 
 uint CLodVisibleClusterPageSlabDescriptorIndex(uint4 packedCluster)
@@ -275,7 +277,8 @@ uint4 CLodPackVisibleCluster(
         CLodBuildVisibleClusterVsmPayloadFromClipmapIndex(shadowClipmapIndex) |
             (((pageOffsetUnits >> 10u) &
                 CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_HIGH_MASK) <<
-                CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_HIGH_WORD_SHIFT));
+                CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_HIGH_WORD_SHIFT) |
+            (((groupID >> 20u) & 0x1u) << 30u));
 }
 
 uint4 CLodPackVisibleClusterWithVsmPayload(
@@ -296,10 +299,11 @@ uint4 CLodPackVisibleClusterWithVsmPayload(
             ((pageSlabDescriptorIndex & 0xFFFFFu) << 2u) |
             ((pageOffsetUnits &
                 CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_LOW_MASK) << 22u),
-        vsmPayload |
+        (vsmPayload & ~(1u << 30u)) |
             (((pageOffsetUnits >> 10u) &
                 CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_HIGH_MASK) <<
-                CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_HIGH_WORD_SHIFT));
+                CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_HIGH_WORD_SHIFT) |
+            (((groupID >> 20u) & 0x1u) << 30u));
 }
 
 void CLodStoreVisibleClusterRW(

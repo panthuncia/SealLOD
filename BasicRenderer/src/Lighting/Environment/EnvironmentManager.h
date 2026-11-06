@@ -7,6 +7,7 @@
 #include <mutex>
 #include <vector>
 #include <functional>
+#include <future>
 #include <string>
 
 #include "BasicRenderer/Scene/Environment.h"
@@ -22,6 +23,7 @@ namespace org { class BufferView; }
 namespace org { class DynamicBuffer; }
 namespace org { class PixelBuffer; }
 namespace org::runtime { class IUploadService; }
+struct TextureSourceData;
 
 class EnvironmentManager : public org::IResourceProvider {
 public:
@@ -38,6 +40,10 @@ public:
 	void SetWorkServices(br::render::EnvironmentWorkServices services) {
 		m_workServices = std::move(services);
 	}
+	// TextureFactory::SubmitBC6HCompressionJob: compresses a cached RGBA16F skybox for later launches.
+	using Bc6hCompressorFn = std::function<bool(std::shared_ptr<TextureSourceData>, std::string,
+		std::function<void(std::shared_ptr<TextureSourceData>)>)>;
+	void SetBc6hCompressor(Bc6hCompressorFn fn) { m_bc6hCompressor = std::move(fn); }
 
 	std::unique_ptr<Environment> CreateEnvironment(std::wstring name = L"");
 	void RemoveEnvironment(Environment* environment);
@@ -71,6 +77,9 @@ private:
 	std::mutex m_environmentInfoBufferMutex; // Mutex for thread safety
 
 	unsigned int m_skyboxResolution = 2048;
+	// Reads a cached RGBA16F skybox and submits it to the GPU BC6H encoder, once (SubmitSkyboxCompression).
+	std::future<void> m_skyboxCompression;
+	Bc6hCompressorFn m_bc6hCompressor;
 	unsigned int m_reflectionCubemapResolution = 512;
 
 	// Queue ownership belongs to the renderer-scoped service. The environment

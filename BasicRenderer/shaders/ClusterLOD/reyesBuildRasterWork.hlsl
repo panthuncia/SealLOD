@@ -343,9 +343,9 @@ void BuildReyesRasterWorkCS(uint3 dispatchThreadId : SV_DispatchThreadID)
     uint assemblyTransformIndex = CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
     if (CLOD_REYES_BUILD_RASTER_WORK_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX != 0xFFFFFFFFu)
     {
-        StructuredBuffer<uint> visibleClusterTransformIndices = ResourceDescriptorHeap[
+        StructuredBuffer<uint2> visibleClusterTransformIndices = ResourceDescriptorHeap[
             CLOD_REYES_BUILD_RASTER_WORK_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
-        assemblyTransformIndex = visibleClusterTransformIndices[diceEntry.visibleClusterIndex];
+        assemblyTransformIndex = visibleClusterTransformIndices[diceEntry.visibleClusterIndex].x;
     }
     if ((CLOD_REYES_BUILD_RASTER_WORK_ENABLE_PATCH_OCCLUSION != 0u ||
          CLOD_REYES_BUILD_RASTER_WORK_TERRAIN_RVT_ENABLED != 0u) &&

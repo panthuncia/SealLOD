@@ -223,7 +223,7 @@ ClusterSoftwareRasterBindings ClusterSoftwareRasterizationPass::Declare(org::Pas
     auto* builder = &declaration;
     builder->PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder->ShaderResource(
-            Builtin::PerMeshBuffer,
+            Builtin::PerMeshBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases,
             Builtin::PerMaterialDataBuffer,
             Builtin::Material::TextureStreamingMetadataBuffer,
             Builtin::PerMeshInstanceBuffer,

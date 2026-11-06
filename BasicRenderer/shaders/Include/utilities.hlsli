@@ -113,25 +113,23 @@ uint ComputeTextureStreamingRequestedTopMip(TextureStreamingGPUInfo streamingInf
     return min(streamingInfo.totalMipCount - 1u, requestedTopMipBase + localRequestedTopMip);
 }
 
-uint ReduceWaveGroupRequestedTopMipMin(uint4 groupMask, uint requestedTopMip)
+// A terrain RVT page keeps whatever its source textures had resident when it was generated. Generation notes the texture
+// it was most short of, so the page can ask for that texture again and be re-rendered once it improves.
+// Packed: [31:27] 31 - wanted mip (finer wins under max), [26:22] resident top mip at generation (31: no image yet),
+// [21:0] streaming texture ID. Zero: the page had everything it asked for.
+static const uint kTerrainRvtTextureDeficitIdMask = 0x003FFFFFu;
+uint TerrainRvtPackTextureDeficit(uint streamingTextureID, uint wantedTopMip, uint residentTopMipAtGeneration)
 {
-    uint minRequestedTopMip = 0xffffffffu;
-
-    [unroll]
-    for (uint wordIndex = 0u; wordIndex < 4u; ++wordIndex)
-    {
-        uint wordMask = groupMask[wordIndex];
-        while (wordMask != 0u)
-        {
-            const uint bitIndex = firstbitlow(wordMask);
-            const uint laneIndex = wordIndex * 32u + bitIndex;
-            minRequestedTopMip = min(minRequestedTopMip, WaveReadLaneAt(requestedTopMip, laneIndex));
-            wordMask &= ~(1u << bitIndex);
-        }
-    }
-
-    return minRequestedTopMip;
+    return ((31u - min(wantedTopMip, 30u)) << 27) | (min(residentTopMipAtGeneration, 31u) << 22) |
+        (streamingTextureID & kTerrainRvtTextureDeficitIdMask);
 }
+uint TerrainRvtTextureDeficitID(uint deficit) { return deficit & kTerrainRvtTextureDeficitIdMask; }
+uint TerrainRvtTextureDeficitWantedMip(uint deficit) { return 31u - (deficit >> 27); }
+uint TerrainRvtTextureDeficitResidentMip(uint deficit) { return (deficit >> 22) & 0x1Fu; }
+
+#if defined(TERRAIN_RVT_GENERATION)
+static uint g_terrainRvtTextureDeficit = 0u;
+#endif
 
 void RecordTextureStreamingFeedbackRequestedTopMip(
     TextureStreamingGPUInfo streamingInfo,
@@ -145,6 +143,18 @@ void RecordTextureStreamingFeedbackRequestedTopMip(
     if ((streamingInfo.flags & kTextureStreamingFlagEnabled) == 0u || streamingInfo.totalMipCount <= 1u) {
         return;
     }
+#if defined(TERRAIN_RVT_GENERATION)
+    {
+        const bool hasImage = streamingInfo.imageDescriptorIndex != 0xffffffffu;
+        if ((!hasImage || requestedTopMip < streamingInfo.residentTopMip) && streamingTextureID <= kTerrainRvtTextureDeficitIdMask)
+        {
+            g_terrainRvtTextureDeficit = max(g_terrainRvtTextureDeficit,
+                TerrainRvtPackTextureDeficit(streamingTextureID, requestedTopMip, hasImage ? streamingInfo.residentTopMip : 31u));
+        }
+    }
+#endif
+    // Stored as mip + 1: zero is what a newly grown backing holds before its reset lands, and must not read as mip 0.
+    requestedTopMip += 1u;
 
 #if defined(CLOD_RESOLVE_PATH_HIT)
     // Reordering moves threads between hits, so there is no wave to reduce over: every sample writes for itself.
@@ -173,16 +183,22 @@ void RecordTextureStreamingFeedbackRequestedTopMip(
         return;
     }
 
-    const uint4 groupMask = WaveMatch(streamingTextureID);
-    const uint leaderLane = WaveFirstLaneFromMask(groupMask);
-    if (WaveGetLaneIndex() != leaderLane) {
-        return;
+    // Mixed textures in one wave: peel off one texture ID per iteration, reducing while all its lanes are still active.
+    // (A WaveMatch leader reading its group's lanes after they have returned reads inactive lanes, which is undefined.)
+    for (;;)
+    {
+        const uint leaderTextureID = WaveReadLaneFirst(streamingTextureID);
+        if (streamingTextureID == leaderTextureID)
+        {
+            const uint groupRequestedTopMip = WaveActiveMin(requestedTopMip);
+            if (WaveIsFirstLane())
+            {
+                uint previousRequestedTopMip;
+                InterlockedMin(textureStreamingFeedbackBuffer[leaderTextureID], groupRequestedTopMip, previousRequestedTopMip);
+            }
+            return;
+        }
     }
-
-    const uint groupRequestedTopMip = ReduceWaveGroupRequestedTopMipMin(groupMask, requestedTopMip);
-
-    uint previousRequestedTopMip;
-    InterlockedMin(textureStreamingFeedbackBuffer[streamingTextureID], groupRequestedTopMip, previousRequestedTopMip);
 #endif
 }
 

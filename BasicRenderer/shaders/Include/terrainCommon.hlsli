@@ -186,11 +186,20 @@ TerrainStochasticContext TerrainBuildStochasticContext(
     return ctx;
 }
 
-float TerrainEstimateTextureLod(Texture2D<float4> lodTexture, float2 duDx, float2 duDy)
+// The LOD against the texture's full mip 0: a streamed image holds only its resident mips, and its size would move the
+// estimate (and the stochastic blend that depends on it) whenever residency changes.
+float TerrainEstimateTextureLod(Texture2D<float4> lodTexture, uint streamingTextureID, float2 duDx, float2 duDy)
 {
     uint textureWidth = 1u;
     uint textureHeight = 1u;
     lodTexture.GetDimensions(textureWidth, textureHeight);
+    if (streamingTextureID != 0u)
+    {
+        const TextureStreamingGPUInfo streamingInfo = LoadTextureStreamingInfo(streamingTextureID);
+        const float2 fullSize = ResolveTextureStreamingTexelScale(streamingInfo, textureWidth, textureHeight);
+        textureWidth = (uint)fullSize.x;
+        textureHeight = (uint)fullSize.y;
+    }
     float2 textureSize = float2(max(textureWidth, 1u), max(textureHeight, 1u));
     float2 dxTexels = duDx * textureSize;
     float2 dyTexels = duDy * textureSize;
@@ -201,6 +210,7 @@ float TerrainEstimateTextureLod(Texture2D<float4> lodTexture, float2 duDx, float
 TerrainStochasticContext TerrainBuildStochasticContext(
     Texture2D<float4> lodTexture,
     SamplerState lodSampler,
+    uint lodStreamingTextureID,
     float2 uv,
     float2 duDx,
     float2 duDy,
@@ -213,7 +223,7 @@ TerrainStochasticContext TerrainBuildStochasticContext(
         duDy,
         stochasticScale,
         blendCurve,
-        TerrainEstimateTextureLod(lodTexture, duDx, duDy));
+        TerrainEstimateTextureLod(lodTexture, lodStreamingTextureID, duDx, duDy));
 }
 
 float3 TerrainVariancePreservingBlend(float3 a, float3 b, float3 c, float3 weights)
@@ -426,7 +436,7 @@ bool TerrainTryBuildLayerStochasticContext(
     {
         Texture2D<float4> lodTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.diffuseTextureIndex)];
         SamplerState lodSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.diffuseSamplerIndex)];
-        ctx = TerrainBuildStochasticContext(lodTex, lodSampler, uv, duDx, duDy, stochasticScale, blendCurve);
+        ctx = TerrainBuildStochasticContext(lodTex, lodSampler, layer.diffuseStreamingTextureID, uv, duDx, duDy, stochasticScale, blendCurve);
         return true;
     }
 
@@ -434,7 +444,7 @@ bool TerrainTryBuildLayerStochasticContext(
     {
         Texture2D<float4> lodTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.normalTextureIndex)];
         SamplerState lodSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.normalSamplerIndex)];
-        ctx = TerrainBuildStochasticContext(lodTex, lodSampler, uv, duDx, duDy, stochasticScale, blendCurve);
+        ctx = TerrainBuildStochasticContext(lodTex, lodSampler, layer.normalStreamingTextureID, uv, duDx, duDy, stochasticScale, blendCurve);
         return true;
     }
 
@@ -442,7 +452,7 @@ bool TerrainTryBuildLayerStochasticContext(
     {
         Texture2D<float4> lodTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.heightTextureIndex)];
         SamplerState lodSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.heightSamplerIndex)];
-        ctx = TerrainBuildStochasticContext(lodTex, lodSampler, uv, duDx, duDy, stochasticScale, blendCurve);
+        ctx = TerrainBuildStochasticContext(lodTex, lodSampler, layer.heightStreamingTextureID, uv, duDx, duDy, stochasticScale, blendCurve);
         return true;
     }
 
@@ -471,6 +481,7 @@ float TerrainSampleLayerHeight(
             TerrainStochasticContext ctx = TerrainBuildStochasticContext(
                 diffuseTex,
                 diffuseSampler,
+                layer.diffuseStreamingTextureID,
                 uv,
                 duDx,
                 duDy,
@@ -493,6 +504,7 @@ float TerrainSampleLayerHeight(
             TerrainStochasticContext ctx = TerrainBuildStochasticContext(
                 heightTex,
                 heightSampler,
+                layer.heightStreamingTextureID,
                 uv,
                 duDx,
                 duDy,
@@ -513,6 +525,7 @@ float TerrainSampleLayerHeight(
             TerrainStochasticContext ctx = TerrainBuildStochasticContext(
                 heightTex,
                 heightSampler,
+                layer.heightStreamingTextureID,
                 uv,
                 duDx,
                 duDy,
@@ -634,7 +647,7 @@ bool TerrainTryBuildLayerParallaxHeightContext(
     {
         Texture2D<float4> diffuseTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.diffuseTextureIndex)];
         SamplerState diffuseSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.diffuseSamplerIndex)];
-        ctx = TerrainBuildStochasticContext(diffuseTex, diffuseSampler, uv, duDx, duDy, stochasticScale, blendCurve);
+        ctx = TerrainBuildStochasticContext(diffuseTex, diffuseSampler, layer.diffuseStreamingTextureID, uv, duDx, duDy, stochasticScale, blendCurve);
         ctx.weights = TerrainHeightBlendWeights(ctx.weights, TerrainSampleLayerHeightTriplet(layer, ctx), blendCurve);
         return true;
     }
@@ -649,7 +662,7 @@ bool TerrainTryBuildLayerParallaxHeightContext(
 
         Texture2D<float4> heightTex = ResourceDescriptorHeap[NonUniformResourceIndex(layer.heightTextureIndex)];
         SamplerState heightSampler = SamplerDescriptorHeap[NonUniformResourceIndex(layer.heightSamplerIndex)];
-        ctx = TerrainBuildStochasticContext(heightTex, heightSampler, uv, duDx, duDy, stochasticScale, blendCurve);
+        ctx = TerrainBuildStochasticContext(heightTex, heightSampler, layer.heightStreamingTextureID, uv, duDx, duDy, stochasticScale, blendCurve);
         ctx.weights = TerrainHeightBlendWeights(ctx.weights, TerrainSampleLayerHeightTriplet(layer, ctx), blendCurve);
         return true;
     }

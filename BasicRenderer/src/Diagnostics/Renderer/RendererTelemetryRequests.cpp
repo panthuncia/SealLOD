@@ -534,15 +534,20 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
                 return;
             }
 
-            uint32_t counters[4] = {};
-            std::memcpy(counters, result.data.data(), counterBytes);
+            // Words 5-7 (TERRAIN_RVT_COUNTER_REFRESHED_PAGES / _WAITING_PAGES / _SHORT_PAGES): pages re-rendered because a
+            // source texture improved and pages generated short of one, both since startup; sampled pages waiting now.
+            uint32_t counters[8] = {};
+            std::memcpy(counters, result.data.data(), (std::min)(result.data.size(), sizeof(counters)));
             spdlog::info(
-                "SARP terrain RVT telemetry counters: frame={} request_count={} generation_count={} allocated_physical_pages={} counter_overflows={} config(page={} border={} source_texels_per_world={:.3f} clip0_page_world={:.3f} mip0_texel_world={:.5f} atlas={}x{}x{} clip_table={} max_sets={} max_clips={} max_gen_pages={} configured_mips={} forced_fallback={})",
+                "SARP terrain RVT telemetry counters: frame={} request_count={} generation_count={} allocated_physical_pages={} counter_overflows={} refreshed_pages_total={} short_pages_total={} waiting_pages={} config(page={} border={} source_texels_per_world={:.3f} clip0_page_world={:.3f} mip0_texel_world={:.5f} atlas={}x{}x{} clip_table={} max_sets={} max_clips={} max_gen_pages={} configured_mips={} forced_fallback={})",
                 requestedFrame,
                 counters[0],
                 counters[1],
                 counters[2],
                 counters[3],
+                counters[5],
+                counters[7],
+                counters[6],
                 pageSize,
                 borderTexels,
                 sourceTexelsPerWorld,

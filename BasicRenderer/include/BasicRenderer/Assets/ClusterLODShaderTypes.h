@@ -202,6 +202,10 @@ struct ClusterLODGroup
 static constexpr uint32_t CLOD_GROUP_FLAG_IS_VOXEL = 1u << 0;
 static constexpr uint32_t CLOD_GROUP_FLAG_IS_ASSEMBLY_PROXY = 1u << 1;
 static constexpr uint32_t CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL = 1u << 2;
+// A merge-hierarchy child (node group or portal proxy): no segment refines into it (its parent's segments refine into
+// a page-less children group), so its streaming parent is parentGroupId. Without this it would look like a coarsest
+// group and be pinned resident.
+static constexpr uint32_t CLOD_GROUP_FLAG_MERGE_CHILD = 1u << 3;
 
 static constexpr uint32_t CLOD_NODE_INTERNAL = 0u;
 static constexpr uint32_t CLOD_NODE_VOXEL_LEAF = 1u;
@@ -210,6 +214,10 @@ static constexpr uint32_t CLOD_NODE_INSTANCE_ROOT = 3u;
 static constexpr uint32_t CLOD_ASSEMBLY_TRANSFORM_SENTINEL = 0xFFFFFFFFu;
 static constexpr uint32_t CLOD_ASSEMBLY_BONE_REMAP_SENTINEL = 0xFFFFFFFFu;
 static constexpr uint32_t CLOD_ASSEMBLY_MAX_STACK_DEPTH = 8u;
+// A part portal (docs/merge_hierarchies.md): the instance opens a node of another registered mesh, the part, instead
+// of a part library copied into this one. Before upload, targetRootNode is the node within the part and stackDepth
+// the part's ordinal in Mesh::GetPortalParts(); registration rewrites targetRootNode to the part's global node.
+static constexpr uint32_t CLOD_ASSEMBLY_INSTANCE_FLAG_PART_PORTAL = 1u << 31;
 
 struct ClusterLODAssemblyTransform
 {

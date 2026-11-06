@@ -15,7 +15,8 @@
 
 struct BuildPixelListBindings {
     org::PipelineState pipeline;
-    org::DeclaredViewToken visibleClusters, reyesDiceQueue;
+    org::DeclaredViewToken visibleClusters, reyesDiceQueue, sideBand;
+    bool hasSideBand = false;
     bool hasReyesDiceQueue = false;
     uint32_t patchVisibilityIndexBase = 0;
 };
@@ -30,6 +31,7 @@ public:
     explicit BuildPixelListPass(const MaterialEvaluationBuildInputs& inputs)
         : m_visibleClusterResource(inputs.visibleClusters),
           m_reyesDiceQueueResource(inputs.reyesDiceQueue),
+          m_sideBandResource(inputs.visibleClusterTransformIndices),
           m_patchVisibilityIndexBase(CLodReyesPatchVisibilityIndexBase(inputs.visibleClusterCapacity)) {
         if (!m_visibleClusterResource)
             throw std::invalid_argument("BuildPixelListPass requires the published visible-cluster resource");
@@ -41,13 +43,17 @@ public:
             bindings.reyesDiceQueue = b.ShaderResource(m_reyesDiceQueueResource);
             bindings.hasReyesDiceQueue = true;
         }
+        if (m_sideBandResource) {
+            bindings.sideBand = b.ShaderResource(m_sideBandResource);
+            bindings.hasSideBand = true;
+        }
         bindings.patchVisibilityIndexBase = m_patchVisibilityIndexBase;
 
         b.ShaderResource(Builtin::PrimaryCamera::VisibilityTexture,
                               //Builtin::PrimaryCamera::VisibleClusterTable,
                               Builtin::PerMeshInstanceBuffer,
                               Builtin::InstanceDrawRecordBuffer,
-                              Builtin::PerMeshBuffer,
+                              Builtin::PerMeshBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases,
                               Builtin::PerMaterialDataBuffer,
                               "Builtin::VisUtil::MaterialOffsetBuffer");
         b.UnorderedAccess("Builtin::VisUtil::MaterialWriteCursorBuffer",
@@ -83,6 +89,8 @@ public:
             ? context.Index(bindings.reyesDiceQueue)
             : 0xFFFFFFFFu;
         constants[VISBUF_REYES_PATCH_INDEX_BASE] = bindings.patchVisibilityIndexBase;
+        constants[VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX] =
+            bindings.hasSideBand ? context.Index(bindings.sideBand) : 0xFFFFFFFFu;
         constants[VISBUF_VOXEL_MATERIAL_BIN_INDEX] = invocation.voxelMaterialBin;
         br::render::DispatchCompute(context, bindings.pipeline, constants, invocation.groupsX, invocation.groupsY);
     }
@@ -90,5 +98,6 @@ public:
 private:
     std::shared_ptr<org::GloballyIndexedResource> m_visibleClusterResource;
     std::shared_ptr<org::GloballyIndexedResource> m_reyesDiceQueueResource;
+    std::shared_ptr<org::GloballyIndexedResource> m_sideBandResource;
 	uint32_t m_patchVisibilityIndexBase = 0u;
 };

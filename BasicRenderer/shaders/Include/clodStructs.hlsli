@@ -23,7 +23,7 @@ struct CLodMeshMetadata
     uint groupsBase;
     uint segmentsBase;
     uint lodNodesBase;
-    uint rootNode; // node index (relative to lodNodesBase) to start traversal from
+    uint rootNode; // global node index to start traversal from
     uint groupChunkTableBase;
     uint groupChunkTableCount;
     uint pageMapBase; // global offset into GroupPageMap buffer for this mesh
@@ -43,12 +43,15 @@ struct CLodMeshMetadata
     uint nodeBoneLimit;
     uint meshIdentityLo;
     uint meshIdentityHi;
-    uint meshIdentityClass;
+    uint materialSlotCount; // >1: descriptors store a material slot (word 15)
     float4 coarseCutSphere; // Object space, enclosing every group.
     float coarseCutRefineError; // Largest error of any group finer than the coarsest level; negative if there are none.
     float coarseCutMinError; // Smallest error of a coarsest level group.
-    uint2 coarseCutPadding;
+    uint perMeshBufferIndex; // this mesh's own PerMeshBuffer row: a part's geometry fields
+    uint meshFlags; // CLOD_MESH_FLAG_*
 };
+
+static const uint CLOD_MESH_FLAG_PART_PORTAL_ROOT = 1u << 0;
 
 struct ClusterLODNodeSkinningInfo
 {
@@ -283,7 +286,7 @@ struct ClusterLODGroup
     uint meshletCount;
     int depth;
 
-    uint firstGroupVertex;
+    uint partIndex; // GPU copy: the CLodMeshMetadata row of the part that owns this group (CPU: firstGroupVertex)
     uint groupVertexCount;
     uint firstSegment;
     uint segmentCount;
@@ -304,6 +307,7 @@ static const uint CLOD_NODE_INSTANCE_ROOT = 3u;
 static const uint CLOD_ASSEMBLY_TRANSFORM_SENTINEL = 0xFFFFFFFFu;
 static const uint CLOD_ASSEMBLY_BONE_REMAP_SENTINEL = 0xFFFFFFFFu;
 static const uint CLOD_ASSEMBLY_MAX_STACK_DEPTH = 8u;
+static const uint CLOD_ASSEMBLY_INSTANCE_FLAG_PART_PORTAL = 1u << 31;
 
 struct ClusterLODAssemblyTransform
 {
@@ -341,6 +345,7 @@ struct CLodRuntimeAssemblyTransform
 static const uint CLOD_GROUP_FLAG_IS_VOXEL = 1u << 0;
 static const uint CLOD_GROUP_FLAG_IS_ASSEMBLY_PROXY = 1u << 1;
 static const uint CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL = 1u << 2;
+static const uint CLOD_GROUP_FLAG_MERGE_CHILD = 1u << 3; // streaming parent is parentGroupId (ClusterLODShaderTypes.h)
 
 static const uint CLOD_VOXEL_STATIC_BONE_INDEX = 0xFFFFFFFFu;
 static const uint CLOD_VOXEL_MAX_CUBES_PER_CLUSTER = 128u;
@@ -451,7 +456,7 @@ struct CLodVoxelPageHeader
 GroupPageMapEntry CLodLoadVoxelPageMapEntry(CLodMeshMetadata metadata, ClusterLODGroup group, uint pageIndex)
 {
     StructuredBuffer<GroupPageMapEntry> pageMap = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::GroupPageMap)];
-    return pageMap[metadata.pageMapBase + pageIndex];
+    return pageMap[pageIndex]; // segments and groups name page-map slots globally
 }
 
 CLodVoxelPageHeader CLodLoadVoxelPageHeader(uint slabDescriptorIndex, uint pageByteOffset)

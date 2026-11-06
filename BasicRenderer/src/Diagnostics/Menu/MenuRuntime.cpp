@@ -47,7 +47,7 @@ static void BuildMemorySnapshotFromRecords(
 
     for (const auto& record : records) {
         const uint64_t bytes = record.bytes;
-        out.totalBytes += bytes;
+        if (record.CountsTowardTotal()) out.totalBytes += bytes; // A placed resource's bytes are its alias pool's.
 
         const char* major = MajorCategory(record.resourceType);
 
@@ -544,6 +544,10 @@ void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     getForceDirectTerrainRvtFallback = settingsManager.getSettingGetter<bool>("forceDirectTerrainRvtFallback");
     m_forceDirectTerrainRvtFallback = getForceDirectTerrainRvtFallback();
     observerSetting(m_forceDirectTerrainRvtFallback, "forceDirectTerrainRvtFallback");
+    setTerrainRvtRefreshStalePages = settingsManager.getSettingSetter<bool>("terrainRvtRefreshStalePages");
+    getTerrainRvtRefreshStalePages = settingsManager.getSettingGetter<bool>("terrainRvtRefreshStalePages");
+    m_terrainRvtRefreshStalePages = getTerrainRvtRefreshStalePages();
+    observerSetting(m_terrainRvtRefreshStalePages, "terrainRvtRefreshStalePages");
     setTerrainRvtTelemetryDebug = settingsManager.getSettingSetter<bool>("terrainRvtTelemetryDebug");
     getTerrainRvtTelemetryDebug = settingsManager.getSettingGetter<bool>("terrainRvtTelemetryDebug");
     m_terrainRvtTelemetryDebug = getTerrainRvtTelemetryDebug();
@@ -1451,6 +1455,13 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
         if (ImGui::Checkbox("Force Terrain RVT Direct Fallback", &m_forceDirectTerrainRvtFallback)) {
             setForceDirectTerrainRvtFallback(m_forceDirectTerrainRvtFallback);
         }
+        if (ImGui::Checkbox("Terrain RVT: Re-render Pages When Textures Improve", &m_terrainRvtRefreshStalePages)) {
+            setTerrainRvtRefreshStalePages(m_terrainRvtRefreshStalePages);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Terrain source textures stream by feedback. A page rendered before the mips it wanted arrived\n"
+                "is re-rendered once they improve (on), or kept as rendered while later pages get them (off).");
+        }
         if (ImGui::Checkbox("Terrain RVT Telemetry", &m_terrainRvtTelemetryDebug)) {
             setTerrainRvtTelemetryDebug(m_terrainRvtTelemetryDebug);
         }
@@ -1825,20 +1836,26 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
 	}
 
     if (m_renderGraph) {
-        static const bool logMemoryAccounting = [] {
+        // SARP_MEMORY_INTROSPECTION_LOG=1 logs the 32 largest resource groups; a larger number logs that many.
+        static const size_t memoryAccountingGroups = [] {
             char* value = nullptr;
             size_t valueLength = 0;
-            const bool result = _dupenv_s(&value, &valueLength, "SARP_MEMORY_INTROSPECTION_LOG") == 0 &&
-                value != nullptr && valueLength > 1 && value[0] != '0';
+            size_t result = 0;
+            if (_dupenv_s(&value, &valueLength, "SARP_MEMORY_INTROSPECTION_LOG") == 0 && value != nullptr && valueLength > 1) {
+                const size_t parsed = std::strtoull(value, nullptr, 10);
+                result = parsed == 0 ? 0 : parsed == 1 ? 32 : parsed;
+            }
             std::free(value);
             return result;
         }();
+        const bool logMemoryAccounting = memoryAccountingGroups != 0;
         static uint64_t memoryAccountingFrame = 0;
         ++memoryAccountingFrame;
         if (logMemoryAccounting && (memoryAccountingFrame == 1 || memoryAccountingFrame % 120 == 0)) {
             std::vector<org::memory::ResourceMemoryRecord> diagnosticRecords;
             m_renderGraph->GetMemorySnapshotProvider().BuildSnapshot(diagnosticRecords);
             uint64_t introspectedBytes = 0;
+            uint64_t placedBytes = 0; // Inside an alias pool, whose own record already counts these bytes.
             uint64_t zeroSizedRecords = 0;
             uint64_t recordsWithoutType = 0;
             std::unordered_map<std::string, uint64_t> diagnosticCategories;
@@ -1850,6 +1867,7 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
             std::unordered_map<std::string, ResourceAllocationGroup> allocationGroups;
             for (const auto& record : diagnosticRecords) {
                 introspectedBytes += record.bytes;
+                placedBytes += record.placedInAliasPool ? record.bytes : 0u;
                 zeroSizedRecords += record.bytes == 0 ? 1u : 0u;
                 recordsWithoutType += record.resourceType == rhi::ResourceType::Unknown ? 1u : 0u;
                 const std::string category = std::string(MajorCategory(record.resourceType)) + "/" +
@@ -1878,12 +1896,15 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
 
             const auto budget = m_renderGraph->GetStatisticsService()->GetMemoryBudgetStats();
             spdlog::info(
-                "Memory diagnostics summary: frame={} dxgi_usage={} introspected={} dxgi_minus_introspected={} "
-                "records={} zero_sized_records={} unknown_type_records={}",
+                "Memory diagnostics summary: frame={} dxgi_usage={} dxgi_budget={} introspected={} placed_in_alias_pools={} unique={} "
+                "dxgi_minus_unique={} records={} zero_sized_records={} unknown_type_records={}",
                 memoryAccountingFrame,
                 budget.usageBytes,
+                budget.budgetBytes,
                 introspectedBytes,
-                budget.usageBytes > introspectedBytes ? budget.usageBytes - introspectedBytes : 0,
+                placedBytes,
+                introspectedBytes - placedBytes,
+                budget.usageBytes > introspectedBytes - placedBytes ? budget.usageBytes - (introspectedBytes - placedBytes) : 0,
                 diagnosticRecords.size(),
                 zeroSizedRecords,
                 recordsWithoutType);
@@ -1908,7 +1929,7 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
             }
             std::sort(sortedAllocationGroups.begin(), sortedAllocationGroups.end(),
                 [](const auto& left, const auto& right) { return left.bytes > right.bytes; });
-            for (size_t rank = 0; rank < std::min<size_t>(sortedAllocationGroups.size(), 32u); ++rank) {
+            for (size_t rank = 0; rank < std::min<size_t>(sortedAllocationGroups.size(), memoryAccountingGroups); ++rank) {
                 const auto& group = sortedAllocationGroups[rank];
                 const auto& record = group.representative;
                 spdlog::info(

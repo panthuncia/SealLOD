@@ -50,7 +50,7 @@ public:
             Builtin::Environment::CurrentPrefilteredCubemap);
         builder.ConstantBuffer(Builtin::PerFrameBuffer);
         builder.ShaderResource(Builtin::PrimaryCamera::VisibilityTexture, Builtin::Light::InfoBuffer, Builtin::Light::ActiveLightIndices,
-            Builtin::Environment::InfoBuffer, Builtin::PerMeshBuffer, Builtin::PerMaterialDataBuffer, "Builtin::PerMaterialEvalDataBuffer",
+            Builtin::Environment::InfoBuffer, Builtin::PerMeshBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases, Builtin::PerMaterialDataBuffer, "Builtin::PerMaterialEvalDataBuffer",
             Builtin::PerMeshInstanceBuffer, Builtin::InstanceDrawRecordBuffer, Builtin::PerInstanceTransformBuffer, Builtin::PerObjectBuffer,
             Builtin::NormalMatrixBuffer, Builtin::CullingCameraBuffer, Builtin::CLod::Offsets, Builtin::CLod::MeshMetadata, Builtin::CLod::Groups,
             Builtin::CLod::GroupChunks, Builtin::CLod::GroupPageMap, Builtin::CLod::AssemblyTransforms, Builtin::CLod::AssemblyBoneRemaps,
@@ -124,6 +124,7 @@ public:
                 br::render::MiscConstants constants{};
                 constants[CLOD_RT_SEC_TLAS_SRV] = frame.service->GetTlasSrv();
                 constants[CLOD_RT_SEC_CLAS_INFO_SRV] = frame.service->GetClasInfoSrv();
+                constants[CLOD_RT_SEC_INSTANCE_ROWS_SRV] = frame.service->GetInstanceRowsSrv();
                 constants[CLOD_RT_SEC_OUTPUT_UAV] = recording.Index(bindings.outputShader);
                 constants[CLOD_RT_SEC_HITS_UAV] = recording.Index(bindings.hits);
                 constants[CLOD_RT_SEC_FRAME] = frame.frame;

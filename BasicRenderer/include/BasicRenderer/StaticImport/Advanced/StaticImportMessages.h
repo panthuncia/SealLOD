@@ -678,6 +678,8 @@ namespace br::staticimport
 	struct StaticTemplateMaterialAdmission
 	{
 		br::render::ArtifactVersionHandle batch;
+		// A hierarchy root's palette materials after the first: one admission each (palette order, from entry 1).
+		std::vector<br::render::ArtifactVersionHandle> paletteBatches;
 	};
 
 	struct StaticImportBlockedGroup

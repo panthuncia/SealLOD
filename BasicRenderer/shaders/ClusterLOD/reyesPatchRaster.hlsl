@@ -628,9 +628,9 @@ void ReyesPatchRasterCS(uint3 dispatchThreadId : SV_DispatchThreadID)
 
     const PerMeshInstanceBuffer meshInstance = LoadMeshTemplateForDraw(diceEntry.instanceID);
     const PerMeshBuffer perMesh = perMeshes[meshInstance.perMeshBufferIndex];
-    StructuredBuffer<uint> visibleClusterTransformIndices = ResourceDescriptorHeap[
+    StructuredBuffer<uint2> visibleClusterTransformIndices = ResourceDescriptorHeap[
         CLOD_REYES_PATCH_RASTER_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
-    const uint assemblyTransformIndex = visibleClusterTransformIndices[diceEntry.visibleClusterIndex];
+    const uint assemblyTransformIndex = visibleClusterTransformIndices[diceEntry.visibleClusterIndex].x;
     const MeshInstanceClodOffsets clodOffsets = LoadCLodOffsetsForDraw(diceEntry.instanceID);
     StructuredBuffer<CLodMeshMetadata> clodMetadataBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];

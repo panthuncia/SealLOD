@@ -4,6 +4,7 @@
 InstanceDrawRecordBuffer LoadInstanceDrawRecord(uint drawRecordIndex);
 
 #include "include/clodStructs.hlsli"
+#include "include/clodMaterialPalette.hlsli"
 
 InstanceDrawRecordBuffer LoadInstanceDrawRecord(uint drawRecordIndex)
 {
@@ -150,9 +151,15 @@ void LoadClodRasterTransformForDrawRecord(
     {
         StructuredBuffer<ClusterLODAssemblyTransform> assemblyTransforms =
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::AssemblyTransforms)];
-        const row_major float4x4 assemblyLocalToObject =
-            CLodAssemblyTransformToMatrix(assemblyTransforms[assemblyTransformIndex]);
+        const ClusterLODAssemblyTransform assemblyTransform = assemblyTransforms[assemblyTransformIndex];
+        const row_major float4x4 assemblyLocalToObject = CLodAssemblyTransformToMatrix(assemblyTransform);
         model = mul(assemblyLocalToObject, model);
+        // A mirroring placement (a part portal occurrence) flips winding on top of the object's own.
+        const float3x3 linearPart = float3x3(assemblyTransform.row0.xyz, assemblyTransform.row1.xyz, assemblyTransform.row2.xyz);
+        if (determinant(linearPart) < 0.0f)
+        {
+            objectFlags ^= 1u; // OBJECT_FLAG_REVERSE_WINDING (vertex.hlsli)
+        }
     }
 }
 

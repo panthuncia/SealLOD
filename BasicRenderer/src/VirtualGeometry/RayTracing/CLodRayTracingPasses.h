@@ -32,7 +32,7 @@ struct CLodRayTracingSceneFrame {
 
 struct CLodRayTracingSceneBindings {
     br::render::CLodRayTracingSystem::ScenePipelines pipelines;
-    org::DeclaredViewToken clusters, counter;
+    org::DeclaredViewToken clusters, sideBand, counter;
     uint32_t clusterCapacity = 0u;
 };
 
@@ -40,8 +40,9 @@ class CLodRayTracingScenePass
     : public org::TypedRenderGraphPass<CLodRayTracingScenePass, CLodRayTracingSceneFrame, CLodRayTracingSceneBindings> {
 public:
     CLodRayTracingScenePass(std::shared_ptr<br::render::CLodRayTracingSystem> system, std::shared_ptr<org::Buffer> clusters,
-        std::shared_ptr<org::Buffer> counter, std::shared_ptr<org::ResourceGroup> slabs, uint32_t clusterCapacity)
-        : m_system(std::move(system)), m_clusters(std::move(clusters)), m_counter(std::move(counter)), m_slabs(std::move(slabs)), m_clusterCapacity(clusterCapacity) {
+        std::shared_ptr<org::Buffer> sideBand, std::shared_ptr<org::Buffer> counter, std::shared_ptr<org::ResourceGroup> slabs, uint32_t clusterCapacity)
+        : m_system(std::move(system)), m_clusters(std::move(clusters)), m_sideBand(std::move(sideBand)), m_counter(std::move(counter)),
+          m_slabs(std::move(slabs)), m_clusterCapacity(clusterCapacity) {
     }
 
     CLodRayTracingSceneBindings Declare(org::PassBuilder& builder) {
@@ -61,11 +62,12 @@ public:
         pipelines.writeInstances = make(L"CLodRtWriteInstancesCS", "CLod.RayTracing.WriteInstances.PSO");
         bindings.clusterCapacity = m_clusterCapacity;
         bindings.clusters = builder.ShaderResource(m_clusters).View();
+        bindings.sideBand = builder.ShaderResource(m_sideBand).View(); // Which part portal occurrence reached each cluster.
         bindings.counter = builder.ShaderResource(m_counter).View();
         if (m_slabs) builder.ShaderResource(ResourceGroupResolver(m_slabs));
-        builder.ShaderResource(Builtin::PerMeshBuffer, Builtin::PerMaterialDataBuffer, Builtin::PerMeshInstanceBuffer,
+        builder.ShaderResource(Builtin::PerMeshBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases, Builtin::PerMaterialDataBuffer, Builtin::PerMeshInstanceBuffer,
             Builtin::InstanceDrawRecordBuffer, Builtin::PerInstanceTransformBuffer, Builtin::PerObjectBuffer,
-            Builtin::CLod::Offsets, Builtin::CLod::MeshMetadata, Builtin::CLod::AssemblyTransforms,
+            Builtin::CLod::Offsets, Builtin::CLod::MeshMetadata, Builtin::CLod::Groups, Builtin::CLod::AssemblyTransforms,
             Builtin::Material::TextureStreamingMetadataBuffer); // Micromap bakes and the instance check read alpha textures' residency.
         builder.UnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer); // And keep them resident at their test mip.
         return bindings;
@@ -78,12 +80,12 @@ public:
     static void Record(const CLodRayTracingSceneBindings& bindings, const CLodRayTracingSceneFrame& frame, org::PassRecordContext& recording) {
         std::scoped_lock lock(frame.system->FrameOperationMutex());
         frame.system->RecordSceneBuild(recording, bindings.pipelines,
-            recording.Index(bindings.clusters), recording.Index(bindings.counter), bindings.clusterCapacity);
+            recording.Index(bindings.clusters), recording.Index(bindings.sideBand), recording.Index(bindings.counter), bindings.clusterCapacity);
     }
 
 private:
     std::shared_ptr<br::render::CLodRayTracingSystem> m_system;
-    std::shared_ptr<org::Buffer> m_clusters, m_counter;
+    std::shared_ptr<org::Buffer> m_clusters, m_sideBand, m_counter;
     std::shared_ptr<org::ResourceGroup> m_slabs;
     uint32_t m_clusterCapacity = 0u;
 };
@@ -125,7 +127,7 @@ public:
         // Far from where raster's lists grow: hardware from the bottom, Reyes from the top.
         bindings.recordBase = bindings.capacity / 2u;
         if (m_slabs) builder.ShaderResource(ResourceGroupResolver(m_slabs));
-        builder.ShaderResource(Builtin::CameraBuffer, Builtin::PerMeshBuffer, Builtin::PerMaterialDataBuffer, Builtin::PerMeshInstanceBuffer,
+        builder.ShaderResource(Builtin::CameraBuffer, Builtin::PerMeshBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases, Builtin::PerMaterialDataBuffer, Builtin::PerMeshInstanceBuffer,
             Builtin::InstanceDrawRecordBuffer, Builtin::PerInstanceTransformBuffer, Builtin::PerObjectBuffer, Builtin::CullingCameraBuffer,
             Builtin::CLod::Offsets, Builtin::CLod::MeshMetadata, Builtin::CLod::Groups, Builtin::CLod::AssemblyTransforms,
             Builtin::CLod::AssemblyBoneRemaps, Builtin::CLod::AssemblyBoneRemapIndices, Builtin::SkeletonResources::SkinningInstanceInfo,
@@ -154,6 +156,7 @@ public:
         br::render::MiscConstants constants{};
         constants[CLOD_RT_VIS_TLAS_SRV] = descriptors.tlas;
         constants[CLOD_RT_VIS_CLAS_INFO_SRV] = descriptors.clasInfo;
+        constants[CLOD_RT_VIS_INSTANCE_ROWS_SRV] = descriptors.instanceRows;
         constants[CLOD_RT_VIS_VISIBILITY_UAV] = recording.Index(bindings.visibility);
         constants[CLOD_RT_VIS_VISIBLE_CLUSTERS_UAV] = recording.Index(bindings.visibleClusters);
         constants[CLOD_RT_VIS_TRANSFORM_INDICES_UAV] = recording.Index(bindings.transformIndices);
@@ -215,7 +218,7 @@ public:
             bindings.output = builder.UnorderedAccess(m_working).View();
             if (m_slabs) builder.ShaderResource(ResourceGroupResolver(m_slabs));
             builder.ShaderResource(Builtin::Surface::NormalRoughness, Builtin::Light::InfoBuffer, Builtin::Light::ActiveLightIndices,
-                Builtin::PerMeshBuffer, Builtin::PerMaterialDataBuffer, Builtin::PerMeshInstanceBuffer, Builtin::InstanceDrawRecordBuffer,
+                Builtin::PerMeshBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases, Builtin::PerMaterialDataBuffer, Builtin::PerMeshInstanceBuffer, Builtin::InstanceDrawRecordBuffer,
                 Builtin::PerInstanceTransformBuffer, Builtin::PerObjectBuffer, Builtin::CullingCameraBuffer, Builtin::CLod::Offsets,
                 Builtin::CLod::MeshMetadata, Builtin::CLod::Groups, Builtin::CLod::AssemblyTransforms, Builtin::CLod::AssemblyBoneRemaps,
                 Builtin::CLod::AssemblyBoneRemapIndices, Builtin::SkeletonResources::SkinningInstanceInfo, Builtin::Material::TextureStreamingMetadataBuffer);
@@ -238,6 +241,7 @@ public:
         br::render::MiscConstants constants{};
         constants[CLOD_RT_SEC_TLAS_SRV] = frame.system->GetTlasSrv();
         constants[CLOD_RT_SEC_CLAS_INFO_SRV] = frame.system->GetClasInfoSrv();
+        constants[CLOD_RT_SEC_INSTANCE_ROWS_SRV] = frame.system->GetInstanceRowsSrv();
         constants[CLOD_RT_SEC_OUTPUT_UAV] = recording.Index(bindings.output);
         constants[CLOD_RT_SEC_FRAME] = frame.frame;
         if (bindings.filter) constants[CLOD_RT_SEC_INPUT_SRV] = recording.Index(bindings.input);

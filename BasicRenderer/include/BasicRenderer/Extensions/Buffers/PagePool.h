@@ -32,16 +32,22 @@ namespace org { class GpuBufferBacking; }
 //   - Eviction is O(1)
 class PagePool {
 public:
+	static constexpr uint32_t kPageSizeClassCount = 7u;
+	// Packed visible clusters and CLAS records hold a page's offset in 4 KiB units in 14 bits.
+	static constexpr uint64_t kMaxSlabBytes = 64ull * 1024ull * 1024ull;
 	// Configuration for the page pool.
 	struct Config {
-		std::array<uint32_t, 5> pageSizes{
-			16 * 1024, 32 * 1024, 64 * 1024, 128 * 1024, 256 * 1024
+		// 4 and 8 KiB are for pinned storage, where half the pages carry under 4 KiB. Streaming pages start at
+		// minStreamingPageSize: a 64 MiB slab of a small class barely used would cost more than it saves.
+		std::array<uint32_t, kPageSizeClassCount> pageSizes{
+			4 * 1024, 8 * 1024, 16 * 1024, 32 * 1024, 64 * 1024, 128 * 1024, 256 * 1024
 		};
-		uint64_t slabSize     = 256 * 1024 * 1024; // General streaming slab size.
+		uint64_t slabSize     = 64 * 1024 * 1024; // General streaming slab size: the unit of growth and of rebalancing.
 		uint64_t pinnedSlabSize = 4 * 1024 * 1024; // Per-class pinned growth increment.
 		uint32_t numStreamingSlabs = 16; // Shared cap across all size classes.
-		std::array<uint32_t, 5> initialStreamingSlabs{
-			1u, 1u, 1u, 2u, 3u
+		uint32_t minStreamingPageSize = 16 * 1024;
+		std::array<uint32_t, kPageSizeClassCount> initialStreamingSlabs{
+			0u, 0u, 1u, 1u, 1u, 1u, 1u
 		};
 		std::string debugName = "CLodPagePool";
 	};
@@ -92,8 +98,14 @@ public:
 	uint32_t GetPageSize(uint32_t globalPageID) const;
 	uint32_t GetPageSizeClassIndex(uint32_t globalPageID) const;
 	uint32_t SelectPageSize(uint64_t payloadBytes) const;
+	// The streaming (general) page size for a payload: SelectPageSize, at least Config::minStreamingPageSize.
+	uint32_t SelectStreamingPageSize(uint64_t payloadBytes) const {
+		const uint32_t size = SelectPageSize(payloadBytes);
+		return size < m_config.minStreamingPageSize ? m_config.minStreamingPageSize : size;
+	}
 	uint32_t SelectPageSizeClassIndex(uint64_t payloadBytes) const;
-	static constexpr uint32_t GetPageSizeClassCount() { return 5u; }
+	static constexpr uint32_t GetPageSizeClassCount() { return kPageSizeClassCount; }
+	uint32_t GetClassPageSize(uint32_t classIndex) const { return m_config.pageSizes[classIndex]; }
 
 	// Slab size in bytes.
 	uint64_t GetSlabSize() const { return m_config.slabSize; }
@@ -118,6 +130,19 @@ public:
 	// the page IDs added so the matching LRU can be populated.
 	std::vector<uint32_t> GrowGeneralPageClass(uint32_t pageSizeBytes);
 	std::vector<uint32_t> GetGeneralPageIDs(uint32_t pageSizeBytes) const;
+
+	// Rebalancing between classes. Every general slab owns a fixed range of page IDs, enough for its size in the smallest
+	// class, so a slab can change class without moving any other slab's IDs.
+	struct GeneralSlabInfo {
+		uint32_t slabIndex = 0;
+		uint32_t firstPageID = 0;
+		uint32_t pageCount = 0;
+		uint32_t pageSize = 0;
+	};
+	std::vector<GeneralSlabInfo> GetGeneralSlabs() const;
+	uint32_t GetGeneralSlabCount() const { return m_generalSlabCount; }
+	// Streaming worker only: every page of the slab must be free and out of every LRU. Returns the slab's new page IDs.
+	std::vector<uint32_t> ConvertGeneralSlab(uint32_t slabIndex, uint32_t pageSizeBytes);
 
 	// Allocate/free pinned pages from per-class small slabs.
 	std::vector<uint32_t> AllocatePinnedPages(std::span<const uint32_t> pageSizeBytes);
@@ -145,6 +170,7 @@ private:
 		uint32_t firstPageID = 0;
 		uint32_t pageCount = 0;
 		uint32_t pageSize = 0;
+		uint32_t pageIdCapacity = 0; // IDs reserved from firstPageID; pageCount of them are in use.
 	};
 
 	Config     m_config;
@@ -156,7 +182,7 @@ private:
 	mutable std::shared_mutex m_slabMutex;
 	uint32_t   m_totalPageCapacity = 0;
 	std::vector<Slab> m_slabs;
-	std::array<std::vector<uint32_t>, 5> m_freePinnedPageIDs;
+	std::array<std::vector<uint32_t>, kPageSizeClassCount> m_freePinnedPageIDs;
 	// CPU-side mirror of the page table: indexed by global page ID.
 	std::vector<PageTableEntry> m_pageTableCpu;
 	bool                        m_pageTableDirty = false;

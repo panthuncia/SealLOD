@@ -182,10 +182,17 @@ TextureBC7CompressionBindings TextureFactory::BC7CompressionPass::Declare(org::P
                 subresource.footprint.width, subresource.footprint.height});
         }
         declared.blocks = builder.UnorderedAccess(job->blockBuffer).View();
+        declared.bc6h = job->blockFormat == rhi::Format::BC6H_UF16;
     }
-    if (!bindings.jobs.empty()) {
+    const bool anyBc7 = std::any_of(bindings.jobs.begin(), bindings.jobs.end(), [](const auto& job) { return !job.bc6h; });
+    const bool anyBc6h = std::any_of(bindings.jobs.begin(), bindings.jobs.end(), [](const auto& job) { return job.bc6h; });
+    if (anyBc7) {
         bindings.pipeline = builder.Pipeline(br::render::ComputePipeline(
             L"shaders/Utilities/bc7_compress_mode6.hlsl", L"BC7CompressMode6CS", "BC7Compression[Mode6]"));
+    }
+    if (anyBc6h) {
+        bindings.bc6hPipeline = builder.Pipeline(br::render::ComputePipeline(
+            L"shaders/Utilities/bc6h_compress.hlsl", L"BC6HCompressCS", "BC6HCompression"));
     }
     return bindings;
 }
@@ -261,7 +268,8 @@ void TextureFactory::BC7CompressionPass::Record(const TextureBC7CompressionBindi
             constants[UintRootConstant5] = subresource.height;
             const uint32_t blocksX = (subresource.width + 3u) / 4u;
             const uint32_t blocksY = (subresource.height + 3u) / 4u;
-            br::render::DispatchCompute(context, bindings.pipeline, constants, (blocksX + 7u) / 8u, (blocksY + 7u) / 8u);
+            br::render::DispatchCompute(context, job.bc6h ? bindings.bc6hPipeline : bindings.pipeline, constants,
+                (blocksX + 7u) / 8u, (blocksY + 7u) / 8u);
         }
     }
 }
@@ -421,9 +429,10 @@ TextureFactory::BC7CompressionReadbackPass::Prepare(const BC7CompressionReadback
     std::scoped_lock lock(m_pendingMutex);
     if (m_pending.empty()) return frame;
     if (!m_readbackService) {
-        for (const auto& job : m_pending) if (job && job->handle) {
-            TextureProcessingManager::GetInstance().FailProcessing(
+        for (const auto& job : m_pending) if (job) {
+            if (job->handle) TextureProcessingManager::GetInstance().FailProcessing(
                 job->handle, "TextureFactory: BC7 readback service is unavailable");
+            if (job->done) job->done(nullptr);
             job->ReleaseBudget();
         }
         m_pending.clear();
@@ -454,7 +463,7 @@ TextureFactory::BC7CompressionReadbackPass::Prepare(const BC7CompressionReadback
                 job->stageFrameIndex.store(m_frameIndex, std::memory_order_release);
                 job->stage.store(BC7CompressionJob::Stage::ReadbackRecorded,
                     std::memory_order_release);
-                TextureProcessingManager::GetInstance().MarkGpuJobReadbackPending(job->handle);
+                if (job->handle) TextureProcessingManager::GetInstance().MarkGpuJobReadbackPending(job->handle);
             }
         }
         void Abandoned(org::AbandonReason) const override {
@@ -481,7 +490,7 @@ TextureFactory::BC7CompressionReadbackPass::Prepare(const BC7CompressionReadback
     std::vector<std::shared_ptr<BC7CompressionJob>> admitted;
     std::vector<std::shared_ptr<BC7CompressionJob>> waiting;
     for (const auto& job : m_pending) {
-        if (!job || !job->compressedTexture || !job->handle) continue;
+        if (!job || !job->compressedTexture || (!job->handle && !job->done)) continue;
         if (job->stage.load(std::memory_order_acquire) == BC7CompressionJob::Stage::Completed)
             continue;
         if (job->stage.load(std::memory_order_acquire) != BC7CompressionJob::Stage::CopyRecorded ||
@@ -498,8 +507,8 @@ TextureFactory::BC7CompressionReadbackPass::Prepare(const BC7CompressionReadback
         std::vector<rhi::CopyableFootprint> footprints(job->subresources.size());
         rhi::FootprintRangeDesc range{};
         range.texture = job->compressedTexture->GetAPIResource().GetHandle();
-        range.mipCount = static_cast<uint32_t>(job->subresources.size());
-        range.arraySize = 1; range.planeCount = 1;
+        range.mipCount = static_cast<uint32_t>(job->subresources.size()) / job->sliceCount;
+        range.arraySize = job->sliceCount; range.planeCount = 1;
         const auto info = DeviceManager::GetInstance().GetDevice().GetCopyableFootprints(
             range, footprints.data(), static_cast<uint32_t>(footprints.size()));
         auto readback = org::Buffer::CreateShared(rhi::HeapType::Readback, info.totalBytes);
@@ -521,6 +530,18 @@ TextureFactory::BC7CompressionReadbackPass::Prepare(const BC7CompressionReadback
         request.height = job->compressedTexture->GetHeight();
         request.depth = 1;
         request.callback = [job](org::ReadbackCaptureResult&& result) {
+            if (job->done) {
+                std::shared_ptr<TextureSourceData> data;
+                try {
+                    data = BuildCompressedSourceDataFromReadback(job->outputDescription, true, result);
+                } catch (const std::exception& ex) {
+                    spdlog::error("TextureFactory: BC6H job '{}' readback failed: {}", job->debugName, ex.what());
+                }
+                job->stage.store(BC7CompressionJob::Stage::Completed, std::memory_order_release);
+                job->ReleaseBudget();
+                job->done(std::move(data));
+                return;
+            }
             try {
                 auto data = BuildCompressedSourceDataFromReadback(
                     job->compressedTexture->GetDescription(), job->outputHasFullMipChain, result);

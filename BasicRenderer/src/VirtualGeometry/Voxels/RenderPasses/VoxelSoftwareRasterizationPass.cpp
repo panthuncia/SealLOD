@@ -102,7 +102,7 @@ VoxelRasterBindings VoxelSoftwareRasterizationPass::Declare(org::PassBuilder& de
             Builtin::PerObjectBuffer,
             Builtin::CullingCameraBuffer,
             Builtin::CameraBuffer,
-            Builtin::PerMeshBuffer,
+            Builtin::PerMeshBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases,
 			Builtin::CLod::Offsets,
             Builtin::CLod::MeshMetadata,
             Builtin::CLod::Groups,

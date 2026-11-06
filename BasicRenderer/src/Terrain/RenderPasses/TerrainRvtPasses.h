@@ -33,7 +33,7 @@
 
 namespace TerrainRvt
 {
-    inline constexpr uint32_t CounterCount = 5u;
+    inline constexpr uint32_t CounterCount = 8u; // TERRAIN_RVT_COUNTER_COUNT
     inline constexpr uint32_t MaxDispatchGroupsX = 65535u;
     inline constexpr uint32_t MaxPhysicalAtlasTextureSide = 16384u;
     inline constexpr float DefaultSourceTexelsPerWorld = 24.0f;
@@ -149,6 +149,19 @@ namespace TerrainRvt
     inline uint32_t MaxPhysicalPages()
     {
         return AtlasPagesWide() * AtlasPagesHigh() * AtlasPoolCount();
+    }
+
+    // A page keeps the source texture mips that were resident when it was generated. On, a page that was short of a
+    // texture is re-rendered once that texture improves; off, it stays as rendered (pages generated later get the mips).
+    inline constexpr const char* RefreshStalePagesSettingName = "terrainRvtRefreshStalePages";
+    inline bool RefreshStalePages()
+    {
+        try {
+            return SettingsManager::GetInstance().getSettingGetter<bool>(RefreshStalePagesSettingName)();
+        }
+        catch (...) {
+            return true;
+        }
     }
 
     inline uint32_t MaxGeneratedPagesPerFrame()
@@ -322,11 +335,19 @@ private:
 };
 
 struct TerrainRvtResolveRequestsBindings {
-    org::PipelineState clear, resolve;
+    org::PipelineState clear, resolve, refresh;
 };
 
+struct TerrainRvtResolveRequestsFrame {
+    TerrainRvt::DispatchFrame resolve;
+    TerrainRvt::DispatchFrame refresh;
+    br::render::MiscConstants refreshConstants{};
+};
+
+// Resolve allocates and queues missing pages; the refresh dispatch after it scans resident pages that were short of a
+// source texture (TerrainRvtRefreshStalePagesCS), keeps asking for it, and queues a re-render into the leftover budget.
 class TerrainRvtResolveRequestsPass final : public org::TypedRenderGraphPass<TerrainRvtResolveRequestsPass,
-    TerrainRvt::DispatchFrame, TerrainRvtResolveRequestsBindings> {
+    TerrainRvtResolveRequestsFrame, TerrainRvtResolveRequestsBindings> {
 public:
     TerrainRvtResolveRequestsBindings Declare(org::PassBuilder& b)
     {
@@ -335,29 +356,41 @@ public:
             Builtin::Terrain::RvtInfo,
             Builtin::Terrain::RvtRequestList,
             Builtin::Terrain::RvtRequestMasks,
-            Builtin::Terrain::RvtPageKeys);
+            Builtin::Terrain::RvtPageKeys,
+            Builtin::Material::TextureStreamingMetadataBuffer);
         b.UnorderedAccess(
                 Builtin::Terrain::RvtCounters,
                 Builtin::Terrain::RvtPageTable,
                 Builtin::Terrain::RvtPhysicalPageOwner,
                 Builtin::Terrain::RvtGenerationList,
-                Builtin::Terrain::RvtStats);
+                Builtin::Terrain::RvtStats,
+                Builtin::Material::TextureStreamingFeedbackBuffer);
         b.ConstantBuffer(Builtin::PerFrameBuffer);
         return { b.Pipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtClearGenerationCounterCS",
                      "TerrainRvt.ClearGenerationCounter.PSO", TerrainRvt::ShaderDefines())),
                  b.Pipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtResolveRequestsCS",
-                     "TerrainRvt.ResolveRequests.PSO", TerrainRvt::ShaderDefines())) };
+                     "TerrainRvt.ResolveRequests.PSO", TerrainRvt::ShaderDefines())),
+                 b.Pipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtRefreshStalePagesCS",
+                     "TerrainRvt.RefreshStalePages.PSO", TerrainRvt::ShaderDefines())) };
     }
 
-    TerrainRvt::DispatchFrame Prepare(const TerrainRvtResolveRequestsBindings&, const org::PassPrepareContext&) const
+    TerrainRvtResolveRequestsFrame Prepare(const TerrainRvtResolveRequestsBindings&, const org::PassPrepareContext&) const
     {
-        return TerrainRvt::DispatchForItems(TerrainRvt::MaxGeneratedPagesPerFrame(), 64u);
+        TerrainRvtResolveRequestsFrame frame{};
+        frame.resolve = TerrainRvt::DispatchForItems(TerrainRvt::MaxGeneratedPagesPerFrame(), 64u);
+        frame.refresh = TerrainRvt::DispatchForItems(TerrainRvt::MaxPhysicalPages(), 64u);
+        frame.refreshConstants[0] = TerrainRvt::RefreshStalePages() ? 1u : 0u;
+        return frame;
     }
 
-    static void Record(const TerrainRvtResolveRequestsBindings& bindings, const TerrainRvt::DispatchFrame& frame,
+    static void Record(const TerrainRvtResolveRequestsBindings& bindings, const TerrainRvtResolveRequestsFrame& frame,
         org::PassRecordContext& context) {
         br::render::DispatchCompute(context, bindings.clear, {}, 1u, 1u);
-        br::render::DispatchCompute(context, bindings.resolve, {}, frame.groupsX, frame.groupsY);
+        context.UavBarrier();
+        br::render::DispatchCompute(context, bindings.resolve, {}, frame.resolve.groupsX, frame.resolve.groupsY);
+        // Refreshes take only what new pages left of the generation budget.
+        context.UavBarrier();
+        br::render::DispatchCompute(context, bindings.refresh, frame.refreshConstants, frame.refresh.groupsX, frame.refresh.groupsY);
     }
 };
 
@@ -448,7 +481,6 @@ public:
             Builtin::Terrain::RvtInfo,
             Builtin::Terrain::RvtClipInfos,
             Builtin::Terrain::RvtCounters,
-            Builtin::Terrain::RvtGenerationList,
             Builtin::Terrain::Sets,
             Builtin::Terrain::Layers,
             Builtin::Terrain::StochasticLayers,
@@ -457,6 +489,7 @@ public:
             Builtin::Terrain::WeightBlocks,
             Builtin::Material::TextureStreamingMetadataBuffer);
         b.UnorderedAccess(
+                Builtin::Terrain::RvtGenerationList,
                 Builtin::Terrain::RvtHeightAtlas,
                 Builtin::Terrain::RvtAlbedoAtlas,
                 Builtin::Terrain::RvtNormalAtlas,
@@ -483,10 +516,10 @@ public:
         b.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         b.ShaderResource(
             Builtin::Terrain::RvtInfo,
-            Builtin::Terrain::RvtCounters,
             Builtin::Terrain::RvtGenerationList,
             Builtin::Terrain::RvtPageKeys);
         b.UnorderedAccess(
+                Builtin::Terrain::RvtCounters,
                 Builtin::Terrain::RvtPageTable,
                 Builtin::Terrain::RvtPhysicalPageOwner);
         b.ConstantBuffer(Builtin::PerFrameBuffer);

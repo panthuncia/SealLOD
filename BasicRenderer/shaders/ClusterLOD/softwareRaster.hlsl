@@ -85,6 +85,7 @@ struct SWClusterWork
 {
     uint4 packedCluster;
     uint assemblyTransformIndex;
+    uint paletteIndex;
     uint visibleClusterIndex; // Written to the visibility buffer, so unsorted.
     bool hasResolvedSkinningSlot;
     uint resolvedSkinningSlot;
@@ -115,6 +116,7 @@ void SWLoadClusterSetup(SWClusterWork work)
     CLodRasterClusterSource source;
     source.packedCluster = work.packedCluster;
     source.assemblyTransformIndex = work.assemblyTransformIndex;
+    source.paletteIndex = work.paletteIndex;
     source.hasResolvedSkinningSlot = work.hasResolvedSkinningSlot;
     source.resolvedSkinningSlot = work.resolvedSkinningSlot;
     CLodRasterCluster cluster;
@@ -136,7 +138,7 @@ void SWLoadClusterSetup(SWClusterWork work)
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
         StructuredBuffer<ClusterLODGroup> groups =
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
-        flags.groupFlags = groups[metadataBuffer[offsets.clodMeshMetadataIndex].groupsBase +
+        flags.groupFlags = groups[
             CLodVisibleClusterGroupID(work.packedCluster)].flags;
     }
 
@@ -686,14 +688,15 @@ void WG_SWRaster(
     const uint unsortedClusterIndex = batch.clusterIndices[clusterIndex];
     globallycoherent RWByteAddressBuffer visibleClusters =
         ResourceDescriptorHeap[CLOD_WG_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
-    RWStructuredBuffer<uint> visibleClusterTransformIndices =
+    RWStructuredBuffer<uint2> visibleClusterTransformIndices =
         ResourceDescriptorHeap[CLOD_WG_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
     StructuredBuffer<ClodViewRasterInfo> viewRasterInfoBuffer =
         ResourceDescriptorHeap[CLOD_WG_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX];
 
     SWClusterWork work;
     work.packedCluster = CLodLoadVisibleClusterPackedGloballyCoherent(visibleClusters, unsortedClusterIndex);
-    work.assemblyTransformIndex = visibleClusterTransformIndices[unsortedClusterIndex];
+    work.assemblyTransformIndex = visibleClusterTransformIndices[unsortedClusterIndex].x;
+    work.paletteIndex = visibleClusterTransformIndices[unsortedClusterIndex].y;
     work.visibleClusterIndex = unsortedClusterIndex;
     work.hasResolvedSkinningSlot = false;
     work.resolvedSkinningSlot = 0xFFFFFFFFu;
@@ -717,7 +720,7 @@ void SWRasterIndirectCSMain(uint GI : SV_GroupIndex, uint3 groupId : SV_GroupID)
     const uint sortedClusterIndex = IndirectCommandSignatureRootConstant0 + clusterIndex;
     ByteAddressBuffer compactedVisibleClusters =
         ResourceDescriptorHeap[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX];
-    StructuredBuffer<uint> compactedVisibleClusterTransformIndices =
+    StructuredBuffer<uint2> compactedVisibleClusterTransformIndices =
         ResourceDescriptorHeap[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
     StructuredBuffer<CLodSoftwareRasterMapping> sortedToUnsortedMapping =
         ResourceDescriptorHeap[CLOD_RASTER_SORTED_TO_UNSORTED_MAPPING_DESCRIPTOR_INDEX];
@@ -727,7 +730,8 @@ void SWRasterIndirectCSMain(uint GI : SV_GroupIndex, uint3 groupId : SV_GroupID)
 
     SWClusterWork work;
     work.packedCluster = CLodLoadVisibleClusterPacked(compactedVisibleClusters, sortedClusterIndex);
-    work.assemblyTransformIndex = compactedVisibleClusterTransformIndices[sortedClusterIndex];
+    work.assemblyTransformIndex = compactedVisibleClusterTransformIndices[sortedClusterIndex].x;
+    work.paletteIndex = compactedVisibleClusterTransformIndices[sortedClusterIndex].y;
     work.visibleClusterIndex = mapping.unsortedClusterIndex;
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
     work.hasResolvedSkinningSlot = false;

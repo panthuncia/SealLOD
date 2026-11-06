@@ -215,6 +215,12 @@ private:
 	std::shared_ptr<org::DynamicBuffer> m_clusterLODAssemblyBoneRemaps;
 	std::shared_ptr<org::DynamicBuffer> m_clusterLODAssemblyBoneRemapIndices;
 	std::shared_ptr<org::DynamicBuffer> m_clodGroupPageMap;
+	std::shared_ptr<org::DynamicBuffer> m_clodAssemblyMaterialBases; // uint per assembly transform
+	std::shared_ptr<org::DynamicBuffer> m_clodMaterialPalettes; // CLodMaterialPaletteEntry rows
+	std::mutex m_materialPaletteMutex;
+	std::unordered_map<std::string, uint32_t> m_materialPaletteRows; // palette bytes -> first row
+	std::vector<std::unique_ptr<org::BufferView>> m_materialPaletteViews;
+	uint32_t AcquireMaterialPaletteRows(const std::vector<CLodMaterialPaletteEntry>& palette);
 	uint64_t m_activeMeshletCount = 0;
 
 	struct PreparedCLodContainer {
@@ -252,6 +258,7 @@ private:
 		uint32_t groupsBase = 0;
 		uint32_t groupCount = 0;
 		std::unique_ptr<org::BufferView> ownedGroupChunksView;
+		std::unique_ptr<org::BufferView> ownedAssemblyMaterialBasesView;
 		org::BufferView* groupChunksView = nullptr;
 		std::vector<ClusterLODGroupChunk> baselineGroupChunks;
 		std::vector<uint8_t> groupResidentFlags;

@@ -124,7 +124,7 @@ public:
             Builtin::InstanceDrawRecordBuffer,
             Builtin::PerInstanceTransformBuffer,
             Builtin::PerObjectBuffer,
-            Builtin::PerMeshBuffer,
+            Builtin::PerMeshBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases,
             Builtin::CameraBuffer,
             Builtin::NormalMatrixBuffer,
             Builtin::SkeletonResources::InverseBindMatrices,

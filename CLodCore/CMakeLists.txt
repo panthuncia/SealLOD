@@ -83,6 +83,7 @@ add_library(CLodBuildCore STATIC
     "${BR_SRC}/Assets/Geometry/MeshIngestBuilder.cpp"
     "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLOD.cpp"
     "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODAssembly.cpp"
+    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODMergeHierarchy.cpp"
     "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODClustering.cpp"
     "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODHierarchy.cpp"
     "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODPagePacking.cpp"

@@ -13,12 +13,13 @@ struct RasterBucketHistogramBindings {
     org::CommandSignatureState commandSignature;
     org::DeclaredViewToken visibleClusters, visibleCount;
     org::ResourceBindingToken indirectArguments;
-    org::DeclaredViewToken histogram, reyesOwnership, telemetry, readBaseCounter;
+    org::DeclaredViewToken histogram, reyesOwnership, telemetry, readBaseCounter, sideBand;
     uint32_t visibleCapacity = 0;
     bool readReverse = false;
     bool hasReyesOwnership = false;
     bool hasTelemetry = false;
     bool hasReadBaseCounter = false;
+    bool hasSideBand = false;
 };
 struct RasterBucketHistogramFrame {
     uint32_t numBuckets = 0;
@@ -48,8 +49,11 @@ public:
     static void Record(const RasterBucketHistogramBindings&,
         const RasterBucketHistogramFrame&, org::PassRecordContext&);
     void Update(const org::UpdateExecutionContext& executionContext) override;
+    // Per-visible-cluster (transform, palette index): roots bin clusters by their own material's raster bucket.
+    void SetVisibleClusterSideBand(std::shared_ptr<org::Buffer> sideBand) { m_sideBandBuffer = std::move(sideBand); }
 
 private:
+    std::shared_ptr<org::Buffer> m_sideBandBuffer;
     std::shared_ptr<org::Buffer> m_visibleClustersBuffer;
     std::shared_ptr<org::Buffer> m_visibleClustersCounterBuffer;
     std::shared_ptr<org::Buffer> m_histogramIndirectCommand;

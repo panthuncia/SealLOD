@@ -185,6 +185,18 @@ public:
 	const std::vector<uint32_t>& GetCLodNodeBoneIndices() const { return m_clodNodeBoneIndices; }
 	uint32_t GetCLodNodeBoneLimit() const { return m_clodNodeBoneLimit; }
 
+	const std::vector<uint32_t>& GetCLodAssemblyTransformMaterialBases() const {
+		return m_clodAssemblyTransformMaterialBases;
+	}
+	uint32_t GetCLodMaterialSlotCount() const { return m_clodMaterialSlotCount; }
+	// A hierarchy root's materials: slot s of a cluster reached through a portal with material base b uses
+	// palette[b + s]. Empty for ordinary meshes, which use their own material.
+	void SetMaterialPalette(std::vector<std::shared_ptr<Material>> palette) { m_materialPalette = std::move(palette); }
+	const std::vector<std::shared_ptr<Material>>& GetMaterialPalette() const { return m_materialPalette; }
+	// A hierarchy root's parts, in the order its part portals name them (ClusterLODAssemblyInstance::stackDepth).
+	// They register before the root, and the root's template keeps their streaming active.
+	void SetPortalParts(std::vector<std::shared_ptr<Mesh>> parts) { m_portalParts = std::move(parts); }
+	const std::vector<std::shared_ptr<Mesh>>& GetPortalParts() const { return m_portalParts; }
 	const std::vector<ClusterLODAssemblyTransform>& GetCLodAssemblyTransforms() const {
 		return m_clodAssemblyTransforms;
 	}
@@ -328,6 +340,10 @@ private:
 	std::vector<ClusterLODNodeRangeAlloc> m_clodLodNodeRanges;  // per depth
 	std::vector<uint32_t>            m_clodLodLevelRoots;        // node index per depth (== 1+depth)
 	std::vector<ClusterLODAssemblyTransform> m_clodAssemblyTransforms;
+	std::vector<uint32_t> m_clodAssemblyTransformMaterialBases;
+	uint32_t m_clodMaterialSlotCount = 1;
+	std::vector<std::shared_ptr<Material>> m_materialPalette;
+	std::vector<std::shared_ptr<Mesh>> m_portalParts;
 	std::vector<ClusterLODAssemblyInstance> m_clodAssemblyInstances;
 	std::vector<ClusterLODAssemblyBoneRemap> m_clodAssemblyBoneRemaps;
 	std::vector<uint32_t> m_clodAssemblyBoneRemapIndices;

@@ -282,7 +282,7 @@ ComputeCullingBindings ComputeCullingPass::Declare(org::PassBuilder& builder)
         Builtin::PerInstanceTransformBuffer,
         Builtin::PerObjectBuffer,
         Builtin::CameraBuffer,
-        Builtin::PerMeshBuffer,
+        Builtin::PerMeshBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases,
         Builtin::PerMaterialDataBuffer,
         Builtin::Material::TextureStreamingMetadataBuffer,
         Builtin::SkeletonResources::InverseBindMatrices,

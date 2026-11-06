@@ -81,7 +81,7 @@ RasterBucketCompactAndArgsBindings RasterBucketCompactAndArgsPass::Declare(org::
             Builtin::InstanceDrawRecordBuffer,
             Builtin::PerInstanceTransformBuffer,
             Builtin::SkeletonResources::SkinningInstanceInfo,
-            Builtin::PerMeshBuffer,
+            Builtin::PerMeshBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases,
             Builtin::PerMaterialDataBuffer,
             Builtin::Material::TextureStreamingMetadataBuffer);
     builder.UnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer);

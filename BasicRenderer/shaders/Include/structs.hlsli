@@ -887,6 +887,8 @@ struct PerMeshInstanceBuffer {
     uint expectedClodMeshMetadataIndex;
     uint expectedClodMeshIdentityLo;
     uint expectedClodMeshIdentityHi;
+    uint materialPaletteBase;
+    uint materialPaletteCount;
 };
 
 struct PerInstanceTransformBuffer {

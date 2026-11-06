@@ -705,10 +705,12 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
 #if !defined(CLOD_RESOLVE_RAY_HIT)
     if (VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX != 0xFFFFFFFFu)
     {
-        StructuredBuffer<uint> visibleClusterTransformIndices =
+        StructuredBuffer<uint2> visibleClusterTransformIndices =
             ResourceDescriptorHeap[VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
-        assemblyTransformIndex = visibleClusterTransformIndices[clusterIndex];
+        assemblyTransformIndex = visibleClusterTransformIndices[clusterIndex].x;
     }
+#else
+    assemblyTransformIndex = g_clodRtHitTransformIndex;
 #endif
 
     MeshletResolveData md = LoadMeshletResolveData_Wave(clusterIndex);

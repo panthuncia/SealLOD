@@ -84,10 +84,10 @@ bool DWLoadCluster(uint sortedClusterIndex, out uint4 packedCluster,
     metadata = (CLodMeshMetadata)0;
     ByteAddressBuffer clusters =
         ResourceDescriptorHeap[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX];
-    StructuredBuffer<uint> assemblyTransforms =
+    StructuredBuffer<uint2> assemblyTransforms =
         ResourceDescriptorHeap[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
     packedCluster = CLodLoadVisibleClusterPacked(clusters, sortedClusterIndex);
-    assemblyTransformIndex = assemblyTransforms[sortedClusterIndex];
+    assemblyTransformIndex = assemblyTransforms[sortedClusterIndex].x;
     drawRecordIndex = CLodVisibleClusterInstanceID(packedCluster);
     localMeshletIndex = CLodVisibleClusterLocalMeshletIndex(packedCluster);
     slabDescriptor = CLodVisibleClusterPageSlabDescriptorIndex(packedCluster);

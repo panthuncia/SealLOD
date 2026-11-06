@@ -45,7 +45,7 @@ ReyesClassifyBindings ReyesClassifyPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.ShaderResource(
-            Builtin::PerMeshBuffer,
+            Builtin::PerMeshBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases,
             Builtin::PerMeshInstanceBuffer,
             Builtin::InstanceDrawRecordBuffer,
             Builtin::PerInstanceTransformBuffer,

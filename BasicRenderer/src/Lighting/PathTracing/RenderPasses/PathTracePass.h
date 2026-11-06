@@ -174,7 +174,7 @@ public:
     PathTraceBindings Declare(org::PassBuilder& builder) {
         PathTraceBindings bindings{};
         builder.ConstantBuffer(Builtin::PerFrameBuffer);
-        builder.ShaderResource(Builtin::CameraBuffer, Builtin::PerMeshBuffer, Builtin::PerMaterialDataBuffer, Builtin::InstanceDrawRecordBuffer,
+        builder.ShaderResource(Builtin::CameraBuffer, Builtin::PerMeshBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases, Builtin::PerMaterialDataBuffer, Builtin::InstanceDrawRecordBuffer,
             Builtin::PerMeshInstanceBuffer, Builtin::PerInstanceTransformBuffer, Builtin::PerObjectBuffer, Builtin::Material::TextureStreamingMetadataBuffer,
             Builtin::CLod::Offsets, Builtin::CLod::MeshMetadata, Builtin::CLod::Groups, Builtin::CLod::GroupChunks, Builtin::CLod::GroupPageMap,
             Builtin::CLod::AssemblyTransforms, Builtin::CLod::AssemblyBoneRemaps, Builtin::CLod::AssemblyBoneRemapIndices,
@@ -254,6 +254,7 @@ public:
         br::render::MiscConstants constants{};
         constants[CLOD_RT_SEC_TLAS_SRV] = frame.system->GetTlasSrv();
         constants[CLOD_RT_SEC_CLAS_INFO_SRV] = frame.system->GetClasInfoSrv();
+        constants[CLOD_RT_SEC_INSTANCE_ROWS_SRV] = frame.system->GetInstanceRowsSrv();
         constants[CLOD_RT_SEC_OUTPUT_UAV] = recording.Index(bindings.output);
         constants[CLOD_RT_SEC_FRAME] = frame.frame;
         constants[CLOD_RT_PT_MAX_BOUNCES] = frame.maxBounces;

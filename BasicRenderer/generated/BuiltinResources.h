@@ -12,10 +12,12 @@ struct Builtin {
     inline static constexpr std::string_view AssemblyBoneRemapIndices = "Builtin::CLod::AssemblyBoneRemapIndices";
     inline static constexpr std::string_view AssemblyBoneRemaps = "Builtin::CLod::AssemblyBoneRemaps";
     inline static constexpr std::string_view AssemblyInstances = "Builtin::CLod::AssemblyInstances";
+    inline static constexpr std::string_view AssemblyMaterialBases = "Builtin::CLod::AssemblyMaterialBases";
     inline static constexpr std::string_view AssemblyTransforms = "Builtin::CLod::AssemblyTransforms";
     inline static constexpr std::string_view GroupChunks = "Builtin::CLod::GroupChunks";
     inline static constexpr std::string_view GroupPageMap = "Builtin::CLod::GroupPageMap";
     inline static constexpr std::string_view Groups = "Builtin::CLod::Groups";
+    inline static constexpr std::string_view MaterialPalettes = "Builtin::CLod::MaterialPalettes";
     inline static constexpr std::string_view MeshMetadata = "Builtin::CLod::MeshMetadata";
     inline static constexpr std::string_view NodeBoneIndices = "Builtin::CLod::NodeBoneIndices";
     inline static constexpr std::string_view NodeSkinningInfos = "Builtin::CLod::NodeSkinningInfos";

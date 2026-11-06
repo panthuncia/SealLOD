@@ -33,6 +33,11 @@
 #define CLOD_RT_SCENE_GROUP_TABLE_SRV UintRootConstant13
 #define CLOD_RT_SCENE_SEGMENT_TABLE_SRV UintRootConstant14
 #define CLOD_RT_SCENE_CLAS_ADDRESSES_UAV UintRootConstant15
+// Part portals (docs/merge_hierarchies.md): a cluster reached through a portal belongs to that occurrence's instance, not
+// its draw's. The side band names the occurrence's assembly transform; its instance key is DRAW_KEYS + transform.
+#define CLOD_RT_SCENE_CLUSTER_SIDE_BAND_SRV UintRootConstant16
+#define CLOD_RT_SCENE_INSTANCE_ROWS_UAV UintRootConstant17 // Per instance row: uint4(draw, assembly transform, a cluster's group, 0).
+#define CLOD_RT_SCENE_DRAW_KEYS UintRootConstant30 // Instance keys below this are draws; above, DRAW_KEYS + assembly transform.
 #define CLOD_RT_SCENE_BLAS_ADDRESSES_SRV UintRootConstant18
 #define CLOD_RT_SCENE_TLAS_INSTANCES_UAV UintRootConstant19
 #define CLOD_RT_SCENE_TLAS_INSTANCE_COUNT UintRootConstant20
@@ -51,6 +56,8 @@
 #define CLOD_RT_BUILD_SLOT_OMM_KEYS_UAV UintRootConstant9
 #define CLOD_RT_BUILD_OMM_INDEX_POOL_LOW UintRootConstant10
 #define CLOD_RT_BUILD_OMM_INDEX_POOL_HIGH UintRootConstant11
+#define CLOD_RT_BUILD_COUNTERS_UAV UintRootConstant12 // For CLOD_RT_COUNTER_REJECTED_CLAS_ARGS.
+#define CLOD_RT_BUILD_MEASURED_COUNTS_UAV UintRootConstant13 // Per slot: triangles | vertices << 16, as measured.
 #define CLOD_RT_OMM_INDEX_UNIT_BYTES 512u // One cluster's indices: MS_MESHLET_SIZE triangles at 4 bytes.
 
 // The coarse cut buffer culling fills, see CLOD_WG_RT_COARSE_CUT_DESCRIPTOR_INDEX.
@@ -72,12 +79,21 @@
 #define CLOD_RT_COUNTER_ALPHA_INSTANCES 9u // Alpha-tested instances in the TLAS.
 #define CLOD_RT_COUNTER_OMM_INSTANCES 10u // Of those, how many trace with micromaps.
 #define CLOD_RT_COUNTER_OMM_DISABLED_INSTANCES 11u // Instances whose BLAS has micromaps they can't use.
-#define CLOD_RT_COUNTER_WORDS 12u
+#define CLOD_RT_COUNTER_FRAME_WORDS 12u // The words above are per frame; the scene build clears them.
+// Cumulative, never cleared: clusters whose build arguments broke the batch's limits, or changed between measuring and
+// building (the page moved or was reused). Each was built empty instead, since either is undefined behaviour.
+#define CLOD_RT_COUNTER_REJECTED_CLAS_ARGS 12u
+#define CLOD_RT_COUNTER_WORDS 14u // Even: the readback slice puts 8-byte-aligned query data after the counters.
 
 // In the instance's BLAS entry: not an index but where to find one.
 #define CLOD_RT_INSTANCE_BLAS_SHARED 0x80000000u // The rest is a share table slot.
 #define CLOD_RT_INSTANCE_BLAS_VIA_ROW 0x40000000u // The rest is another instance row.
 #define CLOD_RT_INSTANCE_BLAS_NONE 0xFFFFFFFFu
+
+// InstanceID(): the draw record, with this bit on a part portal occurrence's row, whose assembly transform is then in
+// the instance rows at InstanceIndex().
+#define CLOD_RT_INSTANCE_ID_PORTAL 0x800000u
+#define CLOD_RT_INSTANCE_ID_DRAW_MASK 0x7FFFFFu
 
 // ---- Primary visibility (rayTracedVisibility.hlsl)
 #define CLOD_RT_VIS_TLAS_SRV UintRootConstant0
@@ -92,6 +108,7 @@
 #define CLOD_RT_VIS_STATS_UAV UintRootConstant9
 #define CLOD_RT_VIS_VIEW_ID UintRootConstant10
 #define CLOD_RT_VIS_CAPACITY UintRootConstant11
+#define CLOD_RT_VIS_INSTANCE_ROWS_SRV UintRootConstant12
 
 #define CLOD_RT_VIS_MODE_WRITE 0u   // Merge hits into the visibility buffer.
 #define CLOD_RT_VIS_MODE_COMPARE 1u // Leave the frame alone and count how raster's keys agree with the rays.
@@ -126,6 +143,7 @@
 #define CLOD_RT_SEC_SUN_DIRECTION_Z UintRootConstant10
 #define CLOD_RT_SEC_HISTORY_SRV UintRootConstant11
 #define CLOD_RT_SEC_INPUT_SRV UintRootConstant12
+#define CLOD_RT_SEC_INSTANCE_ROWS_SRV UintRootConstant13 // Path tracing too. See CLodRtInstanceTransform.
 
 // Path tracing shares the secondary rays' TLAS, CLAS info, output and frame slots. Above 21 are the lighting toggles in cbuffers.hlsli.
 #define CLOD_RT_PT_NO_DESCRIPTOR 0xFFFFFFFFu

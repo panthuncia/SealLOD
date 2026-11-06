@@ -139,6 +139,43 @@ std::array<uint8_t, 3> TrianglePage::Triangle(const TriangleMeshlet& meshlet, ui
 			static_cast<size_t>(triangleIndex) * 3u);
 }
 
+DirectX::XMFLOAT2 TrianglePage::Uv(uint32_t meshletIndex, const TriangleMeshlet& meshlet, uint32_t uvSet, uint32_t vertexIndex) const
+{
+	if (uvSet >= m_header.uvSetCount || m_header.uvDescriptorOffset == 0u || m_header.uvBitstreamDirectoryOffset == 0u) {
+		return DirectX::XMFLOAT2(0.0f, 0.0f);
+	}
+	const CLodMeshletUvDescriptor desc = Load<CLodMeshletUvDescriptor>(
+		m_page, static_cast<size_t>(m_header.uvDescriptorOffset) +
+			(static_cast<size_t>(meshletIndex) * m_header.uvSetCount + uvSet) * sizeof(CLodMeshletUvDescriptor));
+	const uint32_t bitstreamBase = Load<uint32_t>(m_page, static_cast<size_t>(m_header.uvBitstreamDirectoryOffset) + uvSet * 4u);
+	const uint32_t bitsU = desc.uvBits & 0xFFu;
+	const uint32_t bitsV = (desc.uvBits >> 8u) & 0xFFu;
+	uint64_t cursor = static_cast<uint64_t>(bitstreamBase) * 8u + desc.uvBitOffset +
+		static_cast<uint64_t>(vertexIndex) * (bitsU + bitsV);
+	auto readBits = [&](uint32_t count) -> uint32_t {
+		uint32_t value = 0u;
+		for (uint32_t bit = 0; bit < count; ++bit, ++cursor) {
+			const size_t byte = static_cast<size_t>(cursor >> 3u);
+			if (byte >= m_page.size()) break;
+			const uint32_t b = (static_cast<uint32_t>(m_page[byte]) >> (cursor & 7u)) & 1u;
+			value |= b << bit;
+		}
+		return value;
+	};
+	const uint32_t u = readBits(bitsU);
+	const uint32_t v = readBits(bitsV);
+	(void)meshlet;
+	return DirectX::XMFLOAT2(desc.uvMinU + static_cast<float>(u) * desc.uvScaleU, desc.uvMinV + static_cast<float>(v) * desc.uvScaleV);
+}
+
+DirectX::XMFLOAT3 TrianglePage::Color(const TriangleMeshlet& meshlet, uint32_t vertexIndex) const
+{
+	if (!HasColors()) return DirectX::XMFLOAT3(1.0f, 1.0f, 1.0f);
+	const uint32_t word = Load<uint32_t>(m_page, static_cast<size_t>(m_header.colorArrayOffset) +
+		(static_cast<size_t>(meshlet.descriptor.vertexAttributeOffset) + vertexIndex) * sizeof(uint32_t));
+	return DirectX::XMFLOAT3((word & 0xFFu) / 255.0f, ((word >> 8u) & 0xFFu) / 255.0f, ((word >> 16u) & 0xFFu) / 255.0f);
+}
+
 std::vector<PageStream> TrianglePage::Streams() const
 {
 	// In the order the encoder lays them out. An offset of 0 means the stream is absent.

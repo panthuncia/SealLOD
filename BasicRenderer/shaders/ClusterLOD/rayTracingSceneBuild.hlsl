@@ -2,6 +2,7 @@
 //   CLodRtBuildClasArgsCS: argument records for groups whose CLAS were just requested
 //   Count -> Allocate -> AllocateFinish -> Place: groups the unordered cluster list by instance, one CLAS address array per BLAS
 //   CLodRtWriteInstancesCS: TLAS instances, once the BLAS addresses are known
+#include "Common/defines.h"
 #include "include/cbuffers.hlsli"
 #include "include/structs.hlsli"
 #include "include/instanceDrawRecordHelpers.hlsli"
@@ -44,6 +45,30 @@ struct CLodRtBuildSource
     uint2 padding;
 };
 
+// Within the batch's declared limits, and every index names one of the cluster's vertices. Anything else is undefined
+// for the build; it can hang the GPU. indexByteBase is the cluster's first index byte in the slab.
+bool CLodRtClusterArgumentsValid(uint slabDescriptor, uint indexByteBase, uint triangleCount, uint vertexCount)
+{
+    if (triangleCount > MS_MESHLET_SIZE || vertexCount > MS_MESHLET_SIZE) return false;
+    if (triangleCount == 0u) return true;
+    if (vertexCount == 0u) return false;
+    ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(slabDescriptor)];
+    const uint byteCount = triangleCount * 3u;
+    const uint firstWord = indexByteBase & ~3u;
+    const uint lastWord = (indexByteBase + byteCount - 1u) & ~3u;
+    for (uint word = firstWord; word <= lastWord; word += 4u) {
+        const uint packed = slab.Load(word);
+        [unroll]
+        for (uint b = 0u; b < 4u; ++b) {
+            const uint byteAddress = word + b;
+            if (byteAddress >= indexByteBase && byteAddress < indexByteBase + byteCount && ((packed >> (8u * b)) & 0xFFu) >= vertexCount) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 [numthreads(16, 1, 1)]
 void CLodRtBuildClasArgsCS(uint3 id : SV_DispatchThreadID)
 {
@@ -74,7 +99,7 @@ void CLodRtBuildClasArgsCS(uint3 id : SV_DispatchThreadID)
             info.slabDescriptor = source.slabDescriptor;
             info.pageOffsetUnits = source.pageOffsetUnits;
             info.localMeshlet = localMeshlet;
-            info.groupLocalIndex = source.groupLocalIndex;
+            info.groupLocalIndex = source.groupLocalIndex | (source.ommKey != 0u ? CLOD_RT_CLAS_INFO_HAS_MICROMAPS : 0u);
             clasInfo[slot] = info;
         }
 
@@ -92,6 +117,23 @@ void CLodRtBuildClasArgsCS(uint3 id : SV_DispatchThreadID)
             vertexCount = (descriptor.bitsAndVertexCount >> 24u) & 0xFFu;
             vertexBuffer = pageAddress + header.positionBitstreamOffset + descriptor.positionBitOffset;
             indexBuffer = pageAddress + header.triangleStreamOffset + descriptor.triangleByteOffset;
+            const uint indexByteBase = source.pageByteOffset + header.triangleStreamOffset + descriptor.triangleByteOffset;
+            if (!CLodRtClusterArgumentsValid(source.slabDescriptor, indexByteBase, triangleCount, vertexCount)) {
+                triangleCount = 0u;
+                vertexCount = 0u;
+            }
+        }
+        // The CLAS memory was sized by measuring these counts frames ago. A page that moved or was reused since would
+        // build something else, possibly larger than its allocation: build it empty instead.
+        RWStructuredBuffer<uint> measuredCounts = ResourceDescriptorHeap[CLOD_RT_BUILD_MEASURED_COUNTS_UAV];
+        const uint counts = triangleCount | (vertexCount << 16u);
+        if (CLOD_RT_BUILD_PUBLISH == 0u) {
+            measuredCounts[slot] = counts;
+        } else if (measuredCounts[slot] != counts) {
+            triangleCount = 0u;
+            vertexCount = 0u;
+            RWByteAddressBuffer rejectCounters = ResourceDescriptorHeap[CLOD_RT_BUILD_COUNTERS_UAV];
+            rejectCounters.InterlockedAdd(CLOD_RT_COUNTER_REJECTED_CLAS_ARGS * 4u, 1u);
         }
 
         // Opacity is decided per instance with FORCE_OPAQUE: a page can be shared by meshes with different materials.
@@ -122,7 +164,26 @@ uint4 CLodRtLoadCluster(uint index)
     return clusters.Load4(index * 16u);
 }
 
-// Draw table, per draw record: a 64-bit [cluster count : 20, signature : 44] updated with one atomic per cluster, then the
+// A selected cluster's instance key: its draw, or DRAW_KEYS + the assembly transform of the part portal occurrence that
+// reached it (variant A roots are drawn once, so the transform alone names the occurrence). Invalid past the table.
+#define CLOD_RT_INVALID_KEY 0xFFFFFFFFu
+
+uint CLodRtClusterTransform(uint index)
+{
+    StructuredBuffer<uint2> sideBand = ResourceDescriptorHeap[CLOD_RT_SCENE_CLUSTER_SIDE_BAND_SRV];
+    return sideBand[index].x;
+}
+
+uint CLodRtInstanceKey(uint draw, uint transformIndex)
+{
+    if (transformIndex == CLOD_ASSEMBLY_TRANSFORM_SENTINEL) {
+        return draw < CLOD_RT_SCENE_DRAW_KEYS ? draw : CLOD_RT_INVALID_KEY;
+    }
+    return transformIndex < CLOD_RT_SCENE_DRAW_TABLE_ENTRIES - CLOD_RT_SCENE_DRAW_KEYS
+        ? CLOD_RT_SCENE_DRAW_KEYS + transformIndex : CLOD_RT_INVALID_KEY;
+}
+
+// Draw table, per instance key (a draw, or a portal occurrence): a 64-bit [cluster count : 20, signature : 44] updated with one atomic per cluster, then the
 // [end, cursor] of the range this draw fills in, which is empty for a draw that shares another's BLAS.
 #define CLOD_RT_DRAW_ENTRY_BYTES 16u
 #define CLOD_RT_DRAW_COUNT_BITS 20u
@@ -157,8 +218,10 @@ void CLodRtCountCS(uint3 id : SV_DispatchThreadID)
     }
     const uint4 packed = CLodRtLoadCluster(id.x);
     const uint draw = CLodVisibleClusterInstanceID(packed);
+    const uint transformIndex = CLodRtClusterTransform(id.x);
+    const uint key = CLodRtInstanceKey(draw, transformIndex);
     RWByteAddressBuffer counters = ResourceDescriptorHeap[CLOD_RT_SCENE_COUNTERS_UAV];
-    if (draw >= CLOD_RT_SCENE_DRAW_TABLE_ENTRIES) {
+    if (key == CLOD_RT_INVALID_KEY) {
         counters.InterlockedAdd(CLOD_RT_COUNTER_DROPPED_CLUSTERS * 4u, 1u);
         return;
     }
@@ -168,17 +231,20 @@ void CLodRtCountCS(uint3 id : SV_DispatchThreadID)
     // from the page location, so two draws agree exactly when they reference the same CLAS.
     const uint clusterKey = CLodVisibleClusterLocalMeshletIndex(packed)
         | (CLodVisibleClusterPageSlabDescriptorIndex(packed) << 14u);
-    const uint pageKey = CLodVisibleClusterPageSlabByteOffset(packed) >> 14u;
+    const uint pageKey = CLodVisibleClusterPageSlabByteOffset(packed) >> CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_SHIFT;
     const uint mixed = CLodRtMix(clusterKey ^ CLodRtMix(pageKey));
     const uint64_t signature = (uint64_t(CLodRtMix(mixed + 0x9E3779B9u) & 0xFFFu) << 32u) | uint64_t(mixed);
     uint64_t previous = 0ull;
-    drawTable.InterlockedAdd64(draw * CLOD_RT_DRAW_ENTRY_BYTES, (signature << CLOD_RT_DRAW_COUNT_BITS) + 1ull, previous);
+    drawTable.InterlockedAdd64(key * CLOD_RT_DRAW_ENTRY_BYTES, (signature << CLOD_RT_DRAW_COUNT_BITS) + 1ull, previous);
     if (previous == 0ull) {
         uint instance = 0u;
         counters.InterlockedAdd(CLOD_RT_COUNTER_INSTANCES * 4u, 1u, instance);
         if (instance < CLOD_RT_SCENE_INSTANCE_CAPACITY) {
             RWStructuredBuffer<uint> instanceList = ResourceDescriptorHeap[CLOD_RT_SCENE_INSTANCE_LIST_UAV];
-            instanceList[instance] = draw;
+            RWStructuredBuffer<uint4> instanceRows = ResourceDescriptorHeap[CLOD_RT_SCENE_INSTANCE_ROWS_UAV];
+            instanceList[instance] = key;
+            // Any of the occurrence's clusters names its part, which says what palette range its materials take.
+            instanceRows[instance] = uint4(draw, transformIndex, CLodVisibleClusterGroupID(packed), 0u);
         }
         else {
             counters.InterlockedAdd(CLOD_RT_COUNTER_DROPPED_INSTANCES * 4u, 1u);
@@ -280,6 +346,8 @@ void CLodRtAddCoarseConsumersCS(uint3 id : SV_DispatchThreadID)
     RWStructuredBuffer<uint> instanceList = ResourceDescriptorHeap[CLOD_RT_SCENE_INSTANCE_LIST_UAV];
     RWStructuredBuffer<uint> instanceBlas = ResourceDescriptorHeap[CLOD_RT_SCENE_INSTANCE_BLAS_UAV];
     instanceList[row] = pair.x;
+    RWStructuredBuffer<uint4> instanceRows = ResourceDescriptorHeap[CLOD_RT_SCENE_INSTANCE_ROWS_UAV];
+    instanceRows[row] = uint4(pair.x, CLOD_ASSEMBLY_TRANSFORM_SENTINEL, 0xFFFFFFFFu, 0u);
     instanceBlas[row] = CLOD_RT_INSTANCE_BLAS_VIA_ROW | (providerRow - 1u);
     counters.InterlockedAdd(CLOD_RT_COUNTER_COARSE_CONSUMERS * 4u, 1u);
 }
@@ -291,7 +359,8 @@ void CLodRtAllocateFinishCS()
     counters.Store(CLOD_RT_COUNTER_BLAS_ARGS * 4u, min(counters.Load(CLOD_RT_COUNTER_BLAS_ARGS * 4u), CLOD_RT_SCENE_BLAS_CAPACITY));
     counters.Store(CLOD_RT_COUNTER_CLUSTERS * 4u, min(counters.Load(CLOD_RT_COUNTER_CLUSTERS * 4u), CLOD_RT_SCENE_REFERENCE_CAPACITY));
     counters.Store(CLOD_RT_COUNTER_TLAS_INSTANCES * 4u, min(counters.Load(CLOD_RT_COUNTER_INSTANCES * 4u), CLOD_RT_SCENE_INSTANCE_CAPACITY));
-    counters.Store(CLOD_RT_COUNTER_LIST_CLUSTERS * 4u, CLodRtClusterCount());
+    StructuredBuffer<uint> rawCounter = ResourceDescriptorHeap[CLOD_RT_SCENE_CLUSTER_COUNTER_SRV]; // EXPERIMENT: demand, unclamped
+    counters.Store(CLOD_RT_COUNTER_LIST_CLUSTERS * 4u, rawCounter[0]);
 }
 
 [numthreads(256, 1, 1)]
@@ -301,12 +370,12 @@ void CLodRtPlaceCS(uint3 id : SV_DispatchThreadID)
         return;
     }
     const uint4 packed = CLodRtLoadCluster(id.x);
-    const uint draw = CLodVisibleClusterInstanceID(packed);
-    if (draw >= CLOD_RT_SCENE_DRAW_TABLE_ENTRIES) {
+    const uint key = CLodRtInstanceKey(CLodVisibleClusterInstanceID(packed), CLodRtClusterTransform(id.x));
+    if (key == CLOD_RT_INVALID_KEY) {
         return;
     }
     RWByteAddressBuffer drawTable = ResourceDescriptorHeap[CLOD_RT_SCENE_DRAW_TABLE_UAV];
-    const uint draws = draw * CLOD_RT_DRAW_ENTRY_BYTES;
+    const uint draws = key * CLOD_RT_DRAW_ENTRY_BYTES;
     const uint end = drawTable.Load(draws + 8u);
     if (end == 0u) {
         return; // Shares another draw's BLAS, which is most of them.
@@ -317,15 +386,13 @@ void CLodRtPlaceCS(uint3 id : SV_DispatchThreadID)
         return;
     }
 
-    const MeshInstanceClodOffsets offsets = LoadCLodOffsetsForDrawRecord(LoadInstanceDrawRecord(draw));
-    StructuredBuffer<CLodMeshMetadata> metadata = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
-    const uint groupGlobal = metadata[offsets.clodMeshMetadataIndex].groupsBase + CLodVisibleClusterGroupID(packed);
+    const uint groupGlobal = CLodVisibleClusterGroupID(packed);
     const uint slot = CLodRtFindClasSlot(
         CLOD_RT_SCENE_GROUP_TABLE_SRV,
         CLOD_RT_SCENE_SEGMENT_TABLE_SRV,
         groupGlobal,
         CLodVisibleClusterPageSlabDescriptorIndex(packed),
-        CLodVisibleClusterPageSlabByteOffset(packed) >> 14u,
+        CLodVisibleClusterPageSlabByteOffset(packed) >> CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_SHIFT,
         CLodVisibleClusterLocalMeshletIndex(packed));
 
     // A null reference is ignored by the build: this happens if a CLAS was freed after culling selected it.
@@ -367,11 +434,13 @@ void CLodRtWriteInstancesCS(uint3 id : SV_DispatchThreadID)
     RtasInstanceDesc desc = (RtasInstanceDesc)0; // A null acceleration structure makes the row inactive.
     if (id.x < counters.Load(CLOD_RT_COUNTER_TLAS_INSTANCES * 4u)) {
         StructuredBuffer<uint64_t> blasAddresses = ResourceDescriptorHeap[CLOD_RT_SCENE_BLAS_ADDRESSES_SRV];
-        RWStructuredBuffer<uint> instanceList = ResourceDescriptorHeap[CLOD_RT_SCENE_INSTANCE_LIST_UAV];
         RWStructuredBuffer<uint> instanceBlas = ResourceDescriptorHeap[CLOD_RT_SCENE_INSTANCE_BLAS_UAV];
-        const uint draw = instanceList[id.x];
+        RWStructuredBuffer<uint4> instanceRows = ResourceDescriptorHeap[CLOD_RT_SCENE_INSTANCE_ROWS_UAV];
+        const uint4 rowInfo = instanceRows[id.x];
+        const uint draw = rowInfo.x;
+        const uint transformIndex = rowInfo.y;
         const InstanceDrawRecordBuffer record = LoadInstanceDrawRecord(draw);
-        const PerObjectBuffer transform = LoadInstanceTransformForDrawRecordWithAssemblyTransform(record, CLOD_ASSEMBLY_TRANSFORM_SENTINEL);
+        const PerObjectBuffer transform = LoadInstanceTransformForDrawRecordWithAssemblyTransform(record, transformIndex);
         const row_major matrix model = transform.model;
 
         // Row-vector model matrix to a 3x4 of column-vector rows.
@@ -380,19 +449,51 @@ void CLodRtWriteInstancesCS(uint3 id : SV_DispatchThreadID)
         }
 
         StructuredBuffer<PerMeshBuffer> perMeshBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
-        const PerMeshBuffer perMesh = perMeshBuffer[LoadMeshTemplateForDrawRecord(record).perMeshBufferIndex];
+        const PerMeshInstanceBuffer meshTemplate = LoadMeshTemplateForDrawRecord(record);
+        const PerMeshBuffer perMesh = perMeshBuffer[meshTemplate.perMeshBufferIndex];
         StructuredBuffer<MaterialInfo> materials = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
-        const uint materialFlags = materials[perMesh.materialDataIndex].materialFlags;
+
+        // The materials this row's clusters can take: its draw's, or for a hierarchy root the palette range of the part
+        // the row's clusters belong to (the root's own geometry spans its whole palette). Instance flags hold for the
+        // whole range: culling off if any material is double-sided, forced opaque only if none tests alpha.
+        uint rowMaterial = perMesh.materialDataIndex;
+        uint rowMaterialCount = 1u;
+        uint paletteFirst = 0u;
+        if (CLodTemplateHasPalette(meshTemplate)) {
+            uint slotCount = meshTemplate.materialPaletteCount;
+            if (rowInfo.z != 0xFFFFFFFFu) {
+                StructuredBuffer<ClusterLODGroup> groups = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
+                StructuredBuffer<CLodMeshMetadata> metadata = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MeshMetadata)];
+                slotCount = max(metadata[groups[rowInfo.z].partIndex].materialSlotCount, 1u);
+            }
+            const uint offset = min(CLodAssemblyMaterialBase(transformIndex), meshTemplate.materialPaletteCount - 1u);
+            paletteFirst = meshTemplate.materialPaletteBase + offset;
+            rowMaterialCount = min(slotCount, meshTemplate.materialPaletteCount - offset);
+            StructuredBuffer<CLodMaterialPaletteEntry> palettes = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MaterialPalettes)];
+            rowMaterial = palettes[paletteFirst].materialDataIndex;
+        }
+        uint materialFlags = materials[rowMaterial].materialFlags;
+        bool anyDoubleSided = (materialFlags & MATERIAL_DOUBLE_SIDED) != 0u;
+        bool anyAlpha = (materialFlags & MATERIAL_ALPHA_TEST) != 0u;
+        if (rowMaterialCount > 1u) {
+            StructuredBuffer<CLodMaterialPaletteEntry> palettes = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::MaterialPalettes)];
+            for (uint k = 1u; k < min(rowMaterialCount, 64u); ++k) {
+                const uint other = materials[palettes[paletteFirst + k].materialDataIndex].materialFlags;
+                anyDoubleSided = anyDoubleSided || (other & MATERIAL_DOUBLE_SIDED) != 0u;
+                anyAlpha = anyAlpha || (other & MATERIAL_ALPHA_TEST) != 0u;
+            }
+        }
 
         // Raster's counter-clockwise front faces are clockwise here, because its projection flips Y. Mirrored objects swap.
         uint flags = (transform.objectFlags & OBJECT_FLAG_REVERSE_WINDING) != 0u ? RTAS_INSTANCE_FLAG_TRIANGLE_FRONT_COUNTERCLOCKWISE : 0u;
-        if ((materialFlags & MATERIAL_DOUBLE_SIDED) != 0u) {
+        if (anyDoubleSided) {
             flags |= RTAS_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE;
         }
-        if ((materialFlags & MATERIAL_ALPHA_TEST) == 0u) {
+        if (!anyAlpha) {
             flags |= RTAS_INSTANCE_FLAG_FORCE_OPAQUE;
         }
-        desc.instanceIDAndMask = (draw & 0x00FFFFFFu) | (0xFFu << 24u);
+        const uint portalBit = transformIndex != CLOD_ASSEMBLY_TRANSFORM_SENTINEL ? CLOD_RT_INSTANCE_ID_PORTAL : 0u;
+        desc.instanceIDAndMask = (draw & CLOD_RT_INSTANCE_ID_DRAW_MASK) | portalBit | (0xFFu << 24u);
         // Selects the hit groups of pipelines that trace this BVH. See pathTrace.lib.hlsl. Ray queries ignore it.
         const uint hitGroupContribution = (materialFlags & MATERIAL_TERRAIN) != 0u ? 2u : 0u;
         desc.contributionAndFlags = (flags << 24u) | hitGroupContribution;
@@ -411,7 +512,7 @@ void CLodRtWriteInstancesCS(uint3 id : SV_DispatchThreadID)
         // never get there, and baked foliage would drift back down, since rays that micromaps answer run no any-hit to ask.
         if (CLOD_RT_SCENE_OMM_ACTIVE != 0u && blas != 0xFFFFFFFFu && (materialFlags & MATERIAL_ALPHA_TEST) != 0u) {
             counters.InterlockedAdd(CLOD_RT_COUNTER_ALPHA_INSTANCES * 4u, 1u);
-            const MaterialInfo alphaMaterial = materials[perMesh.materialDataIndex];
+            const MaterialInfo alphaMaterial = materials[rowMaterial];
             if ((materialFlags & MATERIAL_BASE_COLOR_TEXTURE) != 0u && alphaMaterial.baseColorStreamingTextureID != 0u) {
                 const CLodRtAlphaImage image = CLodRtResolveAlphaImage(alphaMaterial.baseColorTextureIndex, alphaMaterial.baseColorStreamingTextureID);
                 RecordTextureStreamingFeedbackRequestedTopMip(LoadTextureStreamingInfo(alphaMaterial.baseColorStreamingTextureID), alphaMaterial.baseColorStreamingTextureID, image.absoluteMip);
@@ -430,8 +531,9 @@ void CLodRtWriteInstancesCS(uint3 id : SV_DispatchThreadID)
             RWStructuredBuffer<uint> blasOmmKeys = ResourceDescriptorHeap[CLOD_RT_SCENE_BLAS_OMM_KEYS_UAV];
             const uint ommKey = blasOmmKeys[blas];
             if (ommKey != 0u) {
+                // A row whose clusters take several materials can't name the one its micromaps were baked for.
                 const bool usable = CLOD_RT_SCENE_OMM_ACTIVE != 0u && (materialFlags & MATERIAL_ALPHA_TEST) != 0u
-                    && ommKey == materials[perMesh.materialDataIndex].ommIdentity;
+                    && rowMaterialCount == 1u && ommKey == materials[rowMaterial].ommIdentity;
                 if (!usable) {
                     desc.contributionAndFlags |= RTAS_INSTANCE_FLAG_DISABLE_OMMS << 24u;
                     counters.InterlockedAdd(CLOD_RT_COUNTER_OMM_DISABLED_INSTANCES * 4u, 1u);

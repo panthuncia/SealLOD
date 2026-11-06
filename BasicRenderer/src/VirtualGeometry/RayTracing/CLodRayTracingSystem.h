@@ -38,22 +38,30 @@ namespace br::render {
 class CLodRayTracingSystem {
 public:
     struct Limits {
-        uint64_t clasPoolBytes = 1024ull * 1024ull * 1024ull;
+        // Full, it evicts the least recently used groups. Merged r100 peaks at 573 MiB. SARP_RT_CLAS_POOL_MB overrides it.
+        uint64_t clasPoolBytes = 768ull * 1024ull * 1024ull;
         uint32_t maxClasSlots = 1u << 20;
+        // Sized from SaveLab peaks (docs/merge_hierarchies.md, "VRAM"); overflow drops work and the stats log counts it.
         // What the RT view may select. Far more than the BLASes reference, because instances with the same cut share one.
-        uint32_t maxClustersInBvh = 1u << 22;
-        uint32_t maxClusterReferences = 1u << 20; // Clusters across all distinct BLASes.
-        uint32_t maxBlases = 1u << 16;
-        uint32_t maxInstances = 1u << 18;
+        // It also sizes the RT view's traversal frontiers and visible cluster buffers (36 B per cluster in all). Merged
+        // scenes peak at 0.58M (r100); an unmerged r100 scene needs 4.3M: SARP_RT_MAX_LIST_CLUSTERS overrides it.
+        uint32_t maxClustersInBvh = 1u << 21;
+        uint32_t maxClusterReferences = 1u << 19; // Clusters across all distinct BLASes. Peak 229k.
+        uint32_t maxBlases = 1u << 15; // Peak 16k.
+        // TLAS rows: 330 B each with the TLAS and its scratch. Peak 324k merged (r100); an unmerged r100 scene needs 552k:
+        // SARP_RT_MAX_INSTANCES overrides it.
+        uint32_t maxInstances = 1u << 19;
         uint32_t maxClustersPerInstance = 1u << 16;
         uint32_t maxClusterBuildsPerFrame = 1u << 13;
-        uint32_t maxDrawRecords = 1u << 22;
+        uint32_t maxDrawRecords = 1u << 21; // Draw record indices; the draw buffer holds 512k at r100.
+        // Instance keys for part portal occurrences, one per assembly transform (docs/merge_hierarchies.md).
+        uint32_t maxPortalOccurrences = 1u << 20;
         uint32_t maxGroups = 1u << 22;
-        uint32_t maxSegments = 1u << 22;
+        uint32_t maxSegments = 1u << 20; // Segments of CLAS-cached groups: no more than CLAS slots.
         uint32_t requestCapacity = 1u << 16;
         uint32_t visibilityHashEntries = 1u << 19;
         uint32_t blasShareEntries = 1u << 17; // A power of two, at least twice the BLASes expected.
-        uint64_t ommArrayPoolBytes = 256ull * 1024ull * 1024ull; // 77 MiB in use on SaveLab at radius 20.
+        uint64_t ommArrayPoolBytes = 128ull * 1024ull * 1024ull; // 77 MiB in use on SaveLab at r20 unmerged, 20 MiB merged at r100.
         uint32_t ommIndexUnits = 1u << 17; // Clusters with micromap indices at once, at CLOD_RT_OMM_INDEX_UNIT_BYTES each.
         uint64_t ommUploadBytesPerFrame = 32ull << 20; // Baked micromaps and indices uploaded per frame.
         uint64_t ommScratchBytes = 64ull << 20; // For a frame's micromap array builds.
@@ -68,6 +76,8 @@ public:
         uint32_t groupsAwaitingBuild = 0;
         uint32_t cachedGroups = 0;
         uint32_t clasBuildsLastFrame = 0;
+        uint32_t rejectedClasArgs = 0; // Cumulative: clusters built empty because their arguments were invalid or had changed.
+        uint64_t staleMeasuredGroups = 0; // Cumulative: measured groups dropped before building because their pages had moved.
         uint64_t clasBuildsTotal = 0;
         uint64_t clasFreedTotal = 0;
         uint32_t requestsLastFrame = 0;
@@ -122,12 +132,13 @@ public:
     struct VisibilityDescriptors {
         uint32_t tlas = 0;
         uint32_t clasInfo = 0;
+        uint32_t instanceRows = 0;
         uint32_t hash = 0;
         uint32_t hashEntries = 0;
         uint32_t stats = 0;
     };
 
-    CLodRayTracingSystem() = default;
+    CLodRayTracingSystem(); // Reads the limit overrides from the environment.
 
     // Use the preprocessor's opacity micromaps for alpha-tested groups, only for BVH users whose alpha test is
     // clodRayTracingAlpha.hlsli's. Resources exist only if this was on before EnsureInitialized, on a device that has
@@ -146,7 +157,7 @@ public:
     void Refresh(const MeshManager& meshManager);
 
     // Records CLAS builds, BLASes and the TLAS. clusters and counter are the RT view's culling output.
-    void RecordSceneBuild(org::RecordingContext& recording, const ScenePipelines& pipelines, uint32_t clustersSrv, uint32_t counterSrv, uint32_t clusterCapacity);
+    void RecordSceneBuild(org::RecordingContext& recording, const ScenePipelines& pipelines, uint32_t clustersSrv, uint32_t sideBandSrv, uint32_t counterSrv, uint32_t clusterCapacity);
     void RecordVisibilityBegin(org::RecordingContext& recording, const org::PipelineState& clearPipeline, bool clearStats);
     void RecordVisibilityEnd(org::RecordingContext& recording, bool readStats);
     // After the frame's raytracing passes have recorded.
@@ -159,6 +170,8 @@ public:
     bool HasTlas() const noexcept { return m_tlasBuilt; }
     uint32_t GetTlasSrv() const noexcept { return m_tlasSrv; }
     uint32_t GetClasInfoSrv() const noexcept { return m_clasInfo.srv; }
+    // Per TLAS row (InstanceIndex()): uint4(draw, assembly transform, a cluster's group, 0). See CLOD_RT_INSTANCE_ID_PORTAL.
+    uint32_t GetInstanceRowsSrv() const noexcept { return m_instanceRows.srv; }
 
     // Where raytraced primary visibility writes its visible cluster records.
     void SetPrimaryVisibleClusters(std::shared_ptr<org::Buffer> clusters, std::shared_ptr<org::Buffer> transformIndices, uint32_t capacity);
@@ -280,6 +293,8 @@ private:
 
     void FreeGroup(uint32_t groupGlobal, CachedGroup& group);
     bool MeasureGroup(const MeshManager& meshManager, uint32_t groupGlobal, uint32_t ommIdentity, uint32_t& measuresLeft);
+    // Whether each measured source still names where the group's pages are now.
+    bool SourcesStillCurrent(const MeshManager& meshManager, uint32_t groupGlobal, const std::vector<BuildSource>& sources);
     // Uploads a group's baked micromaps into this slice and points its sources at them. False to try again next frame;
     // a group with nothing usable gets none and true.
     bool LoadOmmGroup(const std::wstring& containerPath, uint32_t groupLocalIndex, uint32_t ommIdentity, uint32_t groupGlobal,
@@ -306,13 +321,14 @@ private:
     RawBuffer m_buildArgs, m_buildDestinations, m_buildScratch, m_clasSizes, m_clasSizesReadback;
     RawBuffer m_requests, m_requestCounter;
     RawBuffer m_coarseCut;
-    RawBuffer m_drawTable, m_instanceList, m_instanceBlas, m_shareTable, m_counters;
+    RawBuffer m_drawTable, m_instanceList, m_instanceRows, m_instanceBlas, m_shareTable, m_counters;
     RawBuffer m_blasArgs, m_blasAddressArray, m_blasResult, m_blasScratch, m_blasAddresses, m_blasSizes;
     RawBuffer m_tlasInstances, m_tlasStorage, m_tlasScratch;
     RawBuffer m_visibilityHash, m_visibilityStats;
     RawBuffer m_upload, m_readback;
     RawBuffer m_ommArrayPool, m_ommIndexPool, m_ommScratch, m_ommUpload;
     RawBuffer m_slotOmmKeys, m_blasOmmKeys;
+    RawBuffer m_slotMeasuredCounts; // Per CLAS slot: the triangle and vertex counts its size was measured with.
     uint64_t m_uploadSliceBytes = 0;
     uint64_t m_readbackSliceBytes = 0;
 

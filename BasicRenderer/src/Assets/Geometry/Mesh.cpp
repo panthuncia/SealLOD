@@ -324,6 +324,17 @@ namespace
 			}
 		}
 
+		// Merge-hierarchy children are reached through a page-less children group, not a segment: their streaming
+		// parent is the parent node's own group.
+		for (uint32_t groupLocalIndex = 0u; groupLocalIndex < localGroupCount; ++groupLocalIndex) {
+			const auto& group = groups[groupLocalIndex];
+			if ((group.flags & CLOD_GROUP_FLAG_MERGE_CHILD) == 0u || summary.parentGroupByLocal[groupLocalIndex] >= 0) continue;
+			if (group.parentGroupId >= 0 && static_cast<uint32_t>(group.parentGroupId) < localGroupCount &&
+				static_cast<uint32_t>(group.parentGroupId) != groupLocalIndex) {
+				summary.parentGroupByLocal[groupLocalIndex] = group.parentGroupId;
+			}
+		}
+
 		uint32_t rootGroupBegin = 0u;
 		uint32_t rootGroupEnd = localGroupCount;
 		if (!partRecords.empty() && rootPartIndex < partRecords.size()) {
@@ -555,6 +566,8 @@ void Mesh::ReleaseCLodHierarchyCpuData()
 	m_clodNodeBoneIndices.shrink_to_fit();
 	m_clodAssemblyTransforms.clear();
 	m_clodAssemblyTransforms.shrink_to_fit();
+	m_clodAssemblyTransformMaterialBases.clear();
+	m_clodAssemblyTransformMaterialBases.shrink_to_fit();
 	m_clodAssemblyInstances.clear();
 	m_clodAssemblyInstances.shrink_to_fit();
 	m_clodAssemblyBoneRemaps.clear();
@@ -599,6 +612,8 @@ void Mesh::ApplyPrebuiltClusterLODData(const ClusterLODPrebuiltData& data)
 	m_clodLodNodeRanges = data.lodNodeRanges;
 	m_clodLodLevelRoots = data.lodLevelRoots;
 	m_clodAssemblyTransforms = data.assemblyTransforms;
+	m_clodAssemblyTransformMaterialBases = data.assemblyTransformMaterialBases;
+	m_clodMaterialSlotCount = (std::max)(data.materialSlotCount, 1u);
 	m_clodAssemblyInstances = data.assemblyInstances;
 	m_clodAssemblyBoneRemaps = data.assemblyBoneRemaps;
 	m_clodAssemblyBoneRemapIndices = data.assemblyBoneRemapIndices;
@@ -759,6 +774,8 @@ ClusterLODPrebuiltData Mesh::GetClusterLODPrebuiltData() const
 	if (!m_clodAssemblyTransforms.empty()) {
 		out.assemblyTransforms = m_clodAssemblyTransforms;
 	}
+	out.assemblyTransformMaterialBases = m_clodAssemblyTransformMaterialBases;
+	out.materialSlotCount = m_clodMaterialSlotCount;
 	if (!m_clodAssemblyInstances.empty()) {
 		out.assemblyInstances = m_clodAssemblyInstances;
 	}

@@ -76,6 +76,15 @@
 #include "BuiltinResources.h"
 
 namespace {
+    template <typename... Args>
+    std::shared_ptr<RasterBucketHistogramPass> MakeHistogramPassWithSideBand(std::shared_ptr<org::Buffer> sideBand, Args&&... args) {
+        auto pass = std::make_shared<RasterBucketHistogramPass>(std::forward<Args>(args)...);
+        pass->SetVisibleClusterSideBand(std::move(sideBand));
+        return pass;
+    }
+}
+
+namespace {
 
 CLodTransparencyMode GetTransparencyMode(CLodExtensionType type)
 {
@@ -681,7 +690,8 @@ void CLodExtension::AppendRayTracingPasses(const CLodVariantTraits& traits, std:
 {
     const std::string scenePassName = MakeVariantPassName(traits, "ScenePass");
     auto sceneDesc = org::ExternalPassDesc::Compute(scenePassName, std::make_shared<CLodRayTracingScenePass>(
-        m_options.rayTracingSystem, m_visibleClustersBuffer, m_visibleClustersCounterBuffer, m_options.slabResourceGroup, m_visibleClusterCapacity));
+        m_options.rayTracingSystem, m_visibleClustersBuffer, m_visibleClusterTransformIndicesBuffer, m_visibleClustersCounterBuffer,
+        m_options.slabResourceGroup, m_visibleClusterCapacity));
     auto sceneInsertPoint = org::ExternalInsertPoint::After(MakeVariantPassName(traits, "HierarchicalCullingPass1"));
     if (m_options.pathTraced) {
         sceneInsertPoint.AlsoBefore("PathTraceArgsPass");
@@ -725,7 +735,7 @@ void CLodExtension::InitializeCoreResources()
 
     m_visibleClustersBuffer = CreateAliasedUnmaterializedRawBuffer(static_cast<uint64_t>(m_visibleClusterCapacity) * PackedVisibleClusterStrideBytes, true, false, true);
     m_visibleClustersBuffer->SetName(MakeVariantResourceName(traits, "Visible Clusters Buffer (uncompacted)"));
-    m_visibleClusterTransformIndicesBuffer = CreateAliasedUnmaterializedStructuredBuffer(m_visibleClusterCapacity, sizeof(uint32_t), true, false, false, true);
+    m_visibleClusterTransformIndicesBuffer = CreateAliasedUnmaterializedStructuredBuffer(m_visibleClusterCapacity, CLodVisibleClusterSideBandStride, true, false, false, true);
     m_visibleClusterTransformIndicesBuffer->SetName(MakeVariantResourceName(traits, "Visible Cluster Transform Indices Buffer (uncompacted)"));
 
     auto createHistogramIndirectCommand = [&](std::string_view name) {
@@ -807,12 +817,12 @@ void CLodExtension::InitializeCoreResources()
 
     m_compactedVisibleClustersBuffer = CreateAliasedUnmaterializedRawBuffer(static_cast<uint64_t>(m_visibleClusterCapacity) * PackedVisibleClusterStrideBytes, true, false);
     m_compactedVisibleClustersBuffer->SetName(MakeVariantResourceName(traits, "Compacted Visible Clusters Buffer"));
-    m_compactedVisibleClusterTransformIndicesBuffer = CreateAliasedUnmaterializedStructuredBuffer(m_visibleClusterCapacity, sizeof(uint32_t), true, false, false, true);
+    m_compactedVisibleClusterTransformIndicesBuffer = CreateAliasedUnmaterializedStructuredBuffer(m_visibleClusterCapacity, CLodVisibleClusterSideBandStride, true, false, false, true);
     m_compactedVisibleClusterTransformIndicesBuffer->SetName(MakeVariantResourceName(traits, "Compacted Visible Cluster Transform Indices Buffer"));
 
     m_compactedVisibleClustersBufferSw = CreateAliasedUnmaterializedRawBuffer(static_cast<uint64_t>(m_visibleClusterCapacity) * PackedVisibleClusterStrideBytes, true, false);
     m_compactedVisibleClustersBufferSw->SetName(MakeVariantResourceName(traits, "Compacted Visible Clusters Buffer SW"));
-    m_compactedVisibleClusterTransformIndicesBufferSw = CreateAliasedUnmaterializedStructuredBuffer(m_visibleClusterCapacity, sizeof(uint32_t), true, false, false, true);
+    m_compactedVisibleClusterTransformIndicesBufferSw = CreateAliasedUnmaterializedStructuredBuffer(m_visibleClusterCapacity, CLodVisibleClusterSideBandStride, true, false, false, true);
     m_compactedVisibleClusterTransformIndicesBufferSw->SetName(MakeVariantResourceName(traits, "Compacted Visible Cluster Transform Indices Buffer SW"));
 
     if (traits.type == CLodExtensionType::VisiblityBuffer && m_options.rayTracingSystem) {
@@ -1768,7 +1778,7 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
         outPasses.push_back(
             org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "RasterBucketsHistogramPass" + phaseSuffix),
-                std::make_shared<RasterBucketHistogramPass>(
+                MakeHistogramPassWithSideBand(m_visibleClusterTransformIndicesBuffer,
                     m_visibleClustersBuffer,
                     visibleClustersCounterBuffer,
                     histogramIndirectCommand,
@@ -1928,7 +1938,7 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
         outPasses.push_back(
             org::ExternalPassDesc::Compute(
                 MakeVariantPassName(traits, "RasterBucketsHistogramPassSW" + phaseSuffix),
-                std::make_shared<RasterBucketHistogramPass>(
+                MakeHistogramPassWithSideBand(m_visibleClusterTransformIndicesBuffer,
                     m_visibleClustersBuffer,
                     swVisibleClustersCounterBuffer,
                     swHistogramIndirectCommand,

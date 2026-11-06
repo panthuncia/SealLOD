@@ -1,11 +1,13 @@
 #include "VirtualGeometry/Culling/RenderPasses/ComputeCullingCommands.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <initializer_list>
 #include <utility>
 
 #include "BasicRenderer/Diagnostics/CLodTelemetry.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include <rhi_debug.h>
 #include "../shaders/PerPassRootConstants/clodClearUintBufferRootConstants.h"
 #include "../shaders/PerPassRootConstants/clodCreateCommandRootConstants.h"
 #include "../shaders/PerPassRootConstants/clodPureComputeCullingRootConstants.h"
@@ -103,6 +105,13 @@ private:
     void ExecuteIndirect(const Token& arguments)
     {
         m_context.ExecuteIndirect(m_programs.dispatchSignature, arguments.Resource());
+    }
+    // Names the next indirect dispatch for PIX and DRED breadcrumbs (a hang report then says which stage and level).
+    void Mark(const char* stage)
+    {
+        char label[64];
+        std::snprintf(label, sizeof(label), "CLod culling: %s, level %u", stage, m_level);
+        rhi::debug::Marker(m_context.Commands(), rhi::debug::Color{ 0xFF808080u }, label);
     }
 
     // One batch over the declared buffers in the list; absent ones are skipped.
@@ -327,6 +336,7 @@ private:
         nodes[CLOD_PC_FRONTIER_OUTPUT_DESCRIPTOR_INDEX] = Uav(frontiers.currentNodes);
         nodes[CLOD_PC_FRONTIER_OUTPUT_COUNT_DESCRIPTOR_INDEX] = Uav(frontiers.currentNodeCounter);
         Push(nodes);
+        Mark("seed replay nodes");
         ExecuteIndirect(frontiers.nodeDispatchArgs);
         m_nodeArgsInUse = true;
 
@@ -337,6 +347,7 @@ private:
         clusters[CLOD_PC_CLUSTER_OUTPUT_DESCRIPTOR_INDEX] = Uav(frontiers.clusters);
         clusters[CLOD_PC_CLUSTER_OUTPUT_COUNT_DESCRIPTOR_INDEX] = Uav(frontiers.clusterCounter);
         Push(clusters);
+        Mark("seed replay clusters");
         ExecuteIndirect(frontiers.clusterDispatchArgs);
         m_clusterArgsInUse = true;
 
@@ -358,6 +369,7 @@ private:
         constants[CLOD_PC_FRONTIER_INPUT_DESCRIPTOR_INDEX] = Srv(frontiers.clusters);
         constants[CLOD_PC_FRONTIER_INPUT_COUNT_DESCRIPTOR_INDEX] = Srv(frontiers.clusterCounter);
         Push(constants);
+        Mark("cull clusters");
         ExecuteIndirect(frontiers.clusterDispatchArgs);
         m_clusterArgsInUse = true;
     }
@@ -365,7 +377,7 @@ private:
     // Expands one frontier (interior nodes or leaves) into the next level's
     // frontiers and the cluster frontier.
     void ExpandFrontier(const org::PipelineState& program, const Token& frontier, const Token& counter,
-        const Token& arguments)
+        const Token& arguments, const char* stage)
     {
         const auto& frontiers = m_bindings.frontiers;
         Bind(program);
@@ -379,6 +391,7 @@ private:
         constants[CLOD_PC_LEAF_OUTPUT_DESCRIPTOR_INDEX] = Uav(m_nextLeaves);
         constants[CLOD_PC_LEAF_OUTPUT_COUNT_DESCRIPTOR_INDEX] = Uav(m_nextLeafCounter);
         Push(constants);
+        Mark(stage);
         ExecuteIndirect(arguments);
     }
 
@@ -386,6 +399,7 @@ private:
     {
         const auto& frontiers = m_bindings.frontiers;
         const auto& b = m_bindings;
+        m_level = level;
         if (level > 0u) ReadToUav({m_nextNodes, m_nextNodeCounter, m_nextLeaves, m_nextLeafCounter});
 
         Bind(m_programs.clearTraversalCounters);
@@ -402,10 +416,10 @@ private:
         BuildNodeAndLeafDispatchArgs();
         UavToIndirect({frontiers.nodeDispatchArgs, frontiers.leafDispatchArgs});
 
-        ExpandFrontier(m_programs.traverseNodes, m_currentNodes, m_currentNodeCounter, frontiers.nodeDispatchArgs);
+        ExpandFrontier(m_programs.traverseNodes, m_currentNodes, m_currentNodeCounter, frontiers.nodeDispatchArgs, "traverse nodes");
         UavBarrier({m_nextNodes, m_nextNodeCounter, m_nextLeaves, m_nextLeafCounter,
             frontiers.clusters, frontiers.clusterCounter});
-        ExpandFrontier(m_programs.traverseLeaves, m_currentLeaves, m_currentLeafCounter, frontiers.leafDispatchArgs);
+        ExpandFrontier(m_programs.traverseLeaves, m_currentLeaves, m_currentLeafCounter, frontiers.leafDispatchArgs, "traverse leaves");
         m_nodeArgsInUse = true;
         m_leafArgsInUse = true;
 
@@ -466,6 +480,7 @@ private:
     bool m_nodeArgsInUse = false;
     bool m_leafArgsInUse = false;
     bool m_clusterArgsInUse = false;
+    uint32_t m_level = 0; // The traversal level being recorded, for Mark.
     // Ping-pong frontier roles for the level being traversed.
     Token m_currentNodes, m_currentNodeCounter, m_nextNodes, m_nextNodeCounter;
     Token m_currentLeaves, m_currentLeafCounter, m_nextLeaves, m_nextLeafCounter;

@@ -304,6 +304,17 @@ private:
     void ReleaseGroupResidency(uint32_t groupIndex, ICLodGeometryStorage* meshManager, bool clearPageMapEntries);
     void RetirePhysicalPage(uint32_t page, ICLodGeometryStorage* meshManager, bool pinned);
     void DrainRetiredPhysicalPages(ICLodGeometryStorage* meshManager);
+    // Page pool headroom. A class grows only when the pages it would evict were used recently; at the slab cap, a slab
+    // of a class with a slab's worth of free or cold pages is drained and changes class.
+    void RequestSlabRebalance(uint32_t targetClassIndex, ICLodGeometryStorage* meshManager);
+    void AdvanceSlabRebalance(ICLodGeometryStorage* meshManager);
+    bool IsPageDraining(uint32_t page) const noexcept {
+        return m_slabRebalance.active && page - m_slabRebalance.firstPage < m_slabRebalance.pageCount;
+    }
+    bool IsPageIdleFor(uint32_t page, uint64_t ticks) const noexcept {
+        const uint64_t lastUse = page < m_pageLastUseTick.size() ? m_pageLastUseTick[page] : 0u;
+        return m_streamingDiagnosticTick >= lastUse + ticks;
+    }
     bool IsPhysicalPageRetired(uint32_t page);
     bool IsPhysicalPagePinnedStorage(uint32_t page) const;
     uint64_t StreamingUploadVisibilityDelayTicks() const;
@@ -422,6 +433,24 @@ private:
     std::vector<uint64_t> m_pageOwnerMeshPageKey;
     std::vector<std::unordered_set<uint32_t>> m_pageResidentGroups;
     std::vector<uint8_t> m_pageProtectedThisUpdate;
+    std::vector<uint64_t> m_pageLastUseTick; // Streaming tick a page was last protected (used) or allocated.
+    struct SlabRebalance {
+        bool active = false;
+        uint32_t slabIndex = 0;
+        uint32_t firstPage = 0;
+        uint32_t pageCount = 0;
+        uint32_t targetPageSize = 0;
+        uint64_t startTick = 0;
+    };
+    SlabRebalance m_slabRebalance;
+    uint64_t m_lastSlabRebalanceTick = 0;
+    uint64_t m_streamedPageBytesTotal = 0; // Streaming pages handed out since start: far past the pool's size means churn.
+    // Idle ticks after which a page counts as cold (evicted before a class grows) or warm (evicted rather than refusing).
+    static constexpr uint64_t kPageColdIdleTicks = 60u;
+    static constexpr uint64_t kPageWarmIdleTicks = 16u;
+    // A class grows at most once in this many ticks, so pages loaded in a burst can cool before it grows again.
+    static constexpr uint64_t kPageClassGrowthIntervalTicks = 8u;
+    std::array<uint64_t, PagePool::kPageSizeClassCount> m_pageClassLastGrowthTick{};
     std::vector<uint32_t> m_pagesProtectedThisUpdate;
     std::unordered_map<uint32_t, std::vector<uint32_t>> m_groupOwnedPages; // group to page IDs by segment (~0u = no page)
     std::unordered_map<uint32_t, std::vector<uint64_t>> m_groupOwnedMeshPageKeys; // group to mesh-page keys by page slot

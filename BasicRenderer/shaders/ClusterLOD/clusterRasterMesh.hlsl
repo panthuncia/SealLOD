@@ -339,7 +339,7 @@ void ClusterLODBucketMSMain(
     if (inRange)
     {
         ByteAddressBuffer compactedClusters = ResourceDescriptorHeap[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX];
-        StructuredBuffer<uint> compactedClusterTransformIndices =
+        StructuredBuffer<uint2> compactedClusterTransformIndices =
             ResourceDescriptorHeap[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
         StructuredBuffer<uint> sortedToUnsortedMapping = ResourceDescriptorHeap[CLOD_RASTER_SORTED_TO_UNSORTED_MAPPING_DESCRIPTOR_INDEX];
         packedCluster = CLodLoadVisibleClusterPacked(compactedClusters, sortedClusterIndex);
@@ -347,7 +347,8 @@ void ClusterLODBucketMSMain(
 
         CLodRasterClusterSource source;
         source.packedCluster = packedCluster;
-        source.assemblyTransformIndex = compactedClusterTransformIndices[sortedClusterIndex];
+        source.assemblyTransformIndex = compactedClusterTransformIndices[sortedClusterIndex].x;
+        source.paletteIndex = compactedClusterTransformIndices[sortedClusterIndex].y;
         source.hasResolvedSkinningSlot = false;
         source.resolvedSkinningSlot = 0xFFFFFFFFu;
         loadResult = CLodLoadRasterCluster(source, cluster);

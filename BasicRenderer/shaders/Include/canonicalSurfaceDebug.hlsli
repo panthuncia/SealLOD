@@ -36,9 +36,9 @@ bool CLodAssemblyPartDebugColorFromVisKey(uint64_t vis, out float3 debugColor)
         visClusterIndex = diceQueue[visClusterIndex - VISBUF_REYES_PATCH_INDEX_BASE].visibleClusterIndex;
     }
 
-    StructuredBuffer<uint> visibleClusterTransformIndices =
+    StructuredBuffer<uint2> visibleClusterTransformIndices =
         ResourceDescriptorHeap[VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
-    const uint assemblyTransformIndex = visibleClusterTransformIndices[visClusterIndex];
+    const uint assemblyTransformIndex = visibleClusterTransformIndices[visClusterIndex].x;
 
     ByteAddressBuffer visibleClusterBuffer = ResourceDescriptorHeap[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
     const uint4 packedCluster = CLodLoadVisibleClusterPacked(visibleClusterBuffer, visClusterIndex);
@@ -52,7 +52,7 @@ bool CLodAssemblyPartDebugColorFromVisKey(uint64_t vis, out float3 debugColor)
 
     StructuredBuffer<ClusterLODGroup> groups =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
-    const ClusterLODGroup group = groups[metadata.groupsBase + localGroupId];
+    const ClusterLODGroup group = groups[localGroupId];
 
     if ((group.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) != 0u)
     {
@@ -121,7 +121,7 @@ bool CLodAssemblyDirectPartIdFromVisKey(uint64_t vis, out uint directPartId)
 
     StructuredBuffer<ClusterLODGroup> groups =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
-    const ClusterLODGroup group = groups[metadata.groupsBase + localGroupId];
+    const ClusterLODGroup group = groups[localGroupId];
 
     if ((group.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL) != 0u)
     {
@@ -129,9 +129,9 @@ bool CLodAssemblyDirectPartIdFromVisKey(uint64_t vis, out uint directPartId)
         return true;
     }
 
-    StructuredBuffer<uint> visibleClusterTransformIndices =
+    StructuredBuffer<uint2> visibleClusterTransformIndices =
         ResourceDescriptorHeap[VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
-    const uint assemblyTransformIndex = visibleClusterTransformIndices[visClusterIndex];
+    const uint assemblyTransformIndex = visibleClusterTransformIndices[visClusterIndex].x;
     directPartId = assemblyTransformIndex == CLOD_ASSEMBLY_TRANSFORM_SENTINEL
         ? 1u
         : (0x80000000u + assemblyTransformIndex);

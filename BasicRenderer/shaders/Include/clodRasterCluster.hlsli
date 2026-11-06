@@ -38,6 +38,7 @@ struct CLodRasterClusterSource
 {
     uint4 packedCluster;
     uint assemblyTransformIndex;
+    uint paletteIndex; // culling's palette index, or CLOD_PALETTE_INDEX_FROM_PAGE
     bool hasResolvedSkinningSlot;
     uint resolvedSkinningSlot;
 };
@@ -191,8 +192,14 @@ uint CLodLoadRasterCluster(CLodRasterClusterSource source, out CLodRasterCluster
     StructuredBuffer<PerMeshBuffer> perMeshBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
     const PerMeshBuffer meshData = perMeshBuffer[meshInstance.perMeshBufferIndex];
-    cluster.materialDataIndex = meshData.materialDataIndex;
-    cluster.vertexFlags = meshData.vertexFlags;
+    const PerMeshBuffer geometryData = perMeshBuffer[CLodClusterGeometryPerMeshIndex(
+        meshInstance.perMeshBufferIndex, CLodVisibleClusterGroupID(packedCluster), source.assemblyTransformIndex)];
+    const uint paletteIndex = source.paletteIndex != CLOD_PALETTE_INDEX_FROM_PAGE
+        ? source.paletteIndex
+        : CLodPaletteIndexFromDescriptor(meshInstance, CLodVisibleClusterGroupID(packedCluster), source.assemblyTransformIndex,
+            asuint(descriptor.terrainRvtLocalSkyrimXYRadius));
+    cluster.materialDataIndex = CLodResolveMaterial(meshInstance, meshData, paletteIndex).materialDataIndex;
+    cluster.vertexFlags = geometryData.vertexFlags;
 
 #if CLOD_RASTER_CLUSTER_RIGID_ONLY
     cluster.skinningInstanceSlot = 0xFFFFFFFFu;
@@ -202,7 +209,7 @@ uint CLodLoadRasterCluster(CLodRasterClusterSource source, out CLodRasterCluster
 #else
     const bool allowDeformation = true;
 #endif
-    cluster.skinningInstanceSlot = allowDeformation && (meshData.vertexFlags & VERTEX_SKINNED) != 0u
+    cluster.skinningInstanceSlot = allowDeformation && (geometryData.vertexFlags & VERTEX_SKINNED) != 0u
         ? (source.hasResolvedSkinningSlot
             ? source.resolvedSkinningSlot
             : ResolveProceduralWindSkinningSlot(cluster.drawRecordIndex, meshInstance.skinningInstanceSlot))

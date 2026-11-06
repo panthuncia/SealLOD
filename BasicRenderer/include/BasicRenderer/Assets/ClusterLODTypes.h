@@ -249,6 +249,11 @@ struct ClusterLODPrebuiltData
 	uint32_t rootPartIndex = 0;
 	uint32_t maxDepth = 0;
 	uint32_t maxTraversalDepth = 0;
+	// Material slots (docs/merge_hierarchies.md). Each cluster names a part-local slot in its page descriptor (word 15,
+	// CLodMeshletDescriptorMaterialSlot); a hierarchy root's palette supplies the material for slot + the material
+	// base of the portal that reached the part, which is per assembly transform.
+	uint32_t materialSlotCount = 1;
+	std::vector<uint32_t> assemblyTransformMaterialBases;
 };
 
 struct ClusterLODCacheBuildPayload

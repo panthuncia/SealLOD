@@ -3804,10 +3804,16 @@ void ClusterRasterBucketsHistogramCSMain(uint3 DTid : SV_DispatchThreadID)
 
     // TODO: Remove load chain
     uint instanceIndex = CLodVisibleClusterInstanceID(packedCluster);
-    uint perMeshIndex = LoadMeshTemplateForDraw(instanceIndex).perMeshBufferIndex;
+    const PerMeshInstanceBuffer meshTemplate = LoadMeshTemplateForDraw(instanceIndex);
     StructuredBuffer<PerMeshBuffer> perMeshBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
-    const PerMeshBuffer meshData = perMeshBuffer[perMeshIndex];
-    uint rasterBucketIndex = meshData.rasterBucketIndex;
+    const PerMeshBuffer meshData = perMeshBuffer[meshTemplate.perMeshBufferIndex];
+    uint paletteIndex = 0u;
+    if (CLodTemplateHasPalette(meshTemplate) && CLOD_HISTOGRAM_VISIBLE_CLUSTER_SIDE_BAND_DESCRIPTOR_INDEX != 0xFFFFFFFFu)
+    {
+        StructuredBuffer<uint2> sideBand = ResourceDescriptorHeap[CLOD_HISTOGRAM_VISIBLE_CLUSTER_SIDE_BAND_DESCRIPTOR_INDEX];
+        paletteIndex = sideBand[visibleClusterReadIndex].y;
+    }
+    uint rasterBucketIndex = CLodResolveMaterial(meshTemplate, meshData, paletteIndex).rasterBucketIndex;
     if (rasterBucketIndex >= CLOD_HISTOGRAM_NUM_RASTER_BUCKETS)
     {
         return;
@@ -3995,13 +4001,14 @@ void RasterBucketsBlockOffsetsCS(uint3 groupThreadId : SV_GroupThreadID,
 
 uint GetRasterBucketIndexFromInstance(
     uint instanceID,
+    uint paletteIndex,
     out PerMeshInstanceBuffer instanceData)
 {
     StructuredBuffer<PerMeshBuffer> perMeshBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
 
     instanceData = LoadMeshTemplateForDraw(instanceID);
     const PerMeshBuffer meshData = perMeshBuffer[instanceData.perMeshBufferIndex];
-    return meshData.rasterBucketIndex;
+    return CLodResolveMaterial(instanceData, meshData, paletteIndex).rasterBucketIndex;
 }
 
 static const uint CLOD_COMPACTION_GROUP_SIZE = CLUSTER_HISTOGRAM_GROUP_SIZE;
@@ -4051,10 +4058,10 @@ void CompactClustersAndBuildIndirectArgsCS(uint3 dtid : SV_DispatchThreadID)
         }
 
         ByteAddressBuffer visibleClusters = ResourceDescriptorHeap[CLOD_COMPACTION_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
-        StructuredBuffer<uint> visibleClusterTransformIndices =
+        StructuredBuffer<uint2> visibleClusterTransformIndices =
             ResourceDescriptorHeap[CLOD_COMPACTION_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
         RWByteAddressBuffer compactedClusters = ResourceDescriptorHeap[CLOD_COMPACTION_COMPACTED_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX];
-        RWStructuredBuffer<uint> compactedClusterTransformIndices =
+        RWStructuredBuffer<uint2> compactedClusterTransformIndices =
             ResourceDescriptorHeap[CLOD_COMPACTION_COMPACTED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
         StructuredBuffer<uint> offsets = ResourceDescriptorHeap[CLOD_COMPACTION_RASTER_BUCKETS_OFFSETS_DESCRIPTOR_INDEX];
         RWStructuredBuffer<uint> writeCursor = ResourceDescriptorHeap[CLOD_COMPACTION_RASTER_BUCKETS_WRITE_CURSOR_DESCRIPTOR_INDEX];
@@ -4069,7 +4076,8 @@ void CompactClustersAndBuildIndirectArgsCS(uint3 dtid : SV_DispatchThreadID)
         {
             const uint instanceID = CLodVisibleClusterInstanceID(packedCluster);
             PerMeshInstanceBuffer meshInstance;
-            uint bucketIndex = GetRasterBucketIndexFromInstance(instanceID, meshInstance);
+            uint bucketIndex = GetRasterBucketIndexFromInstance(
+                instanceID, visibleClusterTransformIndices[sourceClusterIndex].y, meshInstance);
             shouldCompactCluster = bucketIndex < numBuckets;
             if (shouldCompactCluster)
             {

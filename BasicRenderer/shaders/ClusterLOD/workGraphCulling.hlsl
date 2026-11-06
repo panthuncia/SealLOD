@@ -72,7 +72,7 @@ struct ClusterLODNodeRange
     uint indexOrOffset; // voxel leaf: group-local section index; segment-leaf: mesh-local segment index
                          // internal: childOffset (relative to lodNodesBase)
     uint countMinusOne; // internal: childCountMinusOne; voxel leaf: refinedGroup+1, or 0 for terminal
-    uint ownerGroupId;  // segment-leaf: mesh-local group index (for page resolution + streaming)
+    uint ownerGroupId;  // leaf: global group index (for page resolution + streaming)
 };
 
 struct ClusterLODTraversalMetric
@@ -1131,10 +1131,10 @@ bool CLodVirtualShadowMeshletTouchesActiveBlock(
 
 void CLodVirtualShadowEmitVisibleClusterBlocksForMeshlet(
     globallycoherent RWByteAddressBuffer visibleClusters,
-    RWStructuredBuffer<uint> visibleClusterTransformIndices,
+    RWStructuredBuffer<uint2> visibleClusterTransformIndices,
     uint writeBase,
     uint maxWriteCount,
-    uint assemblyTransformIndex,
+    uint2 clusterSideBand, // (assembly transform, palette index)
     uint viewId,
     uint instanceIndex,
     uint localMeshletIndex,
@@ -1178,7 +1178,7 @@ void CLodVirtualShadowEmitVisibleClusterBlocksForMeshlet(
                 pageSlabDescriptorIndex,
                 pageSlabByteOffset,
                 vsmPayload);
-            visibleClusterTransformIndices[writeBase + emittedCount] = assemblyTransformIndex;
+            visibleClusterTransformIndices[writeBase + emittedCount] = clusterSideBand;
         }
         emittedCount++;
         if (emittedCount == maxWriteCount)
@@ -1561,7 +1561,7 @@ void CLodAppendVoxelRasterClusterWork(
         ResourceDescriptorHeap[queueDescriptors.skinnedWorkRecordCounterUAVDescriptorIndex];
     globallycoherent RWByteAddressBuffer visibleClusters =
         ResourceDescriptorHeap[CLOD_WG_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
-    RWStructuredBuffer<uint> visibleClusterTransformIndices =
+    RWStructuredBuffer<uint2> visibleClusterTransformIndices =
         ResourceDescriptorHeap[CLOD_WG_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
     RWStructuredBuffer<uint> visibleClusterCounter =
         ResourceDescriptorHeap[CLOD_WG_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX];
@@ -1720,7 +1720,7 @@ void CLodAppendVoxelRasterClusterWork(
             voxelSegment.pageIndex,
             0u,
             voxelVsmPayload);
-        visibleClusterTransformIndices[visibleClusterIndex] = assemblyTransformIndex;
+        visibleClusterTransformIndices[visibleClusterIndex] = uint2(assemblyTransformIndex, 0u); // voxels: one material
 
         CLodVoxelRasterWorkRecord record;
         record.visibleClusterIndex = visibleClusterIndex;
@@ -2353,7 +2353,7 @@ bool CLodInstanceRootWantsTraversal(
 
     StructuredBuffer<ClusterLODGroup> groups =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
-    const ClusterLODGroup proxyGroup = groups[clodMeshMetadata.groupsBase + node.range.ownerGroupId];
+    const ClusterLODGroup proxyGroup = groups[node.range.ownerGroupId];
     const bool structuralRootProxy = proxyGroup.parentGroupId < 0 && proxyGroup.pageCount == 0u;
     if (!parentAllowsRefine)
     {
@@ -2382,8 +2382,7 @@ bool CLodInstanceRootWantsTraversal(
 
     if (proxyGroup.parentGroupId >= 0)
     {
-        const uint parentGroupLocalIndex = uint(proxyGroup.parentGroupId);
-        const uint parentGroupGlobalIndex = clodMeshMetadata.groupsBase + parentGroupLocalIndex;
+        const uint parentGroupGlobalIndex = uint(proxyGroup.parentGroupId);
         if (!CLodTouchAndRequestGroupResident(
                 parentGroupGlobalIndex,
                 instanceIndex,
@@ -2650,7 +2649,7 @@ bool CLodPrepareRenderableLeaf(
     out CLodRenderableLeaf leaf)
 {
     leaf = (CLodRenderableLeaf)0;
-    leaf.groupGlobalIndex = clodMeshMetadata.groupsBase + node.range.ownerGroupId;
+    leaf.groupGlobalIndex = node.range.ownerGroupId;
     StructuredBuffer<ClusterLODGroup> groups =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
     leaf.group = groups[leaf.groupGlobalIndex];
@@ -2750,7 +2749,7 @@ void CLodAppendVoxelRasterWorkForLeaf(
         [loop]
         for (uint localSegment = firstLocalSegment; localSegment < voxelGroup.segmentCount; ++localSegment)
         {
-            const uint segGlobalIndex = clodMeshMetadata.segmentsBase + voxelGroup.firstSegment + localSegment;
+            const uint segGlobalIndex = voxelGroup.firstSegment + localSegment;
             const ClusterLODGroupSegment seg = segments[segGlobalIndex];
             if (seg.refinedGroup != sectionRefinedGroup)
             {
@@ -2774,7 +2773,7 @@ void CLodAppendVoxelRasterWorkForLeaf(
         return;
     }
 
-    const uint segGlobalIndex = clodMeshMetadata.segmentsBase + node.range.indexOrOffset;
+    const uint segGlobalIndex = node.range.indexOrOffset;
     const ClusterLODGroupSegment seg = segments[segGlobalIndex];
     WGTelemetryAdd(WG_COUNTER_TRAVERSE_VOXEL_SEGMENT_PAGE_HITS, 1);
     CLodAppendVoxelRasterClusterWork(
@@ -2855,7 +2854,7 @@ void CLodHandleRenderableLeaf(
     }
 
     if (!forceLodDecision && CLodRefinedChildSuppressesParent(
-        clodMeshMetadata.groupsBase,
+        0u,
         node.range.countMinusOne - 1u,
         node.range.countMinusOne != 0u,
         objectModelMatrix,
@@ -2911,7 +2910,7 @@ void CLodHandleRenderableLeaf(
         // Final emit for triangle meshlet payloads.
         StructuredBuffer<ClusterLODGroupSegment> segments =
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Segments)];
-        const uint segGlobalIndex = clodMeshMetadata.segmentsBase + node.range.indexOrOffset;
+        const uint segGlobalIndex = node.range.indexOrOffset;
         const ClusterLODGroupSegment seg = segments[segGlobalIndex];
 
         emitBucket = (seg.meshletCount != 0);
@@ -2922,7 +2921,7 @@ void CLodHandleRenderableLeaf(
             {
                 WGTelemetryAdd(WG_COUNTER_ASSEMBLY_PART_TRIANGLE_BUCKET_RECORDS, 1);
             }
-            const GroupPageMapEntry pageEntry = LoadGroupPageMapEntry(clodMeshMetadata.pageMapBase, seg.pageIndex);
+            const GroupPageMapEntry pageEntry = LoadGroupPageMapEntry(0u, seg.pageIndex);
             if (pageEntry.slabDescriptorIndex == 0u)
             {
                 WGTelemetryAdd(WG_COUNTER_RASTER_MESH_SHADER_INIT_FAILED_ZERO_PAGE_SLAB, 1);
@@ -3249,7 +3248,7 @@ void WG_TraverseNodes(
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Nodes)];
 
         const uint nodeLocalId = UnpackNodeId(rec.nodeIdPacked);
-        const ClusterLODNode node = lodNodes[clodMeshMetadata.lodNodesBase + nodeLocalId];
+        const ClusterLODNode node = lodNodes[nodeLocalId];
         CLodTelemetryTraverseWaveClassification(
             node.range.isLeaf == CLOD_NODE_INTERNAL,
             isSkinned);
@@ -3360,10 +3359,10 @@ void WG_TraverseNodes(
                     StructuredBuffer<ClusterLODAssemblyInstance> assemblyInstances =
                         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::AssemblyInstances)];
                     const bool validAssemblyInstance =
-                        node.range.indexOrOffset < clodMeshMetadata.assemblyInstanceCount;
+                        node.range.indexOrOffset - clodMeshMetadata.assemblyInstanceBase < clodMeshMetadata.assemblyInstanceCount;
                     if (validAssemblyInstance) {
                         const ClusterLODAssemblyInstance assemblyInstance =
-                            assemblyInstances[clodMeshMetadata.assemblyInstanceBase + node.range.indexOrOffset];
+                            assemblyInstances[node.range.indexOrOffset];
                         if (assemblyInstance.stackDepth <= CLOD_ASSEMBLY_MAX_STACK_DEPTH) {
                             TraverseNodeRecord instanceChildRecord = (TraverseNodeRecord)0;
                             instanceChildRecord.instanceIndex = rec.instanceIndex;
@@ -3376,7 +3375,7 @@ void WG_TraverseNodes(
                             instanceChildRecord.assemblyTransformIndex =
                                 assemblyInstance.transformIndex == CLOD_ASSEMBLY_TRANSFORM_SENTINEL
                                     ? rec.assemblyTransformIndex
-                                    : clodMeshMetadata.assemblyTransformBase + assemblyInstance.transformIndex;
+                                    : assemblyInstance.transformIndex;
                             childRecords[emitTraverseCount] = instanceChildRecord;
                             emitTraverseCount++;
                         }
@@ -3587,7 +3586,7 @@ void WG_TraverseNodes(
                             [loop]
                             for (uint childIndex = 0; childIndex < childCount; ++childIndex) {
                                 const uint childNodeId = node.range.indexOrOffset + childIndex;
-                                const ClusterLODNode child = lodNodes[clodMeshMetadata.lodNodesBase + childNodeId];
+                                const ClusterLODNode child = lodNodes[childNodeId];
 
                                 // LOD pre-filter for internal children only.
                                 // Leaf children use the group sphere for LOD (different from node sphere),
@@ -3840,7 +3839,7 @@ void WG_LeafNodes(
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Nodes)];
 
 		const uint nodeLocalId = UnpackNodeId(rec.nodeIdPacked);
-		const ClusterLODNode node = lodNodes[clodMeshMetadata.lodNodesBase + nodeLocalId];
+		const ClusterLODNode node = lodNodes[nodeLocalId];
         WGTelemetryAdd(WG_COUNTER_TRAVERSE_LEAF_NODE_RECORDS, 1);
 
         const float objectUniformScale = MaxAxisScale_RowVector(objectModelMatrix);
@@ -4104,6 +4103,8 @@ void ClusterCullBody(
     uint groupsBase = 0;
     uint meshBufferIndex = 0;
     uint meshVertexFlags = 0u;
+    bool templateHasPalette = false;
+    bool partHasMaterialSlots = false;
     uint activeGroupScanCount = 0;
     float ownGroupErrorOverDistance = 0.0f;
     PerObjectBuffer instanceTransform = (PerObjectBuffer)0;
@@ -4185,6 +4186,7 @@ void ClusterCullBody(
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
         const PerMeshBuffer perMesh = perMeshBuffer[meshBufferIndex];
         meshVertexFlags = perMesh.vertexFlags;
+        templateHasPalette = CLodTemplateHasPalette(instanceData);
 #if !CLOD_WG_RIGID_ONLY
         if ((meshVertexFlags & VERTEX_SKINNED) != 0u &&
 			shadowClipmapAllowsSkinnedDeformation)
@@ -4235,7 +4237,11 @@ void ClusterCullBody(
         {
             StructuredBuffer<ClusterLODGroup> groups =
                 ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
-            const ClusterLODGroup ownGrp = groups[groupsBase + UnpackGroupId(b.groupIdPacked)];
+            const ClusterLODGroup ownGrp = groups[UnpackGroupId(b.groupIdPacked)];
+            // Page descriptors name refined groups within their part, which a portal may have reached.
+            groupsBase = clodMeshMetadataBuffer[ownGrp.partIndex].groupsBase;
+            // Only a part with several material slots stores one in its descriptors (word 15 is terrain data otherwise).
+            partHasMaterialSlots = clodMeshMetadataBuffer[ownGrp.partIndex].materialSlotCount > 1u;
             const float3 ownWorldCenter = mul(float4(ownGrp.bounds.centerAndRadius.xyz, 1.0f), objectModelMatrix).xyz;
             const float ownWorldRadius = ownGrp.bounds.centerAndRadius.w * lodUniformScale;
             ownGroupErrorOverDistance = ProjectedGeometricError(
@@ -4255,7 +4261,7 @@ void ClusterCullBody(
 
     globallycoherent RWByteAddressBuffer visibleClusters =
         ResourceDescriptorHeap[CLOD_WG_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
-    RWStructuredBuffer<uint> visibleClusterTransformIndices =
+    RWStructuredBuffer<uint2> visibleClusterTransformIndices =
         ResourceDescriptorHeap[CLOD_WG_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
     RWStructuredBuffer<uint> visibleClusterCounter =
         ResourceDescriptorHeap[CLOD_WG_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX];
@@ -4303,6 +4309,7 @@ void ClusterCullBody(
     for (uint m = 0; m < FIXED_LOOP_COUNT; m++) {
         const bool active = (m < meshletCount) && pageValid;
         uint localMeshletIndex = 0;
+        uint clusterPaletteIndex = 0u;
         bool survives = false;
         float3 meshletCenterViewSpace = float3(0, 0, -1); // default: behind camera
         float3 meshletCenterWorld = 0.0f.xxx;
@@ -4327,6 +4334,11 @@ void ClusterCullBody(
 
             if (localMeshlet < pageMeshletCount) {
                 localMeshletIndex = localMeshlet;
+                if (templateHasPalette) {
+                    clusterPaletteIndex = CLodAssemblyMaterialBase(b.assemblyTransformIndex) + (partHasMaterialSlots
+                        ? CLodLoadMeshletMaterialSlot(pageSlabDesc, pageSlabOff, pageDescriptorOffset, localMeshlet)
+                        : 0u);
+                }
 
                 CLodClusterCullHeader clusterCullHeader;
                 CLodMeshletDescriptor desc = (CLodMeshletDescriptor)0;
@@ -4679,7 +4691,7 @@ void ClusterCullBody(
                         visibleClusterTransformIndices,
                         hwGlobalBase + hwPrefix,
                         hwLaneAvail,
-                        b.assemblyTransformIndex,
+                        uint2(b.assemblyTransformIndex, clusterPaletteIndex),
                         b.viewId,
                         b.instanceIndex,
                         localMeshletIndex,
@@ -4707,7 +4719,7 @@ void ClusterCullBody(
                         b.pageSlabByteOffset,
                         shadowClipmapIndex,
                         dynamicShadowLayer);
-                    visibleClusterTransformIndices[hwGlobalBase + hwPrefix] = b.assemblyTransformIndex;
+                    visibleClusterTransformIndices[hwGlobalBase + hwPrefix] = uint2(b.assemblyTransformIndex, clusterPaletteIndex);
                 }
             }
         }
@@ -4793,7 +4805,7 @@ void ClusterCullBody(
                             visibleClusterTransformIndices,
                             hwGlobalBase + hwPrefix,
                             hwLaneAvail,
-                            b.assemblyTransformIndex,
+                            uint2(b.assemblyTransformIndex, clusterPaletteIndex),
                             b.viewId,
                             b.instanceIndex,
                             localMeshletIndex,
@@ -4821,7 +4833,7 @@ void ClusterCullBody(
                             b.pageSlabByteOffset,
                             shadowClipmapIndex,
                             dynamicShadowLayer);
-                        visibleClusterTransformIndices[hwGlobalBase + hwPrefix] = b.assemblyTransformIndex;
+                        visibleClusterTransformIndices[hwGlobalBase + hwPrefix] = uint2(b.assemblyTransformIndex, clusterPaletteIndex);
                     }
                 }
             }
@@ -4968,7 +4980,7 @@ void ClusterCullBody(
                             visibleClusterTransformIndices,
                             hwGlobalBase + hwPrefix,
                             hwLaneAvail,
-                            b.assemblyTransformIndex,
+                            uint2(b.assemblyTransformIndex, clusterPaletteIndex),
                             b.viewId,
                             b.instanceIndex,
                             localMeshletIndex,
@@ -4996,7 +5008,7 @@ void ClusterCullBody(
                             b.pageSlabByteOffset,
                             shadowClipmapIndex,
                             dynamicShadowLayer);
-                        visibleClusterTransformIndices[hwGlobalBase + hwPrefix] = b.assemblyTransformIndex;
+                        visibleClusterTransformIndices[hwGlobalBase + hwPrefix] = uint2(b.assemblyTransformIndex, clusterPaletteIndex);
                     }
                 }
             }
@@ -5049,7 +5061,7 @@ void ClusterCullBody(
                         b.pageSlabByteOffset,
                         shadowClipmapIndex,
                         dynamicShadowLayer);
-                    visibleClusterTransformIndices[reyesIndex] = b.assemblyTransformIndex;
+                    visibleClusterTransformIndices[reyesIndex] = uint2(b.assemblyTransformIndex, clusterPaletteIndex);
                     gs_reyesSeedBatchIndices[reyesPending + reyesRank] = reyesIndex;
                 }
             }
@@ -5104,7 +5116,7 @@ void ClusterCullBody(
                         b.pageSlabByteOffset,
                         shadowClipmapIndex,
                         dynamicShadowLayer);
-                    visibleClusterTransformIndices[swIndex] = b.assemblyTransformIndex;
+                    visibleClusterTransformIndices[swIndex] = uint2(b.assemblyTransformIndex, clusterPaletteIndex);
 
                     // Accumulate index into batch buffer.
 #if CLOD_WG_ENABLE_SW_NODE_OUTPUT

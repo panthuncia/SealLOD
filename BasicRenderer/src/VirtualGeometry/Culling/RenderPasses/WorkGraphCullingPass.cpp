@@ -215,7 +215,7 @@ org::ResourceBindingToken WorkGraphCullingPass::DeclareSceneInputs(org::PassBuil
         Builtin::PerInstanceTransformBuffer,
         Builtin::PerObjectBuffer,
         Builtin::CameraBuffer,
-        Builtin::PerMeshBuffer,
+        Builtin::PerMeshBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases,
         Builtin::SkeletonResources::InverseBindMatrices,
         Builtin::SkeletonResources::InverseSkinMatrices,
         Builtin::SkeletonResources::BoneTransforms,

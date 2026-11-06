@@ -59,6 +59,8 @@
       "NodeBoneIndices": {},
       "AssemblyTransforms": {},
       "AssemblyInstances": {},
+      "AssemblyMaterialBases": {},
+      "MaterialPalettes": {},
       "AssemblyBoneRemaps": {},
       "AssemblyBoneRemapIndices": {},
       "VoxelCubeRecords": {},

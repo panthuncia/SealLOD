@@ -228,6 +228,18 @@ MeshletResolveData LoadMeshletResolveData(uint clusterIndex)
     d.skinningInstanceSlot = inst.skinningInstanceSlot;
 
     PerMeshBuffer mesh = perMeshBuffer[d.objAndMesh.y];
+    uint resolveTransformIndex = CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
+#if !defined(CLOD_RESOLVE_RAY_HIT)
+    if (VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX != 0xFFFFFFFFu)
+    {
+        StructuredBuffer<uint2> resolveSideBand = ResourceDescriptorHeap[VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
+        resolveTransformIndex = resolveSideBand[clusterIndex].x;
+    }
+#else
+    resolveTransformIndex = g_clodRtHitTransformIndex;
+#endif
+    const PerMeshBuffer geometryMesh = perMeshBuffer[CLodClusterGeometryPerMeshIndex(
+        d.objAndMesh.y, CLodVisibleClusterGroupID(packedCluster), resolveTransformIndex)];
 
     const uint pageSlabDesc = CLodVisibleClusterPageSlabDescriptorIndex(packedCluster);
     const uint pageSlabOff = CLodVisibleClusterPageSlabByteOffset(packedCluster);
@@ -236,8 +248,26 @@ MeshletResolveData LoadMeshletResolveData(uint clusterIndex)
     CLodMeshletDescriptor desc = LoadMeshletDescriptor(
         pageSlabDesc, pageSlabOff, hdr.descriptorOffset, d.drawcallAndMeshlet.y);
 
-    d.meshInfo = uint4(mesh.vertexByteSize, mesh.vertexFlags, mesh.numVertices, 0);
-    d.materialDataIndex = mesh.materialDataIndex;
+    d.meshInfo = uint4(geometryMesh.vertexByteSize, geometryMesh.vertexFlags, geometryMesh.numVertices, 0);
+    uint paletteIndex = 0u;
+    if (CLodTemplateHasPalette(inst))
+    {
+        bool fromSideBand = false;
+#if !defined(CLOD_RESOLVE_RAY_HIT)
+        if (VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX != 0xFFFFFFFFu)
+        {
+            StructuredBuffer<uint2> sideBand = ResourceDescriptorHeap[VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
+            paletteIndex = sideBand[clusterIndex].y;
+            fromSideBand = true;
+        }
+#endif
+        if (!fromSideBand)
+        {
+            paletteIndex = CLodPaletteIndexFromDescriptor(inst, CLodVisibleClusterGroupID(packedCluster), resolveTransformIndex,
+                asuint(desc.terrainRvtLocalSkyrimXYRadius));
+        }
+    }
+    d.materialDataIndex = CLodResolveMaterial(inst, mesh, paletteIndex).materialDataIndex;
 
     d.vertexCount = CLodDescVertexCount(desc);
     d.triangleCount = CLodDescTriangleCount(desc);

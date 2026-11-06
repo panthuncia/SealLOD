@@ -648,6 +648,7 @@ namespace
 		uint32_t indicesOffset = 0;
 		uint32_t indexCount = 0;
 		uint32_t vertexCount = 0;
+		uint32_t materialSlot = 0;
 	};
 
 	struct CapturedClusterLODGroup
@@ -656,6 +657,9 @@ namespace
 		clodBounds simplified{};
 		std::vector<unsigned int> flattenedIndices;
 		std::vector<CapturedClusterLODCluster> clusters;
+		// Multi-material meshes (merge hierarchies): each cluster's slot goes in descriptor word 15 instead of the
+		// terrain RVT radius, which only terrain reads.
+		bool writeMaterialSlots = false;
 	};
 
 	struct ClusterLODGroupBuildOutput
@@ -670,6 +674,7 @@ namespace
 		std::vector<std::byte> vertexChunk;
 		std::vector<std::byte> skinningChunk;
 		std::vector<int32_t> meshletRefinedGroups;
+		std::vector<uint32_t> meshletMaterialSlots;
 		std::vector<std::vector<std::byte>> pageBlobs;
 		ClusterLODGroupChunk groupChunk{};
 	};
@@ -777,7 +782,8 @@ namespace
 				uint32_t vertexCount,
 				uint32_t triangleCount,
 				const clodBounds& bounds,
-				int32_t refinedGroup)
+				int32_t refinedGroup,
+				uint32_t materialSlot)
 				{
 					assert(vertexCount <= MS_MESHLET_SIZE);
 					assert(triangleCount <= MS_MESHLET_SIZE);
@@ -810,6 +816,7 @@ namespace
 					output.meshlets.push_back(meshlet);
 					output.meshletBounds.push_back(sphere);
 					meshletBucketTag.push_back(refinedGroup);
+					output.meshletMaterialSlots.push_back(materialSlot);
 					++localMeshletCursor;
 				};
 
@@ -849,7 +856,8 @@ namespace
 						static_cast<uint32_t>(uniqueVertexCount),
 						triangleCount,
 						cluster.bounds,
-						bucket.refinedGroup);
+						bucket.refinedGroup,
+						cluster.materialSlot);
 				}
 			}
 		}
@@ -1618,6 +1626,11 @@ namespace
 					desc.terrainRvtLocalSkyrimXYRadius = meshlet.vertex_count > 0u
 						? 0.5f * std::max(maxTerrainX - minTerrainX, maxTerrainY - minTerrainY)
 						: bounds.sphere.w;
+					if (capturedGroup.writeMaterialSlots)
+					{
+						desc.terrainRvtLocalSkyrimXYRadius = std::bit_cast<float>(
+							mi < output.meshletMaterialSlots.size() ? output.meshletMaterialSlots[mi] : 0u);
+					}
 					if (pageHasUvSets)
 					{
 						for (uint32_t uvSetIndex = 0; uvSetIndex < page.uvSetCount; ++uvSetIndex)
@@ -2339,4 +2352,55 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 		artifacts.cacheBuildData.meshPageBlobs);
 
 	return artifacts;
+}
+
+
+namespace clod_detail
+{
+	MergeGroupOutput BuildMergeGroupOutput(
+		const MergeCapturedGroup& group,
+		uint32_t sourceGroupLocalIndex,
+		const std::vector<std::byte>& vertices,
+		unsigned int vertexFlags,
+		size_t vertexStrideBytes)
+	{
+		CapturedClusterLODGroup captured{};
+		captured.depth = group.depth;
+		captured.simplified = group.simplified;
+		captured.flattenedIndices = group.flattenedIndices;
+		captured.writeMaterialSlots = group.writeMaterialSlots;
+		captured.clusters.reserve(group.clusters.size());
+		for (const MergeCapturedCluster& source : group.clusters)
+		{
+			CapturedClusterLODCluster cluster{};
+			cluster.refinedGroup = source.refinedGroup;
+			cluster.bounds = source.bounds;
+			cluster.indicesOffset = source.indicesOffset;
+			cluster.indexCount = source.indexCount;
+			cluster.vertexCount = source.vertexCount;
+			cluster.materialSlot = source.materialSlot;
+			captured.clusters.push_back(cluster);
+		}
+		const uint32_t quantExp = ComputeMeshQuantizationExponent(vertices, vertexStrideBytes);
+		ClusterLODGroupBuildOutput built = BuildClusterLODGroupOutput(
+			captured,
+			sourceGroupLocalIndex,
+			vertices,
+			{},
+			vertexFlags,
+			vertexStrideBytes,
+			nullptr,
+			0u,
+			static_cast<float>(1u << quantExp),
+			quantExp,
+			CLOD_NODE_BONE_LIMIT_DEFAULT,
+			false);
+		MergeGroupOutput out{};
+		out.group = built.group;
+		out.segments = std::move(built.segments);
+		out.segmentBounds = std::move(built.segmentBounds);
+		out.pageBlobs = std::move(built.pageBlobs);
+		out.groupChunk = built.groupChunk;
+		return out;
+	}
 }

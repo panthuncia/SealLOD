@@ -50,6 +50,11 @@ public:
 	DirectX::XMFLOAT3 Position(const TriangleMeshlet& meshlet, uint32_t vertexIndex) const;
 	DirectX::XMFLOAT3 Normal(const TriangleMeshlet& meshlet, uint32_t vertexIndex) const;
 	std::array<uint8_t, 3> Triangle(const TriangleMeshlet& meshlet, uint32_t triangleIndex) const;
+	uint32_t UvSetCount() const { return m_header.uvSetCount; }
+	bool HasColors() const { return (m_header.attributeMask & CLOD_PAGE_ATTRIBUTE_COLOR) != 0u; }
+	// A meshlet vertex's UV in `uvSet` (0 when the page has fewer sets), as the resolve shaders decode it.
+	DirectX::XMFLOAT2 Uv(uint32_t meshletIndex, const TriangleMeshlet& meshlet, uint32_t uvSet, uint32_t vertexIndex) const;
+	DirectX::XMFLOAT3 Color(const TriangleMeshlet& meshlet, uint32_t vertexIndex) const;
 
 	std::vector<PageStream> Streams() const;
 

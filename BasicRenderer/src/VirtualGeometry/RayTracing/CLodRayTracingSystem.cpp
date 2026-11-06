@@ -1,6 +1,7 @@
 #include "VirtualGeometry/RayTracing/CLodRayTracingSystem.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <unordered_set>
 
@@ -24,6 +25,7 @@ namespace {
 constexpr uint32_t kMaxClusterTriangles = MS_MESHLET_SIZE;
 constexpr uint32_t kMaxClusterVertices = MS_MESHLET_SIZE;
 constexpr uint32_t kCountersBytes = CLOD_RT_COUNTER_WORDS * 4u;
+static_assert(kCountersBytes % 8u == 0u, "the readback slice resolves 8-byte query data after the counters");
 constexpr uint32_t kStatsBytes = CLOD_RT_STAT_WORDS * 4u;
 constexpr uint32_t kMaxGroupUpdatesPerFrame = 1u << 14;
 constexpr uint32_t kMaxSegmentUpdatesPerFrame = 1u << 14;
@@ -119,6 +121,22 @@ void CLodRayTracingSystem::RangeAllocator::Free(uint32_t first, uint32_t count) 
     m_used -= count;
 }
 
+CLodRayTracingSystem::CLodRayTracingSystem() {
+    const auto read = [](const char* name) -> unsigned long long {
+        char* value = nullptr;
+        size_t length = 0;
+        unsigned long long result = 0;
+        if (_dupenv_s(&value, &length, name) == 0 && value) result = std::strtoull(value, nullptr, 10);
+        std::free(value);
+        return result;
+    };
+    if (const auto clusters = read("SARP_RT_MAX_LIST_CLUSTERS"))
+        m_limits.maxClustersInBvh = static_cast<uint32_t>(std::min<unsigned long long>(clusters, 1ull << 24));
+    if (const auto instances = read("SARP_RT_MAX_INSTANCES"))
+        m_limits.maxInstances = static_cast<uint32_t>(std::min<unsigned long long>(instances, 1ull << 24));
+    if (const auto mib = read("SARP_RT_CLAS_POOL_MB")) m_limits.clasPoolBytes = std::min<unsigned long long>(mib, 1ull << 16) << 20u;
+}
+
 bool CLodRayTracingSystem::CreateBuffer(RawBuffer& out, uint64_t bytes, rhi::HeapType heap, rhi::ResourceFlags flags, const char* name, View view, uint32_t stride) {
     const auto desc = rhi::helpers::ResourceDesc::Buffer(bytes, heap, flags, name);
     if (!rhi::IsOk(m_device.CreateCommittedResource(desc, out.resource)) || !out.resource) {
@@ -128,6 +146,10 @@ bool CLodRayTracingSystem::CreateBuffer(RawBuffer& out, uint64_t bytes, rhi::Hea
     out.bytes = bytes;
     out.address = m_device.GetBufferDeviceAddress({ out.Handle(), 0u });
     m_stats.totalMemoryBytes += bytes;
+    // These resources are invisible to the render graph's memory introspection.
+    spdlog::debug("CLod RT: allocated '{}' {:.1f} MiB ({}), total {:.1f} MiB", name, double(bytes) / 1048576.0,
+        heap == rhi::HeapType::Upload ? "upload" : heap == rhi::HeapType::Readback ? "readback" : "local",
+        double(m_stats.totalMemoryBytes) / 1048576.0);
     if (heap == rhi::HeapType::Upload || heap == rhi::HeapType::Readback) {
         void* mapped = nullptr;
         out.resource->Map(&mapped, 0u, bytes);
@@ -227,12 +249,14 @@ bool CLodRayTracingSystem::EnsureInitialized(rhi::Device device, const RayTracin
     ok = ok && CreateBuffer(m_buildScratch, std::max<uint64_t>({ buildPrebuild.scratchDataSizeInBytes, measurePrebuild.scratchDataSizeInBytes, 256u }), local, uavFlag, "CLod RT CLAS scratch");
     ok = ok && CreateBuffer(m_requests, uint64_t(m_limits.requestCapacity) * kRequestBytes, local, uavFlag, "CLod RT CLAS requests", View::Structured, kRequestBytes);
     ok = ok && CreateBuffer(m_slotOmmKeys, uint64_t(m_limits.maxClasSlots) * 4u, local, uavFlag, "CLod RT CLAS micromap keys", View::Structured, 4u);
+    ok = ok && CreateBuffer(m_slotMeasuredCounts, uint64_t(m_limits.maxClasSlots) * 4u, local, uavFlag, "CLod RT CLAS measured counts", View::Structured, 4u);
     ok = ok && CreateBuffer(m_blasOmmKeys, uint64_t(m_limits.maxBlases) * 4u, local, uavFlag, "CLod RT BLAS micromap keys", View::Structured, 4u);
     ok = ok && CreateBuffer(m_requestCounter, 16u, local, uavFlag, "CLod RT CLAS request counter", View::Structured, 4u);
-    ok = ok && CreateBuffer(m_drawTable, uint64_t(m_limits.maxDrawRecords) * 16u, local, uavFlag, "CLod RT draw table", View::Raw);
+    ok = ok && CreateBuffer(m_drawTable, (uint64_t(m_limits.maxDrawRecords) + m_limits.maxPortalOccurrences) * 16u, local, uavFlag, "CLod RT draw table", View::Raw);
     ok = ok && CreateBuffer(m_instanceBlas, uint64_t(m_limits.maxInstances) * 4u, local, uavFlag, "CLod RT instance BLAS index", View::Structured, 4u);
     ok = ok && CreateBuffer(m_shareTable, uint64_t(m_limits.blasShareEntries) * 16u, local, uavFlag, "CLod RT BLAS sharing", View::Raw);
     ok = ok && CreateBuffer(m_instanceList, uint64_t(m_limits.maxInstances) * 4u, local, uavFlag, "CLod RT instance list", View::Structured, 4u);
+    ok = ok && CreateBuffer(m_instanceRows, uint64_t(m_limits.maxInstances) * 16u, local, uavFlag, "CLod RT instance rows", View::Structured, 16u);
     ok = ok && CreateBuffer(m_coarseCut, CLOD_RT_COARSE_BUFFER_BYTES, local, uavFlag, "CLod RT coarse cut", View::Raw);
     ok = ok && CreateBuffer(m_counters, kCountersBytes, local, uavFlag, "CLod RT counters", View::Raw);
     ok = ok && CreateBuffer(m_blasArgs, uint64_t(m_limits.maxBlases) * sizeof(rhi::PackedRayTracingClusterBuildBottomLevelInfo), local, uavFlag, "CLod RT BLAS args", View::Structured, sizeof(rhi::PackedRayTracingClusterBuildBottomLevelInfo));
@@ -309,7 +333,7 @@ bool CLodRayTracingSystem::EnsureInitialized(rhi::Device device, const RayTracin
     }
 
     // Over budget, the OS demotes what it likes, and the per-instance reads here get about twenty times slower.
-    for (const RawBuffer* buffer : { &m_clasPool, &m_clasInfo, &m_clasAddresses, &m_groupTable, &m_segmentTable, &m_drawTable, &m_instanceList, &m_instanceBlas, &m_shareTable, &m_counters,
+    for (const RawBuffer* buffer : { &m_clasPool, &m_clasInfo, &m_clasAddresses, &m_groupTable, &m_segmentTable, &m_drawTable, &m_instanceList, &m_instanceRows, &m_instanceBlas, &m_shareTable, &m_counters,
         &m_blasArgs, &m_blasAddressArray, &m_blasResult, &m_blasScratch, &m_blasAddresses, &m_tlasInstances, &m_tlasStorage, &m_tlasScratch, &m_slotOmmKeys, &m_blasOmmKeys }) {
         rhi::PageableRef pageable(buffer->Handle());
         if (!rhi::IsOk(device.SetResidencyPriority(rhi::Span<rhi::PageableRef>{ &pageable, 1u }, rhi::ResidencyPriorityHigh))) {
@@ -340,7 +364,7 @@ CLodRayTracingSystem::CullingDescriptors CLodRayTracingSystem::GetCullingDescrip
 }
 
 CLodRayTracingSystem::VisibilityDescriptors CLodRayTracingSystem::GetVisibilityDescriptors() const noexcept {
-    return { m_tlasSrv, m_clasInfo.srv, m_visibilityHash.uav, m_limits.visibilityHashEntries, m_visibilityStats.uav };
+    return { m_tlasSrv, m_clasInfo.srv, m_instanceRows.srv, m_visibilityHash.uav, m_limits.visibilityHashEntries, m_visibilityStats.uav };
 }
 
 void CLodRayTracingSystem::SetPrimaryVisibleClusters(std::shared_ptr<org::Buffer> clusters, std::shared_ptr<org::Buffer> transformIndices, uint32_t capacity) {
@@ -510,6 +534,41 @@ bool CLodRayTracingSystem::EvictOldest(uint32_t except) {
     return false;
 }
 
+bool CLodRayTracingSystem::SourcesStillCurrent(const MeshManager& meshManager, uint32_t groupGlobal, const std::vector<BuildSource>& sources) {
+    CLodRayTracingGroupLookup lookup{};
+    if (!meshManager.GetCLodRayTracingGroup(groupGlobal, lookup) || !lookup.pagePool) return false;
+    const CLodRayTracingResidentGroup& group = lookup.group;
+    PagePool& pool = *lookup.pagePool;
+    size_t sourceIndex = 0u;
+    for (const ClusterLODGroupSegment& segment : group.segments) {
+        if (segment.meshletCount == 0u) continue;
+        if (sourceIndex >= sources.size()) return false;
+        uint32_t localPage = segment.pageIndex >= group.group.pageMapBase ? segment.pageIndex - group.group.pageMapBase : ~0u;
+        uint32_t pageId = ~0u;
+        const PagePool::PageAllocation* pageAllocation = nullptr;
+        for (const PagePool::PageAllocation& allocation : group.pageAllocations) {
+            if (localPage < allocation.pageCount) {
+                pageId = allocation.firstPageID + localPage;
+                pageAllocation = &allocation;
+                break;
+            }
+            localPage -= allocation.pageCount;
+        }
+        if (pageId == ~0u) return false;
+        const BuildSource& source = sources[sourceIndex++];
+        const auto slab = pool.GetSlab(pool.PageToSlabIndex(pageId));
+        if (!slab
+            || source.pageByteOffset != static_cast<uint32_t>(pool.PageToSlabByteOffset(pageId))
+            || source.slabDescriptor != pool.GetSlabDescriptorIndex(*pageAllocation)
+            || source.slabAddress != m_device.GetBufferDeviceAddress({ slab->GetAPIResource().GetHandle(), 0u })
+            || source.meshletCount != segment.meshletCount
+            || source.firstMeshlet != segment.firstMeshletInPage) {
+            return false;
+        }
+    }
+    return sourceIndex == sources.size();
+}
+
 bool CLodRayTracingSystem::MeasureGroup(const MeshManager& meshManager, uint32_t groupGlobal, uint32_t ommIdentity, uint32_t& measuresLeft) {
     CLodRayTracingGroupLookup lookup{};
     if (groupGlobal >= m_limits.maxGroups || !meshManager.GetCLodRayTracingGroup(groupGlobal, lookup)) return true;
@@ -578,12 +637,12 @@ bool CLodRayTracingSystem::MeasureGroup(const MeshManager& meshManager, uint32_t
         source.slabAddress = m_device.GetBufferDeviceAddress({ slab->GetAPIResource().GetHandle(), 0u });
         source.pageByteOffset = static_cast<uint32_t>(pageByteOffset);
         source.slabDescriptor = pool.GetSlabDescriptorIndex(*pageAllocation);
-        source.pageOffsetUnits = static_cast<uint32_t>(pageByteOffset >> 14u);
+        source.pageOffsetUnits = static_cast<uint32_t>(pageByteOffset >> PackedVisibleClusterPageOffsetShift);
         source.firstMeshlet = segment.firstMeshletInPage;
         source.meshletCount = segment.meshletCount;
         source.firstBuildIndex = measureIndex;
         source.firstClasSlot = firstSlot;
-        source.groupLocalIndex = group.groupLocalIndex;
+        source.groupLocalIndex = groupGlobal; // packed into hit clusters, which name groups globally
         request.sources.push_back(source);
         measureIndex += segment.meshletCount;
 
@@ -618,7 +677,11 @@ bool CLodRayTracingSystem::BuildMeasuredGroup(const MeshManager& meshManager, Aw
     const auto it = m_groups.find(awaiting.groupGlobal);
     if (it == m_groups.end() || it->second.id != awaiting.id) return true;
     CachedGroup& cached = it->second;
-    if (!meshManager.IsCLodRayTracingGroupCurrent(cached.owner, cached.localIndex, cached.firstPageId)) {
+    // The first page ID alone can match after the group was evicted and reloaded into a slab that has since changed
+    // page size, so its sources would name stale bytes. Compare every source's location too.
+    if (!meshManager.IsCLodRayTracingGroupCurrent(cached.owner, cached.localIndex, cached.firstPageId)
+        || !SourcesStillCurrent(meshManager, awaiting.groupGlobal, awaiting.sources)) {
+        ++m_stats.staleMeasuredGroups;
         FreeGroup(awaiting.groupGlobal, cached);
         m_groups.erase(it);
         return true;
@@ -716,6 +779,11 @@ void CLodRayTracingSystem::Refresh(const MeshManager& meshManager) {
         m_stats.alphaInstances = counters[CLOD_RT_COUNTER_ALPHA_INSTANCES];
         m_stats.ommInstances = counters[CLOD_RT_COUNTER_OMM_INSTANCES];
         m_stats.ommDisabledInstances = counters[CLOD_RT_COUNTER_OMM_DISABLED_INSTANCES];
+        if (counters[CLOD_RT_COUNTER_REJECTED_CLAS_ARGS] != m_stats.rejectedClasArgs) {
+            spdlog::warn("CLod RT: {} cluster(s) had build arguments outside the batch limits or changed since they were measured, and were built empty ({} in all)",
+                counters[CLOD_RT_COUNTER_REJECTED_CLAS_ARGS] - m_stats.rejectedClasArgs, counters[CLOD_RT_COUNTER_REJECTED_CLAS_ARGS]);
+            m_stats.rejectedClasArgs = counters[CLOD_RT_COUNTER_REJECTED_CLAS_ARGS];
+        }
         // Some headroom: rows past the instance count are inactive, so overshooting costs little and undershooting
         // drops instances for a frame.
         m_tlasInstanceCount = std::clamp(m_stats.instances + m_stats.instances / 4u + 256u, 256u, m_limits.maxInstances);
@@ -836,6 +904,8 @@ void CLodRayTracingSystem::Refresh(const MeshManager& meshManager) {
             m_stats.clasBytesUsed >> 20u, m_stats.clasPoolBytes >> 20u, m_stats.clasSlotsUsed, m_stats.cachedGroups, m_stats.groupsAwaitingBuild, m_stats.clasBuildsTotal, m_stats.clasFreedTotal,
             m_stats.requestsLastFrame, m_stats.requestsDeferred, m_tlasInstanceCount,
             m_stats.msClasBuild, m_stats.msCount, m_stats.msAllocate, m_stats.msPlace, m_stats.msBlasBuild, m_stats.msWriteInstances, m_stats.msTlasBuild);
+        spdlog::info("CLod RT build checks: {} clusters built empty for invalid or changed arguments, {} measured groups dropped as stale",
+            m_stats.rejectedClasArgs, m_stats.staleMeasuredGroups);
         if (m_ommEnabled) {
             spdlog::info("CLod RT micromaps: groups loaded={} without={} micromaps={} uploaded {} MiB, arrays {} of {} MiB, index clusters {} of {}, files {} | instances alpha={} with={} disabled={}",
                 m_stats.ommGroupsLoaded, m_stats.ommGroupsWithout, m_stats.ommMicromapsTotal, m_stats.ommUploadBytesTotal >> 20u,
@@ -854,7 +924,7 @@ void CLodRayTracingSystem::Refresh(const MeshManager& meshManager) {
     }
 }
 
-void CLodRayTracingSystem::RecordSceneBuild(org::RecordingContext& recording, const ScenePipelines& pipelines, uint32_t clustersSrv, uint32_t counterSrv, uint32_t clusterCapacity) {
+void CLodRayTracingSystem::RecordSceneBuild(org::RecordingContext& recording, const ScenePipelines& pipelines, uint32_t clustersSrv, uint32_t sideBandSrv, uint32_t counterSrv, uint32_t clusterCapacity) {
     auto& commands = recording.Commands();
     const uint32_t sliceIndex = m_frame % m_framesInFlight;
     const UploadSlice& slice = m_slices[sliceIndex];
@@ -882,7 +952,10 @@ void CLodRayTracingSystem::RecordSceneBuild(org::RecordingContext& recording, co
     scene[CLOD_RT_SCENE_REFERENCE_CAPACITY] = m_limits.maxClusterReferences;
     scene[CLOD_RT_SCENE_BLAS_CAPACITY] = m_limits.maxBlases;
     scene[CLOD_RT_SCENE_DRAW_TABLE_UAV] = m_drawTable.uav;
-    scene[CLOD_RT_SCENE_DRAW_TABLE_ENTRIES] = m_limits.maxDrawRecords;
+    scene[CLOD_RT_SCENE_DRAW_TABLE_ENTRIES] = m_limits.maxDrawRecords + m_limits.maxPortalOccurrences;
+    scene[CLOD_RT_SCENE_DRAW_KEYS] = m_limits.maxDrawRecords;
+    scene[CLOD_RT_SCENE_CLUSTER_SIDE_BAND_SRV] = sideBandSrv;
+    scene[CLOD_RT_SCENE_INSTANCE_ROWS_UAV] = m_instanceRows.uav;
     scene[CLOD_RT_SCENE_INSTANCE_LIST_UAV] = m_instanceList.uav;
     scene[CLOD_RT_SCENE_COUNTERS_UAV] = m_counters.uav;
     scene[CLOD_RT_SCENE_INSTANCE_CAPACITY] = m_limits.maxInstances;
@@ -975,6 +1048,8 @@ void CLodRayTracingSystem::RecordSceneBuild(org::RecordingContext& recording, co
         constants[CLOD_RT_BUILD_SLOT_OMM_KEYS_UAV] = m_slotOmmKeys.uav;
         constants[CLOD_RT_BUILD_OMM_INDEX_POOL_LOW] = Low(m_ommIndexPool.address);
         constants[CLOD_RT_BUILD_OMM_INDEX_POOL_HIGH] = High(m_ommIndexPool.address);
+        constants[CLOD_RT_BUILD_COUNTERS_UAV] = m_counters.uav;
+        constants[CLOD_RT_BUILD_MEASURED_COUNTS_UAV] = m_slotMeasuredCounts.uav;
         recording.BindComputePipeline(pipelines.buildClasArgs);
         const auto writeArguments = [&](size_t sourceCount, uint64_t sourcesOffset, uint32_t firstArg, bool publish) {
             if (sourceCount == 0u) return;
@@ -1052,7 +1127,7 @@ void CLodRayTracingSystem::RecordSceneBuild(org::RecordingContext& recording, co
     stamp(1u);
 
     // ---- Group selected clusters by instance
-    clear(m_counters, kCountersBytes);
+    clear(m_counters, uint64_t(CLOD_RT_COUNTER_FRAME_WORDS) * 4u); // Not the cumulative words after them.
     clear(m_shareTable, m_shareTable.bytes);
     clear(m_blasOmmKeys, m_blasOmmKeys.bytes);
     GlobalUavBarrier(commands);

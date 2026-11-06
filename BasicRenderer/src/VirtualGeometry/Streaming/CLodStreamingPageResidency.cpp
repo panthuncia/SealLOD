@@ -3,6 +3,7 @@
 #include "VirtualGeometry/Streaming/CLodStreamingTraceInternals.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <chrono>
 #include <cstdlib>
@@ -877,6 +878,7 @@ void CLodStreamingSystem::ProtectGroupAndAncestors(uint32_t groupIndex) {
             if (page != ~0u && page < m_pageProtectedThisUpdate.size()) {
                 MarkPageProtectedThisUpdate(page);
                 PageLruForPage(page).Touch(page);
+                if (page < m_pageLastUseTick.size()) m_pageLastUseTick[page] = m_streamingDiagnosticTick;
             }
         }
         return true;
@@ -974,7 +976,7 @@ std::vector<uint32_t> CLodStreamingSystem::PopFreePages(
     if (count == 0u || pool == nullptr) {
         return pages;
     }
-    const uint32_t desiredPageSize = pool->SelectPageSize(pageSizeBytes.front());
+    const uint32_t desiredPageSize = pool->SelectStreamingPageSize(pageSizeBytes.front());
     CLodPageLRU& pageLru =
         m_pageLrus[pool->SelectPageSizeClassIndex(desiredPageSize)];
 
@@ -1021,6 +1023,12 @@ std::vector<uint32_t> CLodStreamingSystem::PopFreePages(
         }
 
         PageLruForPage(page).Remove(page);
+        // A fresh page gets the warm grace only: until the views use it, it isn't a reason to grow.
+        if (page < m_pageLastUseTick.size()) {
+            m_pageLastUseTick[page] = m_streamingDiagnosticTick + kPageWarmIdleTicks > kPageColdIdleTicks
+                ? m_streamingDiagnosticTick + kPageWarmIdleTicks - kPageColdIdleTicks
+                : 0u;
+        }
         if (!IsPhysicalPageCleanForFreshAllocation(page)) {
             recordDirtyMetadata();
             const uint64_t ownerKey = page < m_pageOwnerMeshPageKey.size()
@@ -1039,6 +1047,7 @@ std::vector<uint32_t> CLodStreamingSystem::PopFreePages(
         }
 
         pages.push_back(page);
+        m_streamedPageBytesTotal += desiredPageSize;
         return true;
     };
 
@@ -1073,6 +1082,10 @@ std::vector<uint32_t> CLodStreamingSystem::PopFreePages(
                 ++outStats->scanned;
             }
 
+            if (IsPageDraining(page)) {
+                pageLru.Remove(page);
+                continue;
+            }
             if (page < m_pageProtectedThisUpdate.size() && m_pageProtectedThisUpdate[page] != 0u) {
                 recordProtected();
                 break;
@@ -1089,29 +1102,11 @@ std::vector<uint32_t> CLodStreamingSystem::PopFreePages(
         return pages;
     }
 
-    {
-        std::vector<uint32_t> newPages =
-            pool->GrowGeneralPageClass(desiredPageSize);
-        if (!newPages.empty()) {
-            EnsurePageTrackingCapacity(meshManager);
-            for (uint32_t page : newPages) {
-                pageLru.Insert(page);
-            }
-            while (pages.size() < count) {
-                const uint32_t page = pageLru.PopOldest();
-                if (page == ~0u || !tryAcquireCleanFreePage(page)) {
-                    break;
-                }
-            }
-            if (pages.size() >= count) {
-                stampFinalStats();
-                return pages;
-            }
-            lruSize = pageLru.Size();
-        }
-    }
-
-    {
+    // Evicts resident pages idle for at least minIdleTicks; hotPages counts the resident ones that were not. An evicted
+    // page retires before it is free, so this call returns without it and the request retries.
+    uint32_t evictedThisCall = 0u;
+    bool evictionBudgetExhausted = false;
+    const auto evictIdlePages = [&](uint64_t minIdleTicks, uint32_t& hotPages) {
         ZoneScopedN("CLodStreamingSystem::PopFreePages::EvictResidentPages");
         uint32_t attemptsRemaining = scanLimit;
         while (pages.size() < count && attemptsRemaining-- > 0u) {
@@ -1120,9 +1115,14 @@ std::vector<uint32_t> CLodStreamingSystem::PopFreePages(
             if (outStats != nullptr) {
                 ++outStats->scanned;
             }
+            if (IsPageDraining(page)) {
+                pageLru.Remove(page);
+                continue;
+            }
 
             if (page < m_pageProtectedThisUpdate.size() && m_pageProtectedThisUpdate[page] != 0u) {
                 recordProtected();
+                ++hotPages;
                 break;
             }
             if (page >= m_pageState.size()) {
@@ -1139,11 +1139,19 @@ std::vector<uint32_t> CLodStreamingSystem::PopFreePages(
                 ScrubStaleResidentGroups(page);
             }
 
-            if (page < m_pageResidentGroups.size() && !m_pageResidentGroups[page].empty()) {
+            const bool sharedResident = page < m_pageResidentGroups.size() && !m_pageResidentGroups[page].empty();
+            const bool ownedResident = m_pageState[page] == CLodPhysicalPageState::Resident &&
+                page < m_pageOwnerGroup.size() && m_pageOwnerGroup[page] >= 0;
+            if (sharedResident || ownedResident) {
+                if (!IsPageIdleFor(page, minIdleTicks)) {
+                    ++hotPages;
+                    continue;
+                }
                 if (m_pagePopEvictionsThisUpdate >= m_pagePopEvictionBudgetThisUpdate) {
                     if (outStats != nullptr) {
                         ++outStats->rejectedEvictionBudget;
                     }
+                    evictionBudgetExhausted = true;
                     break;
                 }
                 if (!EvictPhysicalPage(page, meshManager)) {
@@ -1156,26 +1164,7 @@ std::vector<uint32_t> CLodStreamingSystem::PopFreePages(
                     ++outStats->evicted;
                 }
                 ++m_pagePopEvictionsThisUpdate;
-                continue;
-            } else if (m_pageState[page] == CLodPhysicalPageState::Resident &&
-                page < m_pageOwnerGroup.size() &&
-                m_pageOwnerGroup[page] >= 0) {
-                if (m_pagePopEvictionsThisUpdate >= m_pagePopEvictionBudgetThisUpdate) {
-                    if (outStats != nullptr) {
-                        ++outStats->rejectedEvictionBudget;
-                    }
-                    break;
-                }
-                if (!EvictPhysicalPage(page, meshManager)) {
-                    if (outStats != nullptr) {
-                        ++outStats->rejectedEvictFailed;
-                    }
-                    continue;
-                }
-                if (outStats != nullptr) {
-                    ++outStats->evicted;
-                }
-                ++m_pagePopEvictionsThisUpdate;
+                ++evictedThisCall;
                 continue;
             } else if (tryAcquireCleanFreePage(page)) {
                 continue;
@@ -1184,10 +1173,146 @@ std::vector<uint32_t> CLodStreamingSystem::PopFreePages(
                 continue;
             }
         }
+    };
+
+    // Cold pages first: evicting them costs nothing the views still use.
+    uint32_t hotPages = 0u;
+    evictIdlePages(kPageColdIdleTicks, hotPages);
+    if (pages.size() >= count || evictedThisCall != 0u || evictionBudgetExhausted || (hotPages == 0u && pageLru.Size() != 0u)) {
+        // Enough, or pages are on their way back (evicted, retiring, uploading): no sign the class is too small.
+        stampFinalStats();
+        return pages;
     }
 
+    // Everything this class would evict is in use: it needs more pages.
+    const uint32_t desiredClass = pool->SelectPageSizeClassIndex(desiredPageSize);
+    if (pageLru.Size() != 0u && m_pageClassLastGrowthTick[desiredClass] != 0u &&
+        m_streamingDiagnosticTick < m_pageClassLastGrowthTick[desiredClass] + kPageClassGrowthIntervalTicks) {
+        stampFinalStats();
+        return pages;
+    }
+    {
+        std::vector<uint32_t> newPages =
+            pool->GrowGeneralPageClass(desiredPageSize);
+        if (!newPages.empty()) m_pageClassLastGrowthTick[desiredClass] = m_streamingDiagnosticTick;
+        if (!newPages.empty()) {
+            EnsurePageTrackingCapacity(meshManager);
+            for (uint32_t page : newPages) {
+                pageLru.Insert(page);
+            }
+            // The new slab's pages, not the LRU's oldest (which are the ones in use).
+            for (uint32_t page : newPages) {
+                if (pages.size() >= count) break;
+                tryAcquireCleanFreePage(page);
+            }
+            stampFinalStats();
+            return pages;
+        }
+    }
+
+    // At the slab cap: take a slab from a class with room to spare. Meanwhile evict pages that are only warm, never ones
+    // in use: refusing keeps the coarser parent, where evicting would thrash.
+    RequestSlabRebalance(pool->SelectPageSizeClassIndex(desiredPageSize), meshManager);
+    uint32_t warmHotPages = 0u;
+    evictIdlePages(kPageWarmIdleTicks, warmHotPages);
     stampFinalStats();
     return pages;
+}
+
+void CLodStreamingSystem::RequestSlabRebalance(uint32_t targetClassIndex, ICLodGeometryStorage* meshManager) {
+    PagePool* pool = meshManager != nullptr ? meshManager->GetCLodPagePool() : nullptr;
+    if (pool == nullptr || m_slabRebalance.active ||
+        m_streamingDiagnosticTick < m_lastSlabRebalanceTick + kPageColdIdleTicks / 2u) {
+        return;
+    }
+    m_lastSlabRebalanceTick = m_streamingDiagnosticTick;
+    const auto slabs = pool->GetGeneralSlabs();
+    constexpr uint32_t kClasses = PagePool::GetPageSizeClassCount();
+    std::array<uint32_t, kClasses> slabsPerClass{};
+    std::array<uint64_t, kClasses> slackPages{}; // Free or cold, across the class.
+    std::vector<uint32_t> hotPerSlab(slabs.size(), 0u);
+    for (size_t s = 0; s < slabs.size(); ++s) {
+        const auto& slab = slabs[s];
+        const uint32_t classIndex = pool->SelectPageSizeClassIndex(slab.pageSize);
+        ++slabsPerClass[classIndex];
+        for (uint32_t page = slab.firstPageID; page < slab.firstPageID + slab.pageCount; ++page) {
+            const bool free = page < m_pageState.size() && m_pageState[page] == CLodPhysicalPageState::Free;
+            if (free || (page < m_pageState.size() && m_pageState[page] == CLodPhysicalPageState::Resident &&
+                    IsPageIdleFor(page, kPageColdIdleTicks))) {
+                ++slackPages[classIndex];
+            } else {
+                ++hotPerSlab[s];
+            }
+        }
+    }
+    // A donor keeps a slab, and has a whole slab of slack: whatever its drained slab still uses fits in the rest.
+    size_t best = slabs.size();
+    for (size_t s = 0; s < slabs.size(); ++s) {
+        const uint32_t classIndex = pool->SelectPageSizeClassIndex(slabs[s].pageSize);
+        if (classIndex == targetClassIndex || slabsPerClass[classIndex] < 2u || slackPages[classIndex] < slabs[s].pageCount) {
+            continue;
+        }
+        if (best == slabs.size() || hotPerSlab[s] < hotPerSlab[best]) best = s;
+    }
+    if (best == slabs.size()) {
+        basic_telemetry::AddCounter("CLod.Streaming.PagePool.RebalanceUnavailable");
+        return;
+    }
+    const auto& donor = slabs[best];
+    m_slabRebalance = { true, donor.slabIndex, donor.firstPageID, donor.pageCount,
+        pool->GetClassPageSize(targetClassIndex), m_streamingDiagnosticTick };
+    spdlog::info("CLod streaming: rebalancing page slab {} from {} KiB to {} KiB pages ({} of {} pages in use)",
+        donor.slabIndex, donor.pageSize / 1024u, m_slabRebalance.targetPageSize / 1024u, hotPerSlab[best], donor.pageCount);
+}
+
+void CLodStreamingSystem::AdvanceSlabRebalance(ICLodGeometryStorage* meshManager) {
+    if (!m_slabRebalance.active) return;
+    PagePool* pool = meshManager != nullptr ? meshManager->GetCLodPagePool() : nullptr;
+    if (pool == nullptr) return;
+    constexpr uint32_t kEvictionsPerUpdate = 256u;
+    uint32_t evictions = 0u;
+    bool drained = true;
+    const uint32_t first = m_slabRebalance.firstPage;
+    for (uint32_t page = first; page < first + m_slabRebalance.pageCount; ++page) {
+        if (page >= m_pageState.size()) continue;
+        const CLodPhysicalPageState state = m_pageState[page];
+        if (state == CLodPhysicalPageState::Free && IsPhysicalPageCleanForFreshAllocation(page)) {
+            PageLruForPage(page).Remove(page);
+            continue;
+        }
+        drained = false;
+        if (state == CLodPhysicalPageState::Resident && evictions < kEvictionsPerUpdate) {
+            if (page < m_pageResidentGroups.size() && !m_pageResidentGroups[page].empty()) ScrubStaleResidentGroups(page);
+            if (EvictPhysicalPage(page, meshManager)) ++evictions;
+        }
+        // Uploading or retiring: wait for it.
+    }
+    if (!drained) {
+        if (m_streamingDiagnosticTick > m_slabRebalance.startTick + 20u * kPageColdIdleTicks) {
+            // Never expected; don't hold the slab's pages back for good.
+            spdlog::warn("CLod streaming: page slab {} did not drain; rebalance abandoned", m_slabRebalance.slabIndex);
+            for (uint32_t page = first; page < first + m_slabRebalance.pageCount; ++page) {
+                if (page < m_pageState.size() && m_pageState[page] == CLodPhysicalPageState::Free &&
+                    IsPhysicalPageCleanForFreshAllocation(page)) {
+                    PageLruForPage(page).Insert(page);
+                }
+            }
+            m_slabRebalance = {};
+        }
+        return;
+    }
+
+    const std::vector<uint32_t> newPages = pool->ConvertGeneralSlab(m_slabRebalance.slabIndex, m_slabRebalance.targetPageSize);
+    m_slabRebalance = {};
+    if (newPages.empty()) return;
+    EnsurePageTrackingCapacity(meshManager);
+    CLodPageLRU& lru = m_pageLrus[pool->SelectPageSizeClassIndex(pool->GetPageSize(newPages.front()))];
+    for (uint32_t page : newPages) {
+        if (page < m_pageLastUseTick.size()) m_pageLastUseTick[page] = 0u;
+        lru.Insert(page);
+    }
+    basic_telemetry::AddCounter("CLod.Streaming.PagePool.Rebalanced");
+    WakeReadyPageCreditWaiters(static_cast<uint32_t>(newPages.size()));
 }
 
 CLodStreamingSystem::PreAllocatedPages CLodStreamingSystem::PreAllocatePagesForGroup(

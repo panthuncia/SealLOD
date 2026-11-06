@@ -1107,7 +1107,7 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
 
     extension.m_vsmExpandedVisibleClusterTransformIndicesBufferSw = CreateAliasedUnmaterializedStructuredBuffer(
         vsmExpandedRecordCapacity,
-        sizeof(uint32_t),
+        CLodVisibleClusterSideBandStride,
         true,
         false,
         false,

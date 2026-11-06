@@ -223,10 +223,11 @@ void CLodVirtualShadowBlockHistogramCSMain(uint3 dtid : SV_DispatchThreadID, uin
 
     const uint sortedClusterIndex = IndirectCommandSignatureRootConstant0 + linearizedGroupID;
     ByteAddressBuffer sourceClusters = ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_SOURCE_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX];
-    StructuredBuffer<uint> sourceClusterTransformIndices =
+    StructuredBuffer<uint2> sourceClusterTransformIndices =
         ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_SOURCE_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
     const uint4 packedCluster = CLodLoadVisibleClusterPacked(sourceClusters, sortedClusterIndex);
-    const uint sourceClusterTransformIndex = sourceClusterTransformIndices[sortedClusterIndex];
+    const uint2 sourceClusterSideBand = sourceClusterTransformIndices[sortedClusterIndex];
+    const uint sourceClusterTransformIndex = sourceClusterSideBand.x;
     RWStructuredBuffer<uint> clusterCoverage =
         ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_CLUSTER_COVERAGE_DESCRIPTOR_INDEX];
 
@@ -338,9 +339,10 @@ void CLodVirtualShadowBlockEmitCSMain(uint3 dtid : SV_DispatchThreadID, uint GI 
     const uint sortedClusterIndex = IndirectCommandSignatureRootConstant0 + linearizedGroupID;
     ByteAddressBuffer sourceClusters = ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_SOURCE_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX];
     const uint4 packedCluster = CLodLoadVisibleClusterPacked(sourceClusters, sortedClusterIndex);
-    StructuredBuffer<uint> sourceClusterTransformIndices =
+    StructuredBuffer<uint2> sourceClusterTransformIndices =
         ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_SOURCE_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
-    const uint sourceClusterTransformIndex = sourceClusterTransformIndices[sortedClusterIndex];
+    const uint2 sourceClusterSideBand = sourceClusterTransformIndices[sortedClusterIndex];
+    const uint sourceClusterTransformIndex = sourceClusterSideBand.x;
 
     if (GI == 0u)
     {
@@ -446,7 +448,7 @@ void CLodVirtualShadowBlockEmitCSMain(uint3 dtid : SV_DispatchThreadID, uint GI 
     }
 
     RWByteAddressBuffer expandedClusters = ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_EXPANDED_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX];
-    RWStructuredBuffer<uint> expandedClusterTransformIndices =
+    RWStructuredBuffer<uint2> expandedClusterTransformIndices =
         ResourceDescriptorHeap[CLOD_VSM_BLOCK_EXPAND_EXPANDED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
 
     for (uint outputIndex = GI;
@@ -487,7 +489,7 @@ void CLodVirtualShadowBlockEmitCSMain(uint3 dtid : SV_DispatchThreadID, uint GI 
             gs_outputBaseIndex + outputIndex,
             expandedCluster);
         expandedClusterTransformIndices[gs_outputBaseIndex + outputIndex] =
-            sourceClusterTransformIndex;
+            sourceClusterSideBand;
     }
 }
 

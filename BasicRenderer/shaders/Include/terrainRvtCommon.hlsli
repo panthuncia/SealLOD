@@ -9,7 +9,12 @@ static const uint TERRAIN_RVT_COUNTER_GENERATION_COUNT = 1u;
 static const uint TERRAIN_RVT_COUNTER_ALLOCATED_PHYSICAL_PAGE_COUNT = 2u;
 static const uint TERRAIN_RVT_COUNTER_OVERFLOW_COUNT = 3u;
 static const uint TERRAIN_RVT_COUNTER_REUSE_CURSOR = 4u;
-static const uint TERRAIN_RVT_COUNTER_COUNT = 5u;
+// Since startup: pages re-rendered because a source texture they were short of improved (5), and pages generated short
+// of one (7). This frame: sampled pages still waiting for one (6).
+static const uint TERRAIN_RVT_COUNTER_REFRESHED_PAGES = 5u;
+static const uint TERRAIN_RVT_COUNTER_WAITING_PAGES = 6u;
+static const uint TERRAIN_RVT_COUNTER_SHORT_PAGES = 7u;
+static const uint TERRAIN_RVT_COUNTER_COUNT = 8u;
 static const uint TERRAIN_RVT_TELEMETRY_MIP_BINS = 16u;
 static const uint TERRAIN_RVT_PHYSICAL_PAGE_OWNER_LOCKED = 0xfffffffeu;
 static const uint TERRAIN_RVT_PHYSICAL_PAGE_OWNER_FREE = 0xffffffffu;

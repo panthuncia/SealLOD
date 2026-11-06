@@ -74,7 +74,7 @@ ReyesSplitBindings ReyesSplitPass::Declare(org::PassBuilder& declaration)
             Builtin::InstanceDrawRecordBuffer,
             Builtin::PerInstanceTransformBuffer,
             Builtin::PerObjectBuffer,
-            Builtin::PerMeshBuffer,
+            Builtin::PerMeshBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases,
             Builtin::PerMaterialDataBuffer,
             Builtin::PerMaterialOpenPBRDataBuffer,
             Builtin::Material::TextureStreamingMetadataBuffer,

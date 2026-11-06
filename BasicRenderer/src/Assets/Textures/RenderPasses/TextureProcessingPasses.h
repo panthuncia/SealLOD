@@ -160,8 +160,10 @@ struct TextureBC7CompressionBindings {
         struct Job {
             std::vector<Subresource> subresources;
             org::DeclaredViewToken blocks;
+            bool bc6h = false;
         };
         org::PipelineState pipeline;
+        org::PipelineState bc6hPipeline;
         std::vector<Job> jobs;
         // The pass's DeclaredJob list for `jobs` (its private type), as TextureMipmappingBindings::declaredJobs.
         std::shared_ptr<const void> declaredJobs;

@@ -22,6 +22,8 @@
 #include "Resources/Buffers/Buffer.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -443,8 +445,10 @@ void TextureStreamingManager::PollCompletedReadbackSlots(uint64_t& lastProcessed
 				std::memcpy(&requestedTopMip,
 					static_cast<const std::byte*>(mapped) + static_cast<size_t>(streamingTextureID) * sizeof(uint32_t),
 					sizeof(uint32_t));
-				if (requestedTopMip != kTextureStreamingFeedbackUnused) {
-					m_pendingTextureStreamingFeedback.emplace_back(streamingTextureID, requestedTopMip);
+				// Shaders store mip + 1. Zero is a slot no reset has reached yet (a newly grown backing replays the CPU
+				// copy, which can still hold zeros), not a request: read as mip 0, each one loaded a full-resolution image.
+				if (requestedTopMip != kTextureStreamingFeedbackUnused && requestedTopMip != 0u) {
+					m_pendingTextureStreamingFeedback.emplace_back(streamingTextureID, requestedTopMip - 1u);
 				}
 			}
 			completedSlot.staging->GetAPIResource().Unmap(0, 0);
@@ -793,6 +797,9 @@ void TextureStreamingManager::BeginTextureStreamingFeedbackFrame(uint64_t frameI
 		}
 
 		uint32_t policyTopMip = requestedTopMip;
+		// SARP_TEXTURE_FEEDBACK_FORCE_MIP=<n>: debug override, every request becomes mip n (0 gives a full-resolution reference).
+		static const int forcedFeedbackMip = [] { const char* v = std::getenv("SARP_TEXTURE_FEEDBACK_FORCE_MIP"); return v && v[0] ? std::atoi(v) : -1; }();
+		if (forcedFeedbackMip >= 0) policyTopMip = static_cast<uint32_t>(forcedFeedbackMip);
 		if (m_alphaTestedBindingCountsByStreamingTextureID.contains(streamingTextureID)) {
 			policyTopMip = (std::min)(policyTopMip, AlphaTestedTopMipCap(*texture));
 		}
@@ -861,10 +868,9 @@ void TextureStreamingManager::BeginTextureStreamingFeedbackFrame(uint64_t frameI
 		// Once a texture has been unseen for the full idle interval, jump directly to
 		// its terminal coarse mip.  Rebuilding every intermediate one-mip window made
 		// an idle scene cycle allocate and retire the entire texture set repeatedly.
-		uint32_t coarsenedTopMip = state.residency.totalMipCount - 1u;
-		if (m_alphaTestedBindingCountsByStreamingTextureID.contains(it->first)) {
-			coarsenedTopMip = (std::min)(coarsenedTopMip, AlphaTestedTopMipCap(*texture));
-		}
+		// The terminal mip respects binding caps (bindingMipCap includes the alpha-tested one): going below them only
+		// had the cap check above load the capped image again the next frame.
+		const uint32_t coarsenedTopMip = bindingMipCap;
 		if (coarsenedTopMip != state.requestedTopMip) {
 			const uint64_t previousRevision = texture->GetStreamingStateRevision();
 			const bool needsUploadAdvance = texture->ApplyStreamingSystemRequest(coarsenedTopMip, frameIndex, true);
@@ -2189,6 +2195,19 @@ MaterialTextureStreamingStats TextureStreamingManager::BuildTextureStreamingStat
 		stats.largestResidentTextures,
 		std::greater<>{},
 		&MaterialTextureStreamingRecord::residentBytes);
+	// SARP_TEXTURE_STATS_DUMP=1: every 5 s, log one row per resident material texture. Logged rather than written to a
+	// file: file creation under MO2's virtual filesystem stalled this thread for seconds.
+	static const bool dumpStats = [] { const char* v = std::getenv("SARP_TEXTURE_STATS_DUMP"); return v && v[0] != '0' && v[0] != '\0'; }();
+	static std::chrono::steady_clock::time_point lastDump{};
+	if (dumpStats && std::chrono::steady_clock::now() - lastDump >= std::chrono::seconds(5)) {
+		lastDump = std::chrono::steady_clock::now();
+		const uint64_t dumpId = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::seconds>(lastDump.time_since_epoch()).count());
+		for (const auto& r : stats.largestResidentTextures) {
+			spdlog::info("Texture stats row: dump={} id={} bytes={} width={} height={} mips={} residentTopMip={} requestedTopMip={} feedbackTopMip={} eligible={} enabled={} alphaTested={} identifier='{}'",
+				dumpId, r.streamingTextureID, r.residentBytes, r.residentWidth, r.residentHeight, r.totalMipCount, r.residentTopMip, r.requestedTopMip,
+				r.feedbackTopMip == UINT32_MAX ? -1 : static_cast<int>(r.feedbackTopMip), r.eligible, r.enabled, r.alphaTested, r.identifier);
+		}
+	}
 	if (stats.largestResidentTextures.size() > 64u) {
 		stats.largestResidentTextures.resize(64u);
 	}

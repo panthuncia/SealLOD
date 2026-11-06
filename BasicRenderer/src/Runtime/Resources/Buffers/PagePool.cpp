@@ -55,6 +55,9 @@ PagePool::PagePool(const Config& config)
 		assert(m_config.pinnedSlabSize >= pageSize);
 	}
 	assert(m_config.numStreamingSlabs > 0);
+	if (m_config.slabSize > kMaxSlabBytes || m_config.pinnedSlabSize > kMaxSlabBytes) {
+		throw std::invalid_argument("PagePool slabs are limited to 64 MiB: page offsets are packed in 4 KiB units");
+	}
 
 	m_pageTableBuffer = CreatePageTableBuffer(1u, m_config.debugName + "::PageTable");
 	org::memory::SetResourceUsageHint(*m_pageTableBuffer, "Cluster LOD page table");
@@ -107,8 +110,13 @@ bool PagePool::AllocateNewSlab(
 	const uint64_t slabByteSize =
 		role == SlabRole::Pinned ? m_config.pinnedSlabSize : m_config.slabSize;
 	const uint32_t slabPageCount = static_cast<uint32_t>(slabByteSize / pageSizeBytes);
+	// A general slab reserves IDs for its size in the smallest class, so it can change class in place.
+	const uint32_t pageIdCapacity = role == SlabRole::General
+		? static_cast<uint32_t>(slabByteSize / m_config.minStreamingPageSize)
+		: slabPageCount;
 	slab.firstPageID = firstGlobal;
 	slab.pageCount = slabPageCount;
+	slab.pageIdCapacity = pageIdCapacity;
 	slab.buffer = CreatePagePoolSlabBuffer(
 		slabByteSize,
 		m_config.debugName + "::" +
@@ -121,7 +129,7 @@ bool PagePool::AllocateNewSlab(
 	{
 		std::unique_lock lock(m_slabMutex);
 		m_slabs.push_back(std::move(slab));
-		m_totalPageCapacity += slabPageCount;
+		m_totalPageCapacity += pageIdCapacity;
 	}
 	if (role == SlabRole::General) {
 		m_generalSlabCount++;
@@ -131,7 +139,7 @@ bool PagePool::AllocateNewSlab(
 	m_slabResourceGroup->AddResource(slabBuffer);
 
 	// Extend the CPU page-table mirror and describe every physical page.
-	m_pageTableCpu.resize(static_cast<size_t>(firstGlobal) + slabPageCount, PageTableEntry{});
+	m_pageTableCpu.resize(static_cast<size_t>(firstGlobal) + pageIdCapacity, PageTableEntry{});
 	for (uint32_t i = 0; i < slabPageCount; ++i) {
 		auto& entry = m_pageTableCpu[firstGlobal + i];
 		entry.slabIndex = slabIndex;
@@ -298,7 +306,7 @@ uint32_t PagePool::GetPageSizeClassIndex(uint32_t globalPageID) const {
 
 std::vector<uint32_t> PagePool::GrowGeneralPageClass(uint32_t pageSizeBytes) {
 	std::vector<uint32_t> pages;
-	if (SelectPageSize(pageSizeBytes) != pageSizeBytes ||
+	if (SelectPageSize(pageSizeBytes) != pageSizeBytes || pageSizeBytes < m_config.minStreamingPageSize ||
 		m_generalSlabCount >= m_config.numStreamingSlabs) {
 		return pages;
 	}
@@ -317,6 +325,46 @@ std::vector<uint32_t> PagePool::GetGeneralPageIDs(uint32_t pageSizeBytes) const 
 			pages.push_back(slab.firstPageID + offset);
 		}
 	}
+	return pages;
+}
+
+std::vector<PagePool::GeneralSlabInfo> PagePool::GetGeneralSlabs() const {
+	std::shared_lock lock(m_slabMutex);
+	std::vector<GeneralSlabInfo> result;
+	for (uint32_t index = 0u; index < static_cast<uint32_t>(m_slabs.size()); ++index) {
+		const Slab& slab = m_slabs[index];
+		if (slab.role == SlabRole::General) result.push_back({ index, slab.firstPageID, slab.pageCount, slab.pageSize });
+	}
+	return result;
+}
+
+std::vector<uint32_t> PagePool::ConvertGeneralSlab(uint32_t slabIndex, uint32_t pageSizeBytes) {
+	std::vector<uint32_t> pages;
+	if (SelectPageSize(pageSizeBytes) != pageSizeBytes || pageSizeBytes < m_config.minStreamingPageSize) return pages;
+	uint32_t firstPageID = 0u;
+	uint32_t pageCount = 0u;
+	uint32_t previousPageSize = 0u;
+	{
+		std::unique_lock lock(m_slabMutex);
+		if (slabIndex >= m_slabs.size() || m_slabs[slabIndex].role != SlabRole::General) return pages;
+		Slab& slab = m_slabs[slabIndex];
+		previousPageSize = slab.pageSize;
+		pageCount = static_cast<uint32_t>(m_config.slabSize / pageSizeBytes);
+		if (pageCount > slab.pageIdCapacity) return pages;
+		firstPageID = slab.firstPageID;
+		slab.pageSize = pageSizeBytes;
+		slab.pageCount = pageCount;
+		for (uint32_t i = 0u; i < slab.pageIdCapacity; ++i) {
+			auto& entry = m_pageTableCpu[firstPageID + i];
+			entry.slabIndex = slabIndex;
+			entry.slabByteOffset = i < pageCount ? i * pageSizeBytes : 0u;
+		}
+	}
+	m_pageTableDirty = true;
+	pages.reserve(pageCount);
+	for (uint32_t i = 0u; i < pageCount; ++i) pages.push_back(firstPageID + i);
+	spdlog::info("PagePool: slab {} changed from {} KiB to {} KiB pages ({} pages)",
+		slabIndex, previousPageSize / 1024u, pageSizeBytes / 1024u, pageCount);
 	return pages;
 }
 

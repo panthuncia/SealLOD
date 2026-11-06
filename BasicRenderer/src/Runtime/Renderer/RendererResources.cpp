@@ -88,8 +88,10 @@ void Renderer::CreateDefaultEnvironmentResources() {
         return cubemap;
     };
 
-    auto reflectionResolution = SettingsManager::GetInstance().getSettingGetter<uint16_t>("reflectionCubemapResolution")();
-    auto skyboxResolution = SettingsManager::GetInstance().getSettingGetter<uint16_t>("skyboxResolution")();
+    // Blank stand-ins until an environment exists: their contents are uniform, so their size buys nothing. At the skybox and
+    // reflection resolutions they held 104 MiB for the whole session.
+    constexpr uint32_t reflectionResolution = 16u;
+    constexpr uint32_t skyboxResolution = 16u;
 
     if (!m_pipelineRecipe.Bindings().Contains(Builtin::Environment::CurrentCubemap) && !m_defaultEnvironmentCubemap) {
         m_defaultEnvironmentCubemap = makeFallbackCubemap(skyboxResolution, false, "Fallback Environment Cubemap");

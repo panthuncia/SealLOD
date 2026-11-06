@@ -22,6 +22,8 @@
 #define PSO_OPENPBR_FUZZ_ROUGHNESS_TEXTURE 1
 
 static uint4 g_clodRtPackedCluster;
+// The hit's assembly transform (a part portal occurrence), from its TLAS row; sentinel for a root's own clusters.
+static uint g_clodRtHitTransformIndex = 0xFFFFFFFFu;
 
 #include "include/cbuffers.hlsli"
 #include "include/structs.hlsli"
@@ -75,11 +77,12 @@ BarycentricDeriv CLodPathHitBarycentrics(float2 barycentrics, float3 edge1WS, fl
     return bary;
 }
 
-// drawRecord is InstanceID() and clasSlot is ClusterID(). coneWidth is the footprint's width at this hit, in world units.
+// instanceID and instanceIndex are InstanceID() and InstanceIndex(), and clasSlot is ClusterID(). coneWidth is the footprint's width at this hit, in world units.
 // isPrimaryHit decides whether the hit may feed streaming and use parallax. isTerrain must be a literal at each closest-hit
 // entry, so the other material path folds away. False if the hit doesn't resolve to geometry of that kind.
 bool CLodResolvePathHit(
-    uint drawRecord,
+    uint instanceID,
+    uint instanceIndex,
     uint clasSlot,
     uint primitive,
     float2 barycentrics,
@@ -95,9 +98,11 @@ bool CLodResolvePathHit(
     hit.frontFace = frontFace;
     g_clodPathHitIsPrimary = isPrimaryHit;
 
+    const uint drawRecord = CLodRtInstanceDraw(instanceID);
+    g_clodRtHitTransformIndex = CLodRtInstanceTransform(instanceID, instanceIndex);
     StructuredBuffer<CLodRtClasInfo> clasInfo = ResourceDescriptorHeap[CLOD_PATH_HIT_CLAS_INFO_SRV];
     const CLodRtClasInfo info = clasInfo[clasSlot];
-    g_clodRtPackedCluster = CLodPackVisibleCluster(0u, drawRecord, info.localMeshlet, info.groupLocalIndex, info.slabDescriptor,
+    g_clodRtPackedCluster = CLodPackVisibleCluster(0u, drawRecord, info.localMeshlet, CLodRtClasGroup(info), info.slabDescriptor,
         info.pageOffsetUnits << CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_SHIFT, CLOD_PACKED_VISIBLE_CLUSTER_INVALID_SHADOW_CLIPMAP_INDEX);
 
     const MeshletResolveData md = LoadMeshletResolveData(0u);
@@ -119,8 +124,8 @@ bool CLodResolvePathHit(
     const uint materialFlags = materialInfo.materialFlags;
 
     const uint3 triIdx = DecodeTriangleCompact(primitive, md);
-    const ClodResolvedTriangle tri = CLodResolveLoadTriangle(triIdx, md, CLOD_ASSEMBLY_TRANSFORM_SENTINEL);
-    const PerObjectBuffer obj = LoadInstanceTransformForDrawWithAssemblyTransform(md.objAndMesh.x, CLOD_ASSEMBLY_TRANSFORM_SENTINEL);
+    const ClodResolvedTriangle tri = CLodResolveLoadTriangle(triIdx, md, g_clodRtHitTransformIndex);
+    const PerObjectBuffer obj = LoadInstanceTransformForDrawWithAssemblyTransform(md.objAndMesh.x, g_clodRtHitTransformIndex);
     const float3 edge1WS = mul(float4(tri.p1 - tri.p0, 0.0f), obj.model).xyz;
     const float3 edge2WS = mul(float4(tri.p2 - tri.p0, 0.0f), obj.model).xyz;
     float3 windingNormalWS;

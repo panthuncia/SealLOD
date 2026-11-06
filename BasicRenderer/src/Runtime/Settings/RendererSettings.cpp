@@ -166,6 +166,12 @@ void Renderer::SetSettings() {
         "enableTerrainRvt",
         m_pipelineRecipe.Contains<br::pipeline::TerrainRvtTechnique>());
     settingsManager.registerSetting<bool>("forceDirectTerrainRvtFallback", false);
+    // TerrainRvt::RefreshStalePagesSettingName: re-render RVT pages once a source texture they were short of improves.
+    // SARP_TERRAIN_RVT_REFRESH=0 starts with it off (the menu switches it at runtime).
+    settingsManager.registerSetting<bool>("terrainRvtRefreshStalePages", [] {
+        const char* value = std::getenv("SARP_TERRAIN_RVT_REFRESH");
+        return !(value && value[0] == '0');
+    }());
     settingsManager.registerSetting<bool>(TerrainRvtTelemetryDebugSettingName, false);
     settingsManager.registerSetting<uint32_t>("terrainRvtDebugView", 0u);
     settingsManager.registerSetting<uint32_t>("terrainRvtPageSize", 128u);

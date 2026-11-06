@@ -20,6 +20,7 @@ struct CLodRtHit
 {
     bool hit;
     uint drawRecord;
+    uint transformIndex; // The part portal occurrence's assembly transform, or sentinel.
     uint clasSlot;
     uint primitive;
     float2 barycentrics;
@@ -34,7 +35,7 @@ uint4 CLodRtPackHitCluster(uint viewID, uint drawRecord, CLodRtClasInfo info)
         viewID,
         drawRecord,
         info.localMeshlet,
-        info.groupLocalIndex,
+        CLodRtClasGroup(info),
         info.slabDescriptor,
         info.pageOffsetUnits << CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_SHIFT,
         CLOD_PACKED_VISIBLE_CLUSTER_INVALID_SHADOW_CLIPMAP_INDEX);
@@ -43,9 +44,13 @@ uint4 CLodRtPackHitCluster(uint viewID, uint drawRecord, CLodRtClasInfo info)
 // Materials reach their real image through streaming, as raster's alpha test does. Normally it has no say in what streams in,
 // since raster asks for what it draws. With no raster, a leaf rejected by a low mip would never reach the closest hit that asks
 // for a better one, so primary rays ask here as well.
-float CLodRtSampleAlpha(uint textureIndex, uint samplerIndex, uint streamingTextureID, float2 uv, float footprintUv)
+// testMip: the cluster has micromaps, so its any-hit answers must be theirs. A cluster without them (merge hierarchy
+// node geometry has none yet) samples the footprint's mip instead: asking every primary hit for the test mip keeps
+// distant foliage textures at full resolution.
+float CLodRtSampleAlpha(uint textureIndex, uint samplerIndex, uint streamingTextureID, float2 uv, float footprintUv, bool testMip)
 {
 #if CLOD_RT_FIXED_ALPHA_MIP
+    if (testMip) {
     // See clodRayTracingAlpha.hlsli: one mip whatever the distance, which opacity micromaps are baked against.
     const CLodRtAlphaImage alphaImage = CLodRtResolveAlphaImage(textureIndex, streamingTextureID);
     Texture2D<float4> fixedImage = ResourceDescriptorHeap[NonUniformResourceIndex(alphaImage.descriptor)];
@@ -64,7 +69,8 @@ float CLodRtSampleAlpha(uint textureIndex, uint samplerIndex, uint streamingText
     }
 #endif
     return fixedImage.SampleLevel(fixedSampler, uv, float(alphaImage.mip)).a;
-#else
+    }
+#endif
     if (streamingTextureID != 0u) {
         StructuredBuffer<TextureStreamingGPUInfo> streaming =
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Material::TextureStreamingMetadataBuffer)];
@@ -90,18 +96,18 @@ float CLodRtSampleAlpha(uint textureIndex, uint samplerIndex, uint streamingText
     const float footprintTexels = footprintUv * float(max(width, height));
     const float mipLevel = log2(max(footprintTexels, 1.0f));
     return image.SampleLevel(imageSampler, uv, mipLevel).a;
-#endif
 }
 
 // Ray barycentrics are perspective correct already, so unlike raster nothing needs converting.
 //
 // The mip comes from a ray cone. Hardware raster samples alpha with screen derivatives, and at a distance those pick
 // coarser, denser mips of a foliage texture; testing mip 0 instead would leave trees full of holes raster does not have.
-bool CLodRtTriangleIsTransparentAt(CLodRtClasInfo info, uint drawRecord, uint primitive, float2 barycentrics, float3 rayDirection, float t, float coneSpread)
+bool CLodRtTriangleIsTransparentAt(CLodRtClasInfo info, uint drawRecord, uint transformIndex, uint primitive, float2 barycentrics, float3 rayDirection, float t, float coneSpread)
 {
     CLodRasterClusterSource source = (CLodRasterClusterSource)0;
     source.packedCluster = CLodRtPackHitCluster(0u, drawRecord, info);
-    source.assemblyTransformIndex = CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
+    source.assemblyTransformIndex = transformIndex;
+    source.paletteIndex = CLOD_PALETTE_INDEX_FROM_PAGE;
     CLodRasterCluster cluster;
     if (CLodLoadRasterCluster(source, cluster) != CLOD_RASTER_CLUSTER_OK) {
         return true;
@@ -122,7 +128,7 @@ bool CLodRtTriangleIsTransparentAt(CLodRtClasInfo info, uint drawRecord, uint pr
     const float2 uv = uv0 * (1.0f - barycentrics.x - barycentrics.y) + uv1 * barycentrics.x + uv2 * barycentrics.y;
 
     const row_major matrix model = LoadInstanceTransformForDrawRecordWithAssemblyTransform(
-        LoadInstanceDrawRecord(drawRecord), CLOD_ASSEMBLY_TRANSFORM_SENTINEL).model;
+        LoadInstanceDrawRecord(drawRecord), transformIndex).model;
     const float3 p0 = mul(float4(CLodRasterLoadPosition(cluster, slab, indices.x), 1.0f), model).xyz;
     const float3 edge1 = mul(float4(CLodRasterLoadPosition(cluster, slab, indices.y), 1.0f), model).xyz - p0;
     const float3 edge2 = mul(float4(CLodRasterLoadPosition(cluster, slab, indices.z), 1.0f), model).xyz - p0;
@@ -138,18 +144,22 @@ bool CLodRtTriangleIsTransparentAt(CLodRtClasInfo info, uint drawRecord, uint pr
     const MaterialInfo material = materials[cluster.materialDataIndex];
     float alpha = material.baseColorFactor.a;
     if ((material.materialFlags & MATERIAL_BASE_COLOR_TEXTURE) != 0u) {
-        alpha *= CLodRtSampleAlpha(material.baseColorTextureIndex, material.baseColorSamplerIndex, material.baseColorStreamingTextureID, uv, footprintUv);
+        alpha *= CLodRtSampleAlpha(material.baseColorTextureIndex, material.baseColorSamplerIndex, material.baseColorStreamingTextureID, uv, footprintUv,
+            CLodRtClasHasMicromaps(info));
     }
     if ((material.materialFlags & MATERIAL_OPACITY_TEXTURE) != 0u) {
-        alpha *= CLodRtSampleAlpha(material.opacityTextureIndex, material.opacitySamplerIndex, material.opacityStreamingTextureID, uv, footprintUv);
+        alpha *= CLodRtSampleAlpha(material.opacityTextureIndex, material.opacitySamplerIndex, material.opacityStreamingTextureID, uv, footprintUv,
+            CLodRtClasHasMicromaps(info));
     }
     return !CLodRtAlphaIsOpaque(alpha, material.alphaCutoff);
 }
 
 // coneSpread: how fast the ray footprint grows with distance, in radians.
-bool CLodRtCandidateIsTransparent(StructuredBuffer<CLodRtClasInfo> clasInfo, uint drawRecord, uint slot, uint primitive, float2 barycentrics, float3 rayDirection, float t, float coneSpread)
+// instanceID and instanceIndex are the candidate's InstanceID() and InstanceIndex().
+bool CLodRtCandidateIsTransparent(StructuredBuffer<CLodRtClasInfo> clasInfo, uint instanceID, uint instanceIndex, uint slot, uint primitive, float2 barycentrics, float3 rayDirection, float t, float coneSpread)
 {
-    return CLodRtTriangleIsTransparentAt(clasInfo[slot], drawRecord, primitive, barycentrics, rayDirection, t, coneSpread);
+    return CLodRtTriangleIsTransparentAt(clasInfo[slot], CLodRtInstanceDraw(instanceID), CLodRtInstanceTransform(instanceID, instanceIndex),
+        primitive, barycentrics, rayDirection, t, coneSpread);
 }
 
 CLodRtHit CLodRtTrace(RaytracingAccelerationStructure scene, StructuredBuffer<CLodRtClasInfo> clasInfo, RayDesc ray, uint rayFlags, uint instanceMask, float coneSpread)
@@ -158,7 +168,7 @@ CLodRtHit CLodRtTrace(RaytracingAccelerationStructure scene, StructuredBuffer<CL
     query.TraceRayInline(scene, rayFlags, instanceMask, ray);
     while (query.Proceed()) {
         if (query.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE
-            && !CLodRtCandidateIsTransparent(clasInfo, query.CandidateInstanceID(), query.CandidateClusterID(),
+            && !CLodRtCandidateIsTransparent(clasInfo, query.CandidateInstanceID(), query.CandidateInstanceIndex(), query.CandidateClusterID(),
                 query.CandidatePrimitiveIndex(), query.CandidateTriangleBarycentrics(), ray.Direction, query.CandidateTriangleRayT(), coneSpread)) {
             query.CommitNonOpaqueTriangleHit();
         }
@@ -167,7 +177,8 @@ CLodRtHit CLodRtTrace(RaytracingAccelerationStructure scene, StructuredBuffer<CL
     CLodRtHit hit = (CLodRtHit)0;
     hit.hit = query.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
     if (hit.hit) {
-        hit.drawRecord = query.CommittedInstanceID();
+        hit.drawRecord = CLodRtInstanceDraw(query.CommittedInstanceID());
+        hit.transformIndex = CLodRtInstanceTransform(query.CommittedInstanceID(), query.CommittedInstanceIndex());
         hit.clasSlot = query.CommittedClusterID();
         hit.primitive = query.CommittedPrimitiveIndex();
         hit.barycentrics = query.CommittedTriangleBarycentrics();

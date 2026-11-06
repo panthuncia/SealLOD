@@ -738,6 +738,10 @@ void Renderer::Initialize(
     m_pTextureFactory->SetJobUploadService(m_textureJobs->Uploads());
     m_textureJobs->StartSelfTestIfRequested();
     m_clodRayTracingSystem = std::make_shared<br::render::CLodRayTracingSystem>();
+    m_pEnvironmentManager->SetBc6hCompressor([factory = m_pTextureFactory.get()](std::shared_ptr<TextureSourceData> source,
+        std::string name, std::function<void(std::shared_ptr<TextureSourceData>)> done) {
+        return factory->SubmitBC6HCompressionJob(std::move(source), std::move(name), std::move(done));
+    });
     if (currentRenderGraph) {
         m_pTextureFactory->SetReadbackService(m_orgRuntime->Readbacks());
     }

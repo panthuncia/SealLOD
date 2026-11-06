@@ -3,7 +3,10 @@
 #include <atomic>
 #include <cstdint>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
+#include <vector>
 
 #include <BasicRenderer/Streaming/ArtifactTypes.h>
 #include <BasicRenderer/Streaming/PublishedTypes.h>
@@ -54,8 +57,14 @@ public:
     VersionedBufferRuntime(const VersionedBufferRuntime&) = delete;
     VersionedBufferRuntime& operator=(const VersionedBufferRuntime&) = delete;
 
-    // Any thread: a frame slot's fence completed and its retained published states were released.
+    // Any thread: a frame slot's fence completed and its retained published states were released. Every kTrimInterval
+    // retirements it also trims the pools (TrimPools).
     void NotifyFrameRetirement() noexcept;
+    // Any thread: returns the free backings each pool no longer needs. Acquire releases only the free backings that are already
+    // reusable when it runs, and a backing superseded then is not (SupersededSafeAt), so without this every publication can
+    // leave one more full copy behind for good. A pool that acquired nothing since the last trim keeps no spare either.
+    void TrimPools() noexcept;
+    static constexpr std::uint64_t kTrimInterval = 64;
     [[nodiscard]] std::uint64_t RetirementEpoch() const noexcept { return m_clock->Completed(); }
     [[nodiscard]] const std::shared_ptr<org::services::RetirementClock>& Clock() const noexcept { return m_clock; }
     [[nodiscard]] std::uint32_t FramesInFlight() const noexcept { return m_framesInFlight; }
@@ -69,9 +78,15 @@ public:
     [[nodiscard]] std::shared_ptr<VersionedGpuBufferBackingPool> CreatePool(std::string name) const;
 
 private:
+    struct WatchedPool {
+        std::weak_ptr<VersionedGpuBufferBackingPool> pool;
+        std::uint64_t acquisitions = 0; // allocated + reused at the last trim
+    };
     std::shared_ptr<org::services::RetirementClock> m_clock;
     std::atomic<std::uint64_t> m_retirements{ 0 };
     std::uint32_t m_framesInFlight = 1;
+    mutable std::mutex m_poolsMutex;
+    mutable std::vector<WatchedPool> m_pools;
 };
 
 // VersionedBufferFamily::Acknowledge for raw pool users: `version` became the published one, and `published` (the version that

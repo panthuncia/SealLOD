@@ -76,6 +76,9 @@ namespace br::staticimport
 		// The material slot this template's own usage admission reserved. Set
 		// before the request reaches the publication drain.
 		std::optional<std::uint32_t> materialDataIndex;
+		// A hierarchy root: the slot of every palette material (Mesh::GetMaterialPalette order; entry 0 is
+		// `material`), each from its own admission.
+		std::vector<std::uint32_t> paletteMaterialDataIndices;
 	};
 
 	enum class StaticImportDependencyKind

@@ -622,7 +622,8 @@ namespace {
         return desc;
     }
 
-    std::vector<rhi::CopyableFootprint> BuildBc7CompressionFootprints(const org::TextureDescription& desc, uint64_t& totalBytes)
+    std::vector<rhi::CopyableFootprint> BuildBc7CompressionFootprints(const org::TextureDescription& desc, uint64_t& totalBytes,
+        uint32_t arraySize = 1u)
     {
         if (desc.imageDimensions.empty()) {
             throw std::runtime_error("BuildBc7CompressionSubresources: texture description has no image dimensions");
@@ -633,7 +634,7 @@ namespace {
             subresource.pData = reinterpret_cast<const void*>(1);
         }
 
-        const uint32_t mipLevels = static_cast<uint32_t>(desc.imageDimensions.size());
+        const uint32_t mipLevels = static_cast<uint32_t>(desc.imageDimensions.size()) / arraySize;
         const rhi::Span<const rhi::helpers::SubresourceData> srcSpan{ dummySubresources.data(), static_cast<uint32_t>(dummySubresources.size()) };
         const auto plan = rhi::helpers::PlanTextureUploadSubresources(
             desc.format,
@@ -641,7 +642,7 @@ namespace {
             desc.imageDimensions[0].height,
             1,
             mipLevels,
-            1,
+            arraySize,
             srcSpan);
 
         std::vector<rhi::CopyableFootprint> footprints;
@@ -990,6 +991,83 @@ bool TextureFactory::SubmitBC7CompressionJob(
                 ready->stage.store(BC7CompressionJob::Stage::ReadyForCompression, std::memory_order_release);
         }))
         job->waitsForMips.store(true, std::memory_order_release);
+
+    std::static_pointer_cast<BC7CompressionPass>(m_bc7CompressionPass)->EnqueueJob(job);
+    std::static_pointer_cast<BC7CompressionCopyPass>(m_bc7CompressionCopyPass)->EnqueueJob(job);
+    readbackPass->EnqueueJob(job);
+    return true;
+}
+
+bool TextureFactory::SubmitBC6HCompressionJob(
+    std::shared_ptr<TextureSourceData> source,
+    std::string debugName,
+    std::function<void(std::shared_ptr<TextureSourceData>)> done) const
+{
+    if (!source || !done || source->desc.imageDimensions.empty() || source->isBlockCompressed) return false;
+    const rhi::Format format = source->desc.format;
+    if (format != rhi::Format::R16G16B16A16_Float && format != rhi::Format::R32G32B32A32_Float) return false;
+    auto* readbackPass = std::static_pointer_cast<BC7CompressionReadbackPass>(m_bc7CompressionReadbackPass).get();
+    if (!readbackPass || !readbackPass->HasReadbackService()) return false;
+
+    // A cube's faces are slices: the job reads each through a 2D array view.
+    const uint32_t faces = source->desc.isCubemap ? 6u : 1u;
+    const uint32_t sliceCount = (std::max)(1u, source->desc.arraySize) * faces;
+    const uint32_t subresourceCount = static_cast<uint32_t>(source->desc.imageDimensions.size());
+    if (subresourceCount % sliceCount != 0u || source->subresources.size() != subresourceCount) return false;
+    const uint32_t mipLevels = subresourceCount / sliceCount;
+
+    org::TextureDescription workingDesc = source->desc;
+    workingDesc.isCubemap = false;
+    workingDesc.isArray = sliceCount > 1u;
+    workingDesc.arraySize = sliceCount;
+    workingDesc.generateMipMaps = false;
+    workingDesc.hasUAV = false;
+    workingDesc.hasRTV = false;
+    workingDesc.uavFormat = rhi::Format::Unknown;
+    auto workingTexture = CreateAlwaysResidentPixelBuffer(
+        workingDesc, TextureInitialData::FromBytes(source->subresources), debugName + "[BC6HWorking]");
+
+    org::TextureDescription compressedDesc = workingDesc;
+    compressedDesc.format = rhi::Format::BC6H_UF16;
+    compressedDesc.srvFormat = rhi::Format::BC6H_UF16;
+    compressedDesc.channels = 4;
+    for (auto& dims : compressedDesc.imageDimensions) {
+        dims.rowPitch = static_cast<uint64_t>((dims.width + 3u) / 4u) * 16u;
+        dims.slicePitch = dims.rowPitch * ((dims.height + 3u) / 4u);
+    }
+    auto compressedTexture = org::PixelBuffer::CreateShared(compressedDesc);
+    org::memory::SetResourceUsageHint(*compressedTexture, "Texture processing compressed outputs");
+    compressedTexture->SetName(debugName + "[BC6H]");
+
+    uint64_t outputByteSize = 0;
+    const auto footprints = BuildBc7CompressionFootprints(compressedDesc, outputByteSize, sliceCount);
+    auto job = std::make_shared<BC7CompressionJob>();
+    job->debugName = debugName;
+    job->blockFormat = rhi::Format::BC6H_UF16;
+    job->sliceCount = sliceCount;
+    job->done = std::move(done);
+    job->outputDescription = source->desc;
+    job->outputDescription.format = rhi::Format::BC6H_UF16;
+    job->outputDescription.srvFormat = rhi::Format::BC6H_UF16;
+    job->outputDescription.imageDimensions = compressedDesc.imageDimensions;
+    job->blockBuffer = CreateRawByteAddressBuffer(outputByteSize, true, debugName + "[BC6HBlocks]");
+    job->workingTexture = std::move(workingTexture);
+    job->compressedTexture = std::move(compressedTexture);
+    job->outputByteSize = outputByteSize;
+    // Subresource order: mips of slice 0, then of slice 1, as the footprints are.
+    for (uint32_t index = 0; index < static_cast<uint32_t>(footprints.size()); ++index) {
+        BC7CompressionSubresource subresource{};
+        subresource.footprint = footprints[index];
+        subresource.mip = index % mipLevels;
+        subresource.slice = index / mipLevels;
+        job->subresources.push_back(subresource);
+    }
+    // Counted against the BC7 budget, but always admitted: these are rare one-off jobs.
+    uint64_t sourceBytes = 0;
+    for (const auto& subresource : source->subresources) if (subresource) sourceBytes += subresource->size();
+    job->inFlightBytes = m_bc7InFlightBytes;
+    job->budgetBytes = sourceBytes * 2u + outputByteSize * 3u;
+    m_bc7InFlightBytes->fetch_add(job->budgetBytes, std::memory_order_acq_rel);
 
     std::static_pointer_cast<BC7CompressionPass>(m_bc7CompressionPass)->EnqueueJob(job);
     std::static_pointer_cast<BC7CompressionCopyPass>(m_bc7CompressionCopyPass)->EnqueueJob(job);

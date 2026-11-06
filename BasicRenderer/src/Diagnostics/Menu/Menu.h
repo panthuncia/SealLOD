@@ -517,6 +517,9 @@ private:
     bool m_forceDirectTerrainRvtFallback = false;
     std::function<bool()> getForceDirectTerrainRvtFallback;
     std::function<void(bool)> setForceDirectTerrainRvtFallback;
+    bool m_terrainRvtRefreshStalePages = true;
+    std::function<bool()> getTerrainRvtRefreshStalePages;
+    std::function<void(bool)> setTerrainRvtRefreshStalePages;
     bool m_terrainRvtTelemetryDebug = false;
     std::function<bool()> getTerrainRvtTelemetryDebug;
     std::function<void(bool)> setTerrainRvtTelemetryDebug;

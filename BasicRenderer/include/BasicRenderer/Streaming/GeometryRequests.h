@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <vector>
 #include "BasicRenderer/Extensions/ShaderBuffers.h"
 
 class Mesh;
@@ -12,6 +13,9 @@ namespace br::render {
 struct StaticMeshTemplateRequest {
 	std::shared_ptr<Mesh> mesh;
 	std::shared_ptr<Material> material;
+	// A hierarchy root's palette rows (Mesh::GetMaterialPalette order), each built from a material its template
+	// admitted. Empty for an ordinary mesh.
+	std::vector<CLodMaterialPaletteEntry> palette;
 };
 
 struct StaticMeshTemplateRegistration {

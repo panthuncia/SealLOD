@@ -53,7 +53,7 @@ bool CLodValidateSourceGroup(
     uint bucketCount)
 {
     const uint instanceId = CLodVisibleClusterInstanceID(packedCluster);
-    const uint expectedGroupLocalIndex = CLodVisibleClusterGroupID(packedCluster);
+    const uint expectedGroupGlobalIndex = CLodVisibleClusterGroupID(packedCluster);
     const uint pageLocalMeshletIndex = CLodVisibleClusterLocalMeshletIndex(packedCluster);
     const uint pageSlabDescriptorIndex = CLodVisibleClusterPageSlabDescriptorIndex(packedCluster);
     const uint pageSlabByteOffset = CLodVisibleClusterPageSlabByteOffset(packedCluster);
@@ -74,7 +74,9 @@ bool CLodValidateSourceGroup(
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
     StructuredBuffer<ClusterLODGroupSegment> segments =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Segments)];
-    const ClusterLODGroup expectedGroup = groups[metadata.groupsBase + expectedGroupLocalIndex];
+    const ClusterLODGroup expectedGroup = groups[expectedGroupGlobalIndex];
+    // Page descriptors name their group mesh-locally.
+    const uint expectedGroupLocalIndex = expectedGroupGlobalIndex - metadata.groupsBase;
 
     // The segment of the expected group that should hold this meshlet.
     uint actualOwnerMeshMetadataIndex = 0xFFFFFFFFu;
@@ -88,21 +90,21 @@ bool CLodValidateSourceGroup(
         segmentIndex < expectedGroup.firstSegment + expectedGroup.segmentCount;
         ++segmentIndex)
     {
-        const ClusterLODGroupSegment segment = segments[metadata.segmentsBase + segmentIndex];
+        const ClusterLODGroupSegment segment = segments[segmentIndex];
         if (pageLocalMeshletIndex < segment.firstMeshletInPage ||
             pageLocalMeshletIndex >= segment.firstMeshletInPage + segment.meshletCount)
         {
             continue;
         }
 
-        const GroupPageMapEntry entry = LoadGroupPageMapEntry(metadata.pageMapBase, segment.pageIndex);
+        const GroupPageMapEntry entry = LoadGroupPageMapEntry(0u, segment.pageIndex);
         if (entry.slabDescriptorIndex != pageSlabDescriptorIndex || entry.slabByteOffset != pageSlabByteOffset)
         {
             continue;
         }
 
         actualOwnerMeshMetadataIndex = entry.ownerMeshMetadataIndex;
-        expectedSegmentGlobalIndex = metadata.segmentsBase + segmentIndex;
+        expectedSegmentGlobalIndex = segmentIndex;
         expectedSegmentPageIndex = segment.pageIndex;
         expectedSegmentFirstMeshlet = segment.firstMeshletInPage;
         expectedSegmentMeshletCount = segment.meshletCount;

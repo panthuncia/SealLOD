@@ -56,7 +56,7 @@ ReyesPatchRasterBindings ReyesPatchRasterizationPass::Declare(org::PassBuilder& 
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.ShaderResource(
-            Builtin::PerMeshBuffer,
+            Builtin::PerMeshBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases,
             Builtin::PerMeshInstanceBuffer,
             Builtin::InstanceDrawRecordBuffer,
             Builtin::PerInstanceTransformBuffer,

@@ -617,7 +617,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Nodes)];
 
     const uint nodeLocalId = UnpackNodeId(rec.nodeIdPacked);
-    const ClusterLODNode node = lodNodes[clodMeshMetadata.lodNodesBase + nodeLocalId];
+    const ClusterLODNode node = lodNodes[nodeLocalId];
     CLodTelemetryTraverseWaveClassification(
         node.range.isLeaf == CLOD_NODE_INTERNAL,
         isSkinned);
@@ -730,9 +730,9 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
         {
             StructuredBuffer<ClusterLODAssemblyInstance> assemblyInstances =
                 ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::AssemblyInstances)];
-            if (node.range.indexOrOffset < clodMeshMetadata.assemblyInstanceCount) {
+            if (node.range.indexOrOffset - clodMeshMetadata.assemblyInstanceBase < clodMeshMetadata.assemblyInstanceCount) {
                 const ClusterLODAssemblyInstance assemblyInstance =
-                    assemblyInstances[clodMeshMetadata.assemblyInstanceBase + node.range.indexOrOffset];
+                    assemblyInstances[node.range.indexOrOffset];
                 if (assemblyInstance.stackDepth <= CLOD_ASSEMBLY_MAX_STACK_DEPTH) {
                     uint outputIndex = 0u;
                     InterlockedAdd(nextCounter[0], 1u, outputIndex);
@@ -748,7 +748,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
                         childRecord.assemblyTransformIndex =
                             assemblyInstance.transformIndex == CLOD_ASSEMBLY_TRANSFORM_SENTINEL
                                 ? rec.assemblyTransformIndex
-                                : clodMeshMetadata.assemblyTransformBase + assemblyInstance.transformIndex;
+                                : assemblyInstance.transformIndex;
                         nextFrontier[outputIndex] = PackPureComputeTraverseNodeRecord(childRecord);
                         WGTelemetryAdd(WG_COUNTER_TRAVERSE_TRAVERSE_RECORDS, 1);
                     }
@@ -799,7 +799,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
         }
 
         if (!forceLodDecision && CLodRefinedChildSuppressesParent(
-            clodMeshMetadata.groupsBase,
+            0u,
             node.range.countMinusOne - 1u,
             node.range.countMinusOne != 0u,
             objectModelMatrix,
@@ -856,7 +856,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
 
         StructuredBuffer<ClusterLODGroupSegment> segments =
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Segments)];
-        const uint segGlobalIndex = clodMeshMetadata.segmentsBase + node.range.indexOrOffset;
+        const uint segGlobalIndex = node.range.indexOrOffset;
         const ClusterLODGroupSegment seg = segments[segGlobalIndex];
 
         if (seg.meshletCount == 0u) {
@@ -868,7 +868,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
         {
             WGTelemetryAdd(WG_COUNTER_ASSEMBLY_PART_TRIANGLE_BUCKET_RECORDS, 1);
         }
-        const GroupPageMapEntry pageEntry = LoadGroupPageMapEntry(clodMeshMetadata.pageMapBase, seg.pageIndex);
+        const GroupPageMapEntry pageEntry = LoadGroupPageMapEntry(0u, seg.pageIndex);
         if (pageEntry.slabDescriptorIndex == 0u)
         {
             WGTelemetryAdd(WG_COUNTER_RASTER_MESH_SHADER_INIT_FAILED_ZERO_PAGE_SLAB, 1);
@@ -990,7 +990,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
     [loop]
     for (uint childIndex = 0; childIndex < childCount; ++childIndex) {
         const uint childNodeId = node.range.indexOrOffset + childIndex;
-        const ClusterLODNode child = lodNodes[clodMeshMetadata.lodNodesBase + childNodeId];
+        const ClusterLODNode child = lodNodes[childNodeId];
 
         // Reject internal children by their cheap hierarchy LOD bound before
         // doing any visibility-bound work.

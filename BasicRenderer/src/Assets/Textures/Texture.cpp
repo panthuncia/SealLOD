@@ -1760,20 +1760,37 @@ TexturePendingDebugInfo TextureAsset::GetPendingDebugInfo() const {
 
 bool TextureAsset::ApplyStreamingSystemRequest(uint32_t topMip, uint64_t frameIndex, bool forceResidencyChange) {
 	constexpr uint64_t kUpgradeRequestSettleFrames = 8u;
-	constexpr uint32_t kStreamingMipLevelStep = 4u;
+	// Feedback must stay coarser than residency this long before residency follows it down.
+	constexpr uint64_t kDowngradeRequestSettleFrames = 240u;
 	std::scoped_lock uploadAdvanceLock(m_uploadAdvanceMutex);
 	const uint32_t rawClampedTopMip = (std::min)(topMip, m_streamingState.residency.totalMipCount - 1u);
 	if (!forceResidencyChange) {
 		m_streamingState.lastFeedbackTopMip = rawClampedTopMip;
 	}
-	// Every streamed image is a complete replacement, so changing residency by one
-	// mip at a time is disproportionately expensive.  Quantize upgrades toward the
-	// finer end of a four-mip bucket: this never supplies less detail than feedback
-	// requested and caps a typical 12-mip texture at 11 -> 8 -> 4 -> 0.
-	const uint32_t clampedTopMip =
-		!forceResidencyChange && rawClampedTopMip < m_streamingState.residency.residentTopMip
-			? (rawClampedTopMip / kStreamingMipLevelStep) * kStreamingMipLevelStep
-			: rawClampedTopMip;
+	// Upgrades load exactly the mip feedback asks for. Rounding them to a multiple of four mips toward the finer end
+	// meant a request for mip 3 loaded mip 0, 64 times the bytes. Intermediate requests while an object approaches
+	// still settle first (below), and their images are a small fraction of the final one.
+	uint32_t clampedTopMip = rawClampedTopMip;
+	bool downgradeDue = false;
+	if (!forceResidencyChange && frameIndex != 0u) {
+		const uint32_t residentTopMip = m_streamingState.residency.residentTopMip;
+		if (rawClampedTopMip > residentTopMip) {
+			if (m_coarserFeedbackSinceFrame == 0u) {
+				m_coarserFeedbackSinceFrame = frameIndex;
+				m_coarserFeedbackFinestTopMip = rawClampedTopMip;
+			} else {
+				m_coarserFeedbackFinestTopMip = (std::min)(m_coarserFeedbackFinestTopMip, rawClampedTopMip);
+			}
+			if (frameIndex >= m_coarserFeedbackSinceFrame + kDowngradeRequestSettleFrames) {
+				// Down to the finest mip asked for over the whole window, so a texture seen at varying distances keeps it.
+				clampedTopMip = m_coarserFeedbackFinestTopMip;
+				downgradeDue = true;
+				m_coarserFeedbackSinceFrame = 0u;
+			}
+		} else {
+			m_coarserFeedbackSinceFrame = 0u;
+		}
+	}
 	const bool requestChanged = m_streamingState.requestedTopMip != clampedTopMip;
 	const bool frameChanged = frameIndex != 0u && m_streamingState.lastSeenFrame != frameIndex;
 	const bool requestIsResident = clampedTopMip >= m_streamingState.residency.residentTopMip;
@@ -1793,7 +1810,7 @@ bool TextureAsset::ApplyStreamingSystemRequest(uint32_t topMip, uint64_t frameIn
 		m_streamingRequestChangedFrame == 0u ||
 		frameIndex >= m_streamingRequestChangedFrame + kUpgradeRequestSettleFrames;
 	const bool shouldChangeResidency =
-		(forceResidencyChange && !uploadInProgress && m_streamingState.pendingTopMip != clampedTopMip) ||
+		((forceResidencyChange || downgradeDue) && !uploadInProgress && m_streamingState.pendingTopMip != clampedTopMip) ||
 		(!requestIsResident && !uploadInProgress && m_streamingState.pendingTopMip != clampedTopMip &&
 		 upgradeRequestSettled);
 

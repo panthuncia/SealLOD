@@ -22,6 +22,7 @@ namespace org { class PixelBuffer; }
 namespace org { class Sampler; }
 namespace org { class BufferView; }
 namespace org { class Buffer; }
+struct TextureSourceData;
 struct TextureProcessingJobHandle;
 class MaterialTextureTransferService;
 
@@ -92,6 +93,13 @@ public:
     bool SubmitBC7CompressionJob(
         const std::shared_ptr<TextureProcessingJobHandle>& handle,
         std::string_view debugName = {}) const;
+    // Compresses float RGB data (2D, array or cube, with the mips it has) to BC6H_UF16 on the GPU, through the BC7 job's
+    // passes. done runs once, on a readback thread: the blocks, described like the source but BC6H, or null on failure.
+    // False when the job can't run (no readback service) or the data isn't float RGBA.
+    bool SubmitBC6HCompressionJob(
+        std::shared_ptr<TextureSourceData> source,
+        std::string debugName,
+        std::function<void(std::shared_ptr<TextureSourceData>)> done) const;
 
 private:
 	MaterialTextureTransferService* m_materialTextureTransferService = nullptr;
@@ -126,6 +134,11 @@ private:
 
         std::string debugName;
         std::shared_ptr<TextureProcessingJobHandle> handle;
+        // BC6H jobs (SubmitBC6HCompressionJob) have no handle: they report through done, with the source's description.
+        rhi::Format blockFormat = rhi::Format::BC7_UNorm;
+        uint32_t sliceCount = 1;
+        std::function<void(std::shared_ptr<TextureSourceData>)> done;
+        org::TextureDescription outputDescription;
         std::shared_ptr<org::PixelBuffer> workingTexture;
         std::shared_ptr<org::PixelBuffer> compressedTexture;
         std::shared_ptr<org::Buffer> blockBuffer;

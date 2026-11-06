@@ -103,9 +103,12 @@ void TerrainRvtFrameResetCS(uint3 tid : SV_DispatchThreadID)
         {
             counters[TERRAIN_RVT_COUNTER_ALLOCATED_PHYSICAL_PAGE_COUNT] = 0u;
             counters[TERRAIN_RVT_COUNTER_REQUEST_COUNT] = 0u;
+            counters[TERRAIN_RVT_COUNTER_REFRESHED_PAGES] = 0u;
+            counters[TERRAIN_RVT_COUNTER_SHORT_PAGES] = 0u;
         }
         counters[TERRAIN_RVT_COUNTER_OVERFLOW_COUNT] = 0u;
         counters[TERRAIN_RVT_COUNTER_REUSE_CURSOR] = 0u;
+        counters[TERRAIN_RVT_COUNTER_WAITING_PAGES] = 0u;
         if (TERRAIN_RVT_TELEMETRY_ENABLED(perFrame))
         {
             RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
@@ -788,13 +791,107 @@ void TerrainRvtResolveRequestsCS(uint3 tid : SV_DispatchThreadID)
     }
 }
 
+// Root constant 0: 1 re-renders a page once a source texture it was short of has improved; 0 keeps the page as rendered
+// and only keeps asking for the texture, so pages generated later get it.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void TerrainRvtRefreshStalePagesCS(uint3 tid : SV_DispatchThreadID)
+{
+    StructuredBuffer<TerrainRvtInfo> infoBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtInfo)];
+    const TerrainRvtInfo info = infoBuffer[0];
+    const uint physicalPageIndex = tid.x + tid.y * TERRAIN_RVT_MAX_DISPATCH_GROUPS_X * 64u;
+    if (physicalPageIndex >= info.maxPhysicalPages)
+    {
+        return;
+    }
+    RWStructuredBuffer<uint4> physicalPageOwner = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPhysicalPageOwner)];
+    const uint4 owner = physicalPageOwner[physicalPageIndex];
+    if (owner.w == 0u || (owner.z & TERRAIN_RVT_PHYSICAL_PAGE_RESIDENT) == 0u || owner.x >= info.maxVirtualPageTableEntries)
+    {
+        return;
+    }
+    // Only pages sampled this frame, and not ones resolve already queued: an unseen page waits until it is seen again.
+    StructuredBuffer<uint> requestMasks = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtRequestMasks)];
+    const uint requestMask = requestMasks[owner.x];
+    if ((requestMask & TERRAIN_RVT_REQUEST_MASK_CONTENT_MASK) == 0u || (requestMask & TERRAIN_RVT_REQUEST_MASK_APPENDED) != 0u)
+    {
+        return;
+    }
+    RWStructuredBuffer<uint> pageTable = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPageTable)];
+    const uint entry = pageTable[owner.x];
+    if ((entry & TERRAIN_RVT_PAGE_VALID) == 0u || (entry & TERRAIN_RVT_PAGE_PHYSICAL_MASK) != physicalPageIndex)
+    {
+        return;
+    }
+
+    RWStructuredBuffer<uint> counters = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtCounters)];
+    const uint deficit = owner.w;
+    const uint textureID = TerrainRvtTextureDeficitID(deficit);
+    const uint wantedTopMip = TerrainRvtTextureDeficitWantedMip(deficit);
+    const TextureStreamingGPUInfo streamingInfo = LoadTextureStreamingInfo(textureID);
+    const bool hasImage = streamingInfo.imageDescriptorIndex != 0xffffffffu;
+    const uint residentTopMip = hasImage ? streamingInfo.residentTopMip : 31u;
+    const bool complete = (streamingInfo.flags & kTextureStreamingFlagEnabled) == 0u || (hasImage && residentTopMip <= wantedTopMip);
+    const bool improved = complete || residentTopMip < TerrainRvtTextureDeficitResidentMip(deficit);
+    if (!complete)
+    {
+        // Generation asks for a texture only in the frame it renders the page, and one request does not load a mip.
+        RWStructuredBuffer<uint> textureFeedback =
+            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Material::TextureStreamingFeedbackBuffer)];
+        uint previousRequestedTopMip;
+        InterlockedMin(textureFeedback[textureID], wantedTopMip + 1u, previousRequestedTopMip);
+    }
+
+    const bool rerender = UintRootConstant0 != 0u;
+    if (!rerender || !improved)
+    {
+        if (complete)
+        {
+            physicalPageOwner[physicalPageIndex].w = 0u;
+        }
+        else
+        {
+            InterlockedAdd(counters[TERRAIN_RVT_COUNTER_WAITING_PAGES], 1u);
+        }
+        return;
+    }
+
+    // Re-render in place, after new pages have taken their share of this frame's budget: the page stays mapped and is
+    // overwritten before anything samples it this frame. Generation records whatever it is still short of.
+    const uint generationLimit = min(info.maxGenerationEntries, info.maxGeneratedPagesPerFrame);
+    uint generationIndex = generationLimit;
+    if (counters[TERRAIN_RVT_COUNTER_GENERATION_COUNT] < generationLimit)
+    {
+        InterlockedAdd(counters[TERRAIN_RVT_COUNTER_GENERATION_COUNT], 1u, generationIndex);
+    }
+    if (generationIndex >= generationLimit)
+    {
+        InterlockedAdd(counters[TERRAIN_RVT_COUNTER_WAITING_PAGES], 1u);
+        return;
+    }
+    StructuredBuffer<TerrainRvtPageTag> pageTags = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPageKeys)];
+    const TerrainRvtPageTag tag = pageTags[owner.x];
+    RWStructuredBuffer<TerrainRvtGenerationRequest> generationList = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtGenerationList)];
+    TerrainRvtGenerationRequest generation;
+    generation.pageTableIndex = owner.x;
+    generation.physicalPageIndex = physicalPageIndex;
+    generation.contentMask = (entry & TERRAIN_RVT_PAGE_CONTENT_MASK) >> TERRAIN_RVT_PAGE_CONTENT_SHIFT;
+    generation.terrainSetIndex = tag.terrainSetIndex;
+    generation.clipLevel = tag.clipLevel;
+    generation.pageX = tag.pageX;
+    generation.pageY = tag.pageY;
+    generation.pad0 = 0u;
+    generationList[generationIndex] = generation;
+    InterlockedAdd(counters[TERRAIN_RVT_COUNTER_REFRESHED_PAGES], 1u);
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void TerrainRvtFinalizeGeneratedPagesCS(uint3 tid : SV_DispatchThreadID)
 {
     StructuredBuffer<TerrainRvtInfo> infoBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtInfo)];
     TerrainRvtInfo info = infoBuffer[0];
-    StructuredBuffer<uint> counters = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtCounters)];
+    RWStructuredBuffer<uint> counters = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtCounters)];
     StructuredBuffer<TerrainRvtGenerationRequest> generationList = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtGenerationList)];
     StructuredBuffer<TerrainRvtPageTag> pageTags = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPageKeys)];
     RWStructuredBuffer<uint> pageTable = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtPageTable)];
@@ -835,11 +932,16 @@ void TerrainRvtFinalizeGeneratedPagesCS(uint3 tid : SV_DispatchThreadID)
         ? (existingEntry & TERRAIN_RVT_PAGE_CONTENT_MASK) >> TERRAIN_RVT_PAGE_CONTENT_SHIFT
         : 0u;
     pageTable[pageTableIndex] = TerrainRvtPackPageTableEntry(physicalPageIndex, existingContentMask | generation.contentMask);
+    // .w: the source texture this generation was most short of (TerrainRvtPackTextureDeficit), zero if none.
     physicalPageOwner[physicalPageIndex] = uint4(
         pageTableIndex,
         perFrame.frameIndex,
         TERRAIN_RVT_PHYSICAL_PAGE_RESIDENT,
-        0u);
+        generation.pad0);
+    if (generation.pad0 != 0u)
+    {
+        InterlockedAdd(counters[TERRAIN_RVT_COUNTER_SHORT_PAGES], 1u);
+    }
 }
 
 [shader("compute")]
@@ -980,7 +1082,7 @@ void TerrainRvtGeneratePagesCS(uint3 tid : SV_DispatchThreadID)
 {
     StructuredBuffer<TerrainRvtInfo> infoBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtInfo)];
     StructuredBuffer<uint> counters = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtCounters)];
-    StructuredBuffer<TerrainRvtGenerationRequest> generationList = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtGenerationList)];
+    RWStructuredBuffer<TerrainRvtGenerationRequest> generationList = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtGenerationList)];
     StructuredBuffer<TerrainRvtClipInfo> clipInfos = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtClipInfos)];
     StructuredBuffer<TerrainSetInfo> terrainSets = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::Sets)];
     ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
@@ -1084,5 +1186,19 @@ void TerrainRvtGeneratePagesCS(uint3 tid : SV_DispatchThreadID)
             saturate(inputs.metallic),
             saturate(inputs.ambientOcclusion),
             saturate(inputs.terrainRvtHeightScale));
+    }
+
+    // The source texture this page is most short of, set while sampling (RecordTextureStreamingFeedbackRequestedTopMip).
+    if (WaveActiveAllEqual(generationIndex))
+    {
+        const uint pageDeficit = WaveActiveMax(g_terrainRvtTextureDeficit);
+        if (WaveIsFirstLane() && pageDeficit != 0u)
+        {
+            InterlockedMax(generationList[generationIndex].pad0, pageDeficit);
+        }
+    }
+    else if (g_terrainRvtTextureDeficit != 0u)
+    {
+        InterlockedMax(generationList[generationIndex].pad0, g_terrainRvtTextureDeficit);
     }
 }

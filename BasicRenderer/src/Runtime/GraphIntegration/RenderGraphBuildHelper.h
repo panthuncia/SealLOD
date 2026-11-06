@@ -600,7 +600,8 @@ inline void RegisterVisUtilResources(
 
     createTerrainRvtAtlas(Builtin::Terrain::RvtHeightAtlas, "TerrainRvt::HeightAtlas", rhi::Format::R16_Float, 1);
     createTerrainRvtAtlas(Builtin::Terrain::RvtAlbedoAtlas, "TerrainRvt::AlbedoAtlas", rhi::Format::R8G8B8A8_UNorm, 4);
-    createTerrainRvtAtlas(Builtin::Terrain::RvtNormalAtlas, "TerrainRvt::NormalAtlas", rhi::Format::R16G16B16A16_Float, 4);
+    // A [0,1]-packed tangent normal (w unused): 10 bits per channel match FP16 over that range at half the size.
+    createTerrainRvtAtlas(Builtin::Terrain::RvtNormalAtlas, "TerrainRvt::NormalAtlas", rhi::Format::R10G10B10A2_UNorm, 4);
     createTerrainRvtAtlas(Builtin::Terrain::RvtMaterialAtlas, "TerrainRvt::MaterialAtlas", rhi::Format::R8G8B8A8_UNorm, 4);
     if (persistentTerrainRvtResources) {
         const std::string_view persistentNames[] = {

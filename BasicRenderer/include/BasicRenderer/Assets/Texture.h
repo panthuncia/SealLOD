@@ -384,6 +384,9 @@ private:
     std::shared_ptr<const br::textures::TextureRequest> m_pipelineRequest;
     std::string m_pipelineCacheKey;
 	uint64_t m_streamingRequestChangedFrame = 0;
+	// Feedback coarser than residency: the frame it started, and the finest mip asked for since (0 frame: not coarser).
+	uint64_t m_coarserFeedbackSinceFrame = 0;
+	uint32_t m_coarserFeedbackFinestTopMip = 0;
     bool m_suppressMipStreaming = false;
 	uint32_t m_sourceTotalMipCount = 0;
     uint32_t m_sourceFullWidth = 0;

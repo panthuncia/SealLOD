@@ -1295,9 +1295,34 @@ namespace br::staticimport
 							return br::render::ArtifactBuildResult::Failure(
 								"static template material admission has no slot for its material");
 						}
-						completion.requestQueued = true;
 						requestToQueue = source->second;
 						requestToQueue.materialDataIndex = slot->second;
+						// A root's palette: every material's own admission must hold a slot for it too.
+						const auto& palette = source->second.mesh->GetMaterialPalette();
+						if (palette.size() > 1u) {
+							if (admission->paletteBatches.size() + 1u != palette.size()) {
+								return br::render::ArtifactBuildResult::Failure(
+									"static template palette admission does not match the palette");
+							}
+							requestToQueue.paletteMaterialDataIndices.assign(1u, slot->second);
+							for (std::size_t entry = 1; entry < palette.size(); ++entry) {
+								const auto paletteBatch = context.Dependency<br::render::PublishedMaterialUsageBatch>(
+									admission->paletteBatches[entry - 1u].version.address);
+								if (!paletteBatch || !palette[entry]) {
+									return br::render::ArtifactBuildResult::Failure(
+										"static template palette material admission is missing");
+								}
+								const auto paletteMaterialID = palette[entry]->GetMaterialID();
+								const auto paletteSlot = std::ranges::find_if(paletteBatch.payload->materialSlots,
+									[paletteMaterialID](const auto& candidate) { return candidate.first == paletteMaterialID; });
+								if (paletteSlot == paletteBatch.payload->materialSlots.end()) {
+									return br::render::ArtifactBuildResult::Failure(
+										"static template palette admission has no slot for its material");
+								}
+								requestToQueue.paletteMaterialDataIndices.push_back(paletteSlot->second);
+							}
+						}
+						completion.requestQueued = true;
 					}
 				}
 			}
@@ -1328,6 +1353,23 @@ namespace br::staticimport
 				checkpoint->batch = std::move(batch);
 				std::vector<br::render::ArtifactRequirement> requirements{
 					br::render::Exact(checkpoint->batch, br::render::ArtifactReadiness::CpuReady) };
+				// A hierarchy root's palette is part of the template: it publishes once every material is admitted.
+				const auto& palette = meshToPrepare ? meshToPrepare->GetMaterialPalette()
+					: std::vector<std::shared_ptr<Material>>{};
+				for (std::size_t entry = 1; entry < palette.size(); ++entry) {
+					if (!palette[entry]) {
+						return br::render::ArtifactBuildResult::Failure("static template palette has an empty material");
+					}
+					materials->RegisterMaterialSource(palette[entry]);
+					auto paletteBatch = JoinStaticTemplateMaterialBatch(
+						*graphRequests, *materials, palette[entry], refreshTextureBindings);
+					if (!paletteBatch) {
+						return br::render::ArtifactBuildResult::Failure(
+							"static template palette admission request was rejected");
+					}
+					requirements.push_back(br::render::Exact(paletteBatch, br::render::ArtifactReadiness::CpuReady));
+					checkpoint->paletteBatches.push_back(std::move(paletteBatch));
+				}
 				return br::render::ArtifactBuildResult::Needs(std::move(requirements),
 					br::render::ArtifactPayload::Make<StaticTemplateMaterialAdmission>(std::move(checkpoint)));
 			}

@@ -127,6 +127,39 @@ namespace clod_detail {
 		std::vector<VoxelGroupPayload> voxelCarryPayloads;
 	};
 
+	// One group's clusters to pages, for builders that form their own groups (merge hierarchies).
+	struct MergeCapturedCluster
+	{
+		int32_t refinedGroup = -1;
+		clodBounds bounds{};
+		uint32_t indicesOffset = 0;
+		uint32_t indexCount = 0;
+		uint32_t vertexCount = 0;
+		uint32_t materialSlot = 0;
+	};
+	struct MergeCapturedGroup
+	{
+		int depth = 0;
+		clodBounds simplified{};
+		std::vector<unsigned int> flattenedIndices; // global vertex indices, cluster after cluster
+		std::vector<MergeCapturedCluster> clusters;
+		bool writeMaterialSlots = false;
+	};
+	struct MergeGroupOutput
+	{
+		ClusterLODGroup group{};
+		std::vector<ClusterLODGroupSegment> segments;
+		std::vector<BoundingSphere> segmentBounds;
+		std::vector<std::vector<std::byte>> pageBlobs;
+		ClusterLODGroupChunk groupChunk{};
+	};
+	MergeGroupOutput BuildMergeGroupOutput(
+		const MergeCapturedGroup& group,
+		uint32_t sourceGroupLocalIndex,
+		const std::vector<std::byte>& vertices,
+		unsigned int vertexFlags,
+		size_t vertexStrideBytes);
+
 	void FinalizeMeshWidePagePacking(
 		ClusterLODBuildState& state,
 		std::vector<std::vector<std::byte>>& outMeshPageBlobs,

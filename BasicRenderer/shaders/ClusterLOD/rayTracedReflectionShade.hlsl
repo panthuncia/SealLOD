@@ -5,6 +5,7 @@
 #define CLOD_RT_HIT_LIGHTING 1
 
 static uint4 g_clodRtPackedCluster;
+static uint g_clodRtHitTransformIndex = 0xFFFFFFFFu;
 static float2 g_clodRtBarycentrics;
 static float g_clodRtConeWidth;
 static float g_clodRtSunShadow;
@@ -51,8 +52,9 @@ void CLodRtReflectionShadeCS(uint3 id : SV_DispatchThreadID)
 
     StructuredBuffer<CLodRtClasInfo> clasInfo = ResourceDescriptorHeap[CLOD_RT_SEC_CLAS_INFO_SRV];
     const CLodRtClasInfo info = clasInfo[hit.clasSlot];
-    g_clodRtPackedCluster = CLodPackVisibleCluster(perFrame.mainCameraIndex, hit.drawRecord, info.localMeshlet, info.groupLocalIndex,
+    g_clodRtPackedCluster = CLodPackVisibleCluster(perFrame.mainCameraIndex, hit.drawRecord, info.localMeshlet, CLodRtClasGroup(info),
         info.slabDescriptor, info.pageOffsetUnits << CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_SHIFT, CLOD_PACKED_VISIBLE_CLUSTER_INVALID_SHADOW_CLIPMAP_INDEX);
+    g_clodRtHitTransformIndex = hit.transformIndex;
     g_clodRtBarycentrics = hit.barycentrics;
     g_clodRtConeWidth = hit.coneWidth;
 

@@ -9,6 +9,7 @@
 #include "include/visibleClusterPacking.hlsli"
 #include "include/visibilityPacking.hlsli"
 #include "PerPassRootConstants/clodRayTracingSetupRootConstants.h"
+#define CLOD_RT_INSTANCE_ROWS_SRV CLOD_RT_VIS_INSTANCE_ROWS_SRV
 #include "include/clodRayTracingHits.hlsli"
 #include "include/clodRayTracingCoverage.hlsli"
 #include "PerPassRootConstants/clodRayTracingSetupRootConstants.h"
@@ -20,19 +21,36 @@
 #define CLOD_RT_VIS_HASH_MAX_PROBES 32u
 #define CLOD_RT_INVALID_RECORD 0xFFFFFFFFu
 
-uint CLodRtHash(uint drawRecord, uint slot)
+uint CLodRtHash(uint drawRecord, uint slot, uint transformIndex)
 {
-    uint hash = drawRecord * 0x9E3779B1u ^ slot * 0x85EBCA77u;
+    uint hash = drawRecord * 0x9E3779B1u ^ slot * 0x85EBCA77u ^ transformIndex * 0x27D4EB2Fu;
     hash ^= hash >> 15u;
     hash *= 0xC2B2AE3Du;
     return hash ^ (hash >> 13u);
 }
 
-uint CLodRtFindOrCreateRecord(uint drawRecord, uint slot, CLodRtClasInfo info)
+// The palette index culling would have put in the side band for this cluster.
+uint CLodRtHitPaletteIndex(uint drawRecord, uint transformIndex, CLodRtClasInfo info)
+{
+    const PerMeshInstanceBuffer meshTemplate = LoadMeshTemplateForDrawRecord(LoadInstanceDrawRecord(drawRecord));
+    if (!CLodTemplateHasPalette(meshTemplate)) {
+        return 0u;
+    }
+    const uint pageOffset = info.pageOffsetUnits << CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_SHIFT;
+    const CLodPageHeader header = LoadPageHeader(info.slabDescriptor, pageOffset);
+    const uint slot = CLodGroupPartHasMaterialSlots(CLodRtClasGroup(info))
+        ? CLodLoadMeshletMaterialSlot(info.slabDescriptor, pageOffset, header.descriptorOffset, info.localMeshlet)
+        : 0u;
+    return CLodAssemblyMaterialBase(transformIndex) + slot;
+}
+
+// One record per (draw, CLAS, occurrence): a part's CLAS is shared by every portal occurrence that reached it.
+uint CLodRtFindOrCreateRecord(uint drawRecord, uint slot, uint transformIndex, CLodRtClasInfo info)
 {
     RWByteAddressBuffer table = ResourceDescriptorHeap[CLOD_RT_VIS_HASH_UAV];
-    const uint64_t key = (uint64_t(drawRecord + 1u) << 32u) | uint64_t(slot);
-    uint entry = CLodRtHash(drawRecord, slot) % CLOD_RT_VIS_HASH_ENTRIES;
+    // [draw + 1 : 23][transform : 21][slot : 20]; the sentinel transform is the all-ones 21 bits.
+    const uint64_t key = (uint64_t(drawRecord + 1u) << 41u) | (uint64_t(transformIndex & 0x1FFFFFu) << 20u) | uint64_t(slot & 0xFFFFFu);
+    uint entry = CLodRtHash(drawRecord, slot, transformIndex) % CLOD_RT_VIS_HASH_ENTRIES;
     for (uint probe = 0u; probe < CLOD_RT_VIS_HASH_MAX_PROBES; ++probe) {
         uint64_t previous = 0ull;
         table.InterlockedCompareExchange64(entry * 8u, 0ull, key, previous);
@@ -40,9 +58,9 @@ uint CLodRtFindOrCreateRecord(uint drawRecord, uint slot, CLodRtClasInfo info)
             const uint record = CLOD_RT_VIS_RECORD_BASE + entry;
             if (previous == 0ull) {
                 RWByteAddressBuffer visibleClusters = ResourceDescriptorHeap[CLOD_RT_VIS_VISIBLE_CLUSTERS_UAV];
-                RWStructuredBuffer<uint> transformIndices = ResourceDescriptorHeap[CLOD_RT_VIS_TRANSFORM_INDICES_UAV];
+                RWStructuredBuffer<uint2> transformIndices = ResourceDescriptorHeap[CLOD_RT_VIS_TRANSFORM_INDICES_UAV];
                 visibleClusters.Store4(record * 16u, CLodRtPackHitCluster(CLOD_RT_VIS_VIEW_ID, drawRecord, info));
-                transformIndices[record] = CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
+                transformIndices[record] = uint2(transformIndex, CLodRtHitPaletteIndex(drawRecord, transformIndex, info));
             }
             return record;
         }
@@ -113,7 +131,7 @@ void CLodRtCompare(uint2 pixel, CLodRtHit hit, float hitDepth, CLodRtClasInfo in
     }
     else if (CLodVisibleClusterLocalMeshletIndex(rasterRecord) != info.localMeshlet
         || CLodVisibleClusterPageSlabDescriptorIndex(rasterRecord) != info.slabDescriptor
-        || (CLodVisibleClusterPageSlabByteOffset(rasterRecord) >> 14u) != info.pageOffsetUnits) {
+        || (CLodVisibleClusterPageSlabByteOffset(rasterRecord) >> CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_SHIFT) != info.pageOffsetUnits) {
         CLodRtAddStat(CLOD_RT_STAT_DIFFERENT_CLUSTER);
     }
     else if (rasterTriangle != hit.primitive) {
@@ -157,7 +175,7 @@ void CLodRtVisibilityCS(uint3 id : SV_DispatchThreadID)
         return;
     }
 
-    const uint record = CLodRtFindOrCreateRecord(hit.drawRecord, hit.clasSlot, info);
+    const uint record = CLodRtFindOrCreateRecord(hit.drawRecord, hit.clasSlot, hit.transformIndex, info);
     if (record == CLOD_RT_INVALID_RECORD) {
         return;
     }

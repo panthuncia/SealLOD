@@ -66,7 +66,7 @@ ReyesVirtualShadowRasterBindings ReyesVirtualShadowRasterizationPass::Declare(or
     declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     auto* builder = &declaration;
     builder->ShaderResource(
-            Builtin::PerMeshBuffer,
+            Builtin::PerMeshBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases,
             Builtin::PerMeshInstanceBuffer,
             Builtin::InstanceDrawRecordBuffer,
             Builtin::PerInstanceTransformBuffer,

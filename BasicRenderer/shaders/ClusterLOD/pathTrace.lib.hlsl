@@ -261,7 +261,7 @@ void PathTraceShadeHit(inout PathTracePayload payload, BuiltInTriangleIntersecti
     const bool isPrimary = payload.bounce == 0u;
 
     CLodPathHitSurface hit;
-    if (!CLodResolvePathHit(InstanceID(), ClusterID(), PrimitiveIndex(), attributes.barycentrics, HitKind() == HIT_KIND_TRIANGLE_FRONT_FACE,
+    if (!CLodResolvePathHit(InstanceID(), InstanceIndex(), ClusterID(), PrimitiveIndex(), attributes.barycentrics, HitKind() == HIT_KIND_TRIANGLE_FRONT_FACE,
             position, rayDirection, coneWidth, isPrimary, isTerrain, hit)) {
         payload.hitT = -1.0f;
         return;
@@ -346,7 +346,7 @@ void PathTraceTerrainClosestHit(inout PathTracePayload payload, BuiltInTriangleI
 bool PathTraceHitIsTransparent(BuiltInTriangleIntersectionAttributes attributes, float coneSpread)
 {
     StructuredBuffer<CLodRtClasInfo> clasInfo = ResourceDescriptorHeap[CLOD_RT_SEC_CLAS_INFO_SRV];
-    return CLodRtCandidateIsTransparent(clasInfo, InstanceID(), ClusterID(), PrimitiveIndex(), attributes.barycentrics, WorldRayDirection(), RayTCurrent(), coneSpread);
+    return CLodRtCandidateIsTransparent(clasInfo, InstanceID(), InstanceIndex(), ClusterID(), PrimitiveIndex(), attributes.barycentrics, WorldRayDirection(), RayTCurrent(), coneSpread);
 }
 
 [shader("anyhit")]
