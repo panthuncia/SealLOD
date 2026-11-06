@@ -101,7 +101,23 @@ struct CLodVirtualShadowMainCameraInfo
     float4 positionWorldSpace;
     row_major matrix viewInverse;
     row_major matrix projectionInverse;
+    // The camera that rendered the linear depth page marking reads. Marking runs
+    // before this frame writes that depth, so these are the previous frame's.
+    row_major matrix markDepthViewInverse;
+    row_major matrix markDepthProjectionInverse;
 };
+
+// Page marking reconstructs receivers from the primary linear depth, which still
+// holds the previous frame when marking runs. Rays must come from the camera that
+// rendered that depth; clip selection keeps the current camera position, as the
+// receivers that sample this frame do.
+CLodVirtualShadowMainCameraInfo CLodVirtualShadowMarkDepthCamera(CLodVirtualShadowMainCameraInfo camera)
+{
+    CLodVirtualShadowMainCameraInfo result = camera;
+    result.viewInverse = camera.markDepthViewInverse;
+    result.projectionInverse = camera.markDepthProjectionInverse;
+    return result;
+}
 
 struct CLodVirtualShadowCompactShadowCameraInfo
 {
@@ -235,6 +251,33 @@ struct CLodVirtualShadowStats
     uint predictiveInvalidatedPageTableEntries[kCLodVirtualShadowClipmapCount];
     uint invalidatedCurrentBoundsPageTableEntries[kCLodVirtualShadowClipmapCount];
     uint invalidatedPreviousBoundsPageTableEntries[kCLodVirtualShadowClipmapCount];
+    // Receiver-side outcome of the primary deferred pass's directional lookup,
+    // counted per pixel (only while frame telemetry is enabled).
+    uint receiverLookupPixels;
+    uint receiverPreferredSampledPixels;
+    uint receiverFallbackOnePixels;
+    uint receiverFallbackTwoPixels;
+    uint receiverNoSamplePixels;
+    uint receiverPreferredUnallocatedPixels;
+    uint receiverPreferredNotVisitedPixels;
+    uint receiverPreferredNoContentPixels;
+    uint receiverPreferredTagMismatchPixels;
+    uint receiverPreferredDepthMissingPixels;
+    uint receiverTexelClearedPixels;
+    uint receiverShadowedPixels;
+    // Reprojected against the previous frame (CLodReceiverHistory).
+    uint receiverHistoryValidPixels;
+    uint receiverFlipPixels;
+    uint receiverHardFlipPixels;
+    uint receiverFlipClipChangedPixels;
+    uint receiverFlipSamePagePixels;
+    uint receiverFlipPageChangedPixels;
+    uint receiverHardFlipSamePagePixels;
+    uint receiverSoftOnlyFlipPixels;
+    uint receiverFlipToLitPixels;
+    uint receiverFlipPageChangedByClip[kCLodVirtualShadowClipmapCount];
+    // Screen-centre probe: current/previous packed outcome and physical page.
+    uint receiverProbe[4];
 };
 
 struct CLodVirtualShadowBlockMeta

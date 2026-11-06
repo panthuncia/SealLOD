@@ -22,6 +22,10 @@ public:
         const ViewFlags& flags,
         const ViewCreationParams& params) = 0;
     virtual void UpdateShadowView(std::uint64_t viewID, const CameraInfo& camera) = 0;
+    // A directional VSM clip: its page-table offsets describe the same page-aligned
+    // placement as the camera, so they must travel with it in the view snapshot.
+    virtual void UpdateDirectionalClipView(std::uint64_t viewID, const CameraInfo& camera,
+        std::int64_t pageOffsetX, std::int64_t pageOffsetY) = 0;
     virtual void DestroyShadowView(std::uint64_t viewID) = 0;
     virtual std::uint32_t ShadowViewCameraBufferIndex(std::uint64_t viewID) const = 0;
 };

@@ -1,7 +1,9 @@
 #include "Assets/Textures/Processing/TextureProcessingManager.h"
 
 #include <algorithm>
+#include <format>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -126,14 +128,23 @@ void FlipNormalGreenChannel(ScratchImage& image) {
 	}
 }
 
-std::string ResolveProcessingIdentity(const TextureFileMeta& meta) {
-	std::string normalizedIdentity = meta.processing.sourceIdentity.empty()
-		? NormalizeCacheSourcePath(meta.filePath)
-		: NormalizeCacheSourcePath(meta.processing.sourceIdentity);
-	if (normalizedIdentity.empty()) {
-		normalizedIdentity = meta.processing.sourceIdentity.empty() ? meta.filePath : meta.processing.sourceIdentity;
+// A processed-cache identity from the identity string alone: lower case, forward slashes, '.' and '..' folded. Never
+// the filesystem: resolving a relative game path against the working directory (through whatever links it holds) made
+// the key depend on where, and in which process, it was computed. The source's version is keyed separately
+// (TryGetSourceVersionTag).
+std::string LexicalProcessingIdentity(std::string identity) {
+	for (char& ch : identity) {
+		ch = ch == '\\' ? '/' : static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
 	}
-	return normalizedIdentity;
+	// A URI-like identity (sarp-nif://...) is not a path: folding would merge its "//".
+	if (identity.find("://") != std::string::npos) return identity;
+	std::string normalized = std::filesystem::path(identity).lexically_normal().generic_string();
+	while (normalized.starts_with("./")) normalized.erase(0, 2);
+	return normalized.empty() ? identity : normalized;
+}
+
+std::string ResolveProcessingIdentity(const TextureFileMeta& meta) {
+	return LexicalProcessingIdentity(meta.processing.sourceIdentity.empty() ? meta.filePath : meta.processing.sourceIdentity);
 }
 
 std::string TryGetSourceVersionTag(const TextureFileMeta& meta) {
@@ -1210,7 +1221,7 @@ std::shared_ptr<TextureSourceData> PrepareTextureSourceDataForBackend(
 			requestedMipLevels,
 			mipChainImage);
 		if (FAILED(hr)) {
-			throw std::runtime_error("TextureProcessingManager: DirectXTex GenerateMipMaps failed");
+			throw std::runtime_error(std::format("TextureProcessingManager: DirectXTex GenerateMipMaps failed (0x{:08X})", static_cast<uint32_t>(hr)));
 		}
 		currentImage = &mipChainImage;
 	}
@@ -1291,7 +1302,7 @@ std::shared_ptr<TextureSourceData> FinalizeTextureSourceDataOnCpu(
 			requestedMipLevels,
 			mipChainImage);
 		if (FAILED(hr)) {
-			throw std::runtime_error("TextureProcessingManager: DirectXTex GenerateMipMaps failed");
+			throw std::runtime_error(std::format("TextureProcessingManager: DirectXTex GenerateMipMaps failed (0x{:08X})", static_cast<uint32_t>(hr)));
 		}
 		// Alpha-tested foliage thins out at a distance unless each mip keeps the first mip's coverage.
 		if (ShouldPreserveAlphaCoverage(meta, *preparedSourceData)) {
@@ -1587,7 +1598,7 @@ StochasticTextureArtifactResult TextureProcessingManager::RequestStochasticArtif
 
 	const std::string identity = settings.sourceIdentity.empty()
 		? ResolveProcessingIdentity(meta)
-		: NormalizeCacheSourcePath(settings.sourceIdentity);
+		: LexicalProcessingIdentity(settings.sourceIdentity);
 	const uint32_t lutWidth = (std::max)(16u, settings.lutWidth);
 	TextureFileMeta versionMeta = meta;
 	if (!settings.sourceIdentity.empty()) {

@@ -75,6 +75,9 @@ struct View {
     Components::LightType lightType = Components::LightType::Directional;
     int cascadeIndex = -1;
     uint64_t parentEntityID = 0;
+    // Directional VSM clip views: unwrapped page-table offsets of cameraInfo's placement.
+    int64_t virtualShadowPageOffsetX = 0;
+    int64_t virtualShadowPageOffsetY = 0;
 
     ViewResources gpu;
 };
@@ -154,6 +157,14 @@ public:
         return CreateView(cameraInfo, flags, params);
     }
     void UpdateShadowView(uint64_t viewID, const CameraInfo& cameraInfo) override {
+        UpdateCamera(viewID, cameraInfo);
+    }
+    void UpdateDirectionalClipView(uint64_t viewID, const CameraInfo& cameraInfo,
+        int64_t pageOffsetX, int64_t pageOffsetY) override {
+        if (auto* view = Get(viewID)) {
+            view->virtualShadowPageOffsetX = pageOffsetX;
+            view->virtualShadowPageOffsetY = pageOffsetY;
+        }
         UpdateCamera(viewID, cameraInfo);
     }
     void DestroyShadowView(uint64_t viewID) override { DestroyView(viewID); }

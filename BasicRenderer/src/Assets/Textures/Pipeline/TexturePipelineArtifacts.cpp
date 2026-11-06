@@ -159,6 +159,11 @@ ArtifactBuildResult BuildTextureProcessed(const ArtifactBuildContext& context) {
                 ws2s(cachePath), input->request->source.identity);
         }
 
+        // Offline preprocessing should have built this; name what it missed.
+        spdlog::info("Texture pipeline: processed-cache miss for '{}' version='{}' srgb={} semantic={} mips={} bc={} key='{}'",
+            input->request->source.identity, input->request->source.version, input->request->preferSRGB,
+            static_cast<uint32_t>(meta.processing.semantic), meta.processing.requestMipChain,
+            meta.processing.requestBlockCompression, input->cacheKey);
         auto source = br::textures::DecodeTextureSource(*input->request);
         auto processed = TextureProcessingManager::GetInstance().Process(source, meta);
         if (!processed.gpuCompression) return ProcessedReady(input->cacheKey, std::move(processed.result), {});

@@ -639,6 +639,8 @@ void Renderer::Update(float elapsedSeconds) {
                 .linearDepthMap = view->gpu.linearDepthMap,
                 .depthHistory = m_depthHistory.Select(view->id, view->gpu.linearDepthMap),
                 .depthBufferArrayIndex = view->cameraInfo.depthBufferArrayIndex,
+                .virtualShadowPageOffsetX = view->virtualShadowPageOffsetX,
+                .virtualShadowPageOffsetY = view->virtualShadowPageOffsetY,
             });
             if (view->gpu.visibilityBuffer)
                 currentViews->retainedResources.push_back(view->gpu.visibilityBuffer);
@@ -755,10 +757,6 @@ void Renderer::Update(float elapsedSeconds) {
             DirectX::XMStoreFloat3(&shadow.direction,
                 DirectX::XMVector3Normalize(light.lightInfo.dirWorldSpace));
             shadow.viewIDs = viewInfo.viewIDs;
-            shadow.unwrappedPageOffsetX.assign(viewInfo.virtualShadowUnwrappedPageOffsetX.begin(),
-                viewInfo.virtualShadowUnwrappedPageOffsetX.end());
-            shadow.unwrappedPageOffsetY.assign(viewInfo.virtualShadowUnwrappedPageOffsetY.begin(),
-                viewInfo.virtualShadowUnwrappedPageOffsetY.end());
             desiredLights->directionalShadows.push_back(std::move(shadow));
         });
         for (const auto& key : m_pLightManager->GetSupportedKeys()) {

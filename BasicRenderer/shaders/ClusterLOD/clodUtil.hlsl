@@ -2370,7 +2370,8 @@ void CLodVirtualShadowMarkBlocksCSMain(uint3 dispatchThreadId : SV_DispatchThrea
     const float2 tileUvMax = float2(tilePixelMax) / screenSize;
     const float2 tileUvCenter = 0.5f * (tileUvMin + tileUvMax);
 
-    const CLodVirtualShadowMainCameraInfo mainCamera = compactMainCameraBuffer[0];
+    const CLodVirtualShadowMainCameraInfo mainCamera =
+        CLodVirtualShadowMarkDepthCamera(compactMainCameraBuffer[0]);
 
     uint minClipmapIndex = activeClipmapCount - 1u;
     uint maxClipmapIndex = 0u;
@@ -2736,7 +2737,8 @@ void CLodVirtualShadowMarkPagesCSMain(uint3 dispatchThreadId : SV_DispatchThread
     const float2 tileUvMax = float2(tilePixelMax) / screenSize;
     const float2 tileUvCenter = 0.5f * (tileUvMin + tileUvMax);
 
-    const CLodVirtualShadowMainCameraInfo mainCamera = compactMainCameraBuffer[0];
+    const CLodVirtualShadowMainCameraInfo mainCamera =
+        CLodVirtualShadowMarkDepthCamera(compactMainCameraBuffer[0]);
 
     uint minClipmapIndex = activeClipmapCount - 1u;
     uint maxClipmapIndex = 0u;

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <string_view>
 #include <rhi.h>
 
@@ -57,6 +58,22 @@ inline bool ReadTruthyEnvironmentFlag(const char* name) {
         || _stricmp(value, "yes") == 0 || _stricmp(value, "on") == 0;
     std::free(value);
     return result;
+}
+
+// SARP_CLOD_VSM_FRAME_TELEMETRY=<csv path>: every frame's VSM page and receiver
+// counters, one CSV row per frame. Empty when unset.
+inline const std::string& CLodVirtualShadowFrameTelemetryPath() {
+    static const std::string path = [] {
+        std::string result;
+        char* value = nullptr;
+        size_t valueSize = 0;
+        if (_dupenv_s(&value, &valueSize, "SARP_CLOD_VSM_FRAME_TELEMETRY") == 0 && value != nullptr) {
+            result = value;
+            std::free(value);
+        }
+        return result;
+    }();
+    return path;
 }
 
 inline bool IsStreamlineDisabledByEnvironment() {

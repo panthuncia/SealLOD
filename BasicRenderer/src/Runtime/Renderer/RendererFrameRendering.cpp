@@ -300,6 +300,7 @@ void Renderer::Render() {
         BT_ZONE_SCOPE("Renderer::Render::CLodVisibilityTelemetry");
         MaybeRequestCLodVisibilityTelemetry();
         MaybeRequestCLodVirtualShadowTelemetry();
+        MaybeRequestCLodVirtualShadowFrameTelemetry();
     }
     runCapturedStage("RenderGraphExecute", [&]() {
         BT_ZONE_SCOPE("Renderer::Render::RenderGraphExecute");

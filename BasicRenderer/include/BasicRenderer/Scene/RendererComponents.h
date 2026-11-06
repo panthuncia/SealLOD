@@ -31,8 +31,6 @@ namespace Components {
 
     struct LightViewInfo {
         std::vector<uint64_t> viewIDs;
-        std::vector<int64_t> virtualShadowUnwrappedPageOffsetX;
-        std::vector<int64_t> virtualShadowUnwrappedPageOffsetY;
         std::shared_ptr<org::BufferView> lightBufferView;
         uint32_t lightBufferIndex = 0;
         uint32_t viewInfoBufferIndex = 0;

@@ -447,6 +447,20 @@ void Renderer::CreateRenderGraph() {
                     sunMask->SetName("CLod RT sun shadow");
                     newGraph->RegisterResource(Builtin::RayTracing::SunShadow, sunMask);
                 }
+                if (!br::runtime::renderer_settings::CLodVirtualShadowFrameTelemetryPath().empty()) {
+                    // VSM flicker telemetry: the deferred pass reprojects each pixel's
+                    // shadow outcome against the previous frame's (ping-pong slices).
+                    org::TextureDescription historyDesc;
+                    historyDesc.channels = 4;
+                    historyDesc.format = rhi::Format::R32G32B32A32_UInt;
+                    historyDesc.hasUAV = true;
+                    historyDesc.isArray = true;
+                    historyDesc.arraySize = 2;
+                    historyDesc.imageDimensions.emplace_back(resolution.x, resolution.y, 0, 0);
+                    auto history = org::PixelBuffer::CreateSharedUnmaterialized(historyDesc);
+                    history->SetName("CLod VSM receiver history");
+                    newGraph->RegisterResource(Builtin::Shadows::CLodReceiverHistory, history);
+                }
                 m_pViewManager->AttachVisibilityBuffer(primaryViewID, visibilityBuffer);
                 CreateCanonicalSurfaceResources(newGraph);
                 CreateDebugVisualizationResources(newGraph);

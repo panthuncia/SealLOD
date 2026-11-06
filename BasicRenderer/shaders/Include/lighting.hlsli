@@ -14,6 +14,122 @@
 #include "include/outputTypes.hlsli"
 #include "include/debugPayload.hlsli"
 
+#if defined(CLOD_VSM_RECEIVER_TELEMETRY)
+// Only a pass that binds Builtin::Shadows::CLodStats as a UAV may define
+// CLOD_VSM_RECEIVER_TELEMETRY (the primary deferred pass). One atomic per wave
+// per counter.
+#define CLOD_VSM_RECEIVER_COUNT(statsBuffer, field, predicate) \
+    { \
+        const uint clodVsmReceiverCount = WaveActiveCountBits(predicate); \
+        if (WaveIsFirstLane() && clodVsmReceiverCount != 0u) \
+        { \
+            InterlockedAdd(statsBuffer[0].field, clodVsmReceiverCount); \
+        } \
+    }
+
+void CLodVirtualShadowRecordReceiverTelemetry(
+    CLodVirtualShadowDebugInfo debugInfo,
+    float shadow,
+    uint2 pixel,
+    float3 positionWS,
+    float linearDepth,
+    Camera mainCamera)
+{
+    RWStructuredBuffer<CLodVirtualShadowStats> stats =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Shadows::CLodStats)];
+    const uint preferred = debugInfo.preferredClipmapIndex;
+    const uint sampled = debugInfo.sampledClipmapIndex;
+    const bool noSample = sampled == 0xFFFFFFFFu;
+    const bool preferredMissed = sampled != preferred;
+    const uint entry = debugInfo.preferredPageEntry;
+    const bool allocated = (entry & kCLodVirtualShadowAllocatedMask) != 0u;
+    const bool visited = (entry & kCLodVirtualShadowVisitedMask) != 0u;
+    const bool hasContent = (entry &
+        (kCLodVirtualShadowContentValidMask | kCLodVirtualShadowDynamicContentMask)) != 0u;
+
+    CLOD_VSM_RECEIVER_COUNT(stats, receiverLookupPixels, true);
+    CLOD_VSM_RECEIVER_COUNT(stats, receiverPreferredSampledPixels, !preferredMissed);
+    CLOD_VSM_RECEIVER_COUNT(stats, receiverFallbackOnePixels, !noSample && sampled == preferred + 1u);
+    CLOD_VSM_RECEIVER_COUNT(stats, receiverFallbackTwoPixels, !noSample && sampled == preferred + 2u);
+    CLOD_VSM_RECEIVER_COUNT(stats, receiverNoSamplePixels, noSample);
+    CLOD_VSM_RECEIVER_COUNT(stats, receiverPreferredUnallocatedPixels, preferredMissed && !allocated);
+    CLOD_VSM_RECEIVER_COUNT(stats, receiverPreferredNotVisitedPixels, preferredMissed && allocated && !visited);
+    CLOD_VSM_RECEIVER_COUNT(stats, receiverPreferredNoContentPixels, preferredMissed && allocated && visited && !hasContent);
+    CLOD_VSM_RECEIVER_COUNT(stats, receiverPreferredTagMismatchPixels, preferredMissed &&
+        (debugInfo.flags & kCLodVirtualShadowDebugFlagCachedPageTagMismatch) != 0u);
+    CLOD_VSM_RECEIVER_COUNT(stats, receiverPreferredDepthMissingPixels, preferredMissed &&
+        (debugInfo.flags & kCLodVirtualShadowDebugFlagSampledDepthMissing) != 0u);
+    CLOD_VSM_RECEIVER_COUNT(stats, receiverTexelClearedPixels,
+        (debugInfo.flags & kCLodVirtualShadowDebugFlagSampledTexelCleared) != 0u);
+    CLOD_VSM_RECEIVER_COUNT(stats, receiverShadowedPixels, shadow > 0.5f);
+
+    // Flicker: reproject to the previous frame's pixel and compare outcomes.
+    // Slices ping-pong on the full frame number; a texel is only trusted when
+    // the previous frame wrote it and its depth matches this surface.
+    RWTexture2DArray<uint4> history =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Shadows::CLodReceiverHistory)];
+    ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+    const uint frameNumber = GetRootVirtualShadowReceiverTelemetryFrame();
+    const uint writeSlice = frameNumber & 1u;
+    const uint readSlice = writeSlice ^ 1u;
+    const uint shadow8 = (uint)round(saturate(shadow) * 255.0f);
+    const bool hard = (debugInfo.flags & kCLodVirtualShadowDebugFlagFiniteDepthShadowed) != 0u;
+    const uint clip5 = min(sampled, 31u);
+    const uint packed = shadow8 | (hard ? 0x100u : 0u) | (clip5 << 9u) | 0x8000u;
+
+    const float3 previousViewPos = mul(float4(positionWS, 1.0f), mainCamera.prevView).xyz;
+    const float4 previousClip = mul(float4(previousViewPos, 1.0f), mainCamera.prevJitteredProjection);
+    bool historyValid = false;
+    uint4 previous = uint4(0u, 0u, 0u, 0u);
+    if (previousClip.w > 1.0e-6f)
+    {
+        const float2 previousNdc = previousClip.xy / previousClip.w;
+        const float2 previousUv = float2(previousNdc.x * 0.5f + 0.5f, 0.5f - previousNdc.y * 0.5f);
+        const float2 screen = float2(perFrame.screenResX, perFrame.screenResY);
+        if (all(previousUv >= 0.0f) && all(previousUv < 1.0f))
+        {
+            const uint2 previousPixel = min((uint2)(previousUv * screen), (uint2)screen - 1u);
+            previous = history[uint3(previousPixel, readSlice)];
+            const float previousLinearDepth = -previousViewPos.z;
+            historyValid =
+                (previous.x & 0x8000u) != 0u &&
+                previous.w == frameNumber - 1u &&
+                abs(asfloat(previous.z) - previousLinearDepth) <= 0.02f * max(previousLinearDepth, 1.0e-3f);
+        }
+    }
+    history[uint3(pixel, writeSlice)] = uint4(packed, debugInfo.sampledPhysicalPageIndex, asuint(linearDepth), frameNumber);
+
+    const uint previousShadow8 = previous.x & 0xFFu;
+    const bool previousHard = (previous.x & 0x100u) != 0u;
+    const uint previousClip5 = (previous.x >> 9u) & 31u;
+    const uint shadowChange = shadow8 > previousShadow8 ? shadow8 - previousShadow8 : previousShadow8 - shadow8;
+    const bool flip = historyValid && shadowChange > 127u;
+    const bool hardFlip = historyValid && hard != previousHard;
+    const bool clipChanged = previousClip5 != clip5;
+    const bool samePage = !clipChanged && previous.y == debugInfo.sampledPhysicalPageIndex;
+    CLOD_VSM_RECEIVER_COUNT(stats, receiverHistoryValidPixels, historyValid);
+    CLOD_VSM_RECEIVER_COUNT(stats, receiverFlipPixels, flip);
+    CLOD_VSM_RECEIVER_COUNT(stats, receiverHardFlipPixels, hardFlip);
+    CLOD_VSM_RECEIVER_COUNT(stats, receiverFlipClipChangedPixels, flip && clipChanged);
+    CLOD_VSM_RECEIVER_COUNT(stats, receiverFlipSamePagePixels, flip && samePage);
+    CLOD_VSM_RECEIVER_COUNT(stats, receiverFlipPageChangedPixels, flip && !clipChanged && !samePage);
+    CLOD_VSM_RECEIVER_COUNT(stats, receiverHardFlipSamePagePixels, hardFlip && samePage);
+    CLOD_VSM_RECEIVER_COUNT(stats, receiverSoftOnlyFlipPixels, flip && !hardFlip);
+    CLOD_VSM_RECEIVER_COUNT(stats, receiverFlipToLitPixels, flip && shadow8 < previousShadow8);
+    if (flip && !clipChanged && !samePage && clip5 < kCLodVirtualShadowClipmapCount)
+    {
+        InterlockedAdd(stats[0].receiverFlipPageChangedByClip[clip5], 1u);
+    }
+    if (all(pixel == uint2(perFrame.screenResX / 2u, perFrame.screenResY / 2u)))
+    {
+        stats[0].receiverProbe[0] = packed;
+        stats[0].receiverProbe[1] = debugInfo.sampledPhysicalPageIndex;
+        stats[0].receiverProbe[2] = historyValid ? previous.x : 0u;
+        stats[0].receiverProbe[3] = historyValid ? previous.y : 0xFFFFFFFFu;
+    }
+}
+#endif
+
 struct LightFragmentData {
     uint lightType;
     float3 lightPos;
@@ -691,6 +807,18 @@ LightingOutput lightFragment(FragmentInfo fragmentInfo, Camera mainCamera, uint 
                                 Texture2D<float> rayTracedSun = ResourceDescriptorHeap[OptionalResourceDescriptorIndex(Builtin::RayTracing::SunShadow)];
                                 shadow = max(shadow, rayTracedSun[fragmentInfo.pixelCoords]);
                             }
+#if defined(CLOD_VSM_RECEIVER_TELEMETRY)
+                            if (GetRootEnableVirtualShadowReceiverTelemetry())
+                            {
+                                CLodVirtualShadowRecordReceiverTelemetry(
+                                    shadowDebugInfo,
+                                    shadow,
+                                    (uint2)fragmentInfo.pixelCoords,
+                                    fragmentInfo.fragPosWorldSpace,
+                                    -fragmentInfo.fragPosViewSpace.z,
+                                    mainCamera);
+                            }
+#endif
 
                             if (output.shadowDebugPayload.x == DEBUG_SENTINEL)
                             {

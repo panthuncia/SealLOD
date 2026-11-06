@@ -22,8 +22,8 @@ inline constexpr std::uint64_t LightActiveIndexTableVariant = 5;
 struct PublishedDirectionalShadowLight {
     DirectX::XMFLOAT3 direction{};
     std::vector<std::uint64_t> viewIDs;
-    std::vector<std::int64_t> unwrappedPageOffsetX;
-    std::vector<std::int64_t> unwrappedPageOffsetY;
+    // Clip page offsets travel with each view (PreparedViewFrameData), never here:
+    // this table publishes asynchronously and would trail the view matrices.
 };
 
 struct LightTableBuildInput {

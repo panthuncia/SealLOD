@@ -13,6 +13,7 @@ set(CLOD_CACHE_TOOL_RUNTIME_ROOT "${CMAKE_BINARY_DIR}/BasicRenderer")
 
 # The renderer has no Assimp importer, so this format stays here.
 find_package(assimp REQUIRED CONFIG)
+find_package(spdlog REQUIRED CONFIG)
 add_executable(CLodCacheTool
     "main.cpp"
     "${CLOD_CACHE_TOOL_BR_ROOT}/src/Assets/Import/Assimp/AssimpGeometryExtractor.cpp"

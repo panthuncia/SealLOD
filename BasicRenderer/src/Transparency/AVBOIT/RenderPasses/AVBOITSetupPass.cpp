@@ -130,7 +130,7 @@ AVBOITSetupFrameData AVBOITSetupPass::Prepare(
     if (bindings.clears.size() != 5) throw std::logic_error("AVBOIT clear declaration is incomplete");
     for (const auto& binding : bindings.clears)
         if (binding.shaderViews.size() != binding.cpuViews.size()) throw std::logic_error("AVBOIT clear view declaration is incomplete");
-    for (const auto target : bindings.targets)
+    for (const auto& target : bindings.targets)
         data.targetClears.push_back(preparation.ClearValue(target.Resource()));
     return data;
 }

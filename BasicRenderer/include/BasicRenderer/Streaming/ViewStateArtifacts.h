@@ -56,6 +56,10 @@ struct PreparedViewFrameData {
     std::shared_ptr<org::PixelBuffer> linearDepthMap;
     DepthHistorySelection depthHistory;
     std::int32_t depthBufferArrayIndex = -1;
+    // Directional VSM clip views: unwrapped page-table offsets of cameraInfo's
+    // placement, captured with it (the light tables publish asynchronously).
+    std::int64_t virtualShadowPageOffsetX = 0;
+    std::int64_t virtualShadowPageOffsetY = 0;
     // No descriptor indices: a resource's slots change whenever the render
     // graph gives it a new backing, so passes resolve them from the frame's
     // bindings during preparation (see CLodViewTables.h).

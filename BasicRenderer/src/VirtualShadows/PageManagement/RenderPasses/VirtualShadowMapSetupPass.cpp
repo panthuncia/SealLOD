@@ -216,6 +216,18 @@ void VirtualShadowMapSetupPass::Update(const org::UpdateExecutionContext& execut
             compactMainCamera.positionWorldSpace = view.cameraInfo.positionWorldSpace;
             compactMainCamera.viewInverse = view.cameraInfo.viewInverse;
             compactMainCamera.projectionInverse = view.cameraInfo.projectionInverse;
+            // Page marking reads the linear depth before this frame writes it, so
+            // its receivers come from the previous frame's camera. Without a
+            // previous frame (this pass's first) the current camera is all there is.
+            const bool markWithCurrentCamera = !m_previousMarkCameraValid;
+            compactMainCamera.markDepthViewInverse = markWithCurrentCamera
+                ? view.cameraInfo.viewInverse
+                : DirectX::XMMatrixInverse(nullptr, view.cameraInfo.prevView);
+            compactMainCamera.markDepthProjectionInverse = markWithCurrentCamera
+                ? view.cameraInfo.projectionInverse
+                // Matches projectionInverse, which inverts the jittered projection.
+                : DirectX::XMMatrixInverse(nullptr, view.cameraInfo.prevJitteredProjection);
+            m_previousMarkCameraValid = true;
             break;
         }
 
@@ -270,14 +282,12 @@ void VirtualShadowMapSetupPass::Update(const org::UpdateExecutionContext& execut
 				}
 
                 auto& clipmapInfo = clipmapInfos[clipmapIndex];
-                const int64_t pageOffsetX =
-                    clipmapIndex < lightViewInfo.unwrappedPageOffsetX.size()
-                    ? lightViewInfo.unwrappedPageOffsetX[clipmapIndex]
-                    : 0;
-                const int64_t pageOffsetY =
-                    clipmapIndex < lightViewInfo.unwrappedPageOffsetY.size()
-                    ? lightViewInfo.unwrappedPageOffsetY[clipmapIndex]
-                    : 0;
+                // Offsets and matrices come from the same view snapshot. The light
+                // table publishes asynchronously; pairing its offsets with this
+                // frame's matrices addressed neighbouring pages for a frame or two
+                // whenever a clip scrolled, flashing the whole clip.
+                const int64_t pageOffsetX = view.virtualShadowPageOffsetX;
+                const int64_t pageOffsetY = view.virtualShadowPageOffsetY;
                 clipmapInfo.worldOriginX = view.cameraInfo.positionWorldSpace.x;
                 clipmapInfo.worldOriginY = view.cameraInfo.positionWorldSpace.y;
                 clipmapInfo.worldOriginZ = view.cameraInfo.positionWorldSpace.z;
