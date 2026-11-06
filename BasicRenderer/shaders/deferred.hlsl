@@ -1,3 +1,5 @@
+// This pass binds Builtin::Shadows::CLodStats (see DeferredShadingPass).
+#define CLOD_VSM_RECEIVER_TELEMETRY 1
 #include "include/vertex.hlsli"
 #include "include/utilities.hlsli"
 #include "include/cbuffers.hlsli"

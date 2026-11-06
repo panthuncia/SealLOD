@@ -59,6 +59,7 @@
 
 struct ID3D12Resource;
 class Scene;
+class CLodVirtualShadowFrameTelemetryState;
 namespace org {
 class DynamicResource;
 class ExternalTextureResource;
@@ -359,6 +360,7 @@ private:
     void PublishFrameTaskGraphCapture();
     void MaybeRequestCLodVisibilityTelemetry();
     void MaybeRequestCLodVirtualShadowTelemetry();
+    void MaybeRequestCLodVirtualShadowFrameTelemetry();
     void MaybeRequestObjectReyesAtlasTelemetry();
     void MaybeRequestTerrainRvtTelemetry();
     void ApplyWindowResolutionPreset(WindowResolutionPreset preset);
@@ -479,6 +481,7 @@ private:
     bool m_clodVirtualShadowWorkTelemetryReadbackPending = false;
     uint32_t m_virtualShadowCasterTelemetryReadbacksPending = 0u;
     bool m_loggedCLodVirtualShadowTelemetryEnabled = false;
+    std::shared_ptr<CLodVirtualShadowFrameTelemetryState> m_clodVirtualShadowFrameTelemetry;
     uint64_t m_lastObjectReyesAtlasTelemetryRequestFrame = UINT64_MAX;
     bool m_objectReyesAtlasTelemetryPhase1ReadbackPending = false;
     bool m_objectReyesAtlasTelemetryPhase2ReadbackPending = false;

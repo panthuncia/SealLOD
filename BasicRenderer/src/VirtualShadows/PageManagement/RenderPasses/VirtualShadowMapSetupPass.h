@@ -90,4 +90,5 @@ private:
     bool m_previousClipmapInfosValid = false;
     bool m_previousDirectionalLightDirectionValid = false;
     bool m_previousRenderResolutionValid = false;
+    bool m_previousMarkCameraValid = false;
 };

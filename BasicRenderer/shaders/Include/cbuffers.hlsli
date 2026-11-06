@@ -170,5 +170,9 @@ bool GetRootEnablePunctualLights() { return UintRootConstant25 != 0u; }
 bool GetRootEnableGTAO() { return UintRootConstant26 != 0u; }
 bool GetRootEnableSkybox() { return UintRootConstant27 != 0u; }
 bool GetRootEnableRayTracedSunShadow() { return UintRootConstant28 != 0u; }
+// Primary deferred pass only: count VSM receiver lookup outcomes into CLodStats.
+bool GetRootEnableVirtualShadowReceiverTelemetry() { return UintRootConstant29 != 0u; }
+// Full frame number for the receiver history ping-pong (frameIndex wraps at 64).
+uint GetRootVirtualShadowReceiverTelemetryFrame() { return UintRootConstant30; }
 
 #endif // __CBUFFERS_HLSL__

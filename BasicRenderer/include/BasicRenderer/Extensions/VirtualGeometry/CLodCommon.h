@@ -743,9 +743,13 @@ struct CLodVirtualShadowMainCameraInfo
     DirectX::XMFLOAT4 positionWorldSpace{};
     DirectX::XMMATRIX viewInverse{};
     DirectX::XMMATRIX projectionInverse{};
+    // The camera that rendered the linear depth page marking reads. Marking runs
+    // before this frame writes that depth, so these are the previous frame's.
+    DirectX::XMMATRIX markDepthViewInverse{};
+    DirectX::XMMATRIX markDepthProjectionInverse{};
 };
 
-static_assert(sizeof(CLodVirtualShadowMainCameraInfo) == 144u, "CLodVirtualShadowMainCameraInfo size must match HLSL");
+static_assert(sizeof(CLodVirtualShadowMainCameraInfo) == 272u, "CLodVirtualShadowMainCameraInfo size must match HLSL");
 
 struct CLodVirtualShadowCompactShadowCameraInfo
 {
@@ -1011,10 +1015,37 @@ struct CLodVirtualShadowStats
     uint32_t predictiveInvalidatedPageTableEntries[CLodVirtualShadowMaxSupportedClipmapCount] = {};
     uint32_t invalidatedCurrentBoundsPageTableEntries[CLodVirtualShadowMaxSupportedClipmapCount] = {};
     uint32_t invalidatedPreviousBoundsPageTableEntries[CLodVirtualShadowMaxSupportedClipmapCount] = {};
+    // Receiver-side outcome of the primary deferred pass's directional lookup,
+    // counted per pixel (only while frame telemetry is enabled).
+    uint32_t receiverLookupPixels = 0u;
+    uint32_t receiverPreferredSampledPixels = 0u;
+    uint32_t receiverFallbackOnePixels = 0u;
+    uint32_t receiverFallbackTwoPixels = 0u;
+    uint32_t receiverNoSamplePixels = 0u;
+    uint32_t receiverPreferredUnallocatedPixels = 0u;
+    uint32_t receiverPreferredNotVisitedPixels = 0u;
+    uint32_t receiverPreferredNoContentPixels = 0u;
+    uint32_t receiverPreferredTagMismatchPixels = 0u;
+    uint32_t receiverPreferredDepthMissingPixels = 0u;
+    uint32_t receiverTexelClearedPixels = 0u;
+    uint32_t receiverShadowedPixels = 0u;
+    // Reprojected against the previous frame (CLodReceiverHistory).
+    uint32_t receiverHistoryValidPixels = 0u;
+    uint32_t receiverFlipPixels = 0u;
+    uint32_t receiverHardFlipPixels = 0u;
+    uint32_t receiverFlipClipChangedPixels = 0u;
+    uint32_t receiverFlipSamePagePixels = 0u;
+    uint32_t receiverFlipPageChangedPixels = 0u;
+    uint32_t receiverHardFlipSamePagePixels = 0u;
+    uint32_t receiverSoftOnlyFlipPixels = 0u;
+    uint32_t receiverFlipToLitPixels = 0u;
+    uint32_t receiverFlipPageChangedByClip[CLodVirtualShadowMaxSupportedClipmapCount] = {};
+    // Screen-centre probe: current/previous packed outcome and physical page.
+    uint32_t receiverProbe[4] = {};
 };
 
 static_assert(
-    sizeof(CLodVirtualShadowStats) == (55u * sizeof(uint32_t)) + (18u * CLodVirtualShadowMaxSupportedClipmapCount * sizeof(uint32_t)),
+    sizeof(CLodVirtualShadowStats) == (80u * sizeof(uint32_t)) + (19u * CLodVirtualShadowMaxSupportedClipmapCount * sizeof(uint32_t)),
     "CLodVirtualShadowStats size must match HLSL");
 
 

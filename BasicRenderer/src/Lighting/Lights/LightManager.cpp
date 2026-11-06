@@ -305,11 +305,7 @@ LightManager::CreateDirectionalLightViewInfo(const LightInfo& info, uint64_t ent
 	PublishDirectionalShadowDebug(cascades);
 
 	// Create a camera and command buffers for each cascade.
-	viewInfo.virtualShadowUnwrappedPageOffsetX.resize(numCascades);
-	viewInfo.virtualShadowUnwrappedPageOffsetY.resize(numCascades);
 	for (int i = 0; i < numCascades; i++) {
-		viewInfo.virtualShadowUnwrappedPageOffsetX[i] = cascades[i].pageOffsetX;
-		viewInfo.virtualShadowUnwrappedPageOffsetY[i] = cascades[i].pageOffsetY;
 		CameraInfo cameraInfo = {};
 		cameraInfo.positionWorldSpace = cascades[i].worldCenter;
 		cameraInfo.view = cascades[i].viewMatrix;
@@ -345,6 +341,7 @@ LightManager::CreateDirectionalLightViewInfo(const LightInfo& info, uint64_t ent
 		viewParams.lightType = Components::LightType::Directional;
 		viewParams.cascadeIndex = i;
 		auto renderView = m_shadowViews->CreateShadowView(cameraInfo, ViewFlags::ShadowCascade(), viewParams);
+		m_shadowViews->UpdateDirectionalClipView(renderView, cameraInfo, cascades[i].pageOffsetX, cascades[i].pageOffsetY);
 		m_directionalViewInfo->Add(m_shadowViews->ShadowViewCameraBufferIndex(renderView));
 		viewInfo.viewIDs.push_back(renderView);
 	}
@@ -460,8 +457,6 @@ void LightManager::UpdateLightViewInfo(flecs::entity light) {
 		auto numCascades = getNumDirectionalLightCascades();
 		if (renderViewIds.size() != static_cast<size_t>(numCascades)) {
 			numCascades = static_cast<uint8_t>((std::min)(renderViewIds.size(), static_cast<size_t>(numCascades)));
-			viewInfo.virtualShadowUnwrappedPageOffsetX.resize(numCascades);
-			viewInfo.virtualShadowUnwrappedPageOffsetY.resize(numCascades);
 			lightViewInfoChanged = true;
 		}
 		auto& camera = m_currentCamera.get<Components::Camera>();
@@ -480,11 +475,7 @@ void LightManager::UpdateLightViewInfo(flecs::entity light) {
 		const float directionalResolutionScale = std::exp2(directionalLodBias);
 		auto cascades = setupDirectionalClipmaps(numCascades, lightInfo.lightInfo.dirWorldSpace, DirectX::XMLoadFloat3(&posFloats), GetForwardFromMatrix(matrix), GetUpFromMatrix(matrix), camera.zNear, camera.fov, camera.aspect, directionalClipFarPlanes, shadowDistanceLowerBound, std::max(getDirectionalShadowSceneExtent(), 0.0f), directionalResolutionScale);
 		PublishDirectionalShadowDebug(cascades);
-		viewInfo.virtualShadowUnwrappedPageOffsetX.resize(numCascades);
-		viewInfo.virtualShadowUnwrappedPageOffsetY.resize(numCascades);
 		for (int i = 0; i < numCascades; i++) {
-			viewInfo.virtualShadowUnwrappedPageOffsetX[i] = cascades[i].pageOffsetX;
-			viewInfo.virtualShadowUnwrappedPageOffsetY[i] = cascades[i].pageOffsetY;
 			CameraInfo info = {};
 			// Match Timberdoodle's model: the shadow camera is derived from a page-aligned
 			// projection of the primary camera into a fixed light-space basis.
@@ -518,7 +509,7 @@ void LightManager::UpdateLightViewInfo(flecs::entity light) {
 			};
 			info.numDepthMips = CalculateMipLevels(static_cast<uint16_t>(info.depthResX), static_cast<uint16_t>(info.depthResY));
 			info.isOrtho = true; // Directional lights use orthographic projection for shadows.
-			m_shadowViews->UpdateShadowView(renderViewIds[i], info);
+			m_shadowViews->UpdateDirectionalClipView(renderViewIds[i], info, cascades[i].pageOffsetX, cascades[i].pageOffsetY);
 		}
 		lightViewInfoChanged = true;
 		UpdateLightBufferView(viewInfo.lightBufferView.get(), lightInfo.lightInfo);

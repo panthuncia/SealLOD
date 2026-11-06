@@ -11,6 +11,7 @@
 #include "BasicRenderer/Scene/Scene.h"
 #include "Runtime/Settings/SettingsManager.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include "Runtime/Settings/RendererSettingsHelpers.h"
 
 // The deferred pipeline follows the global PSO flags, so it is chosen per frame.
 struct DeferredShadingFrame {
@@ -18,6 +19,8 @@ struct DeferredShadingFrame {
 	std::array<uint32_t, 4> lighting{};
 	uint32_t groupsX = 0, groupsY = 0;
 	bool rayTracedSunShadow = false;
+	bool virtualShadowReceiverTelemetry = false;
+	uint32_t frameNumber = 0;
 };
 
 class DeferredShadingPass : public org::TypedRenderGraphPass<DeferredShadingPass, DeferredShadingFrame> {
@@ -32,6 +35,9 @@ public:
 		m_rayTracedSunShadow = settingsManager.getSettingGetter<bool>("enableRayTracedShadows")()
 			&& DeviceManager::GetInstance().GetCLodRayTracingSupported();
 		m_clusteredLightingEnabled = settingsManager.getSettingGetter<bool>("enableClusteredLighting")();
+		// Receiver counters go to CLodStats, which is bound only with shadows on.
+		m_virtualShadowReceiverTelemetry = m_shadowsEnabled &&
+			!br::runtime::renderer_settings::CLodVirtualShadowFrameTelemetryPath().empty();
 	}
 
 	void Declare(org::PassBuilder& builder) {
@@ -75,6 +81,10 @@ public:
 				builder.ShaderResource(Builtin::Shadows::CLodPageTable,
 					org::SrvView{static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)});
 				builder.UnorderedAccess(Builtin::Shadows::CLodStats);
+				if (m_virtualShadowReceiverTelemetry) {
+					builder.UnorderedAccess(Builtin::Shadows::CLodReceiverHistory,
+						org::UavView{static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)});
+				}
 			}
 
 		if (m_clusteredLightingEnabled) {
@@ -106,6 +116,8 @@ public:
 		frame.lighting = {lighting.shadowsEnabled, lighting.punctualLightingEnabled, lighting.gtaoEnabled, m_skyboxEnabled};
 		frame.groupsX = (resolution.x + 7u) / 8u; frame.groupsY = (resolution.y + 7u) / 8u;
 		frame.rayTracedSunShadow = m_rayTracedSunShadow;
+		frame.virtualShadowReceiverTelemetry = m_virtualShadowReceiverTelemetry;
+		frame.frameNumber = static_cast<uint32_t>(update ? update->frameNumber : render->frameNumber);
 		return frame;
 	}
 	static void Record(const DeferredShadingFrame& frame, org::PassRecordContext& context) {
@@ -113,6 +125,8 @@ public:
 		for (uint32_t index = 0; index < frame.lighting.size(); ++index)
 			constants[MiscEnableShadows + index] = frame.lighting[index];
 		constants[UintRootConstant28] = frame.rayTracedSunShadow ? 1u : 0u;
+		constants[UintRootConstant29] = frame.virtualShadowReceiverTelemetry ? 1u : 0u;
+		constants[UintRootConstant30] = frame.frameNumber;
 		br::render::DispatchCompute(context, frame.pipeline, constants, frame.groupsX, frame.groupsY);
 	}
 
@@ -137,6 +151,7 @@ private:
 
 	bool m_gtaoEnabled = true;
 	bool m_rayTracedSunShadow = false;
+	bool m_virtualShadowReceiverTelemetry = false;
 	bool m_clusteredLightingEnabled = true;
 	bool m_skyboxEnabled = false;
 };

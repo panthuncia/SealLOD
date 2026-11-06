@@ -157,7 +157,8 @@
       "CLodStats": {},
       "CLodDirectionalPageViewInfo": {},
       "CLodCompactMainCamera": {},
-      "CLodCompactShadowCameras": {}
+      "CLodCompactShadowCameras": {},
+      "CLodReceiverHistory": {}
     },
     "PPLL": {
       "HeadPointerTexture": {},

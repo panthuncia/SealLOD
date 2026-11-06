@@ -32,6 +32,9 @@
 #include <BasicRenderer/Extensions/ResourceComponent.h>
 #include "Scene/Objects/ObjectManager.h"
 #include <BasicRenderer/Extensions/VirtualShadowCasterProvider.h>
+#include "Runtime/Settings/RendererSettingsHelpers.h"
+#include <filesystem>
+#include <fstream>
 
 namespace {
 constexpr const char* CLodVisibilityTelemetryDebugSettingName = "clodVisibilityTelemetryDebug";
@@ -1492,4 +1495,152 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                     counters[3], counters[4], counters[5], counters[6]);
             });
     }
+}
+
+// SARP_CLOD_VSM_FRAME_TELEMETRY=<csv>: every frame's VSM page counters and the
+// primary deferred pass's receiver lookup outcomes, one row per frame. Flicker is
+// a frame-to-frame effect, so this samples every frame; the capture rides the
+// deferred pass's own command list (it binds CLodStats), adding no graph pass.
+class CLodVirtualShadowFrameTelemetryState {
+public:
+    std::mutex mutex;
+    std::ofstream output;
+    std::weak_ptr<org::Resource> statsResource;
+    std::atomic<uint32_t> inFlight{0u};
+};
+
+void Renderer::MaybeRequestCLodVirtualShadowFrameTelemetry()
+{
+    const std::string& path = br::runtime::renderer_settings::CLodVirtualShadowFrameTelemetryPath();
+    if (path.empty() || !currentRenderGraph || !m_orgRuntime) {
+        return;
+    }
+    auto* readbackService = m_orgRuntime->Readbacks().get();
+    if (!readbackService) {
+        return;
+    }
+    if (!m_clodVirtualShadowFrameTelemetry) {
+        auto state = std::make_shared<CLodVirtualShadowFrameTelemetryState>();
+        std::error_code error;
+        const std::filesystem::path outputPath(path);
+        if (outputPath.has_parent_path()) {
+            std::filesystem::create_directories(outputPath.parent_path(), error);
+        }
+        state->output.open(outputPath, std::ios::out | std::ios::trunc);
+        if (!state->output) {
+            spdlog::error("CLOD VSM frame telemetry: cannot open '{}'.", path);
+            return;
+        }
+        state->output <<
+            "frame,cam_x,cam_y,cam_z,"
+            "reset,reset_forced,reset_no_previous,reset_structure,reset_light_direction,"
+            "allocation_requests,free_pages,reusable_pages,newly_allocated,mark_overflow,"
+            "allocation_pct,pressure_bias,"
+            "normal_eligible,normal_admitted,normal_deferred,upgrade_eligible,upgrade_admitted,upgrade_deferred,"
+            "requested_pages,visited_pages,dirty_pages,stale_dirty_cleared,wrapped_cleared,"
+            "recv_lookup,recv_preferred,recv_fallback1,recv_fallback2,recv_none,"
+            "recv_pref_unallocated,recv_pref_not_visited,recv_pref_no_content,recv_pref_tag_mismatch,"
+            "recv_pref_depth_missing,recv_texel_cleared,recv_shadowed,"
+            "hist_valid,flip,hard_flip,flip_clip_changed,flip_same_page,flip_page_changed,hard_flip_same_page,soft_only_flip,flip_to_lit,"
+            "probe_packed,probe_page,probe_prev_packed,probe_prev_page,flip_page_changed_by_clip\n";
+        m_clodVirtualShadowFrameTelemetry = std::move(state);
+        spdlog::info("CLOD VSM frame telemetry writing '{}'.", path);
+    }
+    auto state = m_clodVirtualShadowFrameTelemetry;
+    // Startup and resize replace the aliased shadow resources before the
+    // readback pass exists; wait for the graph to settle as the 30-frame log does.
+    if (m_totalFramesRendered < 30u) {
+        return;
+    }
+    // Readbacks complete a few frames late; bound the backlog if the GPU stalls.
+    if (state->inFlight.load(std::memory_order_acquire) >= 16u) {
+        return;
+    }
+    auto statsResource = state->statsResource.lock();
+    if (!statsResource) {
+        auto& world = RendererECSManager::GetInstance().GetWorld();
+        const auto shadowTag = world.component<CLodExtensionShadowTag>();
+        world.query_builder<const Components::Resource>()
+            .with<CLodVirtualShadowStatsTag>()
+            .with<CLodExtensionTypeTag>(shadowTag)
+            .build()
+            .each([&](const Components::Resource& component) {
+                if (!statsResource) {
+                    statsResource = component.resource.lock();
+                }
+            });
+        if (!statsResource) {
+            return;
+        }
+        state->statsResource = statsResource;
+    }
+
+    DirectX::XMFLOAT4 camera{};
+    if (m_frameInputs) {
+        for (const auto& view : m_frameInputs->Update()->Views()) {
+            if (view.primary) {
+                camera = view.cameraInfo.positionWorldSpace;
+                break;
+            }
+        }
+    }
+    // The graph frame number, which the setup log and the deferred pass's
+    // history ping-pong also use.
+    const uint64_t requestedFrame = m_frameInputs ? m_frameInputs->FrameNumber() : m_totalFramesRendered;
+    state->inFlight.fetch_add(1u, std::memory_order_acq_rel);
+    // A dropped capture never calls back; the guard returns its in-flight slot.
+    auto release = std::shared_ptr<void>(nullptr, [state](void*) {
+        state->inFlight.fetch_sub(1u, std::memory_order_acq_rel);
+    });
+    readbackService->RequestReadbackCapture(
+        "DeferredShadingPass",
+        statsResource.get(),
+        org::RangeSpec{},
+        [state, release, requestedFrame, camera](org::ReadbackCaptureResult&& result) {
+            if (result.data.size() < sizeof(CLodVirtualShadowStats)) {
+                return;
+            }
+            CLodVirtualShadowStats stats{};
+            std::memcpy(&stats, result.data.data(), sizeof(stats));
+            const auto sum = [](const auto& counters) {
+                uint64_t total = 0u;
+                for (uint32_t value : counters) {
+                    total += value;
+                }
+                return total;
+            };
+            std::scoped_lock lock(state->mutex);
+            auto& o = state->output;
+            o << requestedFrame << ',' << camera.x << ',' << camera.y << ',' << camera.z << ','
+              << stats.setupResetApplied << ',' << stats.setupResetForced << ','
+              << stats.setupResetNoPreviousState << ',' << stats.setupResetStructureMismatch << ','
+              << stats.setupResetLightDirectionChanged << ','
+              << stats.allocationRequestCount << ',' << stats.freePhysicalPageCount << ','
+              << stats.reusablePhysicalPageCount << ',' << stats.newlyAllocatedPageCount << ','
+              << stats.markRequestOverflowCount << ','
+              << stats.currentAllocationPercentage << ',' << stats.smoothedPressureLodBias << ','
+              << stats.normalEligiblePageCount << ',' << stats.normalAdmittedPageCount << ','
+              << stats.normalDeferredPageCount << ',' << stats.upgradeEligiblePageCount << ','
+              << stats.upgradeAdmittedPageCount << ',' << stats.upgradeDeferredPageCount << ','
+              << sum(stats.requestedPages) << ',' << sum(stats.visitedPageTableEntries) << ','
+              << sum(stats.dirtyPageTableEntries) << ',' << sum(stats.setupStaleDirtyClearedPageTableEntries) << ','
+              << sum(stats.setupWrappedClearedPageTableEntries) << ','
+              << stats.receiverLookupPixels << ',' << stats.receiverPreferredSampledPixels << ','
+              << stats.receiverFallbackOnePixels << ',' << stats.receiverFallbackTwoPixels << ','
+              << stats.receiverNoSamplePixels << ',' << stats.receiverPreferredUnallocatedPixels << ','
+              << stats.receiverPreferredNotVisitedPixels << ',' << stats.receiverPreferredNoContentPixels << ','
+              << stats.receiverPreferredTagMismatchPixels << ',' << stats.receiverPreferredDepthMissingPixels << ','
+              << stats.receiverTexelClearedPixels << ',' << stats.receiverShadowedPixels << ','
+              << stats.receiverHistoryValidPixels << ',' << stats.receiverFlipPixels << ',' << stats.receiverHardFlipPixels << ','
+              << stats.receiverFlipClipChangedPixels << ',' << stats.receiverFlipSamePagePixels << ','
+              << stats.receiverFlipPageChangedPixels << ',' << stats.receiverHardFlipSamePagePixels << ','
+              << stats.receiverSoftOnlyFlipPixels << ',' << stats.receiverFlipToLitPixels << ','
+              << stats.receiverProbe[0] << ',' << stats.receiverProbe[1] << ','
+              << stats.receiverProbe[2] << ',' << stats.receiverProbe[3] << ',';
+            for (uint32_t clip = 0u; clip < CLodVirtualShadowMaxSupportedClipmapCount; ++clip) {
+                o << (clip ? ";" : "") << stats.receiverFlipPageChangedByClip[clip];
+            }
+            o << '\n';
+            o.flush();
+        });
 }

@@ -141,6 +141,7 @@ struct Builtin {
     inline static constexpr std::string_view CLodPageMetadata = "Builtin::Shadows::CLodPageMetadata";
     inline static constexpr std::string_view CLodPageTable = "Builtin::Shadows::CLodPageTable";
     inline static constexpr std::string_view CLodPhysicalPages = "Builtin::Shadows::CLodPhysicalPages";
+    inline static constexpr std::string_view CLodReceiverHistory = "Builtin::Shadows::CLodReceiverHistory";
     inline static constexpr std::string_view CLodStats = "Builtin::Shadows::CLodStats";
   };
   struct SkeletonResources {
