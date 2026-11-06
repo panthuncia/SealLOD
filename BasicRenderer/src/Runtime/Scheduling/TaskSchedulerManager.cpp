@@ -298,7 +298,7 @@ struct TaskSchedulerManager::RuntimeState {
         std::uint64_t traceTaskID = 0;
         std::uint64_t admittedQueuedDepth = 0;
         std::uint32_t admittedActiveCount = 0;
-        std::shared_ptr<CallbackLifetime> callbackLifetime;
+        std::shared_ptr<CallbackLifetime> callbackLifetime{};
     };
     struct DelayedTask {
         std::chrono::steady_clock::time_point due;

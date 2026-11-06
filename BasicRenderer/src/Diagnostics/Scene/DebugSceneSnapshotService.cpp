@@ -53,7 +53,7 @@ std::vector<DebugSkeletonSource> DebugSceneSnapshotService::CaptureSkeletons() c
             source.parentIndices.assign(parents.begin(), parents.end());
             source.rootParentGlobals.assign(roots.begin(), roots.end());
             source.boneNames.reserve(names.size());
-            for (const auto name : names) source.boneNames.emplace_back(name);
+            for (const auto& name : names) source.boneNames.emplace_back(name);
             result.push_back(std::move(source));
         }
     });

@@ -70,7 +70,7 @@ class Execution;
 class Runtime;
 }
 namespace br::render {
-struct RendererFrameInputs;
+class RendererFrameInputs;
 class TextureJobGraph;
 class EnvironmentJobGraph;
 class RendererStatePublisher;
