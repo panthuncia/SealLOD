@@ -728,6 +728,19 @@ void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     m_rayTracedShadowsEnabled = settingsManager.getSettingGetter<bool>("enableRayTracedShadows")();
     setPathTracingEnabled = settingsManager.getSettingSetter<bool>("enablePathTracing");
     m_pathTracingEnabled = settingsManager.getSettingGetter<bool>("enablePathTracing")();
+    // The renderer can turn it back off (no support, or a failed switch).
+    observerSetting(m_pathTracingEnabled, "enablePathTracing");
+    const auto bindPathTracing = [&](auto& localCopy, auto& setter, const char* name) {
+        using Value = std::decay_t<decltype(localCopy)>;
+        setter = settingsManager.getSettingSetter<Value>(name);
+        localCopy = settingsManager.getSettingGetter<Value>(name)();
+        observerSetting(localCopy, name);
+    };
+    bindPathTracing(m_pathTracingMaxBounces, setPathTracingMaxBounces, "pathTracingMaxBounces");
+    bindPathTracing(m_pathTracingReorderMode, setPathTracingReorderMode, "pathTracingReorderMode");
+    bindPathTracing(m_pathTracingOpacityMicromapTwoState, setPathTracingOpacityMicromapTwoState, "pathTracingOpacityMicromapTwoState");
+    bindPathTracing(m_pathTracingAccumulate, setPathTracingAccumulate, "pathTracingAccumulate");
+    bindPathTracing(m_pathTracingSunOnly, setPathTracingSunOnly, "pathTracingSunOnly");
     setRayTracedPrimaryVisibilityMode = settingsManager.getSettingSetter<uint32_t>("rayTracedPrimaryVisibilityMode");
     m_rayTracedPrimaryVisibilityMode = settingsManager.getSettingGetter<uint32_t>("rayTracedPrimaryVisibilityMode")();
     observerSetting(m_rayTracedReflectionsEnabled, "enableRayTracedReflections");
@@ -1581,12 +1594,73 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
         if (ImGui::Checkbox("Enable Screen Space Reflections", &m_screenSpaceReflectionsEnabled)) {
             setScreenSpaceReflectionsEnabled(m_screenSpaceReflectionsEnabled);
 		}
-        const bool clodRtSupported = DeviceManager::GetInstance().GetCLodRayTracingSupported();
-        if (!clodRtSupported) {
-            ImGui::BeginDisabled();
-        }
+        const auto& deviceManager = DeviceManager::GetInstance();
+        const bool pathTracingSupported = deviceManager.GetPathTracingSupported();
+        ImGui::BeginDisabled(!pathTracingSupported);
         if (ImGui::Checkbox("Path Tracing (replaces raster)", &m_pathTracingEnabled)) {
             setPathTracingEnabled(m_pathTracingEnabled);
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            if (pathTracingSupported) {
+                ImGui::SetTooltip("Replaces raster, material evaluation and deferred lighting with the reference path tracer,\n"
+                    "denoised by DLSS Ray Reconstruction. On by default where the device supports it.");
+            }
+            else {
+                ImGui::SetTooltip("Unavailable: path tracing %s.", deviceManager.GetPathTracingUnsupportedReason().c_str());
+            }
+        }
+        if (m_pathTracingEnabled) {
+            ImGui::Indent();
+            int bounces = static_cast<int>(m_pathTracingMaxBounces);
+            ImGui::SetNextItemWidth(160.0f);
+            if (ImGui::SliderInt("Path Segments", &bounces, 1, 8)) {
+                m_pathTracingMaxBounces = static_cast<uint32_t>(bounces);
+                setPathTracingMaxBounces(m_pathTracingMaxBounces);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Segments per path: 1 is direct lighting only, 2 (the default) adds one bounce.");
+            }
+            constexpr const char* reorderModes[] = { "Never", "After the first hit", "Every segment" };
+            int reorderMode = static_cast<int>(std::min<uint32_t>(m_pathTracingReorderMode, 2u));
+            ImGui::SetNextItemWidth(220.0f);
+            if (ImGui::Combo("Shader Execution Reordering", &reorderMode, reorderModes, IM_ARRAYSIZE(reorderModes))) {
+                m_pathTracingReorderMode = static_cast<uint32_t>(reorderMode);
+                setPathTracingReorderMode(m_pathTracingReorderMode);
+            }
+            constexpr const char* twoStateModes[] = { "Exact (any-hit decides)", "2-state for bounce and shadow rays", "2-state for every ray" };
+            int twoState = static_cast<int>(std::min<uint32_t>(m_pathTracingOpacityMicromapTwoState, 2u));
+            ImGui::SetNextItemWidth(220.0f);
+            if (ImGui::Combo("Opacity Micromaps", &twoState, twoStateModes, IM_ARRAYSIZE(twoStateModes))) {
+                m_pathTracingOpacityMicromapTwoState = static_cast<uint32_t>(twoState);
+                setPathTracingOpacityMicromapTwoState(m_pathTracingOpacityMicromapTwoState);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Where a micro-triangle is partly transparent, 2-state takes the baked guess at its centre\n"
+                    "instead of running the alpha test. Exact is the reference; the default 2-state for\n"
+                    "secondary rays is faster with no visible difference.");
+            }
+            if (ImGui::Checkbox("Accumulate (reference image)", &m_pathTracingAccumulate)) {
+                setPathTracingAccumulate(m_pathTracingAccumulate);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Averages samples while nothing changes, without denoising. Restarts when the camera,\n"
+                    "the scene or these options change.");
+            }
+            if (ImGui::Checkbox("Sun Only", &m_pathTracingSunOnly)) {
+                setPathTracingSunOnly(m_pathTracingSunOnly);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Direct sun only, without sky, emission or local lights: for comparing against raster.");
+            }
+            ImGui::Unindent();
+        }
+
+        // These build on the raster pipeline, which path tracing replaces.
+        const bool clodRtSupported = deviceManager.GetCLodRayTracingSupported();
+        const bool rayTracingControlsDisabled = !clodRtSupported || m_pathTracingEnabled;
+        if (rayTracingControlsDisabled) {
+            ImGui::BeginDisabled();
         }
         if (ImGui::Checkbox("Enable Ray Traced Reflections", &m_rayTracedReflectionsEnabled)) {
             setRayTracedReflectionsEnabled(m_rayTracedReflectionsEnabled);
@@ -1600,7 +1674,7 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
             m_rayTracedPrimaryVisibilityMode = static_cast<uint32_t>(primaryVisibilityMode);
             setRayTracedPrimaryVisibilityMode(m_rayTracedPrimaryVisibilityMode);
         }
-        if (!clodRtSupported) {
+        if (rayTracingControlsDisabled) {
             ImGui::EndDisabled();
         }
         const RayTracingFeatureInfo& rtFeatures = DeviceManager::GetInstance().GetRayTracingFeatures();

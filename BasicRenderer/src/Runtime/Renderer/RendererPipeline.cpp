@@ -62,6 +62,13 @@ void Renderer::ApplyPendingPipelineReplacement() {
     m_syncingPipelineTopologySettings = false;
 }
 
+void Renderer::ConfirmPipelineReplacement() {
+    // The raster recipe path tracing replaced is needed only until raster is back.
+    if (!m_pipelineRecipe.Contains<br::pipeline::PathTracingTechnique>()) {
+        m_rasterRecipeBeforePathTracing.reset();
+    }
+}
+
 void Renderer::HandlePipelineReplacementFailure(const std::exception& error) {
     spdlog::error("Renderer pipeline replacement failed: {}", error.what());
     if (m_pipelineReplacementDebugBreakHandler) {
@@ -91,6 +98,17 @@ void Renderer::HandlePipelineReplacementFailure(const std::exception& error) {
         m_pipelineRecipe.Contains<br::pipeline::TerrainRegionMaterialEvaluationTechnique>());
     settings.getSettingSetter<bool>("enableShadows")(
         m_pipelineRecipe.Contains<br::pipeline::ClusterLodShadowTechnique>());
+    // Switching path tracing on or off is what failed: go back to the mode the restored recipe is in.
+    const bool pathTraced = m_pipelineRecipe.Contains<br::pipeline::PathTracingTechnique>();
+    if (pathTraced != m_pathTracing) {
+        m_pathTracing = pathTraced;
+        if (!pathTraced) {
+            m_rasterRecipeBeforePathTracing.reset();
+        }
+        settings.getSettingSetter<bool>("enablePathTracing")(pathTraced);
+        settings.getSettingSetter<bool>("rayReconstructionGuidesAvailable")(pathTraced);
+        SelectPathTracingUpscaler(pathTraced);
+    }
     m_syncingPipelineTopologySettings = false;
 }
 

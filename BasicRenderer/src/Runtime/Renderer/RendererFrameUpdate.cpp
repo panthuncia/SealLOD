@@ -245,6 +245,7 @@ void Renderer::Update(float elapsedSeconds) {
             try {
 		        CreateRenderGraph();
                 m_pipelineRollbackRecipe.reset();
+                ConfirmPipelineReplacement();
             }
             catch (const std::exception& error) {
                 if (!m_pipelineRollbackRecipe) {

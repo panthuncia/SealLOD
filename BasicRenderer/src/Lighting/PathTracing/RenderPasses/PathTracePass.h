@@ -31,7 +31,8 @@ struct PathTraceState {
     std::mutex mutex;
     std::shared_ptr<const br::render::CLodRtShaderTable> table;
     // What accumulated samples depend on besides the camera. Averaging across a change would keep what is no longer there.
-    std::array<uint64_t, 5> accumulationScene{};
+    // The settings that change the image are in the last entry.
+    std::array<uint64_t, 6> accumulationScene{};
     uint64_t accumulatedFrames = 0u;
 
     // Null until the library has compiled on its worker.
@@ -73,8 +74,11 @@ inline std::shared_ptr<PathTraceState> MakePathTraceState() {
     };
     // pathTrace.lib.hlsl: PathTracePayload, 22 words.
     state->recipe.maxPayloadBytes = 88u;
-    // The BVH's alpha-tested CLAS may carry opacity micromaps (CLodRayTracingSystem::RequestOpacityMicromaps).
-    state->recipe.flags = static_cast<rhi::RayTracingPipelineFlags>(state->recipe.flags | rhi::RTPipeline_AllowOpacityMicromaps);
+    // The BVH's alpha-tested CLAS may carry opacity micromaps (CLodRayTracingSystem::RequestOpacityMicromaps), where the
+    // device has them: a pipeline that allows them can't be created below ray tracing tier 1.2.
+    if (DeviceManager::GetInstance().GetRayTracingFeatures().opacityMicromap) {
+        state->recipe.flags = static_cast<rhi::RayTracingPipelineFlags>(state->recipe.flags | rhi::RTPipeline_AllowOpacityMicromaps);
+    }
     state->recipe.debugName = "PathTrace.PSO";
     state->arguments = CreateAliasedUnmaterializedRawBuffer(sizeof(rhi::RayTracingDispatchRaysArguments), true, false);
     state->arguments->SetName("Path trace dispatch arguments");
@@ -230,8 +234,8 @@ public:
         if (twoState >= 2u) frame.flags |= CLOD_RT_PT_FLAG_OMM_2_STATE_PRIMARY;
         if (frame.system) {
             const auto& stats = frame.system->GetStats();
-            const std::array<uint64_t, 5> scene = { stats.instances, stats.clustersInBvh, stats.clasBuildsTotal, stats.clasFreedTotal,
-                context->materialTextureStreamingStats.totalResidentBytes };
+            const std::array<uint64_t, 6> scene = { stats.instances, stats.clustersInBvh, stats.clasBuildsTotal, stats.clasFreedTotal,
+                context->materialTextureStreamingStats.totalResidentBytes, (uint64_t(frame.maxBounces) << 32u) | frame.flags };
             std::scoped_lock lock(m_state->mutex);
             if (scene != m_state->accumulationScene) {
                 m_state->accumulationScene = scene;

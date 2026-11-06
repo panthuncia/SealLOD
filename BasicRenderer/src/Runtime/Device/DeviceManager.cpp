@@ -343,6 +343,7 @@ void DeviceManager::Cleanup() {
     m_rayTracingFeatures = {};
     m_rayTracingSupported = false;
     m_clodRayTracingSupported = false;
+    m_pathTracingUnsupportedReason = "no device";
 
     if (m_device) {
         m_device.Reset();
@@ -357,6 +358,7 @@ void DeviceManager::CheckGPUFeatures() {
     m_rayTracingFeatures = {};
     m_rayTracingSupported = false;
     m_clodRayTracingSupported = false;
+    m_pathTracingUnsupportedReason = "no device";
     if (!m_device) {
         return;
     }
@@ -392,6 +394,14 @@ void DeviceManager::CheckGPUFeatures() {
             rayTracingFeatures.maxClusterVertices,
             rayTracingFeatures.maxClusterTriangles);
     }
+
+    if (m_backend != rhi::Backend::D3D12) m_pathTracingUnsupportedReason = "needs the D3D12 backend";
+    else if (!m_clodRayTracingSupported) m_pathTracingUnsupportedReason = "needs clustered ray tracing (DXR 2 clusters)";
+    else if (!m_rayTracingFeatures.indirect) m_pathTracingUnsupportedReason = "needs indirect ray dispatch";
+    else if (!m_rayTracingFeatures.shaderExecutionReordering) m_pathTracingUnsupportedReason = "needs shader execution reordering (shader model 6.9)";
+    else m_pathTracingUnsupportedReason.clear();
+    spdlog::info("DeviceManager path tracing {}{}", GetPathTracingSupported() ? "supported" : "unsupported: ",
+        m_pathTracingUnsupportedReason);
 }
 
 }

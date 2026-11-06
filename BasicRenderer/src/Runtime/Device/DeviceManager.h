@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 #include <rhi.h>
 #include <rhi_allocator.h>
 
@@ -58,6 +60,16 @@ public:
         return m_clodRayTracingSupported;
     }
 
+    // What the path tracer needs: clustered ray tracing on D3D12, ray tracing pipelines launched indirectly, and shader
+    // execution reordering (shader model 6.9). Opacity micromaps and DLSS Ray Reconstruction are used when present.
+    bool GetPathTracingSupported() const {
+        return m_pathTracingUnsupportedReason.empty();
+    }
+    // Empty when it is supported; otherwise the first requirement this device lacks.
+    const std::string& GetPathTracingUnsupportedReason() const {
+        return m_pathTracingUnsupportedReason;
+    }
+
 private:
     DeviceManager() = default;
 
@@ -74,6 +86,7 @@ private:
     RayTracingFeatureInfo m_rayTracingFeatures{};
     bool m_rayTracingSupported = false;
     bool m_clodRayTracingSupported = false;
+    std::string m_pathTracingUnsupportedReason = "no device";
 };
 }
 

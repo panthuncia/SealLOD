@@ -43,6 +43,7 @@
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "BasicRenderer/Runtime/Detail/OpenPBRLookupResources.h"
 #include <BasicRenderer/Pipeline/RendererSettings.h>
+#include <BasicRenderer/Pipeline/UpscalingTypes.h>
 #include "BasicRenderer/Scene/SceneRenderBridge.h"
 #include "BasicRenderer/Runtime/Detail/SceneSourceStateStore.h"
 #include "BasicRenderer/Runtime/Detail/SceneEntityMaterializationService.h"
@@ -319,6 +320,8 @@ private:
     br::pipeline::PipelineRecipe GetPipelineRecipeForMutation() const;
     void RegisterPipelineExtensions();
     void HandlePipelineReplacementFailure(const std::exception& error);
+    // After a graph built with the current recipe: drops what only a failed replacement could have needed.
+    void ConfirmPipelineReplacement();
     void SetSettings();
     void SetEnvironmentInternal(std::wstring name);
 	void ToggleMeshShaders(bool useMeshShaders);
@@ -383,6 +386,11 @@ private:
     bool m_pathTracing = false;
     // What switching path tracing off goes back to. A successful replacement clears the rollback copy, so it can't serve.
     std::optional<br::pipeline::PipelineRecipe> m_rasterRecipeBeforePathTracing;
+    // The upscaler raster used, for when path tracing (which selects DLSS Ray Reconstruction) is switched off.
+    std::optional<UpscalingMode> m_upscalingModeBeforePathTracing;
+    // Path tracing denoises one sample per pixel with DLSS Ray Reconstruction (falling back to DLSS SR without it), unless
+    // it's accumulating; leaving it restores the upscaler from before.
+    void SelectPathTracingUpscaler(bool pathTracing);
     bool m_warnedRayTracedReflectionsUnsupported = false;
 	bool m_useMeshShaders = true;
 

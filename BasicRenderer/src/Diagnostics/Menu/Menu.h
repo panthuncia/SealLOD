@@ -633,6 +633,17 @@ private:
     uint32_t m_rayTracedPrimaryVisibilityMode = 0u;
     std::function<void(uint32_t)> setRayTracedPrimaryVisibilityMode;
     std::function<void(bool)> setPathTracingEnabled;
+    // The path tracer's options, read every frame (PathTracePass).
+    uint32_t m_pathTracingMaxBounces = 2u;
+    uint32_t m_pathTracingReorderMode = 2u;
+    uint32_t m_pathTracingOpacityMicromapTwoState = 1u;
+    bool m_pathTracingAccumulate = false;
+    bool m_pathTracingSunOnly = false;
+    std::function<void(uint32_t)> setPathTracingMaxBounces;
+    std::function<void(uint32_t)> setPathTracingReorderMode;
+    std::function<void(uint32_t)> setPathTracingOpacityMicromapTwoState;
+    std::function<void(bool)> setPathTracingAccumulate;
+    std::function<void(bool)> setPathTracingSunOnly;
 
     bool m_jitterEnabled = true;
     std::function<bool()> getJitterEnabled;

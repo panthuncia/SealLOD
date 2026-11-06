@@ -61,6 +61,24 @@ uint32_t ReadUintEnvironmentValue(const char* name, uint32_t fallback)
 }
 }
 
+void Renderer::SelectPathTracingUpscaler(bool pathTracing) {
+    auto& settings = SettingsManager::GetInstance();
+    const UpscalingMode mode = settings.getSettingGetter<UpscalingMode>("upscalingMode")();
+    // One sample per pixel needs denoising, unless the mode is averaging samples itself. Without RR support it falls back to SR.
+    const bool rayReconstruction = pathTracing && !settings.getSettingGetter<bool>("pathTracingAccumulate")()
+        && !ReadTruthyEnvironmentFlag("SARP_RT_PT_NO_RR");
+    if (rayReconstruction) {
+        if (mode != UpscalingMode::DLSSRayReconstruction) {
+            m_upscalingModeBeforePathTracing = mode;
+            settings.getSettingSetter<UpscalingMode>("upscalingMode")(UpscalingMode::DLSSRayReconstruction);
+        }
+    }
+    else if (mode == UpscalingMode::DLSSRayReconstruction && m_upscalingModeBeforePathTracing) {
+        settings.getSettingSetter<UpscalingMode>("upscalingMode")(*m_upscalingModeBeforePathTracing);
+        m_upscalingModeBeforePathTracing.reset();
+    }
+}
+
 void Renderer::SetSettings() {
 	auto& settingsManager = SettingsManager::GetInstance();
 
@@ -239,11 +257,19 @@ void Renderer::SetSettings() {
     if (ReadTruthyEnvironmentFlag("SARP_RT_SHADOWS")) m_rayTracedShadows = true;
     if (ReadTruthyEnvironmentFlag("SARP_RT_PRIMARY")) m_rayTracedPrimaryVisibilityMode = 1u;
     if (ReadTruthyEnvironmentFlag("SARP_RT_PRIMARY_COMPARE")) m_rayTracedPrimaryVisibilityMode = 2u;
-    if (ReadTruthyEnvironmentFlag("SARP_RT_PATH_TRACING")) m_pathTracing = true;
-    if (m_pathTracing && (DeviceManager::GetInstance().GetBackend() != rhi::Backend::D3D12 || !DeviceManager::GetInstance().GetCLodRayTracingSupported())) {
-        spdlog::warn("Path tracing needs clustered ray tracing on D3D12; rendering with raster.");
-        m_pathTracing = false;
+    // Path tracing is the default wherever the device can run it. SARP_RT_PATH_TRACING=0 starts on raster, and =1 asks for path
+    // tracing (it still falls back to raster, with a warning, where it can't run).
+    const auto& deviceManager = DeviceManager::GetInstance();
+    if (std::getenv("SARP_RT_PATH_TRACING") != nullptr) {
+        m_pathTracing = ReadTruthyEnvironmentFlag("SARP_RT_PATH_TRACING");
+        if (m_pathTracing && !deviceManager.GetPathTracingSupported()) {
+            spdlog::warn("Path tracing {}; rendering with raster.", deviceManager.GetPathTracingUnsupportedReason());
+        }
     }
+    else {
+        m_pathTracing = true;
+    }
+    m_pathTracing = m_pathTracing && deviceManager.GetPathTracingSupported();
     if (m_pathTracing) {
         m_rasterRecipeBeforePathTracing = m_pipelineRecipe;
         m_pipelineRecipe = br::pipeline::MakePathTracedRecipe(m_pipelineRecipe);
@@ -266,14 +292,11 @@ void Renderer::SetSettings() {
     // 0 exact, 1 bounce and shadow rays skip any-hit on unknown micro-triangles and take the bake's guess, 2 every ray does.
     // 1 by default: 14.5 ms against 22.7 exact on SaveLab, with no visible difference in an accumulated image.
     settingsManager.registerSetting<uint32_t>("pathTracingOpacityMicromapTwoState", pathTracingEnvironmentNumber("SARP_RT_OMM_2STATE", 1u));
-    // One sample per pixel needs denoising, unless the mode is averaging samples itself. Without RR support it falls back to SR.
     if (m_pathTracing) {
         // Directly as well: the setting's observer isn't registered until later in this function.
         settingsManager.getSettingSetter<bool>("rayReconstructionGuidesAvailable")(true);
         UpscalingManager::GetInstance().SetRayReconstructionGuidesAvailable(true);
-        if (!settingsManager.getSettingGetter<bool>("pathTracingAccumulate")() && !ReadTruthyEnvironmentFlag("SARP_RT_PT_NO_RR")) {
-            settingsManager.getSettingSetter<UpscalingMode>("upscalingMode")(UpscalingMode::DLSSRayReconstruction);
-        }
+        SelectPathTracingUpscaler(true);
     }
     settingsManager.registerSetting<bool>("enableRayTracedReflections", m_rayTracedReflections);
     // 0 raster, 1 raytraced where the BVH can represent the draw, 2 raster with per-pixel agreement counted against rays.
@@ -718,8 +741,10 @@ void Renderer::SetSettings() {
         if (newValue == m_pathTracing) {
             return;
         }
-        if (newValue && (DeviceManager::GetInstance().GetBackend() != rhi::Backend::D3D12 || !DeviceManager::GetInstance().GetCLodRayTracingSupported())) {
-            spdlog::warn("Path tracing needs clustered ray tracing on D3D12; staying on raster.");
+        if (newValue && !DeviceManager::GetInstance().GetPathTracingSupported()) {
+            spdlog::warn("Path tracing {}; staying on raster.", DeviceManager::GetInstance().GetPathTracingUnsupportedReason());
+            // Put the setting back, so whatever shows it (the menu) shows raster.
+            m_preFrameDeferredFunctions.defer([]() { SettingsManager::GetInstance().getSettingSetter<bool>("enablePathTracing")(false); });
             return;
         }
         auto recipe = GetPipelineRecipeForMutation();
@@ -728,12 +753,21 @@ void Renderer::SetSettings() {
             recipe = br::pipeline::MakePathTracedRecipe(recipe);
         }
         else if (m_rasterRecipeBeforePathTracing) {
-            recipe = std::move(*m_rasterRecipeBeforePathTracing);
-            m_rasterRecipeBeforePathTracing.reset();
+            // Kept until raster is in place (ApplyPendingPipelineReplacement), in case the switch fails and rolls back.
+            recipe = *m_rasterRecipeBeforePathTracing;
         }
         if (RequestPipelineReplacement(std::move(recipe))) {
             m_pathTracing = newValue;
+            SelectPathTracingUpscaler(newValue);
             UpscalingManager::GetInstance().RequestHistoryReset();
+        }
+        }));
+    // Accumulating averages samples itself, so it doesn't want Ray Reconstruction's denoising. The path trace pass makes its
+    // accumulation buffer when the graph is built.
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("pathTracingAccumulate", [this](const bool&) {
+        if (m_pathTracing) {
+            SelectPathTracingUpscaler(true);
+            rebuildRenderGraph = true;
         }
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("rayTracedPrimaryVisibilityMode", [this](const uint32_t& newValue) {

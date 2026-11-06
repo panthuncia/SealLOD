@@ -38,6 +38,7 @@
 #include <BasicRenderer/Diagnostics/StatisticalSampler.h>
 #include "Resources/Buffers/DynamicBufferBase.h"
 #include "Render/RenderGraph/RenderGraph.h"
+#include "Runtime/Device/DeviceManager.h"
 #include "Runtime/Settings/SettingsManager.h"
 #include <BasicRenderer/StaticImport/ImportedAssetLibrary.h>
 #include <BasicRenderer/StaticImport/StaticImportRuntime.h>
@@ -1801,6 +1802,16 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                     response["software_raster"] = softwareRasterName;
                     response["rigid_only"] =
                         br::extensions::MakeSettingGetter<bool>(CLodWorkGraphRigidOnlySettingName)();
+                } else if (command == "pathtracing.get" || command == "pathtracing.set") {
+                    // The menu's switch, for switching at runtime without it. It takes effect at the next frame.
+                    if (command == "pathtracing.set") {
+                        if (!m_finished) throw std::runtime_error("cannot switch path tracing while profiling is active");
+                        br::extensions::MakeSettingSetter<bool>("enablePathTracing")(request->document.at("enabled").get<bool>());
+                    }
+                    const auto& deviceManager = br::DeviceManager::GetInstance();
+                    response["enabled"] = br::extensions::MakeSettingGetter<bool>("enablePathTracing")();
+                    response["supported"] = deviceManager.GetPathTracingSupported();
+                    response["unsupported_reason"] = deviceManager.GetPathTracingUnsupportedReason();
                 } else if (command == "clod.vsm_perf.get" || command == "clod.vsm_perf.set") {
                     if (command == "clod.vsm_perf.set" && !m_finished) {
                         throw std::runtime_error("cannot change VSM performance settings while profiling is active");
