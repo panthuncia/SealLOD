@@ -316,18 +316,21 @@ void Renderer::Render() {
                 graphicsQueue,
                 computeQueue,
                 m_totalFramesRendered);
-            passExecutionContext.beginGpuPassRange = [activeBackend](rhi::CommandList commandList, rhi::Queue queue, const char* queueName, const char* passName) {
-                br::telemetry::nvperf::BeginPassRange(activeBackend, commandList, queue, queueName, passName);
-            };
-            passExecutionContext.endGpuPassRange = [activeBackend](rhi::CommandList commandList, rhi::Queue queue) {
-                br::telemetry::nvperf::EndPassRange(activeBackend, commandList, queue);
-            };
+#if BASICRENDERER_ENABLE_NVPERF
+            // NVPerf's per-pass ranges. The persistent executor records them from the graph's callbacks and never
+            // reads the execution context's hooks, so they are set on the graph.
+            currentRenderGraph->SetGpuPassRangeCallbacks(
+                [activeBackend](rhi::CommandList commandList, rhi::Queue queue, const char* queueName, const char* passName) {
+                    br::telemetry::nvperf::BeginPassRange(activeBackend, commandList, queue, queueName, passName);
+                },
+                [activeBackend](rhi::CommandList commandList, rhi::Queue queue) {
+                    br::telemetry::nvperf::EndPassRange(activeBackend, commandList, queue);
+                });
+#endif
             // Main render graph execution: the one Update prepared.
             if (!m_preparedFrame) throw std::logic_error("Renderer: no frame was prepared for execution");
             const auto prepared = std::move(m_preparedFrame);
             prepared->Submit(passExecutionContext);
-            passExecutionContext.beginGpuPassRange = {};
-            passExecutionContext.endGpuPassRange = {};
             // Texture readbacks copy what the frame wrote, so they are submitted right after the frame's execution.
             if (m_pReadbackManager) {
                 const auto graphicsSlot = currentRenderGraph->GetQueueRegistry().FindGraphicsSlot();
@@ -377,8 +380,6 @@ void Renderer::Render() {
             }
         }
         catch (const std::exception& ex) {
-            passExecutionContext.beginGpuPassRange = {};
-            passExecutionContext.endGpuPassRange = {};
             spdlog::critical("Renderer: frame {} RenderGraph::Execute threw: {}", m_totalFramesRendered, ex.what());
             WriteRendererExceptionNote(
                 "RenderGraphExecute",

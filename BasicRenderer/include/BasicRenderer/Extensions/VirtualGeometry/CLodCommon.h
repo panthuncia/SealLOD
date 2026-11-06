@@ -38,10 +38,10 @@ inline constexpr const char* CLodPureComputeReplayExpansionFactorSettingName = "
 inline constexpr const char* CLodFrustumCullingSettingName = "clodFrustumCulling";
 inline constexpr const char* CLodLodHeightModeSettingName = "clodLodHeightMode";
 inline constexpr const char* CLodLodErrorPixelsSettingName = "clodLodErrorPixels";
-// The large-scene streaming stress workload peaks at roughly 0.52M opaque
-// visible clusters. Keep nearly 4x headroom while avoiding capacity-scaling
-// every visible-cluster and pure-compute frontier resource to 8M entries.
-inline constexpr uint32_t CLodDefaultVisibleClusterCapacity = 2u * 1000u * 1000u;
+// Shadow culling at SARP's radius-100 sampling scene (pitch -45, VSM cache off)
+// emits about 2.9M contributing clusters. Past capacity the cull drops writes in
+// atomic order, so a different subset is lost each frame and shadows flicker.
+inline constexpr uint32_t CLodDefaultVisibleClusterCapacity = 4u * 1000u * 1000u;
 inline constexpr uint32_t CLodMinVisibleClusterCapacity = 1u * 1000u * 1000u;
 inline constexpr uint32_t CLodMaxVisibleClusterCapacity = 30u * 1000u * 1000u;
 inline constexpr uint32_t CLodPureComputePhase2ExpansionFactorDefault = 16u;

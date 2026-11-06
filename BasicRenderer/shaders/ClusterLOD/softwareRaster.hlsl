@@ -247,6 +247,9 @@ struct SWRasterTriangle
     uint triangleIndex;
     float3 depths;
     float3 invW;
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+    SWVirtualShadowTrianglePage vsmPage;
+#endif
 };
 
 // Per-cluster debug output. Only built when a debug view is on.
@@ -364,6 +367,9 @@ struct SWRasterOutput
     uint viewID;
     uint visibleClusterIndex;
     uint dynamicShadowLayer;
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+    SWVirtualShadowTarget vsmTarget;
+#endif
     SWRasterDebug debug;
 #if CLOD_SW_RASTER_MAY_ALPHA_TEST
     bool alphaTestEnabled;
@@ -384,9 +390,27 @@ void SWRasterPixel(
     float3 barycentrics)
 {
     SWTelemetryAdd(SW_COUNTER_COVERED_PIXELS, 1u);
+    const float depth = dot(barycentrics, tri.depths);
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+    // The texel's page and depth come before the alpha test: a texel on a page that is not being
+    // rastered, or already holding nearer depth, needs neither its UVs nor its texture samples.
+    const bool dynamicLayer = output.dynamicShadowLayer != 0u;
+    SWVirtualShadowTexel texel;
+    if (!SWResolveVirtualShadowTexel(pixel, output.vsmTarget, tri.vsmPage, dynamicLayer, texel))
+    {
+        return;
+    }
+    const uint encodedDepth = SWEncodeVirtualShadowTexelDepth(texel, output.vsmTarget, depth, dynamicLayer);
+#endif
 #if CLOD_SW_RASTER_MAY_ALPHA_TEST
     if (output.alphaTestEnabled)
     {
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+        if (SWVirtualShadowTexelOccluded(texel, encodedDepth, dynamicLayer))
+        {
+            return;
+        }
+#endif
         const float3 perspective = barycentrics * tri.invW;
         const float invSum = rcp(perspective.x + perspective.y + perspective.z);
         // Decoded here because so few triangles cover a sample: decoding per vertex was a
@@ -408,9 +432,8 @@ void SWRasterPixel(
         WriteDebugPixel(debugVisTex, pixel, output.debug.payload);
     }
 
-    const float depth = dot(barycentrics, tri.depths);
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
-    SWRasterWriteVirtualShadow(pixel, output.viewID, depth, output.dynamicShadowLayer != 0u);
+    SWCommitVirtualShadowTexel(texel, encodedDepth, dynamicLayer);
 #else
     InterlockedMin(visBuffer[pixel], PackVisKey(depth, output.visibleClusterIndex, tri.triangleIndex));
 #endif
@@ -480,7 +503,8 @@ void SWRasterTriangles(SWClusterWork work, CLodRasterCluster cluster, SWClusterF
     StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos =
         ResourceDescriptorHeap[CLOD_SW_VSM_CLIPMAP_INFO_DESCRIPTOR_INDEX];
     CLodVirtualShadowClipmapInfo clipmapInfo = (CLodVirtualShadowClipmapInfo)0;
-    const bool hasClipmapInfo = CLodVirtualShadowTryGetClipmapInfoForView(viewID, clipmapInfos, clipmapInfo);
+    const bool hasClipmapInfo = SWFindVirtualShadowClipmapInfo(viewID, clipmapInfos, clipmapInfo);
+    output.vsmTarget = SWBuildVirtualShadowTarget(clipmapInfo);
     RWTexture2DArray<uint> pageTable = ResourceDescriptorHeap[CLOD_SW_VSM_PAGE_TABLE_DESCRIPTOR_INDEX];
 #else
     RWTexture2D<uint64_t> visBuffer =
@@ -537,13 +561,15 @@ void SWRasterTriangles(SWClusterWork work, CLodRasterCluster cluster, SWClusterF
         }
 
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+        SWVirtualShadowTrianglePage trianglePage;
         if (!hasClipmapInfo ||
-            !CLodVirtualShadowAnyRenderablePageInPixelRect(
+            !SWVirtualShadowResolveTrianglePages(
                 uint2(minPixel),
                 uint2(maxPixel),
-                clipmapInfo,
+                output.vsmTarget,
                 (cluster.vertexFlags & VERTEX_SKINNED) != 0u,
-                pageTable))
+                pageTable,
+                trianglePage))
         {
             continue;
         }
@@ -556,6 +582,9 @@ void SWRasterTriangles(SWClusterWork work, CLodRasterCluster cluster, SWClusterF
         tri.triangleIndex = triangleIndex;
         tri.depths = float3(gs_linearDepth[vertices.x], gs_linearDepth[vertices.y], gs_linearDepth[vertices.z]);
         tri.invW = float3(gs_invClipW[vertices.x], gs_invClipW[vertices.y], gs_invClipW[vertices.z]);
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+        tri.vsmPage = trianglePage;
+#endif
         if (tri.depths.x <= 0.0f || tri.depths.y <= 0.0f || tri.depths.z <= 0.0f)
         {
             SWTelemetryAdd(SW_COUNTER_DEGENERATE_OR_OFFSCREEN, 1u);

@@ -86,24 +86,27 @@ bool VirtualShadowCasterWriteDepthAtVirtualTexel(
 
     InterlockedMin(physicalPages[atlasPixel], CLodVirtualShadowEncodeDepth(pageSpaceLinearDepth, clipmapInfo));
 
-    const uint packedPageCoords =
-        (pageCoords.x & 0xFFFu) |
-        ((pageCoords.y & 0xFFFu) << 12u) |
-        ((pageCoords.z & 0xFFu) << 24u);
-    const uint4 pageMatchMask = WaveMatch(packedPageCoords);
-    uint pageLeaderLane = pageMatchMask.x != 0u ? firstbitlow(pageMatchMask.x) :
-        pageMatchMask.y != 0u ? 32u + firstbitlow(pageMatchMask.y) :
-        pageMatchMask.z != 0u ? 64u + firstbitlow(pageMatchMask.z) :
-        96u + firstbitlow(pageMatchMask.w);
-    if (WaveGetLaneIndex() == pageLeaderLane)
+    // The bits are only ever set, so lanes whose entry already has them need neither the OR nor the
+    // WaveMatch that elects one lane per page for it. After a page's first texels, that is almost all.
+    const uint contentMask = dynamicLayer
+        ? kCLodVirtualShadowDynamicContentMask
+        : kCLodVirtualShadowContentValidMask | kCLodVirtualShadowRerenderedThisFrameMask;
+    if ((pageEntry & contentMask) != contentMask)
     {
-        uint ignored = 0u;
-        InterlockedOr(
-            pageTable[pageCoords],
-            dynamicLayer
-                ? kCLodVirtualShadowDynamicContentMask
-                : kCLodVirtualShadowContentValidMask | kCLodVirtualShadowRerenderedThisFrameMask,
-            ignored);
+        const uint packedPageCoords =
+            (pageCoords.x & 0xFFFu) |
+            ((pageCoords.y & 0xFFFu) << 12u) |
+            ((pageCoords.z & 0xFFu) << 24u);
+        const uint4 pageMatchMask = WaveMatch(packedPageCoords);
+        uint pageLeaderLane = pageMatchMask.x != 0u ? firstbitlow(pageMatchMask.x) :
+            pageMatchMask.y != 0u ? 32u + firstbitlow(pageMatchMask.y) :
+            pageMatchMask.z != 0u ? 64u + firstbitlow(pageMatchMask.z) :
+            96u + firstbitlow(pageMatchMask.w);
+        if (WaveGetLaneIndex() == pageLeaderLane)
+        {
+            uint ignored = 0u;
+            InterlockedOr(pageTable[pageCoords], contentMask, ignored);
+        }
     }
     return true;
 }

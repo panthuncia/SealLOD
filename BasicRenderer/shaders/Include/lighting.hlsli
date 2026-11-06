@@ -67,7 +67,7 @@ void CLodVirtualShadowRecordReceiverTelemetry(
     // Slices ping-pong on the full frame number; a texel is only trusted when
     // the previous frame wrote it and its depth matches this surface.
     RWTexture2DArray<uint4> history =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Shadows::CLodReceiverHistory)];
+        ResourceDescriptorHeap[OptionalResourceDescriptorIndex(Builtin::Shadows::CLodReceiverHistory)];
     ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     const uint frameNumber = GetRootVirtualShadowReceiverTelemetryFrame();
     const uint writeSlice = frameNumber & 1u;

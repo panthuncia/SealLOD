@@ -1429,12 +1429,23 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                     counter(CLodWorkGraphCounterIndex::ClassifyContributing),
                     counter(CLodWorkGraphCounterIndex::ClassifyRoutedHW),
                     counter(CLodWorkGraphCounterIndex::ClassifyRoutedSW));
+                // The sw counters are zero unless the software raster PSOs are compiled with
+                // CLOD_SW_RASTER_TELEMETRY=1 (a pso.recompile define override): they cost atomics per pixel.
                 spdlog::info(
-                    "CLOD VSM pixel attribution frame={}: hw(invocations={},pageRejected={},writes={}) sw(available=false)",
+                    "CLOD VSM pixel attribution frame={}: hw(invocations={},pageRejected={},writes={}) "
+                    "sw(clusters={},tris={},backface={},offscreen={},noSample={},coveredPx={},alphaRejectedPx={},writes={})",
                     requestedFrame,
                     counter(CLodWorkGraphCounterIndex::RasterPixelShaderInvocations),
                     counter(CLodWorkGraphCounterIndex::RasterPixelVirtualShadowPageRejected),
-                    counter(CLodWorkGraphCounterIndex::RasterPixelVirtualShadowWrites));
+                    counter(CLodWorkGraphCounterIndex::RasterPixelVirtualShadowWrites),
+                    counter(CLodWorkGraphCounterIndex::SWRasterClusters),
+                    counter(CLodWorkGraphCounterIndex::SWRasterInputTriangles),
+                    counter(CLodWorkGraphCounterIndex::SWRasterBackfaceCulled),
+                    counter(CLodWorkGraphCounterIndex::SWRasterDegenerateOrOffscreen),
+                    counter(CLodWorkGraphCounterIndex::SWRasterNoSampleCovered),
+                    counter(CLodWorkGraphCounterIndex::SWRasterCoveredPixels),
+                    counter(CLodWorkGraphCounterIndex::SWRasterAlphaRejectedPixels),
+                    counter(CLodWorkGraphCounterIndex::SWRasterVisibilityWrites));
 				spdlog::info(
 					"CLOD VSM DynamicWind cache frame={}: bounds(hit={},miss={},insert={},race={},probeFail={},ineligible={}) clusters(eligible={},unique={},duplicate={}) vertices(requested={},skinned={},fallback={},cachedRaster={},inlineRaster={})",
 					requestedFrame,
