@@ -10,6 +10,8 @@
 #include <stdexcept>
 #include <unordered_map>
 
+#include <objbase.h>
+
 #include <spdlog/spdlog.h>
 
 #include "Assets/Textures/Pipeline/TexturePipelineStages.h"
@@ -38,6 +40,13 @@ namespace br::textures
 			if (!stream) throw std::runtime_error("cannot read texture source '" + file.path.string() + "'");
 			return bytes;
 		}
+
+		// DirectXTex filters mips and converts formats through WIC, which needs COM on the calling thread. The renderer's
+		// workers run in the process's implicit MTA; an offline tool's own threads may have no COM at all.
+		struct ScopedCom {
+			HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+			~ScopedCom() { if (SUCCEEDED(hr)) CoUninitialize(); }
+		};
 
 		TextureFileMeta CacheMeta(const TextureRequest& request)
 		{
@@ -147,6 +156,7 @@ namespace br::textures
 		if (ReadConditionedCacheDescription(TextureProcessingManager::ConditionedCachePath(cacheKey))) {
 			return TextureConditionResult::AlreadyCached;
 		}
+		const ScopedCom com;
 		const TextureFileMeta meta = TextureProcessingMeta(request);
 		using Clock = std::chrono::steady_clock;
 		const auto ms = [](Clock::time_point a, Clock::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
