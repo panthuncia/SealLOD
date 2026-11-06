@@ -1,3 +1,4 @@
+#include <atomic>
 #include <BasicRenderer/Assets/TexturePipeline.h>
 #include "BasicRenderer/Assets/Import/NifLoader.h"
 
@@ -12,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
@@ -1181,6 +1183,128 @@ private:
     std::ofstream out;
 };
 
+// A read-only view of one cache file. The file and mapping handles are closed once the view exists (the view
+// keeps the section alive), so a retained view costs address space and no handles.
+struct MappedCacheFile
+{
+    const std::uint8_t* bytes{ nullptr };
+    std::size_t size{ 0 };
+
+    MappedCacheFile() = default;
+    MappedCacheFile(const MappedCacheFile&) = delete;
+    MappedCacheFile& operator=(const MappedCacheFile&) = delete;
+    ~MappedCacheFile()
+    {
+        if (bytes) UnmapViewOfFile(bytes);
+    }
+
+    static std::shared_ptr<const MappedCacheFile> Open(const fs::path& path)
+    {
+        BT_ZONE_SCOPE("NifLoader::MappedCacheFile::Open");
+        const HANDLE file = CreateFileW(
+            path.c_str(),
+            GENERIC_READ,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS,
+            nullptr);
+        if (file == INVALID_HANDLE_VALUE) {
+            return nullptr;
+        }
+        auto mapped = std::make_shared<MappedCacheFile>();
+        LARGE_INTEGER fileSize{};
+        if (!GetFileSizeEx(file, std::addressof(fileSize)) ||
+            fileSize.QuadPart < 0 ||
+            static_cast<std::uint64_t>(fileSize.QuadPart) > 512ull * 1024ull * 1024ull) {
+            CloseHandle(file);
+            return nullptr;
+        }
+        mapped->size = static_cast<std::size_t>(fileSize.QuadPart);
+        if (mapped->size != 0) {
+            const HANDLE mapping = CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
+            if (mapping) {
+                mapped->bytes = static_cast<const std::uint8_t*>(MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0));
+                CloseHandle(mapping);
+            }
+        }
+        CloseHandle(file);
+        if (mapped->size != 0 && !mapped->bytes) {
+            return nullptr;
+        }
+        return mapped;
+    }
+};
+
+// Payload cache files kept mapped for later readers in the same process (SetRetainCachedPayloadFiles): the offline
+// preprocessor's mesh stage opens every payload, and its recipe and micromap stages load the same payloads again.
+// Under MO2 each open waits on the VFS lock; a retained view is read from memory instead. Every reader still parses
+// the bytes with its own import settings. A write or removal of a path drops its view first.
+class RetainedCacheFiles
+{
+public:
+    std::shared_ptr<const MappedCacheFile> Open(const fs::path& path)
+    {
+        if (!enabled.load(std::memory_order_acquire)) {
+            return MappedCacheFile::Open(path);
+        }
+        auto& shard = ShardFor(path);
+        {
+            std::lock_guard lock(shard.mutex);
+            if (const auto found = shard.views.find(path.native()); found != shard.views.end()) {
+                return found->second;
+            }
+        }
+        auto opened = MappedCacheFile::Open(path);
+        if (!opened || !enabled.load(std::memory_order_acquire)) {
+            return opened;
+        }
+        std::lock_guard lock(shard.mutex);
+        return shard.views.try_emplace(path.native(), std::move(opened)).first->second;
+    }
+
+    void Forget(const fs::path& path)
+    {
+        auto& shard = ShardFor(path);
+        std::lock_guard lock(shard.mutex);
+        shard.views.erase(path.native());
+    }
+
+    void SetEnabled(bool value)
+    {
+        enabled.store(value, std::memory_order_release);
+        if (!value) {
+            for (auto& shard : shards) {
+                std::lock_guard lock(shard.mutex);
+                shard.views.clear();
+            }
+        }
+    }
+
+private:
+    struct Shard
+    {
+        std::mutex mutex;
+        std::unordered_map<std::wstring, std::shared_ptr<const MappedCacheFile>> views;
+    };
+
+    Shard& ShardFor(const fs::path& path)
+    {
+        return shards[std::hash<std::wstring>{}(path.native()) % shards.size()];
+    }
+
+    std::atomic<bool> enabled{ false };
+    std::array<Shard, 64> shards;
+};
+
+RetainedCacheFiles& GetRetainedCacheFiles()
+{
+    // Never destroyed: views still retained at exit go with the address space, which is far cheaper than unmapping
+    // thousands of them one at a time (about 0.5 s for the preprocessor's ~9500 payloads).
+    static RetainedCacheFiles* const retained = new RetainedCacheFiles;
+    return *retained;
+}
+
 class BinaryReader
 {
 public:
@@ -1190,45 +1314,16 @@ public:
         if (CachePack::Entry packed{}; CachePack::Find(path, packed) && packed.size <= 512ull * 1024ull * 1024ull) {
             bytes = reinterpret_cast<const std::uint8_t*>(packed.data);
             size = static_cast<std::size_t>(packed.size);
-            ownsView = false;
             valid = true;
             return;
         }
-        file = CreateFileW(
-            path.c_str(),
-            GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            nullptr,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS,
-            nullptr);
-        if (file == INVALID_HANDLE_VALUE) {
+        mapped = GetRetainedCacheFiles().Open(path);
+        if (!mapped) {
             return;
         }
-        LARGE_INTEGER fileSize{};
-        if (!GetFileSizeEx(file, std::addressof(fileSize)) ||
-            fileSize.QuadPart < 0 ||
-            static_cast<std::uint64_t>(fileSize.QuadPart) > 512ull * 1024ull * 1024ull) {
-            return;
-        }
-        size = static_cast<std::size_t>(fileSize.QuadPart);
-        if (size == 0) {
-            valid = true;
-            return;
-        }
-        mapping = CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
-        if (!mapping) {
-            return;
-        }
-        bytes = static_cast<const std::uint8_t*>(MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0));
-        valid = bytes != nullptr;
-    }
-
-    ~BinaryReader()
-    {
-        if (bytes && ownsView) UnmapViewOfFile(bytes);
-        if (mapping) CloseHandle(mapping);
-        if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+        bytes = mapped->bytes;
+        size = mapped->size;
+        valid = true;
     }
 
     BinaryReader(const BinaryReader&) = delete;
@@ -1307,13 +1402,11 @@ public:
     }
 
 private:
-    HANDLE file{ INVALID_HANDLE_VALUE };
-    HANDLE mapping{ nullptr };
+    std::shared_ptr<const MappedCacheFile> mapped;
     const std::uint8_t* bytes{ nullptr };
     std::size_t size{ 0 };
     std::size_t offset{ 0 };
     bool valid{ false };
-    bool ownsView = true;
 };
 
 void WriteMatrix(BinaryWriter& writer, const DirectX::XMMATRIX& matrix)
@@ -1465,7 +1558,112 @@ std::string NormalizeTextureRelativePath(std::string path)
     return path;
 }
 
+std::atomic<bool> g_memoizeCachedTexturePaths{ false };
+
+std::optional<fs::path> ResolveCachedTexturePathUncached(
+    const std::string& texturePath,
+    const std::vector<std::string>& textureSearchRoots);
+
+// A cached payload stores its texture paths relative to the search roots it was imported with (Data and every
+// loose mod root), so each binding probes every root on disk; under MO2 each probe waits on the VFS lock. With
+// memoization on (the offline preprocessor, whose file tree is fixed for the run) each path/roots pair is
+// probed once per process.
 std::optional<fs::path> ResolveCachedTexturePath(
+    const std::string& texturePath,
+    const std::vector<std::string>& textureSearchRoots)
+{
+    if (!g_memoizeCachedTexturePaths.load(std::memory_order_relaxed)) {
+        return ResolveCachedTexturePathUncached(texturePath, textureSearchRoots);
+    }
+    struct Shard {
+        std::shared_mutex mutex;
+        std::unordered_map<std::string, std::optional<fs::path>> results;
+    };
+    static std::array<Shard, 64> shards;
+    std::string key = texturePath;
+    for (const auto& root : textureSearchRoots) {
+        key.push_back('\0');
+        key.append(root);
+    }
+    auto& shard = shards[std::hash<std::string>{}(key) % shards.size()];
+    {
+        std::shared_lock lock(shard.mutex);
+        if (const auto found = shard.results.find(key); found != shard.results.end()) return found->second;
+    }
+    auto resolved = ResolveCachedTexturePathUncached(texturePath, textureSearchRoots);
+    std::unique_lock lock(shard.mutex);
+    shard.results.try_emplace(std::move(key), resolved);
+    return resolved;
+}
+
+// With memoization on, file existence and canonical forms are remembered per candidate path: the same texture is
+// probed under the same Data and mod roots for every model that uses it. Keys are 64-bit path hashes.
+bool IsRegularFileForCachedTexture(const fs::path& candidate)
+{
+    if (!g_memoizeCachedTexturePaths.load(std::memory_order_relaxed)) {
+        std::error_code ec;
+        return fs::is_regular_file(candidate, ec);
+    }
+    struct Shard {
+        std::shared_mutex mutex;
+        std::unordered_map<std::size_t, bool> exists;
+    };
+    static std::array<Shard, 64> shards;
+    const auto key = std::hash<std::wstring>{}(candidate.native());
+    auto& shard = shards[key % shards.size()];
+    {
+        std::shared_lock lock(shard.mutex);
+        if (const auto found = shard.exists.find(key); found != shard.exists.end()) return found->second;
+    }
+    std::error_code ec;
+    const bool exists = fs::is_regular_file(candidate, ec);
+    std::unique_lock lock(shard.mutex);
+    shard.exists.try_emplace(key, exists);
+    return exists;
+}
+
+fs::path CanonicalCachedTexturePath(const fs::path& candidate)
+{
+    const auto canonicalize = [&] {
+        std::error_code ec;
+        fs::path resolved = fs::weakly_canonical(candidate, ec);
+        return ec ? candidate : resolved;
+    };
+    if (!g_memoizeCachedTexturePaths.load(std::memory_order_relaxed)) return canonicalize();
+    struct Shard {
+        std::shared_mutex mutex;
+        std::unordered_map<std::wstring, fs::path> canonical;
+    };
+    static std::array<Shard, 64> shards;
+    auto& shard = shards[std::hash<std::wstring>{}(candidate.native()) % shards.size()];
+    {
+        std::shared_lock lock(shard.mutex);
+        if (const auto found = shard.canonical.find(candidate.native()); found != shard.canonical.end()) return found->second;
+    }
+    auto resolved = canonicalize();
+    std::unique_lock lock(shard.mutex);
+    shard.canonical.try_emplace(candidate.native(), resolved);
+    return resolved;
+}
+
+// The roots every lookup appends: the working directory and SARP's resource caches. Fixed for the process when
+// memoizing; otherwise read per lookup, as before.
+std::vector<fs::path> FallbackTextureRoots()
+{
+    std::vector<fs::path> roots;
+    std::error_code ec;
+    roots.emplace_back(fs::current_path(ec));
+    char* tempEnv = nullptr;
+    std::size_t tempEnvLength = 0;
+    if (_dupenv_s(&tempEnv, &tempEnvLength, "LOCALAPPDATA") == 0 && tempEnv && *tempEnv) {
+        roots.emplace_back(fs::path(tempEnv) / "Temp" / "SARP" / "ResourceCache");
+    }
+    std::free(tempEnv);
+    roots.emplace_back(fs::temp_directory_path(ec) / "SARP" / "ResourceCache");
+    return roots;
+}
+
+std::optional<fs::path> ResolveCachedTexturePathUncached(
     const std::string& texturePath,
     const std::vector<std::string>& textureSearchRoots)
 {
@@ -1475,9 +1673,8 @@ std::optional<fs::path> ResolveCachedTexturePath(
 
     std::error_code ec;
     const fs::path input(texturePath);
-    if (fs::is_regular_file(input, ec)) {
-        fs::path resolved = fs::weakly_canonical(input, ec);
-        return ec ? input : resolved;
+    if (IsRegularFileForCachedTexture(input)) {
+        return CanonicalCachedTexturePath(input);
     }
 
     const std::string normalizedRelative = NormalizeTextureRelativePath(texturePath);
@@ -1497,14 +1694,13 @@ std::optional<fs::path> ResolveCachedTexturePath(
         }
     }
 
-    candidateRoots.emplace_back(fs::current_path(ec));
-    char* tempEnv = nullptr;
-    std::size_t tempEnvLength = 0;
-    if (_dupenv_s(&tempEnv, &tempEnvLength, "LOCALAPPDATA") == 0 && tempEnv && *tempEnv) {
-        candidateRoots.emplace_back(fs::path(tempEnv) / "Temp" / "SARP" / "ResourceCache");
+    if (g_memoizeCachedTexturePaths.load(std::memory_order_relaxed)) {
+        static const std::vector<fs::path> fallback = FallbackTextureRoots();
+        candidateRoots.insert(candidateRoots.end(), fallback.begin(), fallback.end());
+    } else {
+        const auto fallback = FallbackTextureRoots();
+        candidateRoots.insert(candidateRoots.end(), fallback.begin(), fallback.end());
     }
-    std::free(tempEnv);
-    candidateRoots.emplace_back(fs::temp_directory_path(ec) / "SARP" / "ResourceCache");
 
     for (const fs::path& root : candidateRoots) {
         std::array<fs::path, 2> candidates = {
@@ -1512,10 +1708,8 @@ std::optional<fs::path> ResolveCachedTexturePath(
             root / "textures" / withoutTexturesPrefix
         };
         for (const fs::path& candidate : candidates) {
-            ec.clear();
-            if (fs::is_regular_file(candidate, ec)) {
-                fs::path resolved = fs::weakly_canonical(candidate, ec);
-                return ec ? candidate : resolved;
+            if (IsRegularFileForCachedTexture(candidate)) {
+                return CanonicalCachedTexturePath(candidate);
             }
         }
     }
@@ -2086,9 +2280,14 @@ bool WritePayloadCache(
     TracyPlot("SARP.Import.NifMeta.Write.MeshCount", static_cast<int64_t>(payload.meshes.size()));
     TracyPlot("SARP.Import.NifMeta.Write.PartCount", static_cast<int64_t>(payload.parts.size()));
 
-    if (payload.meshes.empty() || payload.parts.empty()) {
+    // A NIF that converts to nothing renderable is cached as an empty payload (no meshes, no parts), so later
+    // loads report "no renderable meshes" without converting it again. A payload with meshes but no parts, or
+    // the reverse, is malformed and never cached.
+    if (payload.meshes.empty() != payload.parts.empty()) {
 		spdlog::debug(
-			"nif_asset_payload_cache: refusing to cache empty renderable payload for '{}'",
+			"nif_asset_payload_cache: refusing to cache payload with {} mesh(es) and {} part(s) for '{}'",
+            payload.meshes.size(),
+            payload.parts.size(),
             normalizedCacheKey);
         return false;
     }
@@ -2222,6 +2421,7 @@ bool WritePayloadCache(
 		return false;
 	}
 	CachePack::NoteFileChanged(payloadPath);
+	GetRetainedCacheFiles().Forget(payloadPath);
 	if (!MoveFileExW(
 		temporaryPath.c_str(),
 		payloadPath.c_str(),
@@ -2687,7 +2887,7 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
         bool wrote = false;
         bool reusedExisting = false;
         bool preserveExistingFinalizedPayload = false;
-        const bool payloadCacheable = !payload->meshes.empty() && !payload->parts.empty();
+        const bool payloadCacheable = payload->meshes.empty() == payload->parts.empty();
         if (!preBakeRequiresRecipePayload) {
             auto existingPayload = TryLoadPayloadCache(finalizedCachePath, normalizedCacheKey, pathHash, effectiveContentHash, settings.loadMaterialTextures);
             if (existingPayload) {
@@ -2703,7 +2903,7 @@ std::optional<USDLoader::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std
         }
         if (!payloadCacheable) {
             spdlog::debug(
-                "nif_meta_cache=skip_write game='{}' path='{}' content_hash='{}' reason='empty renderable payload'",
+                "nif_meta_cache=skip_write game='{}' path='{}' content_hash='{}' reason='payload has meshes without parts or parts without meshes'",
                 normalizedCacheKey,
                 cachePath.string(),
                 effectiveContentHash);
@@ -2931,6 +3131,7 @@ bool FinalizeObjectReyesPayloadCache(
 		clodAssetSettingsHash);
 	if (stagingCachePath != finalizedCachePath) {
 		std::error_code ec;
+		GetRetainedCacheFiles().Forget(stagingCachePath);
 		fs::remove(stagingCachePath, ec);
 		if (ec) {
 			spdlog::warn(
@@ -2941,6 +3142,16 @@ bool FinalizeObjectReyesPayloadCache(
 		}
 	}
 	return true;
+}
+
+void SetMemoizeCachedTexturePaths(bool enabled)
+{
+    g_memoizeCachedTexturePaths.store(enabled, std::memory_order_relaxed);
+}
+
+void SetRetainCachedPayloadFiles(bool enabled)
+{
+    GetRetainedCacheFiles().SetEnabled(enabled);
 }
 
 } // namespace NifLoader

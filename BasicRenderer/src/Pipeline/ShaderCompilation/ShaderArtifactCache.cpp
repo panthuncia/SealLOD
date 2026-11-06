@@ -278,12 +278,42 @@ std::optional<CacheData> TryLoad(const CacheKey& key, uint64_t expectedBuildConf
         if (data.buildConfigHash != expectedBuildConfigHash || data.binaryFormat != key.binaryFormat || data.artifactKind != key.artifactKind) {
             return std::nullopt;
         }
+        // A hit marks the artifact as in use, so PruneUnused keeps it.
+        std::error_code touchError;
+        std::filesystem::last_write_time(cachePath, std::filesystem::file_time_type::clock::now(), touchError);
         return data;
     }
     catch (const std::exception& ex) {
         spdlog::warn("Failed to load shader cache '{}': {}", ws2s(cachePath), ex.what());
         return std::nullopt;
     }
+}
+
+PruneResult PruneUnused(std::chrono::hours maxAge)
+{
+    PruneResult result;
+    const auto cutoff = std::filesystem::file_time_type::clock::now() - maxAge;
+    for (const auto format : { BinaryFormat::Dxil, BinaryFormat::Spirv }) {
+        const std::filesystem::path directory = std::filesystem::path(GetCacheFilePath(L"probe", GetCacheDirectory(format))).parent_path();
+        std::error_code ec;
+        for (std::filesystem::directory_iterator it(directory, ec), end; !ec && it != end; it.increment(ec)) {
+            const auto name = it->path().filename().wstring();
+            if (!it->is_regular_file(ec) || !name.starts_with(L"shader_") || !name.ends_with(L".bin")) continue;
+            ++result.examined;
+            const auto written = it->last_write_time(ec);
+            if (ec || written >= cutoff) {
+                ec.clear();
+                continue;
+            }
+            const auto bytes = it->file_size(ec);
+            if (std::filesystem::remove(it->path(), ec) && !ec) {
+                ++result.removed;
+                result.bytesRemoved += ec ? 0u : bytes;
+            }
+            ec.clear();
+        }
+    }
+    return result;
 }
 
 bool Save(const CacheKey& key, const CacheData& data)

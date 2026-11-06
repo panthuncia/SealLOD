@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -59,5 +60,14 @@ struct CacheData {
 std::wstring BuildCacheFileName(const CacheKey& key, uint64_t buildConfigHash);
 std::optional<CacheData> TryLoad(const CacheKey& key, uint64_t expectedBuildConfigHash);
 bool Save(const CacheKey& key, const CacheData& data);
+
+// Deletes artifacts neither written nor loaded within maxAge. Keys carry the shader sources' content digest, so a
+// source change leaves the old artifacts unreferenced rather than stale; this is what reclaims them.
+struct PruneResult {
+    std::size_t examined = 0;
+    std::size_t removed = 0;
+    std::uint64_t bytesRemoved = 0;
+};
+PruneResult PruneUnused(std::chrono::hours maxAge);
 
 } // namespace shadercache

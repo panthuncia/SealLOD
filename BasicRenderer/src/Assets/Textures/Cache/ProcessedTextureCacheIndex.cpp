@@ -1,5 +1,6 @@
 #include "Assets/Textures/Cache/ProcessedTextureCache.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -87,16 +88,19 @@ private:
         {
             std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
             if (!out) return;
-            const auto write = [&](const auto& entries) {
-                for (const auto& [path, header] : entries) {
-                    const auto pathLength = static_cast<std::uint32_t>(path.size());
-                    out.write(reinterpret_cast<const char*>(&pathLength), sizeof(pathLength));
-                    out.write(reinterpret_cast<const char*>(path.data()), pathLength * sizeof(wchar_t));
-                    out.write(reinterpret_cast<const char*>(&header), sizeof(header));
-                }
-            };
-            write(m_loaded);
-            write(m_recorded);
+            // Sorted by path, so the same entries always produce the same file.
+            std::vector<const std::pair<const std::wstring, FileHeader>*> entries;
+            entries.reserve(m_loaded.size() + m_recorded.size());
+            for (const auto& entry : m_loaded) entries.push_back(&entry);
+            for (const auto& entry : m_recorded) entries.push_back(&entry);
+            std::ranges::sort(entries, [](const auto* a, const auto* b) { return a->first < b->first; });
+            for (const auto* entry : entries) {
+                const auto& [path, header] = *entry;
+                const auto pathLength = static_cast<std::uint32_t>(path.size());
+                out.write(reinterpret_cast<const char*>(&pathLength), sizeof(pathLength));
+                out.write(reinterpret_cast<const char*>(path.data()), pathLength * sizeof(wchar_t));
+                out.write(reinterpret_cast<const char*>(&header), sizeof(header));
+            }
             if (!out) return;
         }
         std::error_code error;

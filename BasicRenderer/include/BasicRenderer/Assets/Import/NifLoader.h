@@ -83,6 +83,13 @@ struct PreprocessResult {
 
 std::optional<br::import::ImportedAssetPayload> TryLoadCachedImportedAsset(std::string cacheKey, const br::import::ImportSettings& settings = {}, LoadTimingStats* stats = nullptr);
 std::optional<br::import::ImportedAssetPayload> LoadImportedAssetWithCacheKey(std::string filePath, std::string cacheKey, const br::import::ImportSettings& settings = {}, LoadTimingStats* stats = nullptr);
+// Remember cached payloads' texture path resolutions for the rest of the process. For tools whose file tree does
+// not change while they run (the offline preprocessor); off by default.
+void SetMemoizeCachedTexturePaths(bool enabled);
+// Keep every payload cache file this process opens mapped, so a later load of the same payload reads memory instead of
+// reopening the file (the offline preprocessor's stages load the same payloads). A write drops the rewritten file's
+// view; disabling releases them all. Off by default.
+void SetRetainCachedPayloadFiles(bool enabled);
 PreprocessResult PreprocessNifWithCacheKey(std::string filePath, std::string cacheKey, const br::import::ImportSettings& settings = {}, LoadTimingStats* stats = nullptr);
 bool FinalizeObjectReyesPayloadCache(
 	const std::filesystem::path& cachePath,

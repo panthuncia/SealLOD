@@ -276,6 +276,21 @@ uint64_t GetShaderSourceTreeIdentityHash()
     return identity;
 }
 
+// Artifacts are reused across runs only because their keys carry the source tree's content digest. Without one (a
+// shader root missing under the working directory) a key no longer changes with the sources, so the cache is neither
+// read nor written.
+bool ShaderArtifactCacheUsable()
+{
+    if (g_bypassShaderArtifactCache) return false;
+    static const bool hasSourceIdentity = [] {
+        if (GetShaderSourceTreeIdentityHash() != 0) return true;
+        spdlog::warn("Shader artifact cache disabled: no source tree digest (shaders, SARPShaders or NVSL missing under '{}')",
+            std::filesystem::current_path().string());
+        return false;
+    }();
+    return hasSourceIdentity;
+}
+
 void HashShaderDefines(uint64_t& seed, const std::vector<DxcDefine>& defines)
 {
     util::hash_combine_u64(seed, defines.size());
@@ -2491,14 +2506,14 @@ ShaderLibraryBundle PSOManager::CompileShaderLibrary(const ShaderLibraryInfo& li
         .identityHash = cacheKey.identityHash,
         .buildConfigHash = buildConfigHash,
     };
-    if (g_bypassShaderArtifactCache) {
+    if (!ShaderArtifactCacheUsable()) {
         spdlog::info(
             "Shader live reload: bypassing library artifact cache identity=0x{:X}",
             cacheKey.identityHash);
     }
     bool cacheLookupLogged = false;
     for (;;) {
-        if (!g_bypassShaderArtifactCache) {
+        if (ShaderArtifactCacheUsable()) {
             std::optional<ShaderLibraryBundle> cachedBundle =
                 TryLoadShaderLibraryFromCache(cacheKey, buildConfigHash, pUtils.Get());
             if (ShaderCacheDiagnosticsEnabled() && !cacheLookupLogged) {
@@ -2570,7 +2585,7 @@ ShaderLibraryBundle PSOManager::CompileShaderLibrary(const ShaderLibraryInfo& li
 	bundle.resourceIDsHash = libPP.resourceIDsHash;
 
     const shadercache::CacheData cacheData = BuildLibraryCacheData(libraryInfo, bundle, buildConfigHash, binaryFormat);
-    if (!g_bypassShaderArtifactCache) {
+    if (ShaderArtifactCacheUsable()) {
         shadercache::Save(cacheKey, cacheData);
     }
 	return bundle;
@@ -2606,14 +2621,14 @@ ShaderBundle PSOManager::CompileShadersForBackend(const ShaderInfoBundle& info, 
         .identityHash = cacheKey.identityHash,
         .buildConfigHash = buildConfigHash,
     };
-    if (g_bypassShaderArtifactCache) {
+    if (!ShaderArtifactCacheUsable()) {
         spdlog::info(
             "Shader live reload: bypassing bundle artifact cache identity=0x{:X}",
             cacheKey.identityHash);
     }
     bool cacheLookupLogged = false;
     for (;;) {
-        if (!g_bypassShaderArtifactCache) {
+        if (ShaderArtifactCacheUsable()) {
             std::optional<ShaderBundle> cachedBundle =
                 TryLoadShaderBundleFromCache(cacheKey, buildConfigHash, pUtils.Get());
             if (ShaderCacheDiagnosticsEnabled() && !cacheLookupLogged) {
@@ -2780,7 +2795,7 @@ ShaderBundle PSOManager::CompileShadersForBackend(const ShaderInfoBundle& info, 
 	bundle.resourceIDsHash = hash_list(combinedIds);
 
     const shadercache::CacheData cacheData = BuildBundleCacheData(info, bundle, buildConfigHash, binaryFormat);
-    if (!g_bypassShaderArtifactCache) {
+    if (ShaderArtifactCacheUsable()) {
         shadercache::Save(cacheKey, cacheData);
     }
 

@@ -1,6 +1,7 @@
 #include <BasicRenderer/Assets/ShaderArtifactCompilation.h>
 
 #include "Pipeline/PipelineState/PSOManager.h"
+#include "Pipeline/ShaderCompilation/ShaderArtifactCache.h"
 #include "Runtime/Settings/SettingsManager.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "BasicRenderer/Pipeline/ShaderVariantRequestService.h"
@@ -37,4 +38,10 @@ void br::assets::PrecompileShaderArtifact(const ShaderVariantRequest& request)
 void br::assets::PrecompileShaderBundleArtifact(const ShaderInfoBundle& shaderInfoBundle)
 {
 	PSOManager::GetInstance().PrecompileShaderBundleArtifact(shaderInfoBundle);
+}
+
+br::assets::ShaderArtifactPruneSummary br::assets::PruneUnusedShaderArtifacts(std::chrono::hours maxAge)
+{
+	const auto result = shadercache::PruneUnused(maxAge);
+	return { result.examined, result.removed, result.bytesRemoved };
 }
