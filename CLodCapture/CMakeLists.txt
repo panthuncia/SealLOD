@@ -6,6 +6,7 @@ cmake_minimum_required(VERSION 3.16)
 get_filename_component(CLOD_CAPTURE_BR_ROOT "${CMAKE_CURRENT_LIST_DIR}/../BasicRenderer" ABSOLUTE)
 set(CLOD_CAPTURE_RUNTIME_ROOT "${CMAKE_BINARY_DIR}/BasicRenderer")
 
+find_package(spdlog REQUIRED CONFIG)
 get_filename_component(CLOD_CAPTURE_EVAL_SRC "${CMAKE_CURRENT_LIST_DIR}/../CLodEval/src" ABSOLUTE)
 add_executable(CLodCapture
     "CaptureShared.h"
