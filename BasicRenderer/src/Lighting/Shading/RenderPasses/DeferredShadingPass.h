@@ -17,6 +17,7 @@ struct DeferredShadingFrame {
 	org::PipelineState pipeline;
 	std::array<uint32_t, 4> lighting{};
 	uint32_t groupsX = 0, groupsY = 0;
+	bool rayTracedSunShadow = false;
 };
 
 class DeferredShadingPass : public org::TypedRenderGraphPass<DeferredShadingPass, DeferredShadingFrame> {
@@ -28,6 +29,8 @@ public:
 		m_punctualLightingEnabled = settingsManager.getSettingGetter<bool>("enablePunctualLighting")();
 		m_shadowsEnabled = settingsManager.getSettingGetter<bool>("enableShadows")();
 		m_gtaoEnabled = settingsManager.getSettingGetter<bool>("enableGTAO")();
+		m_rayTracedSunShadow = settingsManager.getSettingGetter<bool>("enableRayTracedShadows")()
+			&& DeviceManager::GetInstance().GetCLodRayTracingSupported();
 		m_clusteredLightingEnabled = settingsManager.getSettingGetter<bool>("enableClusteredLighting")();
 	}
 
@@ -78,6 +81,9 @@ public:
 			builder.ShaderResource(Builtin::Light::ClusterBuffer, Builtin::Light::PagesBuffer);
 		}
 
+		if (m_rayTracedSunShadow) {
+			builder.ShaderResource(Builtin::RayTracing::SunShadow);
+		}
 		if (m_gtaoEnabled) {
 			builder.ShaderResource(Builtin::GTAO::OutputAOTerm);
 		}
@@ -99,12 +105,14 @@ public:
 		frame.pipeline = DeferredPipeline(globalFlags);
 		frame.lighting = {lighting.shadowsEnabled, lighting.punctualLightingEnabled, lighting.gtaoEnabled, m_skyboxEnabled};
 		frame.groupsX = (resolution.x + 7u) / 8u; frame.groupsY = (resolution.y + 7u) / 8u;
+		frame.rayTracedSunShadow = m_rayTracedSunShadow;
 		return frame;
 	}
 	static void Record(const DeferredShadingFrame& frame, org::PassRecordContext& context) {
 		br::render::MiscConstants constants{};
 		for (uint32_t index = 0; index < frame.lighting.size(); ++index)
 			constants[MiscEnableShadows + index] = frame.lighting[index];
+		constants[UintRootConstant28] = frame.rayTracedSunShadow ? 1u : 0u;
 		br::render::DispatchCompute(context, frame.pipeline, constants, frame.groupsX, frame.groupsY);
 	}
 
@@ -128,6 +136,7 @@ private:
 	bool m_shadowsEnabled = true;
 
 	bool m_gtaoEnabled = true;
+	bool m_rayTracedSunShadow = false;
 	bool m_clusteredLightingEnabled = true;
 	bool m_skyboxEnabled = false;
 };

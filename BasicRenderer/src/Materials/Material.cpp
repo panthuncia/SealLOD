@@ -11,6 +11,7 @@
 #include <BasicRenderer/Pipeline/PSOFlags.h>
 #include "Utilities/Utilities.h"
 #include <BasicRenderer/Assets/MaterialFlags.h>
+#include <BasicRenderer/Assets/Import/CLodOpacityMicromapCache.h>
 #include "Resources/PixelBuffer.h"
 #include "Render/MemoryIntrospectionAPI.h"
 
@@ -212,6 +213,22 @@ Material::Material(const std::string& name,
     m_materialData.emissiveUvSetIndex = m_emissiveUvSetIndex;
     m_materialData.opacityUvSetIndex = m_opacityUvSetIndex;
 
+    // Which baked opacity micromaps this material's alpha test can use: the preprocessor computes the same identity from
+    // the same material (SARP's OpacityMicromapBake), so a mesh drawn with another texture or cutoff finds none.
+    if ((materialFlags & MATERIAL_ALPHA_TEST) != 0u) {
+        CLodCache::OpacityMicromapMaterialKey key{};
+        if ((materialFlags & MATERIAL_BASE_COLOR_TEXTURE) != 0u && m_baseColorTexture && m_baseColorTexture->IsPipelineTexture()) {
+            key.baseColorTexture = m_baseColorTexture->PipelineCacheKey();
+        }
+        if ((materialFlags & MATERIAL_OPACITY_TEXTURE) != 0u && m_opacityTexture && m_opacityTexture->IsPipelineTexture()) {
+            key.opacityTexture = m_opacityTexture->PipelineCacheKey();
+        }
+        key.baseColorUvSet = m_baseColorUvSetIndex;
+        key.opacityUvSet = m_opacityUvSetIndex;
+        key.alphaCutoff = alphaCutoff;
+        key.alphaFactor = baseColorFactor.w;
+        m_materialData.ommIdentity = CLodCache::OpacityMicromapIdentity(key);
+    }
 }
 
 Material::~Material() {

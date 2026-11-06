@@ -94,6 +94,34 @@ namespace std {
 #include <BasicRenderer/Extensions/ShaderCompilationTypes.h>
 #include <BasicRenderer/Diagnostics/PipelineControl.h>
 
+// A DXR state object made from one library, with the compute root signature as its global layout. D3D12 only.
+struct RayTracingPipelineRecipe {
+    struct Shader {
+        rhi::ShaderStage stage{};
+        std::string exportName;
+    };
+    struct HitGroup {
+        std::string name;
+        std::string closestHit;
+        std::string anyHit;
+    };
+    std::wstring libraryPath;
+    std::wstring target = L"lib_6_10";
+    std::vector<std::pair<std::wstring, std::wstring>> defines;
+    // Each ray generation and miss shader becomes a group of its own, named after its export.
+    std::vector<Shader> shaders;
+    std::vector<HitGroup> hitGroups;
+    uint32_t maxPayloadBytes = 0;
+    uint32_t maxAttributeBytes = 8;
+    uint32_t maxRecursionDepth = 1;
+    rhi::RayTracingPipelineFlags flags = static_cast<rhi::RayTracingPipelineFlags>(
+        rhi::RTPipeline_AllowClusteredGeometry | rhi::RTPipeline_SkipProceduralPrimitives);
+    std::string debugName;
+
+    // Every group, in the order the state object numbers them. CLodRtShaderTable finds shader identifiers through this.
+    std::vector<std::string> GroupNames() const;
+};
+
 class PSOManager {
 public:
 
@@ -141,6 +169,14 @@ public:
     // to them keyed on this generation.
     uint64_t PipelineCacheGeneration() const noexcept { return m_asyncPSOGeneration.load(std::memory_order_acquire); }
 
+    // Compiles and creates the state object on the calling thread, unless the same recipe was made before. Throws when the
+    // primary backend isn't D3D12. It has no peer-backend build: ResolvePipeline leaves it absent, so its pass must stay on
+    // the primary device.
+    org::PipelineState MakeRayTracingPipeline(RayTracingPipelineRecipe recipe);
+    // The same, on a shader-compile worker: returns null until the state object exists. Creating one can stall for long
+    // enough that a frame must not wait on it.
+    const org::PipelineState* TryGetRayTracingPipeline(const RayTracingPipelineRecipe& recipe);
+
     std::shared_ptr<const void> CaptureLayoutOwner(rhi::PipelineLayoutHandle layout) const;
     const rhi::PipelineLayout& GetRootSignature();
     const rhi::PipelineLayout& GetComputeRootSignature();
@@ -187,7 +223,8 @@ private:
         const wchar_t* entryPoint,
         std::vector<DxcDefine> defines = {},
         const char* debugName = nullptr,
-        std::shared_ptr<const void> layoutOwner = {});
+        std::shared_ptr<const void> layoutOwner = {},
+        const wchar_t* target = L"cs_6_6");
     struct OwnedDefine {
         std::wstring name;
         std::wstring value;
@@ -200,6 +237,7 @@ private:
         std::wstring entryPoint;
         std::vector<OwnedDefine> defines;
         std::string debugName;
+        std::wstring target = L"cs_6_6";
     };
 
     struct LivePipelineEntry {
@@ -210,6 +248,7 @@ private:
         ComputeRecipe computeRecipe;
         std::function<org::PipelineState()> rebuild;
         std::vector<std::string> shaderPaths;
+        uint64_t rayTracingRecipeHash = 0;
         bool supportsDefineOverrides = false;
         std::deque<std::shared_ptr<org::PipelineStatePayload>> generations;
         std::map<uint64_t, std::map<std::string, std::string>> generationDefineOverrides;
@@ -284,6 +323,7 @@ private:
     std::unordered_map<uint64_t, org::PipelineState> m_clusterLODSoftwareRasterPSOCache;
     std::unordered_map<unsigned int, org::PipelineState> m_clusterLODDeepVisibilityResolvePSOCache;
     std::unordered_map<MaterialCompileFlags, org::PipelineState> m_materialEvalPSOCache;
+    std::unordered_map<uint64_t, org::PipelineState> m_rayTracingPSOCache;
 
     std::unordered_set<RasterPSOKey> m_pendingClusterLODRasterPSOs;
     std::unordered_set<RasterPSOKey> m_pendingClusterLODVirtualShadowRasterPSOs;
@@ -293,6 +333,7 @@ private:
     std::unordered_set<RasterPSOKey> m_pendingClusterLODAVBOITShadePSOs;
     std::unordered_set<uint64_t> m_pendingClusterLODSoftwareRasterPSOs;
     std::unordered_set<MaterialCompileFlags> m_pendingMaterialEvalPSOs;
+    std::unordered_set<uint64_t> m_pendingRayTracingPSOs;
 
 	std::unordered_map<unsigned int, org::PipelineState> m_deferredPSOCache;
 
@@ -336,6 +377,7 @@ private:
     org::PipelineState CreateDeferredPSO(UINT psoFlags);
     org::PipelineState BuildComputePipeline(const ComputeRecipe& recipe, const br::diagnostics::RecompileOptions* options = nullptr);
     org::PipelineState RegisterComputePipeline(org::PipelineState state, ComputeRecipe recipe);
+    org::PipelineState BuildRayTracingPipeline(const RayTracingPipelineRecipe& recipe);
     org::PipelineState RegisterPipeline(
         org::PipelineState state,
         std::string id,

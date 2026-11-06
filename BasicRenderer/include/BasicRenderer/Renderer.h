@@ -279,6 +279,9 @@ private:
     std::unique_ptr<br::ReadbackManager> m_pReadbackManager;
     std::unique_ptr<TextureFactory> m_pTextureFactory;
     std::shared_ptr<br::render::CLodRayTracingSystem> m_clodRayTracingSystem = nullptr;
+    // 0 raster, 1 raytraced, 2 raster with agreement against rays counted. See "rayTracedPrimaryVisibilityMode".
+    uint32_t m_rayTracedPrimaryVisibilityMode = 0u;
+    bool m_rayTracedShadows = false;
     // The renderer's versioned-buffer retirement clock and pools (advanced by frame-slot and graph retirement).
     std::shared_ptr<br::render::VersionedBufferRuntime> m_versionedBuffers;
     std::unique_ptr<br::render::AsyncStateGraph> m_asyncStateGraph;
@@ -377,6 +380,9 @@ private:
     bool m_jitter = true;
 	bool m_screenSpaceReflections = false;
     bool m_rayTracedReflections = false;
+    bool m_pathTracing = false;
+    // What switching path tracing off goes back to. A successful replacement clears the rollback copy, so it can't serve.
+    std::optional<br::pipeline::PipelineRecipe> m_rasterRecipeBeforePathTracing;
     bool m_warnedRayTracedReflectionsUnsupported = false;
 	bool m_useMeshShaders = true;
 

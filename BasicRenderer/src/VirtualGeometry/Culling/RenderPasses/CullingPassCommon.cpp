@@ -69,6 +69,10 @@ uint32_t BuildCullingFlags(const CullingPassConfig& config, const CullingSetting
             flags |= CLOD_WG_FLAG_VSM_RECEIVER_SUBPAGE_MASK;
     }
     if (!settings.frustumCulling) flags |= CLOD_WG_FLAG_DISABLE_FRUSTUM_CULLING;
+    if (config.rayTracingView) {
+        flags |= CLOD_WG_FLAG_DISABLE_FRUSTUM_CULLING;
+        flags &= ~CLOD_WG_FLAG_OCCLUSION_ENABLED;
+    }
     flags |= settings.softwareRasterThreshold << CLOD_WG_SW_RASTER_THRESHOLD_SHIFT;
     if (!config.isFirstPass) flags |= CLOD_WG_FLAG_PHASE2;
     return flags;

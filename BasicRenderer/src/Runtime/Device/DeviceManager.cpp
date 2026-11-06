@@ -225,6 +225,7 @@ void DeviceManager::Initialize() {
             .enableSynchronousRecording = enableSynchronousRecording,
             .enableTexelAddressing = enableTexelAddressing,
         },
+        .enablePreviewRayTracing = true,
     };
 
     const rhi::Result createResult = backend == rhi::Backend::Vulkan

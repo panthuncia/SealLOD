@@ -10,7 +10,7 @@
 
 namespace Components { struct Camera; }
 
-namespace org { class PixelBuffer; }
+namespace org { class RenderGraph; }
 
 namespace br::render {
 
@@ -21,6 +21,9 @@ class UpscalingGenerationService final {
 public:
     static std::shared_ptr<UpscalingGenerationService> CaptureCurrent();
 
+    // Creates the guides only Ray Reconstruction reads, if the current mode is it.
+    static void RegisterRayReconstructionGuides(org::RenderGraph& graph);
+
     UpscalingMode Mode() const noexcept { return m_mode; }
     rhi::Backend Backend() const noexcept { return m_backend; }
     bool UsesDilatedMotionVectors() const noexcept { return m_dilatedMotion; }
@@ -28,9 +31,7 @@ public:
     DirectX::XMUINT2 OutputResolution() const noexcept { return m_outputResolution; }
 
     void Evaluate(rhi::CommandList& commands, const Components::Camera& camera,
-        std::uint64_t frameNumber, double deltaTime, org::PixelBuffer* hdr,
-        org::PixelBuffer* output, org::PixelBuffer* depth,
-        org::PixelBuffer* motion) const;
+        std::uint64_t frameNumber, double deltaTime, const UpscalingInputs& inputs) const;
 
 private:
     UpscalingGenerationService(UpscalingMode mode, rhi::Backend backend,

@@ -6,11 +6,13 @@ enum class CLodExtensionType {
     VisiblityBuffer,
     AlphaBlend,
     Shadow,
+    RayTracing,
 };
 
 struct CLodExtensionVisibilityBufferTag {};
 struct CLodExtensionAlphaBlendTag {};
 struct CLodExtensionShadowTag {};
+struct CLodExtensionRayTracingTag {};
 
 struct CLodExtensionTypeTag {
 };

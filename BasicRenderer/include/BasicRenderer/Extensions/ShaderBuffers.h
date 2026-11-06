@@ -296,7 +296,10 @@ struct PerMaterialCB {
     DirectX::XMFLOAT4 glintParameters = { 1.5f, 0.0f, 0.015f, 2.0f };
     unsigned int glintEnabled = 0u;
     unsigned int diagnosticReason = 0u;
-    DirectX::XMUINT2 padGlint = {};
+    // CLodOpacityMicromapCache.h's OpacityMicromapIdentity of an alpha-tested material, else 0: the path tracer's
+    // cluster BVH uses micromaps baked for this identity only.
+    unsigned int ommIdentity = 0u;
+    unsigned int padOmm = 0u;
 };
 
 struct PerMaterialEvalCB {
@@ -756,8 +759,12 @@ struct CLodMeshMetadata
     uint meshIdentityLo;
     uint meshIdentityHi;
     uint meshIdentityClass;
+    float coarseCutSphere[4]{};
+    float coarseCutRefineError = -1.0f;
+    float coarseCutMinError = 0.0f;
+    uint32_t coarseCutPadding[2]{};
 };
-static_assert(sizeof(CLodMeshMetadata) == 96, "CLodMeshMetadata must match the HLSL structured-buffer layout");
+static_assert(sizeof(CLodMeshMetadata) == 128, "CLodMeshMetadata must match the HLSL structured-buffer layout");
 
 struct CLodHierarchyLevelInfo
 {

@@ -49,6 +49,15 @@ struct CLodRayTracingResidentGroup {
 	std::vector<PagePool::PageAllocation> pageAllocations;
 };
 
+struct CLodRayTracingGroupLookup {
+	CLodRayTracingResidentGroup group;
+	std::shared_ptr<PagePool> pagePool;
+	// Identifies the group's streaming state for IsCLodRayTracingGroupCurrent.
+	std::shared_ptr<const void> owner;
+	// The mesh's .clodbin, beside which its baked opacity micromaps are (CLodOpacityMicromapCache.h). Empty when unknown.
+	std::wstring containerPath;
+};
+
 struct CLodRayTracingResidencySnapshot {
 	std::vector<CLodRayTracingResidentGroup> residentGroups;
 	std::shared_ptr<PagePool> pagePool;

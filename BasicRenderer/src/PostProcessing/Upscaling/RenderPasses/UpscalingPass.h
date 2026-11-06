@@ -16,6 +16,10 @@ struct UpscalingFrameData {
     std::shared_ptr<org::PixelBuffer> output;
     std::shared_ptr<org::PixelBuffer> depth;
     std::shared_ptr<org::PixelBuffer> motion;
+    std::shared_ptr<org::PixelBuffer> diffuseAlbedo;
+    std::shared_ptr<org::PixelBuffer> specularAlbedo;
+    std::shared_ptr<org::PixelBuffer> normalRoughness;
+    std::shared_ptr<org::PixelBuffer> specularHitDistance;
 };
 
 class UpscalingPass
@@ -83,6 +87,13 @@ public:
                 Builtin::PrimaryCamera::ProjectedDepthTexture,
                 upscaledHDR)
                 .InternalTransition(upscaledHDR, dx12StreamlineExitState);
+            if (upscalingMode == UpscalingMode::DLSSRayReconstruction) {
+                builder->LegacyInterop(
+                    Builtin::Surface::BaseColorOpacity,
+                    Builtin::Surface::NormalRoughness,
+                    Builtin::RayTracing::SpecularAlbedo,
+                    Builtin::RayTracing::SpecularHitDistance);
+            }
         }
     }
 
@@ -95,6 +106,12 @@ public:
         m_pMotionVectors = m_resourceRegistryView->RequestSharedAs<org::PixelBuffer>(motionVectors);
 		m_pDepthTexture = m_resourceRegistryView->RequestSharedAs<org::PixelBuffer>(Builtin::PrimaryCamera::ProjectedDepthTexture);
 		m_pUpscaledHDRTarget = m_resourceRegistryView->RequestSharedAs<org::PixelBuffer>(Builtin::PostProcessing::UpscaledHDR);
+        if (m_service->Mode() == UpscalingMode::DLSSRayReconstruction) {
+            m_pDiffuseAlbedo = m_resourceRegistryView->RequestSharedAs<org::PixelBuffer>(Builtin::Surface::BaseColorOpacity);
+            m_pSpecularAlbedo = m_resourceRegistryView->RequestSharedAs<org::PixelBuffer>(Builtin::RayTracing::SpecularAlbedo);
+            m_pNormalRoughness = m_resourceRegistryView->RequestSharedAs<org::PixelBuffer>(Builtin::Surface::NormalRoughness);
+            m_pSpecularHitDistance = m_resourceRegistryView->RequestSharedAs<org::PixelBuffer>(Builtin::RayTracing::SpecularHitDistance);
+        }
     }
 
     UpscalingFrameData Prepare(const org::PassPrepareContext& preparation) {
@@ -108,12 +125,25 @@ public:
             .output = m_pUpscaledHDRTarget,
             .depth = m_pDepthTexture,
             .motion = m_pMotionVectors,
+            .diffuseAlbedo = m_pDiffuseAlbedo,
+            .specularAlbedo = m_pSpecularAlbedo,
+            .normalRoughness = m_pNormalRoughness,
+            .specularHitDistance = m_pSpecularHitDistance,
         };
     }
     static void Record(const UpscalingFrameData& data, org::PassRecordContext& recording) {
+        const UpscalingInputs inputs{
+            .color = data.hdr.get(),
+            .output = data.output.get(),
+            .depth = data.depth.get(),
+            .motionVectors = data.motion.get(),
+            .diffuseAlbedo = data.diffuseAlbedo.get(),
+            .specularAlbedo = data.specularAlbedo.get(),
+            .normalRoughness = data.normalRoughness.get(),
+            .specularHitDistance = data.specularHitDistance.get(),
+        };
         data.service->Evaluate(recording.Commands(), data.camera,
-            data.frameNumber, data.deltaTime, data.hdr.get(), data.output.get(),
-            data.depth.get(), data.motion.get());
+            data.frameNumber, data.deltaTime, inputs);
         recording.RestoreDescriptorHeaps();
     }
 
@@ -123,6 +153,10 @@ private:
     std::shared_ptr<org::PixelBuffer> m_pMotionVectors;
 	std::shared_ptr<org::PixelBuffer> m_pDepthTexture;
 	std::shared_ptr<org::PixelBuffer> m_pUpscaledHDRTarget;
+    std::shared_ptr<org::PixelBuffer> m_pDiffuseAlbedo;
+    std::shared_ptr<org::PixelBuffer> m_pSpecularAlbedo;
+    std::shared_ptr<org::PixelBuffer> m_pNormalRoughness;
+    std::shared_ptr<org::PixelBuffer> m_pSpecularHitDistance;
 
     std::shared_ptr<const br::render::UpscalingGenerationService> m_service;
 

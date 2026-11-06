@@ -10,6 +10,7 @@ namespace org { class RenderGraph; }
 #include "VirtualGeometry/GraphIntegration/CLodExtensionComponents.h"
 
 namespace org { class Buffer; }
+namespace br::render { class CLodRayTracingSystem; }
 class CLodStreamingSystem;
 class CLodAlphaVariant;
 class CLodShadowVariant;
@@ -28,6 +29,17 @@ struct CLodExtensionOptions {
     std::shared_ptr<VirtualShadowCasterRegistry> virtualShadowCasters;
     std::shared_ptr<ProducerPersistentState> persistentState;
     std::shared_ptr<org::ResourceGroup> slabResourceGroup;
+    std::shared_ptr<br::render::CLodRayTracingSystem> rayTracingSystem;
+    // Raster leaves the draws the BVH represents to RayTracedVisibilityPass.
+    bool rayTracedPrimaryVisibility = false;
+    // Path tracing replaces raster: the primary variant schedules streaming only, and the RT view drives it instead.
+    bool pathTraced = false;
+    // On the RT view, the mode RayTracedVisibilityPass runs in, or none.
+    bool scheduleRayTracedVisibility = false;
+    uint32_t rayTracedVisibilityMode = 0u;
+    // On the RT view: schedule the sun shadow passes. Shadow maps keep rendering everything, because leaving out what the
+    // BVH covers stops their pages from settling (20 ms of culling every frame, against 0.7 ms cached).
+    bool rayTracedShadows = false;
 };
 
 class CLodExtension final : public org::IRenderGraphExtension, public org::IResourceProvider {
@@ -43,6 +55,7 @@ public:
     void Shutdown(org::RenderGraph& rg) override;
     void OnRegistryReset(org::ResourceRegistry* reg) override;
     void GatherStructuralPasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& outPasses) override;
+    void AppendRayTracingPasses(const CLodVariantTraits& traits, std::vector<org::ExternalPassDesc>& outPasses);
     void AfterExecute(org::RenderGraph& rg) override;
     std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override;
     std::vector<org::ResourceIdentifier> GetSupportedKeys() override;

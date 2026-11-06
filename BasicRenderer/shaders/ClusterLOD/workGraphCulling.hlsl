@@ -2275,6 +2275,9 @@ bool SphereOutsideFrustumViewSpace(float3 viewSpaceCenter, float radius, float4 
 }
 
 // Perspective views attenuate projected geometric error by view-space depth.
+#define CLOD_RT_OFFSCREEN_LOD_SCALE 8.0f
+#define CLOD_RT_OFFSCREEN_MAX_DISTANCE 16384.0f // Four exterior cells.
+
 // Orthographic views keep a constant world-to-screen scale, so the projected
 // error reduces to the world-space error directly.
 float ProjectedGeometricError(
@@ -2295,7 +2298,30 @@ float ProjectedGeometricError(
     // underestimates projected error near frustum edges and allows coarse LODs
     // to switch in too early toward screen corners.
     const float centerViewZ = dot(float4(worldCenter, 1.0f), worldToViewZ);
+#if CLOD_RT_VIEW
+    // The ray tracing view has no frustum culling, so this also sees geometry beside and behind the camera. Inside
+    // the frustum it is identical to the raster views, so the two select the same clusters. Outside, secondary rays
+    // are all that sees the geometry and view depth says nothing about its size, so it uses distance and far less
+    // detail: this is what keeps the BVH and its streaming requests bounded.
+    ConstantBuffer<PerFrameBuffer> rtPerFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+    StructuredBuffer<Camera> rtCameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
+    const uint rtCameraIndex = rtPerFrame.mainCameraIndex;
+    const float3 rtToCenter = worldCenter - rtCameras[rtCameraIndex].positionWorldSpace.xyz;
+    const row_major matrix rtViewInverse = rtCameras[rtCameraIndex].viewInverse;
+    const row_major matrix rtProjection = rtCameras[rtCameraIndex].projection;
+    const float rtViewX = dot(rtToCenter, rtViewInverse[0].xyz);
+    const float rtViewY = dot(rtToCenter, rtViewInverse[1].xyz);
+    const float rtDepth = -dot(rtToCenter, rtViewInverse[2].xyz);
+    const float rtRadiusSlack = worldRadius * 1.5f;
+    const bool rtInFrustum = rtDepth + worldRadius > 0.0f
+        && abs(rtViewX) * abs(rtProjection[0][0]) <= rtDepth + rtRadiusSlack * abs(rtProjection[0][0])
+        && abs(rtViewY) * abs(rtProjection[1][1]) <= rtDepth + rtRadiusSlack * abs(rtProjection[1][1]);
+    const float denom = rtInFrustum
+        ? max(-centerViewZ - worldRadius, zNear)
+        : max(length(rtToCenter) - worldRadius, zNear) * CLOD_RT_OFFSCREEN_LOD_SCALE;
+#else
     const float denom = max(-centerViewZ - worldRadius, zNear);
+#endif
 
     return worldSpaceError / denom;
 }
@@ -2372,6 +2398,8 @@ bool CLodInstanceRootWantsTraversal(
     return false;
 }
 
+#include "include/clodRayTracingCoverage.hlsli"
+
 bool CLodGroupIsResident(uint groupGlobalIndex)
 {
     StructuredBuffer<CLodStreamingRuntimeState> runtimeState =
@@ -2441,6 +2469,34 @@ void CLodRequestGroupLoad(
     }
 }
 
+#if CLOD_RT_VIEW
+bool CLodRtGroupHasClas(uint groupGlobalIndex)
+{
+    StructuredBuffer<uint2> groupTable = ResourceDescriptorHeap[CLOD_WG_RT_GROUP_TABLE_DESCRIPTOR_INDEX];
+    uint tableElements = 0u;
+    uint tableStride = 0u;
+    groupTable.GetDimensions(tableElements, tableStride);
+    return groupGlobalIndex < tableElements && groupTable[groupGlobalIndex].y != 0u;
+}
+
+// A request names the alpha-tested material that asked, if any, which opacity micromaps are baked against.
+void CLodRtRequestClas(uint groupGlobalIndex, uint meshBufferIndex)
+{
+    RWStructuredBuffer<uint2> requests = ResourceDescriptorHeap[CLOD_WG_RT_REQUESTS_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<uint> requestCounter = ResourceDescriptorHeap[CLOD_WG_RT_REQUEST_COUNTER_DESCRIPTOR_INDEX];
+    uint slot = 0u;
+    InterlockedAdd(requestCounter[0], 1u, slot);
+    if (slot < CLOD_WG_RT_REQUEST_CAPACITY) {
+        StructuredBuffer<PerMeshBuffer> perMeshBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
+        StructuredBuffer<MaterialInfo> materials = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
+        // With the micromaps an alpha-tested draw's material can use: their identity (CLodOpacityMicromapCache.h), else 0.
+        const MaterialInfo material = materials[perMeshBuffer[meshBufferIndex].materialDataIndex];
+        const bool alphaTested = (material.materialFlags & MATERIAL_ALPHA_TEST) != 0u;
+        requests[slot] = uint2(groupGlobalIndex, alphaTested ? material.ommIdentity : 0u);
+    }
+}
+#endif
+
 bool CLodTouchAndRequestGroupResident(
     uint groupGlobalIndex,
     uint instanceIndex,
@@ -2448,7 +2504,11 @@ bool CLodTouchAndRequestGroupResident(
     uint viewId,
     float requestPriorityErrorOverDistance)
 {
+#if !CLOD_RT_VIEW || CLOD_RT_VIEW_STREAMS
+    // Normally the ray tracing view uses what raster keeps resident and has no say in it, and a missing group means
+    // its coarser parent is used. When rays replace raster for these draws, nothing else would ask for them.
     CLodMarkGroupTouched(groupGlobalIndex);
+#endif
     StructuredBuffer<ClusterLODGroup> groups =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
     const ClusterLODGroup group = groups[groupGlobalIndex];
@@ -2460,15 +2520,24 @@ bool CLodTouchAndRequestGroupResident(
     if (CLodGroupIsResident(groupGlobalIndex))
     {
         WGTelemetryAdd(WG_COUNTER_STREAM_RESIDENT_HITS, 1u);
+#if CLOD_RT_VIEW
+        if (!CLodRtGroupHasClas(groupGlobalIndex))
+        {
+            CLodRtRequestClas(groupGlobalIndex, meshBufferIndex);
+            return false;
+        }
+#endif
         return true;
     }
 
+#if !CLOD_RT_VIEW || CLOD_RT_VIEW_STREAMS
     CLodRequestGroupLoad(
         groupGlobalIndex,
         instanceIndex,
         meshBufferIndex,
         viewId,
         requestPriorityErrorOverDistance);
+#endif
     return false;
 }
 
@@ -2499,6 +2568,10 @@ bool CLodRefinedChildSuppressesParent(
 
     const uint childGroupGlobalIndex = groupsBase + childGroupLocalIndex;
     const ClusterLODGroup childGroup = groups[childGroupGlobalIndex];
+#if CLOD_RT_VIEW
+    // Voxels have no triangles to build a CLAS from, so this view keeps the triangle parent instead.
+    allowVoxelChildSuppression = false;
+#endif
     if (!allowVoxelChildSuppression && ((childGroup.flags & CLOD_GROUP_FLAG_IS_VOXEL) != 0u))
     {
         return false;

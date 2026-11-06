@@ -1,220 +1,156 @@
 #pragma once
 
+#include <bit>
+#include <mutex>
+
+#include "BuiltinResources.h"
+#include "Render/PassBuilders.h"
+#include "Resources/Buffers/Buffer.h"
+#include "Runtime/GraphIntegration/Resolvers/ResourceGroupResolver.h"
 #include "Runtime/Device/DeviceManager.h"
+#include "Runtime/Settings/SettingsManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
 #include <BasicRenderer/Extensions/PipelineDescs.h>
-#include "Interfaces/IDynamicDeclaredResources.h"
 #include "VirtualGeometry/RayTracing/CLodRayTracingSystem.h"
 #include "Render/PipelineState.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
-#include "Resources/Buffers/Buffer.h"
 #include "Resources/PixelBuffer.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "../shaders/PerPassRootConstants/clodRayTracingSetupRootConstants.h"
 
 struct RayTracedReflectionsFrameData {
     std::shared_ptr<br::render::CLodRayTracingSystem> service;
-    // The ray-tracing service records through the device it was built on.
-    rhi::Device device;
-    std::shared_ptr<org::PixelBuffer> output;
-    std::shared_ptr<org::Buffer> pageSources, buildInfos, clasData, clasAddresses;
-    std::shared_ptr<org::Buffer> blasData, blasAddresses, tlasInstances;
-    uint32_t pageSourceCount = 0, buildClusterCapacity = 0;
+    uint32_t width = 0u;
+    uint32_t height = 0u;
+    float maxDistance = 0.0f;
+    float roughnessCutoff = 0.0f;
+    uint32_t frame = 0u;
 };
 
 struct RayTracedReflectionsBindings {
-    org::PipelineState setupPipeline, tlasSetupPipeline;
-    org::DeclaredViewToken outputShader, outputCpu, pageSources, buildInfos;
-    org::DeclaredViewToken blasAddressesSrv, tlasInstances;
-    bool hasServiceResources = false;
+    org::PipelineState tracePipeline, shadePipeline, shadeTerrainPipeline;
+    org::DeclaredViewToken outputShader, outputCpu, hits;
 };
 
 class RayTracedReflectionsPass
     : public org::TypedRenderGraphPass<RayTracedReflectionsPass,
-          RayTracedReflectionsFrameData, RayTracedReflectionsBindings>,
-      public org::IDynamicDeclaredResources {
+          RayTracedReflectionsFrameData, RayTracedReflectionsBindings> {
 public:
+    RayTracedReflectionsPass(std::shared_ptr<org::ResourceGroup> slabs, bool terrainRvt) : m_slabs(std::move(slabs)), m_terrainRvt(terrainRvt) {
+        const auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
+        m_hits = CreateAliasedUnmaterializedStructuredBuffer(uint64_t(resolution.x) * resolution.y, 64u, true, false, false, false);
+        m_hits->SetName("CLod RT reflection hits");
+    }
+
     RayTracedReflectionsBindings Declare(org::PassBuilder& builder) {
         builder.ShaderResource(Builtin::Color::HDRColorTarget,
             Builtin::PrimaryCamera::DepthTexture, Builtin::Surface::NormalRoughness,
             Builtin::Surface::SpecularAo, Builtin::CameraBuffer,
             Builtin::Environment::CurrentPrefilteredCubemap);
+        builder.ConstantBuffer(Builtin::PerFrameBuffer);
+        builder.ShaderResource(Builtin::PrimaryCamera::VisibilityTexture, Builtin::Light::InfoBuffer, Builtin::Light::ActiveLightIndices,
+            Builtin::Environment::InfoBuffer, Builtin::PerMeshBuffer, Builtin::PerMaterialDataBuffer, "Builtin::PerMaterialEvalDataBuffer",
+            Builtin::PerMeshInstanceBuffer, Builtin::InstanceDrawRecordBuffer, Builtin::PerInstanceTransformBuffer, Builtin::PerObjectBuffer,
+            Builtin::NormalMatrixBuffer, Builtin::CullingCameraBuffer, Builtin::CLod::Offsets, Builtin::CLod::MeshMetadata, Builtin::CLod::Groups,
+            Builtin::CLod::GroupChunks, Builtin::CLod::GroupPageMap, Builtin::CLod::AssemblyTransforms, Builtin::CLod::AssemblyBoneRemaps,
+            Builtin::CLod::AssemblyBoneRemapIndices, Builtin::SkeletonResources::InverseBindMatrices, Builtin::SkeletonResources::BoneTransforms,
+            Builtin::SkeletonResources::SkinningInstanceInfo, Builtin::Material::TextureStreamingMetadataBuffer,
+            Builtin::Terrain::Sets, Builtin::Terrain::Layers, Builtin::Terrain::StochasticLayers, Builtin::Terrain::LayerRefs,
+            Builtin::Terrain::Regions, Builtin::Terrain::WeightBlocks,
+            Builtin::Light::PointLightCubemapBuffer, Builtin::Light::DirectionalLightCascadeBuffer, Builtin::Light::SpotLightMatrixBuffer,
+            Builtin::PerMaterialOpenPBRDataBuffer, Builtin::OpenPBR::FuzzLTC, Builtin::OpenPBR::IdealMetalEnergyComplement,
+            Builtin::OpenPBR::IdealMetalAverageEnergyComplement, Builtin::OpenPBR::OpaqueDielectricAverageEnergyComplement, Builtin::Noise::BlueNoise2D);
+        builder.ShaderResource(Builtin::OpenPBR::OpaqueDielectricEnergyComplement,
+            org::SrvView{static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)});
+        if (m_slabs) builder.ShaderResource(ResourceGroupResolver(m_slabs));
+        // Materials seen in reflections ask for their mips like any others.
+        builder.UnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer);
+        if (m_terrainRvt) {
+            builder.ShaderResource(Builtin::Terrain::RvtInfo, Builtin::Terrain::RvtClipInfos, Builtin::Terrain::RvtPageTable,
+                Builtin::Terrain::RvtPageKeys, Builtin::Terrain::RvtPhysicalPageOwner, Builtin::Terrain::RvtPhysicalPageAtlas,
+                Builtin::Terrain::RvtHeightResidentCache, Builtin::Terrain::RvtHeightAtlas, Builtin::Terrain::RvtAlbedoAtlas,
+                Builtin::Terrain::RvtNormalAtlas, Builtin::Terrain::RvtMaterialAtlas);
+            builder.UnorderedAccess(Builtin::Terrain::RvtRequestMasks, Builtin::Terrain::RvtRequestList,
+                Builtin::Terrain::RvtCounters, Builtin::Terrain::RvtStats);
+        }
         RayTracedReflectionsBindings bindings{};
+        // What every material could need. Unlike primary evaluation there's one program per surface kind rather than one per
+        // material combination, because material flags still decide at run time what is sampled.
+        const std::vector<org::PipelineShaderDefine> materialDefines = {
+            { L"PSO_BASE_COLOR_TEXTURE", L"1" }, { L"PSO_NORMAL_MAP", L"1" }, { L"PSO_ROUGHNESS_TEXTURE", L"1" },
+            { L"PSO_METALLIC_TEXTURE", L"1" }, { L"PSO_AO_TEXTURE", L"1" }, { L"PSO_EMISSIVE_TEXTURE", L"1" }, { L"PSO_OPACITY_TEXTURE", L"1" },
+            { L"PSO_IMAGE_BASED_LIGHTING", L"1" }, { L"PSO_DEFERRED", L"1" }, { L"VISUTIL_COLOR_ONLY_GBUFFER_EVAL", L"1" },
+        };
+        std::vector<org::PipelineShaderDefine> terrainDefines = materialDefines;
+        terrainDefines.push_back({ L"PSO_TERRAIN", L"1" });
+        // Ray queries against clusters need shader model 6.10.
+        const auto sm610 = [](org::ComputePipelineDesc desc) {
+            desc.shader.target = L"cs_6_10";
+            return desc;
+        };
+        bindings.tracePipeline = builder.Pipeline(sm610(br::render::ComputePipeline(L"Shaders/ClusterLOD/rayTracedReflections.hlsl",
+            L"CLodRtReflectionTraceCS", "CLod.RayTracing.ReflectionTrace.PSO")));
+        bindings.shadePipeline = builder.Pipeline(sm610(br::render::ComputePipeline(L"Shaders/ClusterLOD/rayTracedReflectionShade.hlsl",
+            L"CLodRtReflectionShadeCS", "CLod.RayTracing.ReflectionShade.PSO", materialDefines)));
+        bindings.shadeTerrainPipeline = builder.Pipeline(sm610(br::render::ComputePipeline(L"Shaders/ClusterLOD/rayTracedReflectionShade.hlsl",
+            L"CLodRtReflectionShadeCS", "CLod.RayTracing.ReflectionShadeTerrain.PSO", terrainDefines)));
+        bindings.hits = builder.UnorderedAccess(m_hits).View();
         const auto output = builder.UnorderedAccessClear(Builtin::PostProcessing::ScreenSpaceReflections);
         bindings.outputShader = output.View(0);
         bindings.outputCpu = output.View(1);
-        if (m_pageSources && m_buildInfos) {
-            // Record binds these only with the service's resources declared.
-            bindings.setupPipeline = builder.Pipeline(br::render::ComputePipeline(
-                L"Shaders/ClusterLOD/rayTracingSetup.hlsl", L"CLodRayTracingSetupCSMain", "CLod.RayTracing.Setup.PSO"));
-            bindings.tlasSetupPipeline = builder.Pipeline(br::render::ComputePipeline(
-                L"Shaders/ClusterLOD/rayTracingTlasSetup.hlsl", L"CLodRayTracingTlasSetupCSMain",
-                "CLod.RayTracing.TLASSetup.PSO"));
-            bindings.pageSources = builder.ShaderResource(m_pageSources).View();
-            bindings.buildInfos = builder.UnorderedAccess(m_buildInfos).View();
-            if (m_clasData) builder.UnorderedAccess(m_clasData);
-            if (m_clasAddresses) builder.UnorderedAccess(m_clasAddresses);
-            if (m_blasData) builder.UnorderedAccess(m_blasData);
-            if (m_blasAddresses) {
-                builder.UnorderedAccess(m_blasAddresses);
-                bindings.blasAddressesSrv = builder.ShaderResource(m_blasAddresses).View();
-            }
-            if (m_tlasInstances) bindings.tlasInstances = builder.UnorderedAccess(m_tlasInstances).View();
-            bindings.hasServiceResources = true;
-        }
-        builder.InternalTransition(
-            org::ResourceIdentifierAndRange(Builtin::PostProcessing::ScreenSpaceReflections, {}),
-            org::ResourceState{.access = rhi::ResourceAccessType::Common,
-                .layout = rhi::ResourceLayout::Common,
-                .sync = rhi::ResourceSyncState::All});
         return bindings;
     }
 
-    void Initialize() {
-        m_output = m_resourceRegistryView->RequestSharedAs<org::PixelBuffer>(
-            Builtin::PostProcessing::ScreenSpaceReflections);
-    }
-
-    void Update(const org::UpdateExecutionContext& execution) override {
-        const auto* context = execution.hostData->Get<UpdateContext>();
-        auto service = context ? context->clodRayTracingSystem : nullptr;
-        std::shared_ptr<org::Buffer> pageSources, buildInfos, clasData, clasAddresses;
-        std::shared_ptr<org::Buffer> blasData, blasAddresses, tlasInstances;
-        if (service) {
-            std::scoped_lock lock(service->FrameOperationMutex());
-            pageSources = service->GetPageSourceBuffer();
-            buildInfos = service->GetClasBuildInfoBuffer();
-            clasData = service->GetClasDataBuffer();
-            clasAddresses = service->GetClasAddressBuffer();
-            blasData = service->GetBlasDataBuffer();
-            blasAddresses = service->GetBlasAddressBuffer();
-            tlasInstances = service->GetTlasInstanceBuffer();
-        }
-        m_declaredResourcesChanged = service != m_service || pageSources != m_pageSources ||
-            buildInfos != m_buildInfos || clasData != m_clasData || clasAddresses != m_clasAddresses ||
-            blasData != m_blasData || blasAddresses != m_blasAddresses || tlasInstances != m_tlasInstances;
-        m_service = std::move(service); m_pageSources = std::move(pageSources);
-        m_buildInfos = std::move(buildInfos); m_clasData = std::move(clasData);
-        m_clasAddresses = std::move(clasAddresses); m_blasData = std::move(blasData);
-        m_blasAddresses = std::move(blasAddresses); m_tlasInstances = std::move(tlasInstances);
-    }
-
-    bool DeclaredResourcesChanged() const override { return m_declaredResourcesChanged; }
-    // The ray-tracing service's buffers are reallocated as they grow; each new one takes the old one's place.
-    bool RebindsConcreteResources() const noexcept override { return true; }
-    bool PreparesOnlyDeclaredWork() const noexcept override { return false; } // Required with RebindsConcreteResources.
-
-    RayTracedReflectionsFrameData Prepare(const RayTracedReflectionsBindings& bindings,
-        const org::PassPrepareContext& preparation) const {
+    RayTracedReflectionsFrameData Prepare(const RayTracedReflectionsBindings&, const org::PassPrepareContext& preparation) const {
         RayTracedReflectionsFrameData frame{};
-        const auto* context = preparation.preparationData
-            ? preparation.preparationData->Get<UpdateContext>() : nullptr;
-        if (!context || !m_output || !m_service || !bindings.hasServiceResources) return frame;
-        auto service = m_service;
-        std::scoped_lock serviceLock(service->FrameOperationMutex());
-        if (!service->HasGpuClasBuildInputs()) return frame;
-        service->EnsureRayTracingPipeline(DeviceManager::GetInstance().GetDevice(),
-            DeviceManager::GetInstance().GetRayTracingFeatures());
-        frame.service = service;
-        frame.output = m_output;
-        frame.pageSources = m_pageSources; frame.buildInfos = m_buildInfos;
-        frame.clasData = m_clasData; frame.clasAddresses = m_clasAddresses;
-        frame.blasData = m_blasData; frame.blasAddresses = m_blasAddresses;
-        frame.tlasInstances = m_tlasInstances;
-        frame.device = DeviceManager::GetInstance().GetDevice();
-        frame.pageSourceCount = service->GetGpuPageSourceCount();
-        frame.buildClusterCapacity = service->GetStats().buildableClusters;
-        preparation.Retain(frame.output);
-        preparation.Retain(frame.pageSources); preparation.Retain(frame.buildInfos);
-        preparation.Retain(frame.clasData); preparation.Retain(frame.clasAddresses);
-        preparation.Retain(frame.blasData); preparation.Retain(frame.blasAddresses);
-        preparation.Retain(frame.tlasInstances);
+        const auto* context = preparation.preparationData ? preparation.preparationData->Get<UpdateContext>() : nullptr;
+        if (!context) return frame;
+        frame.service = context->clodRayTracingSystem;
+        frame.width = context->renderResolution.x;
+        frame.height = context->renderResolution.y;
+        auto& settings = SettingsManager::GetInstance();
+        frame.maxDistance = settings.getSettingGetter<float>("rayTracedReflectionMaxDistance")();
+        frame.roughnessCutoff = settings.getSettingGetter<float>("rayTracedReflectionRoughnessCutoff")();
+        frame.frame = static_cast<uint32_t>(context->frameIndex);
         return frame;
     }
 
-    static void Record(const RayTracedReflectionsBindings& bindings,
-        const RayTracedReflectionsFrameData& frame,
-        org::PassRecordContext& recording) {
-        if (!frame.output) return;
-        std::unique_lock<std::mutex> serviceLock;
-        if (frame.service) serviceLock = std::unique_lock(frame.service->FrameOperationMutex());
-        auto& commands = recording.Commands();
+    static void Record(const RayTracedReflectionsBindings& bindings, const RayTracedReflectionsFrameData& frame, org::PassRecordContext& recording) {
         bool traced = false;
-        auto barrier = [&](const std::shared_ptr<org::Buffer>& buffer,
-            rhi::ResourceAccessType before, rhi::ResourceAccessType after,
-            rhi::ResourceSyncState beforeSync, rhi::ResourceSyncState afterSync) {
-            if (!buffer) return;
-            rhi::BufferBarrier value{};
-            value.buffer = buffer->GetAPIResource().GetHandle();
-            value.beforeAccess = before; value.afterAccess = after;
-            value.beforeSync = beforeSync; value.afterSync = afterSync;
-            rhi::BarrierBatch batch{}; batch.buffers = {&value}; commands.Barriers(batch);
-        };
-        if (frame.service && frame.pageSources && frame.buildInfos) {
-            recording.BindComputePipeline(bindings.setupPipeline);
-            br::render::MiscConstants constants{};
-            constants[CLOD_RT_SETUP_PAGE_SOURCES_DESCRIPTOR_INDEX] =
-                recording.Index(bindings.pageSources);
-            constants[CLOD_RT_SETUP_BUILD_INFOS_DESCRIPTOR_INDEX] =
-                recording.Index(bindings.buildInfos);
-            constants[CLOD_RT_SETUP_PAGE_SOURCE_COUNT] = frame.pageSourceCount;
-            constants[CLOD_RT_SETUP_BUILD_CLUSTER_CAPACITY] = frame.buildClusterCapacity;
-            br::render::PushMiscConstants(recording, constants);
-            commands.Dispatch((frame.pageSourceCount + 63u) / 64u, 1u, 1u);
-            barrier(frame.buildInfos, rhi::ResourceAccessType::UnorderedAccess,
-                rhi::ResourceAccessType::ShaderResource, rhi::ResourceSyncState::ComputeShading,
-                rhi::ResourceSyncState::BuildRaytracingAccelerationStructure);
-            frame.service->ExecuteClasBuild(commands);
-            if (frame.clasData && frame.clasAddresses && frame.service->HasGpuBlasBuildInputs()) {
-                barrier(frame.clasData, rhi::ResourceAccessType::RaytracingAccelerationStructureWrite,
-                    rhi::ResourceAccessType::RaytracingAccelerationStructureRead,
-                    rhi::ResourceSyncState::BuildRaytracingAccelerationStructure,
-                    rhi::ResourceSyncState::BuildRaytracingAccelerationStructure);
-                barrier(frame.clasAddresses, rhi::ResourceAccessType::RaytracingAccelerationStructureWrite,
-                    rhi::ResourceAccessType::RaytracingAccelerationStructureRead,
-                    rhi::ResourceSyncState::BuildRaytracingAccelerationStructure,
-                    rhi::ResourceSyncState::BuildRaytracingAccelerationStructure);
-                frame.service->ExecuteBlasBuild(commands);
-                if (frame.blasData && frame.blasAddresses && frame.tlasInstances &&
-                    frame.service->HasGpuTlasBuildInputs()) {
-                    barrier(frame.blasData, rhi::ResourceAccessType::RaytracingAccelerationStructureWrite,
-                        rhi::ResourceAccessType::RaytracingAccelerationStructureRead,
-                        rhi::ResourceSyncState::BuildRaytracingAccelerationStructure,
-                        rhi::ResourceSyncState::BuildRaytracingAccelerationStructure);
-                    barrier(frame.blasAddresses, rhi::ResourceAccessType::RaytracingAccelerationStructureWrite,
-                        rhi::ResourceAccessType::ShaderResource,
-                        rhi::ResourceSyncState::BuildRaytracingAccelerationStructure,
-                        rhi::ResourceSyncState::ComputeShading);
-                    recording.BindComputePipeline(bindings.tlasSetupPipeline);
-                    br::render::MiscConstants tlas{};
-                    tlas[CLOD_RT_SETUP_BLAS_ADDRESSES_DESCRIPTOR_INDEX] =
-                        recording.Index(bindings.blasAddressesSrv);
-                    tlas[CLOD_RT_SETUP_TLAS_INSTANCES_DESCRIPTOR_INDEX] =
-                        recording.Index(bindings.tlasInstances);
-                    br::render::PushMiscConstants(recording, tlas);
-                    commands.Dispatch(1u, 1u, 1u);
-                    barrier(frame.tlasInstances, rhi::ResourceAccessType::UnorderedAccess,
-                        rhi::ResourceAccessType::RaytracingAccelerationStructureRead,
-                        rhi::ResourceSyncState::ComputeShading,
-                        rhi::ResourceSyncState::BuildRaytracingAccelerationStructure);
-                    frame.service->ExecuteTlasBuild(commands);
-                    if (frame.service->HasRayTracingPipeline()) {
-                        frame.service->ExecuteTraceRays(frame.device,
-                            commands, *frame.output, recording.Index(bindings.outputShader),
-                            frame.output->GetWidth(), frame.output->GetHeight());
-                        traced = frame.service->GetStats().traceRaysSubmitted;
-                    }
-                }
+        if (frame.service) {
+            std::scoped_lock lock(frame.service->FrameOperationMutex());
+            if (frame.service->HasTlas()) {
+                br::render::MiscConstants constants{};
+                constants[CLOD_RT_SEC_TLAS_SRV] = frame.service->GetTlasSrv();
+                constants[CLOD_RT_SEC_CLAS_INFO_SRV] = frame.service->GetClasInfoSrv();
+                constants[CLOD_RT_SEC_OUTPUT_UAV] = recording.Index(bindings.outputShader);
+                constants[CLOD_RT_SEC_HITS_UAV] = recording.Index(bindings.hits);
+                constants[CLOD_RT_SEC_FRAME] = frame.frame;
+                constants[CLOD_RT_SEC_MAX_DISTANCE] = std::bit_cast<uint32_t>(frame.maxDistance);
+                constants[CLOD_RT_SEC_ROUGHNESS_CUTOFF] = std::bit_cast<uint32_t>(frame.roughnessCutoff);
+                recording.BindComputePipeline(bindings.tracePipeline);
+                br::render::PushMiscConstants(recording, constants);
+                recording.Commands().Dispatch((frame.width + 7u) / 8u, (frame.height + 7u) / 8u, 1u);
+                rhi::GlobalBarrier uav{ rhi::ResourceSyncState::ComputeShading, rhi::ResourceSyncState::ComputeShading,
+                    rhi::ResourceAccessType::UnorderedAccess, rhi::ResourceAccessType::UnorderedAccess };
+                rhi::BarrierBatch barrier{};
+                barrier.globals = { &uav, 1u };
+                recording.Commands().Barriers(barrier);
+                recording.BindComputePipeline(bindings.shadePipeline);
+                br::render::PushMiscConstants(recording, constants);
+                recording.Commands().Dispatch((frame.width + 7u) / 8u, (frame.height + 7u) / 8u, 1u);
+                recording.BindComputePipeline(bindings.shadeTerrainPipeline);
+                br::render::PushMiscConstants(recording, constants);
+                recording.Commands().Dispatch((frame.width + 7u) / 8u, (frame.height + 7u) / 8u, 1u);
+                traced = true;
             }
         }
         if (!traced) br::render::ClearUavFloat(recording, bindings.outputShader, bindings.outputCpu, 0.0f);
     }
 
 private:
-    std::shared_ptr<org::PixelBuffer> m_output;
-    std::shared_ptr<br::render::CLodRayTracingSystem> m_service;
-    std::shared_ptr<org::Buffer> m_pageSources, m_buildInfos, m_clasData, m_clasAddresses;
-    std::shared_ptr<org::Buffer> m_blasData, m_blasAddresses, m_tlasInstances;
-    bool m_declaredResourcesChanged = true;
+    std::shared_ptr<org::Buffer> m_hits;
+    std::shared_ptr<org::ResourceGroup> m_slabs;
+    bool m_terrainRvt = false;
 };

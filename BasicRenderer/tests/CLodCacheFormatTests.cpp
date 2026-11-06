@@ -6,6 +6,7 @@
 #include <BasicRenderer/Assets/ClusterLODTypes.h>
 #include <BasicRenderer/Assets/DefaultCLodSettings.h>
 #include <BasicRenderer/Assets/Import/CLodCache.h>
+#include <BasicRenderer/Assets/Import/CLodOpacityMicromapCache.h>
 #include <BasicRenderer/Assets/Import/ClusterLODUtilities.h>
 #include <BasicRenderer/Assets/Geometry/VertexLayout.h>
 #include <BasicRenderer/Streaming/TaskScheduler.h>
@@ -327,6 +328,77 @@ void TestOpenFailures(const fs::path& root)
 	fs::remove(garbagePath);
 }
 
+// Opacity micromap sidecars: what's written reads back, and a file for another material, another container, or with an
+// index past its micromaps is refused rather than built from.
+void TestOpacityMicromapRoundTrip(const fs::path& root)
+{
+	CLodCache::OpacityMicromapMaterialKey key{};
+	key.baseColorTexture = "textures/trees/leaf.dds|processed";
+	key.alphaCutoff = 128.0f / 255.0f;
+	const uint32_t identity = CLodCache::OpacityMicromapIdentity(key);
+	CHECK(identity != 0u);
+	CHECK(identity == CLodCache::OpacityMicromapIdentity(key));
+	CLodCache::OpacityMicromapMaterialKey other = key;
+	other.alphaCutoff = 100.0f / 255.0f;
+	CHECK(identity != CLodCache::OpacityMicromapIdentity(other));
+	other = key;
+	other.baseColorTexture = "textures/trees/leaf2.dds|processed";
+	CHECK(identity != CLodCache::OpacityMicromapIdentity(other));
+
+	const std::wstring container = (root / "clod_0123.clodbin").wstring();
+	const std::wstring path = CLodCache::OpacityMicromapPath(container, identity);
+	CHECK(fs::path(path).parent_path() == root);
+	CHECK(fs::path(path).extension() == L".clodomm");
+
+	// Group 1 of 3: two clusters, two level-4 micromaps (64 bytes each), the rest special indices.
+	CLodCache::OpacityMicromapGroupInput group{};
+	group.groupLocalIndex = 1u;
+	group.clusterCount = 2u;
+	group.descs = { { 0u, 4u, CLodCache::kOpacityMicromapFormat4State }, { 64u, 4u, CLodCache::kOpacityMicromapFormat4State } };
+	group.indices.assign(2u * CLodCache::kOpacityMicromapMaxTrianglesPerCluster, -2);
+	group.indices[0] = 0;
+	group.indices[CLodCache::kOpacityMicromapMaxTrianglesPerCluster + 5u] = 1;
+	group.indices[3] = -1;
+	group.data.resize(128u);
+	for (size_t i = 0; i < group.data.size(); ++i) group.data[i] = static_cast<std::byte>(i * 7u);
+	CLodCache::OpacityMicromapFileInfo info{};
+	info.identity = identity;
+	info.subdivisionLevel = 4u;
+	info.containerBytes = 123456u;
+	info.groupCount = 3u;
+	std::string error;
+	CHECK(CLodCache::SaveOpacityMicromaps(path, info, std::span(&group, 1), &error));
+
+	const auto file = CLodCache::OpacityMicromapFile::Open(path, identity, 123456u, &error);
+	CHECK(file != nullptr);
+	if (file) {
+		CLodCache::OpacityMicromapGroupView view{};
+		CHECK(!file->Group(0u, view));
+		CHECK(!file->Group(2u, view));
+		CHECK(file->Group(1u, view));
+		CHECK(view.clusterCount == 2u);
+		CHECK(view.descs.size() == 2u && view.descs[1].byteOffset == 64u && view.descs[1].subdivisionLevel == 4u);
+		CHECK(view.levelCounts[4] == 2u);
+		CHECK(view.data.size() == 128u && std::memcmp(view.data.data(), group.data.data(), 128u) == 0);
+		CHECK(view.indices.size() == 2u * CLodCache::kOpacityMicromapIndexUnitBytes);
+		CHECK(std::memcmp(view.indices.data(), group.indices.data(), view.indices.size()) == 0);
+		CHECK(view.blob.data() + view.indicesOffset == view.indices.data());
+		CHECK(view.blob.data() + view.dataOffset == view.data.data());
+	}
+	CHECK(CLodCache::OpacityMicromapFile::Open(path, identity + 1u, 123456u, &error) == nullptr);
+	CHECK(CLodCache::OpacityMicromapFile::Open(path, identity, 123457u, &error) == nullptr);
+	CHECK(CLodCache::OpacityMicromapFile::Open((root / "missing.clodomm").wstring(), identity, 123456u, &error) == nullptr);
+
+	// An index past the group's micromaps.
+	group.indices[7] = 2;
+	const std::wstring bad = (root / "bad.clodomm").wstring();
+	CHECK(CLodCache::SaveOpacityMicromaps(bad, info, std::span(&group, 1), &error));
+	CHECK(CLodCache::OpacityMicromapFile::Open(bad, identity, 123456u, &error) == nullptr);
+	std::error_code ignored;
+	fs::remove(path, ignored);
+	fs::remove(bad, ignored);
+}
+
 // The file layout has to match ID3D12Device::GetCopyableFootprints, which the runtime reads it with, but tools
 // without a device compute it. These sizes come from files the device laid out.
 void TestProcessedTextureLayoutMatchesDevice()
@@ -396,6 +468,7 @@ int main()
 		TestPrioritizeEdgesRoundTrip(root, source);
 		TestVoxelRoundTrip(root, source);
 		TestOpenFailures(root);
+		TestOpacityMicromapRoundTrip(root);
 		TestCacheOnlyMode(source);
 		TestProcessedTextureLayoutMatchesDevice();
 	}

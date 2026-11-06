@@ -25,7 +25,11 @@ static const uint TERRAIN_RVT_FALLBACK_OWNER_MISMATCH = 5u;
 #define TERRAIN_RVT_ENABLE_HOT_SAMPLE_DEBUG 0
 #define TERRAIN_RVT_ENABLE_DIRECT_FALLBACK 1
 #define TERRAIN_RVT_ENABLE_COARSER_RESIDENT_FALLBACK 1
+#if defined(CLOD_RESOLVE_PATH_HIT)
+#define TERRAIN_RVT_ENABLE_WAVE_PAGE_LOOKUP 0
+#else
 #define TERRAIN_RVT_ENABLE_WAVE_PAGE_LOOKUP 1
+#endif
 static const uint TERRAIN_RVT_HEIGHT_RESIDENT_CACHE_MISSING = 0u;
 static const uint TERRAIN_RVT_HEIGHT_RESIDENT_CACHE_DIRECT = 1u;
 static const uint TERRAIN_RVT_HEIGHT_RESIDENT_CACHE_COARSER = 2u;
@@ -1842,6 +1846,12 @@ bool TerrainRvtTrySampleNormalBiased(
 
 void TerrainRvtMarkPageTableIndex(uint pageTableIndex, uint contentMask)
 {
+#if defined(CLOD_RESOLVE_PATH_HIT)
+    if (!g_clodPathHitIsPrimary)
+    {
+        return;
+    }
+#endif
     StructuredBuffer<TerrainRvtInfo> infoBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtInfo)];
     TerrainRvtInfo info = infoBuffer[0];
     if (pageTableIndex >= info.maxVirtualPageTableEntries)

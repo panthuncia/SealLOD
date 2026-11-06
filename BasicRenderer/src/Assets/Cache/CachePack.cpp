@@ -223,14 +223,195 @@ namespace CachePack {
 		}
 	}
 
-	bool Build(std::string& outSummary) {
-		ZoneScopedN("CachePack::Build");
-		const std::filesystem::path root = PackRoot();
+	namespace {
 		struct Source {
 			std::filesystem::path path;
 			std::uint64_t key = 0u;
 			std::uint64_t size = 0u;
 		};
+
+		std::uint64_t AlignUp(std::uint64_t value) {
+			return (value + kAlignment - 1u) & ~(kAlignment - 1u);
+		}
+
+		std::unordered_set<std::uint64_t> ReadChanges() {
+			std::unordered_set<std::uint64_t> changes;
+			std::ifstream changesFile(ChangesPath());
+			std::string line;
+			while (std::getline(changesFile, line)) {
+				if (!line.empty()) {
+					changes.insert(std::strtoull(line.c_str(), nullptr, 16));
+				}
+			}
+			return changes;
+		}
+
+		bool ReadAt(HANDLE file, std::uint64_t offset, void* destination, std::uint64_t bytes) {
+			auto* cursor = static_cast<char*>(destination);
+			while (bytes != 0u) {
+				OVERLAPPED at{};
+				at.Offset = static_cast<DWORD>(offset);
+				at.OffsetHigh = static_cast<DWORD>(offset >> 32u);
+				const DWORD chunk = static_cast<DWORD>((std::min<std::uint64_t>)(bytes, 1u << 30u));
+				DWORD read = 0;
+				if (!ReadFile(file, cursor, chunk, &read, &at) || read != chunk) {
+					return false;
+				}
+				cursor += chunk;
+				offset += chunk;
+				bytes -= chunk;
+			}
+			return true;
+		}
+
+		bool WriteAt(HANDLE file, std::uint64_t offset, const void* source, std::uint64_t bytes) {
+			const auto* cursor = static_cast<const char*>(source);
+			while (bytes != 0u) {
+				OVERLAPPED at{};
+				at.Offset = static_cast<DWORD>(offset);
+				at.OffsetHigh = static_cast<DWORD>(offset >> 32u);
+				const DWORD chunk = static_cast<DWORD>((std::min<std::uint64_t>)(bytes, 1u << 30u));
+				DWORD written = 0;
+				if (!WriteFile(file, cursor, chunk, &written, &at) || written != chunk) {
+					return false;
+				}
+				cursor += chunk;
+				offset += chunk;
+				bytes -= chunk;
+			}
+			return true;
+		}
+
+		enum class Update { Done, Rebuild, Failed };
+
+		// Brings an existing pack up to date where it lies: files it holds unchanged keep their bytes, new and rewritten
+		// ones are appended, then a new index after them, and the header last. Until the header is written the old one
+		// still names the old index, which nothing overwrites, so an interrupted update leaves the old pack, and the
+		// changes file keeps its stale entries out of use either way. Rebuild when there's no usable pack, or when bytes
+		// nothing indexes would pass a quarter of it (and 64 MiB, so a small pack never rewrites over a few files).
+		Update UpdateInPlace(const std::vector<Source>& sources, std::string& outSummary) {
+			HANDLE file = CreateFileW(PackPath().c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+			if (file == INVALID_HANDLE_VALUE) {
+				const DWORD error = GetLastError();
+				if (error == ERROR_SHARING_VIOLATION || error == ERROR_LOCK_VIOLATION || error == ERROR_ACCESS_DENIED) {
+					outSummary = "cannot update '" + PackPath().string() + "': it is open elsewhere (is the renderer running?)";
+					return Update::Failed;
+				}
+				return Update::Rebuild;
+			}
+			struct Closer {
+				HANDLE handle;
+				~Closer() { CloseHandle(handle); }
+			} closer{ file };
+			LARGE_INTEGER size{};
+			Header header{};
+			if (!GetFileSizeEx(file, &size) || static_cast<std::uint64_t>(size.QuadPart) < sizeof(Header) || !ReadAt(file, 0u, &header, sizeof(header))) {
+				return Update::Rebuild;
+			}
+			const auto fileBytes = static_cast<std::uint64_t>(size.QuadPart);
+			if (header.magic != kMagic || header.version != kVersion || header.indexOffset > fileBytes || header.entryCount > fileBytes / sizeof(IndexEntry) ||
+				header.entryCount * sizeof(IndexEntry) > fileBytes - header.indexOffset) {
+				return Update::Rebuild;
+			}
+			std::vector<IndexEntry> old(static_cast<std::size_t>(header.entryCount));
+			if (!old.empty() && !ReadAt(file, header.indexOffset, old.data(), old.size() * sizeof(IndexEntry))) {
+				return Update::Rebuild;
+			}
+			const auto changes = ReadChanges();
+
+			std::vector<IndexEntry> index;
+			index.reserve(sources.size());
+			std::vector<const Source*> appended;
+			std::uint64_t liveBytes = 0u;
+			std::uint64_t appendBytes = 0u;
+			std::size_t replaced = 0u; // Appended over an entry the pack held.
+			for (const Source& source : sources) {
+				const auto it = std::lower_bound(old.begin(), old.end(), source.key, [](const IndexEntry& entry, std::uint64_t value) { return entry.key < value; });
+				const bool kept = it != old.end() && it->key == source.key && it->size == source.size && !changes.contains(source.key) && it->offset <= fileBytes &&
+					it->size <= fileBytes - it->offset;
+				if (kept) {
+					index.push_back(*it);
+				} else {
+					if (it != old.end() && it->key == source.key) ++replaced;
+					appended.push_back(&source);
+					appendBytes = AlignUp(appendBytes) + source.size;
+				}
+				liveBytes += source.size;
+			}
+			if (appended.empty() && index.size() == old.size() && changes.empty()) {
+				outSummary = std::to_string(index.size()) + " files, " + std::to_string(fileBytes >> 20u) + " MiB, already up to date at '" + PackPath().string() + "'";
+				return Update::Done;
+			}
+			const std::uint64_t dataOffset = AlignUp(fileBytes);
+			const std::uint64_t indexOffset = AlignUp(dataOffset + appendBytes);
+			const std::uint64_t finalBytes = indexOffset + sources.size() * sizeof(IndexEntry);
+			// Old copies, the old index and alignment: bytes nothing reads.
+			const std::uint64_t unindexed = finalBytes - liveBytes - sources.size() * sizeof(IndexEntry) - sizeof(Header);
+			if (unindexed * 4u > finalBytes && unindexed > (64ull << 20u)) {
+				return Update::Rebuild;
+			}
+
+			std::uint64_t cursor = dataOffset;
+			std::vector<char> buffer(4u * 1024u * 1024u);
+			for (const Source* source : appended) {
+				cursor = AlignUp(cursor);
+				std::ifstream in(source->path, std::ios::binary);
+				if (!in.is_open()) {
+					outSummary = "cannot read '" + source->path.string() + "'";
+					return Update::Failed;
+				}
+				std::uint64_t copied = 0u;
+				while (copied < source->size) {
+					const auto chunk = static_cast<std::streamsize>((std::min<std::uint64_t>)(buffer.size(), source->size - copied));
+					in.read(buffer.data(), chunk);
+					if (in.gcount() != chunk || !WriteAt(file, cursor + copied, buffer.data(), static_cast<std::uint64_t>(chunk))) {
+						outSummary = "failed appending '" + source->path.string() + "' to the pack";
+						return Update::Failed;
+					}
+					copied += static_cast<std::uint64_t>(chunk);
+				}
+				index.push_back({ source->key, cursor, source->size });
+				cursor += source->size;
+			}
+			std::sort(index.begin(), index.end(), [](const IndexEntry& a, const IndexEntry& b) { return a.key < b.key; });
+			if (std::adjacent_find(index.begin(), index.end(), [](const IndexEntry& a, const IndexEntry& b) { return a.key == b.key; }) != index.end()) {
+				outSummary = "two cache files hash to one key";
+				return Update::Failed;
+			}
+			Header updated = header;
+			updated.entryCount = index.size();
+			updated.indexOffset = indexOffset;
+			// The data and index reach the disk before the header that names them.
+			if (!WriteAt(file, indexOffset, index.data(), index.size() * sizeof(IndexEntry)) || !FlushFileBuffers(file) ||
+				!WriteAt(file, 0u, &updated, sizeof(updated)) || !FlushFileBuffers(file)) {
+				outSummary = "failed writing the pack's index";
+				return Update::Failed;
+			}
+			LARGE_INTEGER end{};
+			end.QuadPart = static_cast<LONGLONG>(finalBytes);
+			if (!SetFilePointerEx(file, end, nullptr, FILE_BEGIN) || !SetEndOfFile(file)) {
+				outSummary = "failed trimming the pack";
+				return Update::Failed;
+			}
+			std::error_code ec;
+			std::filesystem::remove(ChangesPath(), ec);
+			std::ostringstream summary;
+			const std::size_t kept = index.size() - appended.size();
+			summary << index.size() << " files, " << (finalBytes >> 20u) << " MiB, updated in place at '" << PackPath().string() << "': " << appended.size()
+					<< " appended (" << replaced << " of them rewritten, " << (appendBytes >> 20u) << " MiB), " << (old.size() - kept - replaced) << " removed, "
+					<< (unindexed >> 20u) << " MiB unused";
+			outSummary = summary.str();
+			return Update::Done;
+		}
+	}
+
+	bool Build(std::string& outSummary) {
+		return Build(outSummary, false);
+	}
+
+	bool Build(std::string& outSummary, bool rewrite) {
+		ZoneScopedN("CachePack::Build");
+		const std::filesystem::path root = PackRoot();
 		std::vector<Source> sources;
 		std::error_code ec;
 		for (std::filesystem::recursive_directory_iterator it(root, std::filesystem::directory_options::skip_permission_denied, ec), end;
@@ -239,7 +420,7 @@ namespace CachePack {
 				continue;
 			}
 			const auto extension = it->path().extension();
-			if (extension != L".clodbin" && extension != L".clodmeta" && extension != L".nifmeta") {
+			if (extension != L".clodbin" && extension != L".clodmeta" && extension != L".nifmeta" && extension != L".clodomm") {
 				continue;
 			}
 			Source source{};
@@ -257,6 +438,17 @@ namespace CachePack {
 		}
 		// A stable order keeps one mesh's files together, so neighbouring reads stay near each other on disk.
 		std::sort(sources.begin(), sources.end(), [](const Source& a, const Source& b) { return a.path < b.path; });
+
+		if (!rewrite) {
+			switch (UpdateInPlace(sources, outSummary)) {
+			case Update::Done:
+				return true;
+			case Update::Failed:
+				return false;
+			case Update::Rebuild:
+				break;
+			}
+		}
 
 		const std::filesystem::path tempPath = PackPath().wstring() + L".tmp";
 		std::ofstream out(tempPath, std::ios::binary | std::ios::trunc);

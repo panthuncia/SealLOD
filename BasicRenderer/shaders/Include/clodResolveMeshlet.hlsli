@@ -212,7 +212,12 @@ MeshletResolveData LoadMeshletResolveData(uint clusterIndex)
     StructuredBuffer<PerMeshBuffer> perMeshBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
 
+#if defined(CLOD_RESOLVE_RAY_HIT)
+    // A ray hit has no visible cluster record: the caller builds it from the CLAS.
+    const uint4 packedCluster = g_clodRtPackedCluster;
+#else
     const uint4 packedCluster = CLodLoadVisibleClusterPacked(visibleClusterBuffer, clusterIndex);
+#endif
     d.drawcallAndMeshlet.x = CLodVisibleClusterInstanceID(packedCluster);
     d.drawcallAndMeshlet.y = CLodVisibleClusterLocalMeshletIndex(packedCluster);
 
@@ -267,6 +272,9 @@ MeshletResolveData LoadMeshletResolveData(uint clusterIndex)
 // is not this: its lane index must be wave-uniform, and drivers that scalarize it hand every lane the first group's data.
 MeshletResolveData LoadMeshletResolveData_Wave(uint clusterIndex)
 {
+#if defined(CLOD_RESOLVE_RAY_HIT)
+    return LoadMeshletResolveData(clusterIndex); // Threads see unrelated clusters, so there's nothing to share.
+#endif
     MeshletResolveData d = (MeshletResolveData)0;
     [loop]
     for (;;)

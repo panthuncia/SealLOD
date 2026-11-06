@@ -1092,6 +1092,42 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 		}
 		CLodMeshMetadata clodMeshMetadata{};
 		clodMeshMetadata.groupsBase = groupsBase;
+		{
+			// What it takes to know an instance selects exactly the coarsest level, without traversing it.
+			const auto& groups = mesh->GetCLodGroups();
+			const auto isCoarsest = [&](const ClusterLODGroup& group) {
+				if (group.parentGroupId < 0) return true;
+				const ClusterLODGroup& parent = groups[static_cast<size_t>(group.parentGroupId)];
+				return parent.parentGroupId < 0 && parent.pageCount == 0u;
+			};
+			float minimum[3] = { FLT_MAX, FLT_MAX, FLT_MAX };
+			float maximum[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
+			float refineError = -1.0f;
+			float coarsestMinError = FLT_MAX;
+			for (const ClusterLODGroup& group : groups) {
+				for (int axis = 0; axis < 3; ++axis) {
+					const float center = group.bounds.center[axis];
+					minimum[axis] = (std::min)(minimum[axis], center);
+					maximum[axis] = (std::max)(maximum[axis], center);
+				}
+				if (!isCoarsest(group)) refineError = (std::max)(refineError, group.bounds.error);
+				else if (group.pageCount != 0u) coarsestMinError = (std::min)(coarsestMinError, group.bounds.error);
+			}
+			const float center[3] = { (minimum[0] + maximum[0]) * 0.5f, (minimum[1] + maximum[1]) * 0.5f, (minimum[2] + maximum[2]) * 0.5f };
+			float radius = 0.0f;
+			for (const ClusterLODGroup& group : groups) {
+				const float dx = group.bounds.center[0] - center[0];
+				const float dy = group.bounds.center[1] - center[1];
+				const float dz = group.bounds.center[2] - center[2];
+				radius = (std::max)(radius, std::sqrt(dx * dx + dy * dy + dz * dz) + group.bounds.radius);
+			}
+			clodMeshMetadata.coarseCutSphere[0] = center[0];
+			clodMeshMetadata.coarseCutSphere[1] = center[1];
+			clodMeshMetadata.coarseCutSphere[2] = center[2];
+			clodMeshMetadata.coarseCutSphere[3] = radius;
+			clodMeshMetadata.coarseCutRefineError = refineError;
+			clodMeshMetadata.coarseCutMinError = coarsestMinError;
+		}
 		clodMeshMetadata.segmentsBase = static_cast<uint32_t>(clusterLODSegmentsView->GetOffset() / sizeof(ClusterLODGroupSegment));
 		clodMeshMetadata.lodNodesBase = static_cast<uint32_t>(clusterLODNodesView->GetOffset() / sizeof(ClusterLODNode));
 		clodMeshMetadata.rootNode = mesh->GetCLodRootNodeIndex();
@@ -3884,6 +3920,53 @@ br::render::CLodStreamingDebugStats MeshManager::GetCLodStreamingDebugStats() co
 	}
 
 	return stats;
+}
+
+bool MeshManager::GetCLodRayTracingGroup(uint32_t groupGlobalIndex, br::render::CLodRayTracingGroupLookup& out) const {
+	const_cast<MeshManager*>(this)->RebuildCLodSharedStreamingRangeIndex();
+
+	std::lock_guard<std::mutex> residencyLock(m_clodResidencyMutex);
+	for (const CLodSharedStreamingRange& range : m_clodSharedStreamingRanges) {
+		if (groupGlobalIndex < range.begin || groupGlobalIndex >= range.end || !range.state) {
+			continue;
+		}
+		const auto& state = range.state;
+		const uint32_t localGroupIndex = groupGlobalIndex - range.begin;
+		if (localGroupIndex >= state->groups.size()
+			|| localGroupIndex >= state->residentGroupAllocations.size()
+			|| localGroupIndex >= state->baselineGroupChunks.size()
+			|| !IsCLodGroupResident(*state, localGroupIndex)) {
+			return false;
+		}
+		const ClusterLODGroup& group = state->groups[localGroupIndex];
+		out.pagePool = m_clodPagePool;
+		out.owner = state;
+		out.containerPath = state->resolvedContainerPath;
+		out.group.groupGlobalIndex = groupGlobalIndex;
+		out.group.groupLocalIndex = localGroupIndex;
+		out.group.group = group;
+		out.group.chunk = state->baselineGroupChunks[localGroupIndex];
+		out.group.pageAllocations = state->residentGroupAllocations[localGroupIndex].pageAllocations;
+		out.group.segments.clear();
+		if (group.firstSegment < state->segments.size()) {
+			const uint32_t segmentCount = std::min<uint32_t>(group.segmentCount, static_cast<uint32_t>(state->segments.size() - group.firstSegment));
+			out.group.segments.assign(state->segments.begin() + group.firstSegment, state->segments.begin() + group.firstSegment + segmentCount);
+		}
+		return true;
+	}
+	return false;
+}
+
+bool MeshManager::IsCLodRayTracingGroupCurrent(const std::shared_ptr<const void>& owner, uint32_t localGroupIndex, uint32_t firstPageId) const {
+	const auto* state = static_cast<const CLodSharedStreamingState*>(owner.get());
+	if (state == nullptr) {
+		return false;
+	}
+	std::lock_guard<std::mutex> residencyLock(m_clodResidencyMutex);
+	return localGroupIndex < state->residentGroupAllocations.size()
+		&& IsCLodGroupResident(*state, localGroupIndex)
+		&& !state->residentGroupAllocations[localGroupIndex].pageAllocations.empty()
+		&& state->residentGroupAllocations[localGroupIndex].pageAllocations.front().firstPageID == firstPageId;
 }
 
 void MeshManager::GetCLodRayTracingResidencySnapshot(br::render::CLodRayTracingResidencySnapshot& outSnapshot) const {

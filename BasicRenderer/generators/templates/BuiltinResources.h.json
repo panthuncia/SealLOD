@@ -144,6 +144,11 @@
       "WorkingAOTerm2": {},
       "OutputAOTerm": {}
     },
+    "RayTracing": {
+      "SpecularAlbedo": {},
+      "SpecularHitDistance": {},
+      "SunShadow": {}
+    },
     "Shadows": {
       "CLodClipmapInfo": {},
       "CLodPhysicalPages": {},

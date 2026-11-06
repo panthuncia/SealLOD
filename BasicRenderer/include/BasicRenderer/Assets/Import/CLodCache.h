@@ -43,7 +43,7 @@ bool AcquireMappedContainer(
 	uint32_t expectedPageCount,
 	std::shared_ptr<const MappedContainerLease>& outLease);
 
-inline constexpr uint32_t kSchemaVersion = 79;
+inline constexpr uint32_t kSchemaVersion = 80; // 80: meshoptimizer 1.3 clusterizer, partitioner and simplifier.
 
 struct CacheKey {
 	std::string sourceIdentifier;

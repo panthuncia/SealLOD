@@ -1,6 +1,6 @@
 add_subdirectory("Streamline")
 add_subdirectory("pix")
-add_subdirectory("meshoptimizer1.2")
+add_subdirectory("meshoptimizer1.3")
 
 set(_basicrenderer_nvperf_root "${CMAKE_CURRENT_LIST_DIR}/NvPerf")
 if(WIN32

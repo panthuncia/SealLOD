@@ -52,6 +52,7 @@ add_library(CLodCacheFormat STATIC
     "${BR_SRC}/Assets/Cache/CachePack.cpp"
     "${BR_SRC}/Assets/Cache/CachePathUtilities.cpp"
     "${BR_SRC}/Assets/Cache/ClusterLOD/CLodCache.cpp"
+    "${BR_SRC}/Assets/Cache/ClusterLOD/CLodOpacityMicromapCache.cpp"
     "${BR_SRC}/Assets/Cache/ClusterLOD/CLodPageDecoder.cpp"
     "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/DefaultCLodSettings.cpp"
     "${BR_SRC}/Assets/GeometryProcessing/Voxels/VoxelSurfaceTrace.cpp"

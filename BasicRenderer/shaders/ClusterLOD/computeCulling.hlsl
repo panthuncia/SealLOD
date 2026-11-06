@@ -231,6 +231,53 @@ void SeedPureComputeReplayClustersCS(const uint3 dispatchThreadID : SV_DispatchT
     outFrontier[index] = PackPureComputeClusterRunRecord(record);
 }
 
+#if CLOD_RT_VIEW
+// An instance for which even the most detailed group below the coarsest level is within the error threshold, and every
+// coarsest group is outside it, selects exactly the coarsest level, wherever it is. The first of a mesh is traversed
+// as normal. The rest would produce the same list, so they skip that and use its BLAS.
+bool CLodRtTakeCoarseCutWithoutTraversal(CLodMeshMetadata metadata, uint meshIndex, uint drawRecordIndex, row_major matrix model, uint viewId)
+{
+    if (CLodForcedTraversalDepthRootEnabled(metadata) || meshIndex >= CLOD_RT_COARSE_MESH_ENTRIES) {
+        return false;
+    }
+    StructuredBuffer<CullingCameraInfo> cameraInfos = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
+    const CullingCameraInfo lodCam = cameraInfos[CLodResolveLodViewId(viewId)];
+    if (lodCam.isOrtho != 0u) {
+        return false;
+    }
+    const float scale = MaxAxisScale_RowVector(model);
+    const float3 center = mul(float4(metadata.coarseCutSphere.xyz, 1.0f), model).xyz;
+    const float radius = metadata.coarseCutSphere.w * scale;
+    if (metadata.coarseCutRefineError >= 0.0f) {
+        const float upper = ProjectedGeometricError(center, radius, metadata.coarseCutRefineError, scale, lodCam.viewZ, lodCam.zNear, false);
+        if (upper > lodCam.errorOverDistanceThreshold) {
+            return false;
+        }
+    }
+    // The largest denominator any group can have: off screen, at the far side of the sphere.
+    StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
+    ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+    const float farDistance = (length(center - cameras[perFrame.mainCameraIndex].positionWorldSpace.xyz) + radius) * CLOD_RT_OFFSCREEN_LOD_SCALE;
+    if (metadata.coarseCutMinError * scale / max(farDistance, lodCam.zNear) <= lodCam.errorOverDistanceThreshold) {
+        return false;
+    }
+
+    RWByteAddressBuffer coarse = ResourceDescriptorHeap[CLOD_WG_RT_COARSE_CUT_DESCRIPTOR_INDEX];
+    uint provider = 0u;
+    coarse.InterlockedCompareExchange(CLOD_RT_COARSE_MESH_TABLE_BYTES + meshIndex * 4u, 0u, drawRecordIndex + 1u, provider);
+    if (provider == 0u) {
+        return false;
+    }
+    uint consumer = 0u;
+    coarse.InterlockedAdd(0u, 1u, consumer);
+    if (consumer >= CLOD_RT_COARSE_CONSUMER_CAPACITY) {
+        return false;
+    }
+    coarse.Store2(16u + consumer * 8u, uint2(drawRecordIndex, provider - 1u));
+    return true;
+}
+#endif
+
 [numthreads(64, 1, 1)]
 void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID)
 {
@@ -339,6 +386,20 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
         return;
     }
 #endif
+    // After the clean-page rejection: shadow views visit every draw once per clipmap, and this reads its material.
+#if CLOD_RT_VIEW && CLOD_RT_VIEW_PATH_TRACED
+    if (!CLodDrawIsPathTraced(perMesh, clodMeshMetadata)) {
+        return;
+    }
+#elif CLOD_RT_VIEW
+    if (!CLodDrawIsRayTracingCovered(perMesh, clodMeshMetadata)) {
+        return;
+    }
+#elif CLOD_SKIP_RT_COVERED
+    if (CLodDrawIsRayTracingCovered(perMesh, clodMeshMetadata)) {
+        return;
+    }
+#endif
     // Voxel-root classification only feeds debug telemetry. Avoid fetching the
     // first group for every object when telemetry is disabled.
     const bool voxelRootCandidate =
@@ -368,6 +429,18 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
         WGTelemetryAdd(WG_COUNTER_OBJECT_CULL_INVALID_BOUNDS, 1);
         culled = true;
     }
+#if CLOD_RT_VIEW && !CLOD_RT_VIEW_PATH_TRACED
+    // Off screen, only secondary rays see this. Past this distance they rarely reach it, and it costs the same as
+    // something close. Shadow maps still cover distant shadows.
+    else if (length(viewSpaceCenter) - worldRadius > CLOD_RT_OFFSCREEN_MAX_DISTANCE) {
+        for (uint planeIndex = 0u; planeIndex < 6u; ++planeIndex) {
+            const float4 plane = camera.clippingPlanes[planeIndex].plane;
+            if (dot(plane.xyz, viewSpaceCenter) + plane.w < -worldRadius) {
+                culled = true;
+            }
+        }
+    }
+#endif
     else if (CLodWorkGraphFrustumCullingEnabled()) {
         [unroll]
         for (uint planeIndex = 0u; planeIndex < 6u; ++planeIndex)
@@ -440,6 +513,12 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
             CLOD_ASSEMBLY_TRANSFORM_SENTINEL);
         return;
     }
+
+#if CLOD_RT_VIEW
+    if (CLodRtTakeCoarseCutWithoutTraversal(clodMeshMetadata, off.clodMeshMetadataIndex, drawRecordIndex, objectModelMatrix, CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX)) {
+        return;
+    }
+#endif
 
     RWStructuredBuffer<PureComputeTraverseNodeRecord> outFrontier = ResourceDescriptorHeap[CLOD_PC_FRONTIER_OUTPUT_DESCRIPTOR_INDEX];
     RWStructuredBuffer<uint> outCounter = ResourceDescriptorHeap[CLOD_PC_FRONTIER_OUTPUT_COUNT_DESCRIPTOR_INDEX];

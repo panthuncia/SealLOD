@@ -4,6 +4,7 @@
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 #include <d3d12.h>
+#include <atomic>
 #include <vector>
 #include <DirectXMath.h>
 #include <functional>
@@ -70,20 +71,31 @@ public:
     void InitializeAdapter();
 	void ProxyDevice();
     void Setup();
-	void Evaluate(rhi::CommandList& commandList, const Components::Camera* camera, uint64_t frameNumber, double elapsedSeconds, org::PixelBuffer* pHDRTarget, org::PixelBuffer* pUpscaledHDRTarget, org::PixelBuffer* pDepthTexture, org::PixelBuffer* pMotionVectors);
+	void Evaluate(rhi::CommandList& commandList, const Components::Camera* camera, uint64_t frameNumber, double elapsedSeconds, const UpscalingInputs& inputs);
 	// Records using the mode captured by a retained graph generation. This does
 	// not consult the mutable settings/current-mode selection.
 	void EvaluateCaptured(UpscalingMode mode, rhi::CommandList& commandList,
 		const Components::Camera* camera, uint64_t frameNumber, double elapsedSeconds,
-		org::PixelBuffer* pHDRTarget, org::PixelBuffer* pUpscaledHDRTarget,
-		org::PixelBuffer* pDepthTexture, org::PixelBuffer* pMotionVectors);
+		const UpscalingInputs& inputs);
+    // Discards temporal history on the next evaluation. Callable from any thread.
     void RequestHistoryReset() { m_resetUpscalerHistory = true; }
 	void Shutdown();
 
     bool InitSL();
 	bool InitFFX();
     DirectX::XMFLOAT2 GetJitter(uint64_t frameNumber);
-	UpscalingMode GetCurrentUpscalingMode() const { return m_upscalingMode; }
+	// A Ray Reconstruction request resolves to DLSS unless the adapter supports it
+	// and the active pipeline writes its guides, so a graph never declares guides
+	// that nothing produces.
+	UpscalingMode GetCurrentUpscalingMode() const {
+		if (m_upscalingMode == UpscalingMode::DLSSRayReconstruction &&
+			!(m_rayReconstructionSupported && m_rayReconstructionGuidesAvailable)) {
+			return UpscalingMode::DLSS;
+		}
+		return m_upscalingMode;
+	}
+	bool IsRayReconstructionSupported() const { return m_rayReconstructionSupported; }
+	void SetRayReconstructionGuidesAvailable(bool available) { m_rayReconstructionGuidesAvailable = available; }
     UpscaleQualityMode GetCurrentUpscalingQualityMode() const { return m_upscaleQualityMode; }
 
     void SetUpscalingMode(UpscalingMode mode) { m_upscalingMode = mode; }
@@ -93,9 +105,9 @@ private:
     UpscalingManager() = default;
     void SyncSettingsFromSettingsManager();
     bool EnsureFSRContext();
-	void EvaluateDLSS(rhi::CommandList& commandList, const Components::Camera* camera, uint64_t frameNumber, org::PixelBuffer* pHDRTarget, org::PixelBuffer* pUpscaledHDRTarget, org::PixelBuffer* pDepthTexture, org::PixelBuffer* pMotionVectors);
-    void EvaluateFSR3(rhi::CommandList& commandList, const Components::Camera* camera, double elapsedSeconds, org::PixelBuffer* pHDRTarget, org::PixelBuffer* pUpscaledHDRTarget, org::PixelBuffer* pDepthTexture, org::PixelBuffer* pMotionVectors);
-	void EvaluateNone(rhi::CommandList& commandList, const Components::Camera* camera, org::PixelBuffer* pHDRTarget, org::PixelBuffer* pUpscaledHDRTarget, org::PixelBuffer* pDepthTexture, org::PixelBuffer* pMotionVectors);
+	void EvaluateDLSS(rhi::CommandList& commandList, const Components::Camera* camera, uint64_t frameNumber, const UpscalingInputs& inputs, bool rayReconstruction);
+    void EvaluateFSR3(rhi::CommandList& commandList, const Components::Camera* camera, double elapsedSeconds, const UpscalingInputs& inputs);
+	void EvaluateNone(rhi::CommandList& commandList, const Components::Camera* camera, const UpscalingInputs& inputs);
 	UpscalingMode m_upscalingMode = UpscalingMode::DLSS;
     UpscaleQualityMode m_upscaleQualityMode = UpscaleQualityMode::Balanced;
     std::function<DirectX::XMUINT2()> m_getRenderRes;
@@ -103,13 +115,16 @@ private:
 	bool m_fsrIntialized = false;
     ffx::Context m_fsrUpscalingContext = nullptr;
 	bool m_dlssSupported = false;
+	bool m_rayReconstructionSupported = false;
+	bool m_rayReconstructionGuidesAvailable = false;
     // Streamline history is tied to the input/output dimensions selected by
     // Setup(). A quality-mode or output-size change must invalidate it on the
     // first evaluation using the replacement render targets.
-    bool m_resetUpscalerHistory = true;
+    std::atomic<bool> m_resetUpscalerHistory = true;
     // Streamline reports memory pressure as a warning result. Avoid turning a
     // recoverable, persistent condition into one error log entry per frame.
 	bool m_reportedDlssOutOfMemory = false;
+	bool m_reportedRayReconstructionFailure = false;
     // Vendor upscalers own mutable history/context state. Recording may run on
     // workers for different frames, so serialize evaluation in frame order.
     std::mutex m_evaluateMutex;

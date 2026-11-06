@@ -120,6 +120,10 @@ ComputeCullingPrograms ComputeCullingPass::DeclarePrograms(org::PassBuilder& bui
         { L"CLOD_WG_ENABLE_VOXEL_OUTPUT", m_voxelQueueTable.Enabled() ? L"1" : L"0" },
         { L"CLOD_COMPUTE_INCLUDE_ONLY", L"1" },
         { L"CLOD_WG_VOXEL_RASTER_QUEUE_DESCRIPTOR_BUFFER_ID", voxelTableDefine },
+        { L"CLOD_RT_VIEW", m_config.rayTracingView ? L"1" : L"0" },
+        { L"CLOD_RT_VIEW_STREAMS", m_config.rayTracingViewStreams ? L"1" : L"0" },
+        { L"CLOD_RT_VIEW_PATH_TRACED", m_config.rayTracingViewPathTraced ? L"1" : L"0" },
+        { L"CLOD_SKIP_RT_COVERED", m_config.skipRayTracingCoveredDraws ? L"1" : L"0" },
     };
     auto leafDefines = defines;
     leafDefines.push_back({ L"CLOD_PC_LEAF_ONLY", L"1" });
@@ -221,6 +225,11 @@ ComputeCullingBindings ComputeCullingPass::Declare(org::PassBuilder& builder)
     bindings.maxVisibleClusters = m_config.maxVisibleClusters;
     bindings.isFirstPass = m_config.isFirstPass;
     bindings.perViewDepthOcclusion = m_config.UsesPerViewDepthOcclusion();
+    bindings.rtGroupTable = m_config.rtGroupTableDescriptor;
+    bindings.rtRequests = m_config.rtRequestsDescriptor;
+    bindings.rtRequestCounter = m_config.rtRequestCounterDescriptor;
+    bindings.rtRequestCapacity = m_config.rtRequestCapacity;
+    bindings.rtCoarseCut = m_config.rtCoarseCutDescriptor;
     const auto uav = [&](const auto& resource) { return builder.UnorderedAccess(resource).View(); };
     bindings.visibleClusters = uav(outputs.visibleClusters);
     bindings.visibleClusterTransformIndices = uav(outputs.visibleClusterTransformIndices);

@@ -1120,7 +1120,7 @@ inline void BuildSSRPasses(org::RenderGraph* graph) {
     TagPassTechnique(graph, "Specular IBL & SSR Composite Pass", "Post Process::Screen-Space Reflections");
 }
 
-inline void BuildRayTracedReflectionPasses(org::RenderGraph* graph) {
+inline void BuildRayTracedReflectionPasses(org::RenderGraph* graph, std::shared_ptr<org::ResourceGroup> slabs, bool terrainRvt) {
     auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
 
     org::TextureDescription rtReflectionDesc;
@@ -1143,7 +1143,7 @@ inline void BuildRayTracedReflectionPasses(org::RenderGraph* graph) {
     org::memory::SetResourceUsageHint(*rtReflectionTexture, "Post-Processing resources");
     graph->RegisterResource(Builtin::PostProcessing::ScreenSpaceReflections, rtReflectionTexture);
 
-    graph->BuildPass<RayTracedReflectionsPass>("Ray Traced Reflections Pass");
+    graph->BuildPass<RayTracedReflectionsPass>("Ray Traced Reflections Pass", std::move(slabs), terrainRvt);
     TagPassTechnique(graph, "Ray Traced Reflections Pass", "Ray Tracing::Reflections");
 
     graph->BuildPass<SpecularIBLPass>("Specular IBL & RT Reflections Composite Pass");

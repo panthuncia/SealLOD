@@ -89,6 +89,12 @@ PipelineRecipe& PipelineRecipe::AddExtension(std::string id, RenderGraphExtensio
     return *this;
 }
 
+PipelineRecipe& PipelineRecipe::ClearExtensions()
+{
+    m_extensions.clear();
+    return *this;
+}
+
 PipelineValidationResult PipelineRecipe::Validate() const
 {
     PipelineValidationResult result;
@@ -138,8 +144,19 @@ PipelineValidationResult PipelineRecipe::Validate() const
         }
     };
 
-    if (Contains<TerrainRvtTechnique>() && !Contains<VisibilityMaterialBinningTechnique>()) {
-        result.errors.emplace_back("Terrain RVT requires visibility material binning");
+    if (Contains<TerrainRvtTechnique>() && !Contains<VisibilityMaterialBinningTechnique>() && !Contains<PathTracingTechnique>()) {
+        result.errors.emplace_back("Terrain RVT requires visibility material binning or path tracing");
+    }
+    if (Contains<PathTracingTechnique>()) {
+        if (!Contains<ClusterLodTechnique>()) {
+            result.errors.emplace_back("Path tracing requires the CLod technique, which builds its BVH");
+        }
+        if (!Contains<CanonicalSurfaceResourcesTechnique>()) {
+            result.errors.emplace_back("Path tracing requires canonical surface resources");
+        }
+        if (Contains<PrimaryLightingTechnique>()) {
+            result.errors.emplace_back("Path tracing replaces primary lighting");
+        }
     }
     if (Contains<VisibilityMaterialBinningTechnique>()) {
         if (!Contains<ClusterLodTechnique>()) {
@@ -166,11 +183,11 @@ PipelineValidationResult PipelineRecipe::Validate() const
     if (Contains<PrimaryLightingTechnique>() && !Contains<CanonicalSurfaceResourcesTechnique>()) {
         result.errors.emplace_back("Primary lighting requires canonical surface resources");
     }
-    if (Contains<ExposureTechnique>() && !Contains<PrimaryLightingTechnique>()) {
-        result.errors.emplace_back("Exposure requires primary lighting output");
+    if (Contains<ExposureTechnique>() && !Contains<PrimaryLightingTechnique>() && !Contains<PathTracingTechnique>()) {
+        result.errors.emplace_back("Exposure requires primary lighting or path tracing output");
     }
-    if (Contains<UpscalingTechnique>() && !Contains<PrimaryLightingTechnique>()) {
-        result.errors.emplace_back("Upscaling requires primary lighting output");
+    if (Contains<UpscalingTechnique>() && !Contains<PrimaryLightingTechnique>() && !Contains<PathTracingTechnique>()) {
+        result.errors.emplace_back("Upscaling requires primary lighting or path tracing output");
     }
     if (Contains<TonemappingTechnique>() && !Contains<UpscalingTechnique>()) {
         result.errors.emplace_back("Tonemapping currently requires the upscaling output");
@@ -256,6 +273,46 @@ PipelineRecipe MakeStandardPipeline(
         .Add<PresentTechnique>();
     return recipe;
 }
+}
+
+PipelineRecipe MakePathTracedRecipe(const PipelineRecipe& base)
+{
+    PipelineRecipe recipe = base;
+    recipe.Remove<ClusterLodAlphaTechnique>()
+        .Remove<ClusterLodShadowTechnique>()
+        .Remove<ClusterLodVoxelTechnique>()
+        .Remove<VisibilityMaterialBinningTechnique>()
+        .Remove<TerrainRegionMaterialEvaluationTechnique>()
+        .Remove<MaterialEvaluationTechnique>()
+        .Remove<GtaoTechnique>()
+        .Remove<ClusteredLightingTechnique>()
+        .Remove<PrimaryLightingTechnique>()
+        .Remove<ReflectionsTechnique>()
+        .Remove<DepthHistoryTechnique>();
+    recipe.Configure<ClusterLodTechnique>(ClusterLodOptions{ .reyes = ReyesMode::Disabled, .primaryRasterization = false });
+
+    // Recipe order is pass order, so the stages that read path tracing's output move after it.
+    const bool exposure = recipe.Contains<ExposureTechnique>();
+    const bool upscaling = recipe.Contains<UpscalingTechnique>();
+    const bool bloom = recipe.Contains<BloomTechnique>();
+    const bool tonemapping = recipe.Contains<TonemappingTechnique>();
+    const bool debugOutput = recipe.Contains<DebugOutputTechnique>();
+    const bool debugUi = recipe.Contains<DebugUiTechnique>();
+    const bool present = recipe.Contains<PresentTechnique>();
+    recipe.Remove<ExposureTechnique>().Remove<UpscalingTechnique>().Remove<BloomTechnique>().Remove<TonemappingTechnique>()
+        .Remove<DebugOutputTechnique>().Remove<DebugUiTechnique>().Remove<PresentTechnique>();
+    recipe.Add<PathTracingTechnique>();
+    if (exposure) recipe.Add<ExposureTechnique>();
+    if (upscaling) recipe.Add<UpscalingTechnique>();
+    if (bloom) recipe.Add<BloomTechnique>();
+    if (tonemapping) recipe.Add<TonemappingTechnique>();
+    if (debugOutput) recipe.Add<DebugOutputTechnique>();
+    if (debugUi) recipe.Add<DebugUiTechnique>();
+    if (present) recipe.Add<PresentTechnique>();
+
+    // Wind and grass anchor on raster passes, which would silently misorder without them, and neither is traced yet.
+    recipe.ClearExtensions();
+    return recipe;
 }
 
 PipelineRecipe MakeBasicRendererDemoPipeline()

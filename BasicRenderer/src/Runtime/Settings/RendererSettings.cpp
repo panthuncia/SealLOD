@@ -228,13 +228,58 @@ void Renderer::SetSettings() {
         CLodPureComputeReplayExpansionFactorDefault);
     settingsManager.registerSetting<bool>("enableBloom", m_bloom);
     settingsManager.registerSetting<bool>("enableJitter", m_jitter);
+    settingsManager.registerSetting<bool>("rayReconstructionGuidesAvailable", false);
     // The host's model loader; the standalone demo installs one that streams the model's statics.
     settingsManager.registerSetting<std::function<void(const std::string&)>>("loadModel", [](const std::string& path) {
         spdlog::warn("Load Model: no model loader is installed; '{}' was not loaded", path);
         });
 	settingsManager.registerSetting<bool>("enableScreenSpaceReflections", m_screenSpaceReflections);
+    // For headless runs: these choose what the first render graph is built with.
+    if (ReadTruthyEnvironmentFlag("SARP_RT_REFLECTIONS")) m_rayTracedReflections = true;
+    if (ReadTruthyEnvironmentFlag("SARP_RT_SHADOWS")) m_rayTracedShadows = true;
+    if (ReadTruthyEnvironmentFlag("SARP_RT_PRIMARY")) m_rayTracedPrimaryVisibilityMode = 1u;
+    if (ReadTruthyEnvironmentFlag("SARP_RT_PRIMARY_COMPARE")) m_rayTracedPrimaryVisibilityMode = 2u;
+    if (ReadTruthyEnvironmentFlag("SARP_RT_PATH_TRACING")) m_pathTracing = true;
+    if (m_pathTracing && (DeviceManager::GetInstance().GetBackend() != rhi::Backend::D3D12 || !DeviceManager::GetInstance().GetCLodRayTracingSupported())) {
+        spdlog::warn("Path tracing needs clustered ray tracing on D3D12; rendering with raster.");
+        m_pathTracing = false;
+    }
+    if (m_pathTracing) {
+        m_rasterRecipeBeforePathTracing = m_pipelineRecipe;
+        m_pipelineRecipe = br::pipeline::MakePathTracedRecipe(m_pipelineRecipe);
+    }
+    settingsManager.registerSetting<bool>("enablePathTracing", m_pathTracing);
+    const auto pathTracingEnvironmentNumber = [](const char* name, uint32_t fallback) {
+        const char* value = std::getenv(name);
+        return value ? static_cast<uint32_t>(std::atoi(value)) : fallback;
+    };
+    // Primary hit plus one bounce, as RTXMG defaults to.
+    settingsManager.registerSetting<uint32_t>("pathTracingMaxBounces", pathTracingEnvironmentNumber("SARP_RT_PT_BOUNCES", 2u));
+    // 0 never, 1 secondary rays, 2 every ray.
+    settingsManager.registerSetting<uint32_t>("pathTracingReorderMode", pathTracingEnvironmentNumber("SARP_RT_PT_REORDER", 2u));
+    // Averages samples while the camera is still: the reference image, with nothing biased left on.
+    settingsManager.registerSetting<bool>("pathTracingAccumulate", ReadTruthyEnvironmentFlag("SARP_RT_PT_ACCUMULATE"));
+    settingsManager.registerSetting<bool>("pathTracingSunOnly", ReadTruthyEnvironmentFlag("SARP_RT_PT_SUN_ONLY"));
+    // Opacity micromaps for alpha-tested foliage, as the preprocessor baked them (its --opacity-micromap-level sets their
+    // subdivision), read when the BVH is first created. SARP_RT_OMM=0 turns them off.
+    settingsManager.registerSetting<bool>("pathTracingOpacityMicromaps", pathTracingEnvironmentNumber("SARP_RT_OMM", 1u) != 0u);
+    // 0 exact, 1 bounce and shadow rays skip any-hit on unknown micro-triangles and take the bake's guess, 2 every ray does.
+    // 1 by default: 14.5 ms against 22.7 exact on SaveLab, with no visible difference in an accumulated image.
+    settingsManager.registerSetting<uint32_t>("pathTracingOpacityMicromapTwoState", pathTracingEnvironmentNumber("SARP_RT_OMM_2STATE", 1u));
+    // One sample per pixel needs denoising, unless the mode is averaging samples itself. Without RR support it falls back to SR.
+    if (m_pathTracing) {
+        // Directly as well: the setting's observer isn't registered until later in this function.
+        settingsManager.getSettingSetter<bool>("rayReconstructionGuidesAvailable")(true);
+        UpscalingManager::GetInstance().SetRayReconstructionGuidesAvailable(true);
+        if (!settingsManager.getSettingGetter<bool>("pathTracingAccumulate")() && !ReadTruthyEnvironmentFlag("SARP_RT_PT_NO_RR")) {
+            settingsManager.getSettingSetter<UpscalingMode>("upscalingMode")(UpscalingMode::DLSSRayReconstruction);
+        }
+    }
     settingsManager.registerSetting<bool>("enableRayTracedReflections", m_rayTracedReflections);
-    settingsManager.registerSetting<float>("rayTracedReflectionMaxDistance", 100.0f);
+    // 0 raster, 1 raytraced where the BVH can represent the draw, 2 raster with per-pixel agreement counted against rays.
+    settingsManager.registerSetting<uint32_t>("rayTracedPrimaryVisibilityMode", m_rayTracedPrimaryVisibilityMode);
+    settingsManager.registerSetting<bool>("enableRayTracedShadows", m_rayTracedShadows);
+    settingsManager.registerSetting<float>("rayTracedReflectionMaxDistance", 16384.0f); // World units: four exterior cells.
     settingsManager.registerSetting<float>("rayTracedReflectionRoughnessCutoff", 1.0f);
     settingsManager.registerSetting<float>("rayTracedReflectionLodBias", 0.0f);
     settingsManager.registerSetting<bool>("useAsyncCompute", false);
@@ -611,6 +656,29 @@ void Renderer::SetSettings() {
             rebuildRenderGraph = true;
             });
 		}));
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("rayReconstructionGuidesAvailable", [this](const bool& newValue) {
+        // Applied now rather than deferred: the graph rebuild of the pipeline
+        // replacement announcing this runs before the next deferred flush, and
+        // must not declare guides the outgoing pipeline wrote.
+        UpscalingManager::GetInstance().SetRayReconstructionGuidesAvailable(newValue);
+        if (SettingsManager::GetInstance().getSettingGetter<UpscalingMode>("upscalingMode")() != UpscalingMode::DLSSRayReconstruction) {
+            return;
+        }
+        m_preFrameDeferredFunctions.defer([this]() {
+            StallPipeline();
+            UpscalingManager::GetInstance().Shutdown();
+            UpscalingManager::GetInstance().InitFFX();
+            UpscalingManager::GetInstance().Setup();
+            FFXManager::GetInstance().Shutdown();
+            FFXManager::GetInstance().InitFFX();
+            CreateTextures();
+            const auto ingestionConfiguration = CaptureSceneIngestionConfiguration();
+            m_sceneRenderBridge.ResyncPrimaryCameraDepth(m_sceneIngestionServices,
+                ingestionConfiguration.renderResolution.x, ingestionConfiguration.renderResolution.y,
+                PrimaryCameraLodHeight(ingestionConfiguration));
+            rebuildRenderGraph = true;
+            });
+        }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<UpscaleQualityMode>("upscalingQualityMode", [this](const UpscaleQualityMode& newValue) {
 
         m_preFrameDeferredFunctions.defer([newValue, this]() { // Don't do this during a frame
@@ -646,6 +714,36 @@ void Renderer::SetSettings() {
 		m_screenSpaceReflections = newValue;
 		rebuildRenderGraph = true;
 		}));
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enablePathTracing", [this](const bool& newValue) {
+        if (newValue == m_pathTracing) {
+            return;
+        }
+        if (newValue && (DeviceManager::GetInstance().GetBackend() != rhi::Backend::D3D12 || !DeviceManager::GetInstance().GetCLodRayTracingSupported())) {
+            spdlog::warn("Path tracing needs clustered ray tracing on D3D12; staying on raster.");
+            return;
+        }
+        auto recipe = GetPipelineRecipeForMutation();
+        if (newValue) {
+            m_rasterRecipeBeforePathTracing = recipe;
+            recipe = br::pipeline::MakePathTracedRecipe(recipe);
+        }
+        else if (m_rasterRecipeBeforePathTracing) {
+            recipe = std::move(*m_rasterRecipeBeforePathTracing);
+            m_rasterRecipeBeforePathTracing.reset();
+        }
+        if (RequestPipelineReplacement(std::move(recipe))) {
+            m_pathTracing = newValue;
+            UpscalingManager::GetInstance().RequestHistoryReset();
+        }
+        }));
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("rayTracedPrimaryVisibilityMode", [this](const uint32_t& newValue) {
+        m_rayTracedPrimaryVisibilityMode = newValue;
+        rebuildRenderGraph = true;
+        }));
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableRayTracedShadows", [this](const bool& newValue) {
+        m_rayTracedShadows = newValue;
+        rebuildRenderGraph = true;
+        }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableRayTracedReflections", [this](const bool& newValue) {
         m_rayTracedReflections = newValue;
         if (newValue && !DeviceManager::GetInstance().GetCLodRayTracingSupported() && !m_warnedRayTracedReflectionsUnsupported) {

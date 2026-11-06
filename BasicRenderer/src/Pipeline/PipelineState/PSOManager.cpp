@@ -677,6 +677,8 @@ void PSOManager::Cleanup() {
     m_pendingClusterLODAVBOITShadePSOs.clear();
     m_pendingClusterLODSoftwareRasterPSOs.clear();
     m_pendingMaterialEvalPSOs.clear();
+    m_rayTracingPSOCache.clear();
+    m_pendingRayTracingPSOs.clear();
     m_livePipelines.clear();
     m_liveJobs.clear();
     m_pendingLivePublications.clear();
@@ -1810,10 +1812,11 @@ org::PipelineState PSOManager::MakeComputePipeline(rhi::PipelineLayoutHandle lay
     const wchar_t* shaderPath,
     const wchar_t* entryPoint,
     std::vector<DxcDefine> defines,
-    const char* debugName, std::shared_ptr<const void> layoutOwner)
+    const char* debugName, std::shared_ptr<const void> layoutOwner, const wchar_t* target)
 {
     ComputeRecipe recipe;
     recipe.layout = layout;
+    recipe.target = target;
     recipe.layoutOwner = layoutOwner ? std::move(layoutOwner) : CaptureLayoutOwner(layout);
     recipe.shaderPath = shaderPath;
     recipe.entryPoint = entryPoint;
@@ -1852,7 +1855,7 @@ org::PipelineState PSOManager::BuildComputePipeline(const ComputeRecipe& recipe,
     }
 
     ShaderInfoBundle sib;
-    sib.computeShader = { recipe.shaderPath, recipe.entryPoint, L"cs_6_6" };
+    sib.computeShader = { recipe.shaderPath, recipe.entryPoint, recipe.target };
     sib.defines = defines;
     auto compiled = CompileShaders(sib);
 
@@ -1893,6 +1896,150 @@ org::PipelineState PSOManager::BuildComputePipeline(const ComputeRecipe& recipe,
     payload->label = options && !options->label.empty() ? options->label : "initial";
 
     return out;
+}
+
+namespace {
+bool IsRayTracingGeneralStage(rhi::ShaderStage stage) {
+    return stage == rhi::ShaderStage::RayGen || stage == rhi::ShaderStage::Miss || stage == rhi::ShaderStage::Callable;
+}
+
+uint64_t HashRayTracingRecipe(const RayTracingPipelineRecipe& recipe) {
+    uint64_t hash = HashStringStable(ws2s(recipe.libraryPath));
+    const auto mixString = [&hash](const std::string& value) { util::hash_combine_u64(hash, HashStringStable(value)); };
+    mixString(ws2s(recipe.target));
+    mixString(recipe.debugName);
+    for (const auto& [name, value] : recipe.defines) {
+        mixString(ws2s(name));
+        mixString(ws2s(value));
+    }
+    for (const auto& shader : recipe.shaders) {
+        util::hash_combine_u64(hash, static_cast<uint64_t>(shader.stage));
+        mixString(shader.exportName);
+    }
+    for (const auto& group : recipe.hitGroups) {
+        mixString(group.name);
+        mixString(group.closestHit);
+        mixString(group.anyHit);
+    }
+    util::hash_combine_u64(hash, recipe.maxPayloadBytes);
+    util::hash_combine_u64(hash, recipe.maxAttributeBytes);
+    util::hash_combine_u64(hash, recipe.maxRecursionDepth);
+    util::hash_combine_u64(hash, static_cast<uint64_t>(recipe.flags));
+    return hash;
+}
+}
+
+std::vector<std::string> RayTracingPipelineRecipe::GroupNames() const {
+    std::vector<std::string> names;
+    names.reserve(shaders.size() + hitGroups.size());
+    for (const Shader& shader : shaders) {
+        if (IsRayTracingGeneralStage(shader.stage)) names.push_back(shader.exportName);
+    }
+    for (const HitGroup& group : hitGroups) names.push_back(group.name);
+    return names;
+}
+
+org::PipelineState PSOManager::BuildRayTracingPipeline(const RayTracingPipelineRecipe& recipe)
+{
+    if (DeviceManager::GetInstance().GetBackend() != rhi::Backend::D3D12) {
+        throw std::runtime_error("Ray tracing pipeline '" + recipe.debugName + "' needs the D3D12 backend");
+    }
+    std::vector<DxcDefine> defines;
+    defines.reserve(recipe.defines.size());
+    for (const auto& [name, value] : recipe.defines) defines.push_back({ name.c_str(), value.c_str() });
+    const ShaderLibraryBundle library = CompileShaderLibrary(ShaderLibraryInfo(recipe.libraryPath, recipe.target), defines);
+    const rhi::ShaderBinary bytecode = rhi::DXIL(library.libraryBlob.Get());
+
+    std::vector<rhi::SubobjShader> shaders;
+    shaders.reserve(recipe.shaders.size());
+    std::vector<rhi::RayTracingShaderGroupDesc> groups;
+    groups.reserve(recipe.shaders.size() + recipe.hitGroups.size());
+    for (const auto& shader : recipe.shaders) {
+        shaders.push_back({ shader.stage, bytecode, shader.exportName });
+        if (IsRayTracingGeneralStage(shader.stage)) {
+            groups.push_back({
+                .type = rhi::RayTracingShaderGroupType::General,
+                .name = shader.exportName.c_str(),
+                .generalShader = shader.exportName.c_str(),
+            });
+        }
+    }
+    for (const auto& group : recipe.hitGroups) {
+        groups.push_back({
+            .type = rhi::RayTracingShaderGroupType::TrianglesHitGroup,
+            .name = group.name.c_str(),
+            .closestHitShader = group.closestHit.empty() ? nullptr : group.closestHit.c_str(),
+            .anyHitShader = group.anyHit.empty() ? nullptr : group.anyHit.c_str(),
+        });
+    }
+
+    const rhi::PipelineLayoutHandle layout = GetComputeRootSignature().GetHandle();
+    rhi::SubobjRayTracingPipeline description{};
+    description.globalLayout = layout;
+    description.shaders = { shaders.data(), static_cast<uint32_t>(shaders.size()) };
+    description.shaderGroups = { groups.data(), static_cast<uint32_t>(groups.size()) };
+    description.shaderConfig.maxPayloadSizeInBytes = recipe.maxPayloadBytes;
+    description.shaderConfig.maxAttributeSizeInBytes = recipe.maxAttributeBytes;
+    description.pipelineConfig.maxTraceRecursionDepth = recipe.maxRecursionDepth;
+    description.flags = recipe.flags;
+    const rhi::PipelineStreamItem items[] = { rhi::Make(description) };
+
+    rhi::PipelinePtr pso;
+    if (Failed(DeviceManager::GetInstance().GetDevice().CreatePipeline(items, static_cast<uint32_t>(std::size(items)), pso))) {
+        throw std::runtime_error("Failed to create ray tracing pipeline '" + recipe.debugName + "'");
+    }
+    if (!recipe.debugName.empty()) pso->SetName(recipe.debugName.c_str());
+
+    org::PipelineState out{ std::move(pso), library.resourceIDsHash, library.resourceDescriptorSlots, CaptureLayoutOwner(layout), layout };
+    const auto payload = out.GetPayload();
+    payload->bytecodeHash = HashBytesStable(library.libraryBlob->GetBufferPointer(), library.libraryBlob->GetBufferSize());
+    payload->sourceHash = HashRayTracingRecipe(recipe);
+    payload->label = "initial";
+    return out;
+}
+
+org::PipelineState PSOManager::MakeRayTracingPipeline(RayTracingPipelineRecipe recipe)
+{
+    const uint64_t recipeHash = HashRayTracingRecipe(recipe);
+    const auto findExisting = [&]() -> const LivePipelineEntry* {
+        const auto existing = std::ranges::find_if(m_livePipelines, [recipeHash](const auto& item) {
+            return item.second.rayTracingRecipeHash == recipeHash;
+        });
+        return existing == m_livePipelines.end() ? nullptr : &existing->second;
+    };
+    {
+        std::scoped_lock lock(m_livePipelineMutex);
+        if (const LivePipelineEntry* existing = findExisting()) return existing->state;
+    }
+
+    org::PipelineState pipeline = BuildRayTracingPipeline(recipe);
+
+    std::scoped_lock lock(m_livePipelineMutex);
+    if (const LivePipelineEntry* existing = findExisting()) return existing->state;
+    const std::string baseId = recipe.debugName.empty() ? ws2s(recipe.libraryPath) : recipe.debugName;
+    std::string id = baseId;
+    for (uint32_t suffix = 2; m_livePipelines.contains(id); ++suffix) id = baseId + "#" + std::to_string(suffix);
+    LivePipelineEntry entry;
+    entry.id = id;
+    entry.displayName = baseId;
+    entry.kind = br::extensions::PipelineKind::RayTracing;
+    entry.state = pipeline;
+    entry.shaderPaths.push_back(ws2s(recipe.libraryPath));
+    entry.rayTracingRecipeHash = recipeHash;
+    entry.rebuild = [this, recipe = std::move(recipe)]() { return BuildRayTracingPipeline(recipe); };
+    entry.generations.push_back(pipeline.GetPayload());
+    m_livePipelines.emplace(std::move(id), std::move(entry));
+    return pipeline;
+}
+
+const org::PipelineState* PSOManager::TryGetRayTracingPipeline(const RayTracingPipelineRecipe& recipe)
+{
+    return TryGetOrRequestPipelineState(
+        &PSOManager::m_rayTracingPSOCache,
+        &PSOManager::m_pendingRayTracingPSOs,
+        HashRayTracingRecipe(recipe),
+        "PSOManager::CompileRayTracingPSO",
+        [this, recipe]() { return MakeRayTracingPipeline(recipe); });
 }
 
 org::PipelineState PSOManager::RegisterComputePipeline(org::PipelineState state, ComputeRecipe recipe)
@@ -2751,6 +2898,10 @@ std::vector<LPCWSTR> PSOManager::BuildArguments(
         args.push_back(L"-E"); args.push_back(opts.entryPoint.c_str());
     }
     args.push_back(L"-T"); args.push_back(opts.target.c_str());
+    // Ray payloads use no access qualifiers: the descriptor name preprocessor can't parse them.
+    if (opts.target.starts_with(L"lib_6_10")) {
+        args.push_back(L"-disable-payload-qualifiers");
+    }
 
     args.push_back(L"-D");
     args.push_back(opts.emitSpirv ? L"BASICRENDERER_SHADER_API_VULKAN=1" : L"BASICRENDERER_SHADER_API_DX12=1");
@@ -3202,6 +3353,7 @@ bool PSOManager::RebuildAllPipelines(std::string& error) {
         m_pendingClusterLODAVBOITShadePSOs.clear();
         m_pendingClusterLODSoftwareRasterPSOs.clear();
         m_pendingMaterialEvalPSOs.clear();
+        m_pendingRayTracingPSOs.clear();
 
         targets.reserve(m_livePipelines.size());
         for (auto& [id, entry] : m_livePipelines) {

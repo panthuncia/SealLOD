@@ -114,6 +114,10 @@ public:
 
 	br::render::CLodStreamingDebugStats GetCLodStreamingDebugStats() const;
 	void GetCLodRayTracingResidencySnapshot(br::render::CLodRayTracingResidencySnapshot& outSnapshot) const;
+	// False when the group isn't resident right now.
+	bool GetCLodRayTracingGroup(uint32_t groupGlobalIndex, br::render::CLodRayTracingGroupLookup& out) const;
+	// Whether the pages a group's CLAS was built from are still its pages.
+	bool IsCLodRayTracingGroupCurrent(const std::shared_ptr<const void>& owner, uint32_t localGroupIndex, uint32_t firstPageId) const;
 	void ProcessCLodDiskStreamingIO();
 
 	// Drains groups that completed disk streaming since the last call.

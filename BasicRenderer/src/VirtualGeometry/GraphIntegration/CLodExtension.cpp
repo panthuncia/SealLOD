@@ -1,4 +1,5 @@
 #include "VirtualGeometry/GraphIntegration/CLodExtension.h"
+#include "VirtualGeometry/RayTracing/CLodRayTracingPasses.h"
 #include "Render/RenderGraph/RenderGraph.h"
 
 #include "Transparency/GraphIntegration/CLodAlphaVariant.h"
@@ -676,6 +677,46 @@ void CLodExtension::RefreshCoreVisibleClusterCapacity()
     }
 }
 
+void CLodExtension::AppendRayTracingPasses(const CLodVariantTraits& traits, std::vector<org::ExternalPassDesc>& outPasses)
+{
+    const std::string scenePassName = MakeVariantPassName(traits, "ScenePass");
+    auto sceneDesc = org::ExternalPassDesc::Compute(scenePassName, std::make_shared<CLodRayTracingScenePass>(
+        m_options.rayTracingSystem, m_visibleClustersBuffer, m_visibleClustersCounterBuffer, m_options.slabResourceGroup, m_visibleClusterCapacity));
+    auto sceneInsertPoint = org::ExternalInsertPoint::After(MakeVariantPassName(traits, "HierarchicalCullingPass1"));
+    if (m_options.pathTraced) {
+        sceneInsertPoint.AlsoBefore("PathTraceArgsPass");
+    }
+    sceneDesc.At(std::move(sceneInsertPoint));
+    outPasses.push_back(std::move(sceneDesc));
+
+    if (m_options.scheduleRayTracedVisibility && m_options.rayTracingSystem->GetPrimaryVisibleClusters()) {
+        auto visibilityDesc = org::ExternalPassDesc::Compute(MakeVariantPassName(traits, "VisibilityPass"), std::make_shared<RayTracedVisibilityPass>(
+            m_options.rayTracingSystem, m_options.slabResourceGroup, m_options.rayTracedVisibilityMode));
+        visibilityDesc.At(org::ExternalInsertPoint::Before("MaterialHistogramPass"));
+        outPasses.push_back(std::move(visibilityDesc));
+    }
+
+    if (m_options.rayTracedShadows) {
+        const auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
+        org::TextureDescription workingDesc;
+        workingDesc.channels = 1;
+        workingDesc.format = rhi::Format::R8_UNorm;
+        workingDesc.hasSRV = workingDesc.hasUAV = true;
+        workingDesc.imageDimensions.emplace_back(resolution.x, resolution.y, 0, 0);
+        auto working = org::PixelBuffer::CreateSharedUnmaterialized(workingDesc);
+        working->SetName("CLod RT sun shadow working");
+
+        auto traceDesc = org::ExternalPassDesc::Compute(MakeVariantPassName(traits, "ShadowTracePass"), std::make_shared<RayTracedShadowPass>(
+            m_options.rayTracingSystem, m_options.slabResourceGroup, working, false));
+        traceDesc.At(org::ExternalInsertPoint::Before("DeferredShadingPass"));
+        outPasses.push_back(std::move(traceDesc));
+        auto filterDesc = org::ExternalPassDesc::Compute(MakeVariantPassName(traits, "ShadowFilterPass"), std::make_shared<RayTracedShadowPass>(
+            m_options.rayTracingSystem, m_options.slabResourceGroup, working, true));
+        filterDesc.At(org::ExternalInsertPoint::Before("DeferredShadingPass"));
+        outPasses.push_back(std::move(filterDesc));
+    }
+}
+
 void CLodExtension::InitializeCoreResources()
 {
     const auto& traits = GetVariantTraits(m_type);
@@ -773,6 +814,10 @@ void CLodExtension::InitializeCoreResources()
     m_compactedVisibleClustersBufferSw->SetName(MakeVariantResourceName(traits, "Compacted Visible Clusters Buffer SW"));
     m_compactedVisibleClusterTransformIndicesBufferSw = CreateAliasedUnmaterializedStructuredBuffer(m_visibleClusterCapacity, sizeof(uint32_t), true, false, false, true);
     m_compactedVisibleClusterTransformIndicesBufferSw->SetName(MakeVariantResourceName(traits, "Compacted Visible Cluster Transform Indices Buffer SW"));
+
+    if (traits.type == CLodExtensionType::VisiblityBuffer && m_options.rayTracingSystem) {
+        m_options.rayTracingSystem->SetPrimaryVisibleClusters(m_visibleClustersBuffer, m_visibleClusterTransformIndicesBuffer, m_visibleClusterCapacity);
+    }
 
     m_visibleClustersBuffer->GetECSEntity()
         .set<Components::Resource>({ m_visibleClustersBuffer })
@@ -1670,8 +1715,26 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
             };
         }
 
+        const bool isRayTracingView = traits.type == CLodExtensionType::RayTracing;
+        if (m_options.rayTracingSystem) {
+            if (isRayTracingView) {
+                config.rayTracingView = true;
+                config.rayTracingViewStreams = m_options.rayTracedPrimaryVisibility || m_options.pathTraced;
+                config.rayTracingViewPathTraced = m_options.pathTraced;
+                const auto descriptors = m_options.rayTracingSystem->GetCullingDescriptors();
+                config.rtGroupTableDescriptor = descriptors.groupTable;
+                config.rtRequestsDescriptor = descriptors.requests;
+                config.rtRequestCounterDescriptor = descriptors.requestCounter;
+                config.rtRequestCapacity = descriptors.requestCapacity;
+                config.rtCoarseCutDescriptor = descriptors.coarseCut;
+            }
+            else if (traits.type == CLodExtensionType::VisiblityBuffer && m_options.rayTracedPrimaryVisibility) {
+                config.skipRayTracingCoveredDraws = true;
+            }
+        }
+
         std::shared_ptr<org::RenderPass> cullPass;
-        if (schedulingPolicy.cullingBackend == CLodCullingBackend::PureCompute) {
+        if (isRayTracingView || schedulingPolicy.cullingBackend == CLodCullingBackend::PureCompute) {
             cullPass = std::make_shared<ComputeCullingPass>(std::move(config), std::move(resources));
         } else {
             cullPass = std::make_shared<WorkGraphCullingPass>(std::move(config), std::move(resources));
@@ -2167,7 +2230,7 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
     std::string phase1CullAfterPassName;
     if (traits.scheduleMode == CLodVariantTraits::ScheduleMode::SinglePassCullOnly ||
         traits.scheduleMode == CLodVariantTraits::ScheduleMode::SinglePassDeepVisibility) {
-        phase1CullAfterPassName = "CLodOpaque::LinearDepthDownsamplePass2";
+        phase1CullAfterPassName = m_options.pathTraced ? "CLod::StreamingBeginFramePass" : "CLodOpaque::LinearDepthDownsamplePass2";
     }
     else {
         if (traits.type == CLodExtensionType::Shadow) {
@@ -2195,6 +2258,12 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
             shadowClearDirtyBitsAfterPassName);
     }
 
+    if (traits.type == CLodExtensionType::VisiblityBuffer && m_options.pathTraced) {
+        applyTechniqueTags();
+        appendStreamingTailPasses();
+        return;
+    }
+
     appendHierarchicalCullingPass(1u, phase1CullAfterPassName);
 
     if (traits.scheduleMode != CLodVariantTraits::ScheduleMode::SinglePassCullOnly && useReyesForThisVariant && !useWorkGraphReyesVisibility) {
@@ -2213,9 +2282,14 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
             shadowClearDirtyBitsAfterPassName);
     }
 
-    appendRasterBucketCompactionPasses(1u, reyesOwnershipBitsetBuffer);
+    if (traits.scheduleMode != CLodVariantTraits::ScheduleMode::SinglePassCullOnly) {
+        appendRasterBucketCompactionPasses(1u, reyesOwnershipBitsetBuffer);
+    }
 
     if (traits.scheduleMode == CLodVariantTraits::ScheduleMode::SinglePassCullOnly) {
+        if (traits.type == CLodExtensionType::RayTracing && m_options.rayTracingSystem) {
+            AppendRayTracingPasses(traits, outPasses);
+        }
         applyTechniqueTags();
         appendStreamingTailPasses();
         return;

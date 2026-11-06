@@ -44,6 +44,10 @@ struct CLodMeshMetadata
     uint meshIdentityLo;
     uint meshIdentityHi;
     uint meshIdentityClass;
+    float4 coarseCutSphere; // Object space, enclosing every group.
+    float coarseCutRefineError; // Largest error of any group finer than the coarsest level; negative if there are none.
+    float coarseCutMinError; // Smallest error of a coarsest level group.
+    uint2 coarseCutPadding;
 };
 
 struct ClusterLODNodeSkinningInfo

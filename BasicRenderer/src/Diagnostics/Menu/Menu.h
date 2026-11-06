@@ -625,8 +625,14 @@ private:
 	std::function<void(bool)> setScreenSpaceReflectionsEnabled;
 
     bool m_rayTracedReflectionsEnabled = false;
+    bool m_pathTracingEnabled = false;
     std::function<bool()> getRayTracedReflectionsEnabled;
     std::function<void(bool)> setRayTracedReflectionsEnabled;
+    bool m_rayTracedShadowsEnabled = false;
+    std::function<void(bool)> setRayTracedShadowsEnabled;
+    uint32_t m_rayTracedPrimaryVisibilityMode = 0u;
+    std::function<void(uint32_t)> setRayTracedPrimaryVisibilityMode;
+    std::function<void(bool)> setPathTracingEnabled;
 
     bool m_jitterEnabled = true;
     std::function<bool()> getJitterEnabled;

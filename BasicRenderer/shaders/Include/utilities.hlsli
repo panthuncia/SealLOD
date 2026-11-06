@@ -20,6 +20,12 @@
 #define PSO_OPENPBR_FUZZ_TEXTURES 1
 #endif
 
+#if defined(CLOD_RESOLVE_PATH_HIT)
+// A static rather than a parameter: the sampling code has dozens of call paths to its few readers, and CLodResolvePathHit sets it
+// before anything reads it. Only the primary hit feeds streaming and uses the camera as its view.
+static bool g_clodPathHitIsPrimary = false;
+#endif
+
 struct OpenPBRSurfaceSample
 {
     uint openPBRMaterialDataIndex;
@@ -140,6 +146,16 @@ void RecordTextureStreamingFeedbackRequestedTopMip(
         return;
     }
 
+#if defined(CLOD_RESOLVE_PATH_HIT)
+    // Reordering moves threads between hits, so there is no wave to reduce over: every sample writes for itself.
+    if (g_clodPathHitIsPrimary)
+    {
+        RWStructuredBuffer<uint> pathHitFeedbackBuffer =
+            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Material::TextureStreamingFeedbackBuffer)];
+        uint pathHitPreviousRequestedTopMip;
+        InterlockedMin(pathHitFeedbackBuffer[streamingTextureID], requestedTopMip, pathHitPreviousRequestedTopMip);
+    }
+#else
     RWStructuredBuffer<uint> textureStreamingFeedbackBuffer =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Material::TextureStreamingFeedbackBuffer)];
 
@@ -167,6 +183,7 @@ void RecordTextureStreamingFeedbackRequestedTopMip(
 
     uint previousRequestedTopMip;
     InterlockedMin(textureStreamingFeedbackBuffer[streamingTextureID], groupRequestedTopMip, previousRequestedTopMip);
+#endif
 }
 
 void RecordTextureStreamingFeedback(
@@ -513,8 +530,12 @@ float ComputeMaterialSelectedMipLod(float2 texelDdx, float2 texelDdy)
 
 bool ShouldTrackMaterialSelectedMipDebug()
 {
+#if defined(CLOD_RESOLVE_PATH_HIT)
+    return false; // A constant buffer read per texture sample, for a debug view the path tracer doesn't output.
+#else
     ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     return perFrameBuffer.outputType == OUTPUT_MATERIAL_SELECTED_MIP;
+#endif
 }
 
 struct MaterialTextureFeedback
@@ -639,6 +660,38 @@ float4 SampleResidentMaterialTexture2DGrad(
     return Sample2DGrad(tex, samp, uv, dUVdx, dUVdy);
 }
 
+#if defined(CLOD_RESOLVE_PATH_HIT)
+// Past the primary hit: the streamed image without asking for more of it. Unlike SampleMaterialTexture2DGradNoFeedback, this
+// resolves the stable texture ID, without which materials stay on their bootstrap fallback.
+float4 SampleStreamingMaterialTexture2DGradNoFeedback(Texture2D<float4> tex, SamplerState samp, uint streamingTextureID, float2 uv, float2 dUVdx, float2 dUVdy)
+{
+    if (streamingTextureID != 0u)
+    {
+        const uint streamedImage = LoadTextureStreamingInfo(streamingTextureID).imageDescriptorIndex;
+        if (streamedImage != 0xffffffffu)
+        {
+            Texture2D<float4> streamedTexture = ResourceDescriptorHeap[NonUniformResourceIndex(streamedImage)];
+            return Sample2DGrad(streamedTexture, samp, uv, dUVdx, dUVdy);
+        }
+    }
+    return Sample2DGrad(tex, samp, uv, dUVdx, dUVdy);
+}
+
+float SampleStreamingMaterialTexture2DGradNoFeedback(Texture2D<float> tex, SamplerState samp, uint streamingTextureID, float2 uv, float2 dUVdx, float2 dUVdy)
+{
+    if (streamingTextureID != 0u)
+    {
+        const uint streamedImage = LoadTextureStreamingInfo(streamingTextureID).imageDescriptorIndex;
+        if (streamedImage != 0xffffffffu)
+        {
+            Texture2D<float> streamedTexture = ResourceDescriptorHeap[NonUniformResourceIndex(streamedImage)];
+            return Sample2DGrad(streamedTexture, samp, uv, dUVdx, dUVdy);
+        }
+    }
+    return Sample2DGrad(tex, samp, uv, dUVdx, dUVdy);
+}
+#endif
+
 float4 SampleStreamingMaterialTexture2DGrad(
     Texture2D<float4> tex,
     SamplerState samp,
@@ -648,6 +701,12 @@ float4 SampleStreamingMaterialTexture2DGrad(
     float2 dUVdy,
     inout MaterialTextureFeedback feedback)
 {
+#if defined(CLOD_RESOLVE_PATH_HIT)
+    if (!g_clodPathHitIsPrimary)
+    {
+        return SampleStreamingMaterialTexture2DGradNoFeedback(tex, samp, streamingTextureID, uv, dUVdx, dUVdy);
+    }
+#endif
 	if (streamingTextureID != 0u)
 	{
 		TextureStreamingGPUInfo currentBinding = LoadTextureStreamingInfo(streamingTextureID);
@@ -772,6 +831,12 @@ float SampleStreamingMaterialTexture2DGrad(
     float2 dUVdy,
     inout MaterialTextureFeedback feedback)
 {
+#if defined(CLOD_RESOLVE_PATH_HIT)
+    if (!g_clodPathHitIsPrimary)
+    {
+        return SampleStreamingMaterialTexture2DGradNoFeedback(tex, samp, streamingTextureID, uv, dUVdx, dUVdy);
+    }
+#endif
 	if (streamingTextureID != 0u)
 	{
 		TextureStreamingGPUInfo currentBinding = LoadTextureStreamingInfo(streamingTextureID);
@@ -3680,6 +3745,10 @@ void SampleMaterialFromUvCacheRuntime(
         ret);
 #endif
     PopulateLegacyMaterialInputsFromOpenPBRSurface(openPBRSurface, normalWS, ao, ret);
+#if defined(CLOD_RESOLVE_PATH_HIT)
+    // This sample is what requests height maps from streaming, and past the primary hit nothing else would read it.
+    if (g_clodPathHitIsPrimary)
+#endif
     ret.geometricHeightDebug = SampleMaterialGeometricHeightDebug(
         uvCache,
         uvBindings,

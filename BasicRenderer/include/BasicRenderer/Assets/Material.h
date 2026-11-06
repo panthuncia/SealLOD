@@ -390,6 +390,9 @@ public:
         return m_materialData.objectSurfaceSamplingMode == static_cast<uint32_t>(ObjectSurfaceSamplingMode::AtlasBakedHeight);
     }
     std::shared_ptr<TextureAsset> GetHeightMapTexture() const { return m_heightMap; }
+    // The alpha test's textures, for the offline opacity micromap bake. Null when the material has none.
+    std::shared_ptr<TextureAsset> GetBaseColorTexture() const { return m_baseColorTexture; }
+    std::shared_ptr<TextureAsset> GetOpacityTexture() const { return m_opacityTexture; }
     // Rebuilds the material's descriptor tuple. A texture without a published image binds its fallback.
     void RefreshTextureBindings(org::runtime::IDescriptorService* descriptorService, const MaterialTextureFallbacks& fallbacks);
     void ForEachReferencedTexture(const std::function<void(const std::shared_ptr<TextureAsset>&)>& visitor) const;

@@ -19,6 +19,7 @@
 #include <sl_core_api.h>
 #include <sl_consts.h>
 #include <sl_dlss.h>
+#include <sl_dlss_d.h>
 #include "rhi_interop_dx12.h"
 #include "rhi_interop_vulkan.h"
 
@@ -68,7 +69,15 @@ namespace {
         }
     }
 
-    UpscalingMode ResolveEffectiveUpscalingMode(UpscalingMode requestedMode, bool dlssSupported) {
+    // In renderer world units, which are Skyrim units in SARP (about 14 m). Well
+    // above what a player or the benchmark flight covers in one frame, even at low
+    // frame rates. Cuts shorter than this need RequestHistoryReset.
+    constexpr float kRayReconstructionCameraCutDistance = 1000.0f;
+
+    UpscalingMode ResolveEffectiveUpscalingMode(UpscalingMode requestedMode, bool dlssSupported, bool rayReconstructionSupported) {
+        if (requestedMode == UpscalingMode::DLSSRayReconstruction && (!IsStreamlineEnabledSetting() || !rayReconstructionSupported)) {
+            requestedMode = UpscalingMode::DLSS;
+        }
         if (requestedMode == UpscalingMode::DLSS && (!IsStreamlineEnabledSetting() || !dlssSupported)) {
             return UpscalingMode::None;
         }
@@ -91,6 +100,22 @@ namespace {
         catch (const std::exception&) {
             return fallback;
         }
+    }
+
+    sl::DLSSDOptions MakeRayReconstructionOptions(UpscaleQualityMode qualityMode, DirectX::XMUINT2 outputRes) {
+        sl::DLSSDOptions options{};
+        options.mode = ToSLQualityMode(qualityMode);
+        options.outputWidth = outputRes.x;
+        options.outputHeight = outputRes.y;
+        options.colorBuffersHDR = sl::Boolean::eTrue;
+        options.normalRoughnessMode = sl::DLSSDNormalRoughnessMode::ePacked;
+        options.dlaaPreset = sl::DLSSDPreset::ePresetE;
+        options.qualityPreset = sl::DLSSDPreset::ePresetE;
+        options.balancedPreset = sl::DLSSDPreset::ePresetE;
+        options.performancePreset = sl::DLSSDPreset::ePresetE;
+        options.ultraPerformancePreset = sl::DLSSDPreset::ePresetE;
+        options.ultraQualityPreset = sl::DLSSDPreset::ePresetE;
+        return options;
     }
 
     bool MakeStreamlineVulkanTextureResource(
@@ -156,7 +181,7 @@ void UpscalingManager::SyncSettingsFromSettingsManager()
     }
 }
 
-bool CheckDLSSSupport(rhi::Device dev, rhi::Backend backend) {
+bool CheckStreamlineFeatureSupport(rhi::Device dev, rhi::Backend backend, sl::Feature feature) {
     sl::AdapterInfo ai{};
 
     if (backend == rhi::Backend::D3D12) {
@@ -183,7 +208,7 @@ bool CheckDLSSSupport(rhi::Device dev, rhi::Backend backend) {
     }
 
     sl::Result res = sl::Result::eOk;
-    if (SL_FAILED(res, slIsFeatureSupported(sl::kFeatureDLSS, ai))) {
+    if (SL_FAILED(res, slIsFeatureSupported(feature, ai))) {
         return false;
     }
     return true;
@@ -216,7 +241,8 @@ void UpscalingManager::InitializeAdapter()
     const rhi::Backend backend = DeviceManager::GetInstance().GetBackend();
     if (!IsStreamlineEnabledSetting()) {
         m_dlssSupported = false;
-        if (m_upscalingMode == UpscalingMode::DLSS) {
+        m_rayReconstructionSupported = false;
+        if (m_upscalingMode == UpscalingMode::DLSS || m_upscalingMode == UpscalingMode::DLSSRayReconstruction) {
             m_upscalingMode = UpscalingMode::None;
         }
         spdlog::info("UpscalingManager::InitializeAdapter skipped DLSS probing because enableStreamline=false");
@@ -224,7 +250,11 @@ void UpscalingManager::InitializeAdapter()
     }
 
     auto dev = DeviceManager::GetInstance().GetDevice();
-	m_dlssSupported = CheckDLSSSupport(dev, backend); // TODO: Query from RHI
+	m_dlssSupported = CheckStreamlineFeatureSupport(dev, backend, sl::kFeatureDLSS); // TODO: Query from RHI
+	// Only the D3D12 RHI loads the Ray Reconstruction plugin.
+	m_rayReconstructionSupported = backend == rhi::Backend::D3D12
+		&& CheckStreamlineFeatureSupport(dev, backend, sl::kFeatureDLSS_RR);
+	spdlog::info("UpscalingManager: DLSS Ray Reconstruction supported: {}", m_rayReconstructionSupported);
 }
 
 void UpscalingManager::ProxyDevice() { // TODO: RHI now handles this internally
@@ -285,7 +315,8 @@ DirectX::XMFLOAT2 UpscalingManager::GetJitter(uint64_t frameNumber) {
         return { 0.0f, 0.0f };
 		break;
     }
-    case UpscalingMode::DLSS: {
+    case UpscalingMode::DLSS:
+    case UpscalingMode::DLSSRayReconstruction: {
         unsigned int sequenceLength = 16;
         unsigned int sequenceIndex = frameNumber % sequenceLength;
         DirectX::XMFLOAT2 sequenceOffset = {
@@ -337,7 +368,8 @@ bool UpscalingManager::InitSL() {
     SyncSettingsFromSettingsManager();
     if (!IsStreamlineEnabledSetting()) {
         m_dlssSupported = false;
-        if (m_upscalingMode == UpscalingMode::DLSS) {
+        m_rayReconstructionSupported = false;
+        if (m_upscalingMode == UpscalingMode::DLSS || m_upscalingMode == UpscalingMode::DLSSRayReconstruction) {
             m_upscalingMode = UpscalingMode::None;
         }
         spdlog::info("UpscalingManager::InitSL skipped because enableStreamline=false");
@@ -349,12 +381,35 @@ bool UpscalingManager::InitSL() {
 void UpscalingManager::Setup() {
     SyncSettingsFromSettingsManager();
     auto outputRes = m_getOutputRes();
-    const UpscalingMode effectiveMode = ResolveEffectiveUpscalingMode(m_upscalingMode, m_dlssSupported);
+    UpscalingMode effectiveMode = ResolveEffectiveUpscalingMode(GetCurrentUpscalingMode(), m_dlssSupported, m_rayReconstructionSupported);
+    sl::DLSSDOptimalSettings rayReconstructionSettings{};
+    if (effectiveMode == UpscalingMode::DLSSRayReconstruction) {
+        const sl::DLSSDOptions options = MakeRayReconstructionOptions(m_upscaleQualityMode, outputRes);
+        if (SL_FAILED(result, slDLSSDGetOptimalSettings(options, rayReconstructionSettings)) ||
+            rayReconstructionSettings.optimalRenderWidth == 0 || rayReconstructionSettings.optimalRenderHeight == 0) {
+            spdlog::warn("UpscalingManager: slDLSSDGetOptimalSettings failed with result {}", static_cast<int32_t>(result));
+            m_rayReconstructionSupported = false;
+            effectiveMode = ResolveEffectiveUpscalingMode(UpscalingMode::DLSS, m_dlssSupported, false);
+        }
+    }
+    if (m_upscalingMode == UpscalingMode::DLSSRayReconstruction && effectiveMode != UpscalingMode::DLSSRayReconstruction) {
+        spdlog::warn(
+            "UpscalingManager: DLSS Ray Reconstruction is unavailable (supported={}, pipeline writes guides={}); using {}",
+            m_rayReconstructionSupported,
+            m_rayReconstructionGuidesAvailable,
+            UpscalingModeNames[static_cast<int>(effectiveMode)]);
+    }
     switch (effectiveMode)
     {
     case UpscalingMode::None: {
         // No upscaling, just set the render resolution to the output resolution
         SettingsManager::GetInstance().getSettingSetter<DirectX::XMUINT2>("renderResolution")(outputRes);
+        break;
+    }
+    case UpscalingMode::DLSSRayReconstruction: {
+        SettingsManager::GetInstance().getSettingSetter<DirectX::XMUINT2>("renderResolution")(
+            { rayReconstructionSettings.optimalRenderWidth, rayReconstructionSettings.optimalRenderHeight });
+        m_resetUpscalerHistory = true;
         break;
     }
     case UpscalingMode::DLSS: {
@@ -428,7 +483,11 @@ void UpscalingManager::Setup() {
     }
 }
 
-void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Components::Camera* camera, uint64_t frameNumber, org::PixelBuffer* pHDRTarget, org::PixelBuffer* pUpscaledHDRTarget, org::PixelBuffer* pDepthTexture, org::PixelBuffer* pMotionVectors) {
+void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Components::Camera* camera, uint64_t frameNumber, const UpscalingInputs& inputs, bool rayReconstruction) {
+    org::PixelBuffer* pHDRTarget = inputs.color;
+    org::PixelBuffer* pUpscaledHDRTarget = inputs.output;
+    org::PixelBuffer* pDepthTexture = inputs.depth;
+    org::PixelBuffer* pMotionVectors = inputs.motionVectors;
     const rhi::Backend backend = DeviceManager::GetInstance().GetBackend();
     if (backend != rhi::Backend::D3D12 && backend != rhi::Backend::Vulkan) {
         spdlog::warn("UpscalingManager::EvaluateDLSS called on unsupported backend {}; skipping.", static_cast<uint32_t>(backend));
@@ -446,6 +505,26 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
     auto myViewport = sl::ViewportHandle(0); // 0 is the default viewport
     auto renderRes = m_getRenderRes();
     auto outputRes = m_getOutputRes();
+
+    if (rayReconstruction) {
+        if (!inputs.diffuseAlbedo || !inputs.specularAlbedo || !inputs.normalRoughness || !inputs.specularHitDistance) {
+            if (!m_reportedRayReconstructionFailure) {
+                m_reportedRayReconstructionFailure = true;
+                spdlog::error("DLSS Ray Reconstruction skipped because a guide resource is missing");
+            }
+            return;
+        }
+        sl::DLSSDOptions rayReconstructionOptions = MakeRayReconstructionOptions(m_upscaleQualityMode, outputRes);
+        StoreFloat4x4(camera->info.view, rayReconstructionOptions.worldToCameraView);
+        StoreFloat4x4(camera->info.viewInverse, rayReconstructionOptions.cameraViewToWorld);
+        if (SL_FAILED(result, slDLSSDSetOptions(myViewport, rayReconstructionOptions))) {
+            if (!m_reportedRayReconstructionFailure) {
+                m_reportedRayReconstructionFailure = true;
+                spdlog::error("slDLSSDSetOptions failed with result {}", static_cast<int32_t>(result));
+            }
+            return;
+        }
+    }
 
     sl::Constants consts = {};
 
@@ -491,11 +570,16 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
     consts.depthInverted = sl::Boolean::eTrue; // Reverse-Z: near=1, far=0
     consts.cameraMotionIncluded = sl::Boolean::eTrue;
     consts.motionVectors3D = sl::Boolean::eFalse;
-    consts.motionVectorsDilated = SettingsManager::GetInstance().getSettingGetter<bool>("enableDilatedMotionVectors")()
+    consts.motionVectorsDilated = !rayReconstruction && SettingsManager::GetInstance().getSettingGetter<bool>("enableDilatedMotionVectors")()
         ? sl::Boolean::eTrue
         : sl::Boolean::eFalse;
     consts.motionVectorsJittered = sl::Boolean::eFalse;
-    const bool resetHistory = m_resetUpscalerHistory;
+    bool cameraCut = false;
+    if (rayReconstruction) {
+        const DirectX::XMVECTOR cameraStep = DirectX::XMVectorSubtract(camera->info.viewInverse.r[3], viewPrevInverse.r[3]);
+        cameraCut = DirectX::XMVectorGetX(DirectX::XMVector3Length(cameraStep)) > kRayReconstructionCameraCutDistance;
+    }
+    const bool resetHistory = m_resetUpscalerHistory || cameraCut;
     consts.reset = resetHistory ? sl::Boolean::eTrue : sl::Boolean::eFalse;
 
     if (SL_FAILED(result, slSetConstants(consts, *frameToken, myViewport))) // constants are changing per frame so frame index is required
@@ -551,10 +635,10 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
             return;
         }
 
-        const sl::BaseStructure* inputs[] = { &myViewport };
+        const sl::BaseStructure* evaluateInputs[] = { &myViewport };
         const auto evaluateResult = [&] {
             BT_ZONE_SCOPE("UpscalingManager::EvaluateDLSS::slEvaluateFeature");
-            return slEvaluateFeature(sl::kFeatureDLSS, *frameToken, inputs, _countof(inputs), nativeCommandList);
+            return slEvaluateFeature(sl::kFeatureDLSS, *frameToken, evaluateInputs, _countof(evaluateInputs), nativeCommandList);
         }();
         if (SL_FAILED(result, evaluateResult))
         {
@@ -607,10 +691,29 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
         sl::ResourceTag depthTag = sl::ResourceTag{ &depth, sl::kBufferTypeDepth, sl::ResourceLifecycle::eValidUntilPresent, &renderExtent };
         sl::ResourceTag mvecTag = sl::ResourceTag{ &mvec, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eValidUntilPresent, &renderExtent };
 
-        const sl::BaseStructure* inputs[] = { &myViewport, &depthTag, &mvecTag, &colorInTag, &colorOutTag };
+        const auto makeGuideResource = [](org::PixelBuffer* texture) {
+            return texture
+                ? sl::Resource{ sl::ResourceType::eTex2d, rhi::dx12::get_resource(texture->GetAPIResource()), nullptr, nullptr, D3D12_RESOURCE_STATE_COMMON }
+                : sl::Resource{};
+        };
+        sl::Resource diffuseAlbedo = makeGuideResource(inputs.diffuseAlbedo);
+        sl::Resource specularAlbedo = makeGuideResource(inputs.specularAlbedo);
+        sl::Resource normalRoughness = makeGuideResource(inputs.normalRoughness);
+        sl::Resource specularHitDistance = makeGuideResource(inputs.specularHitDistance);
+        sl::ResourceTag diffuseAlbedoTag = sl::ResourceTag{ &diffuseAlbedo, sl::kBufferTypeAlbedo, sl::ResourceLifecycle::eValidUntilPresent, &renderExtent };
+        sl::ResourceTag specularAlbedoTag = sl::ResourceTag{ &specularAlbedo, sl::kBufferTypeSpecularAlbedo, sl::ResourceLifecycle::eValidUntilPresent, &renderExtent };
+        sl::ResourceTag normalRoughnessTag = sl::ResourceTag{ &normalRoughness, sl::kBufferTypeNormalRoughness, sl::ResourceLifecycle::eValidUntilPresent, &renderExtent };
+        sl::ResourceTag specularHitDistanceTag = sl::ResourceTag{ &specularHitDistance, sl::kBufferTypeSpecularHitDistance, sl::ResourceLifecycle::eValidUntilPresent, &renderExtent };
+
+        const sl::BaseStructure* evaluateInputs[] = {
+            &myViewport, &depthTag, &mvecTag, &colorInTag, &colorOutTag,
+            &diffuseAlbedoTag, &specularAlbedoTag, &normalRoughnessTag, &specularHitDistanceTag };
+        constexpr uint32_t kUpscaleOnlyInputCount = 5;
+        const uint32_t evaluateInputCount = rayReconstruction ? _countof(evaluateInputs) : kUpscaleOnlyInputCount;
+        const sl::Feature evaluatedFeature = rayReconstruction ? sl::kFeatureDLSS_RR : sl::kFeatureDLSS;
         const auto evaluateResult = [&] {
             BT_ZONE_SCOPE("UpscalingManager::EvaluateDLSS::slEvaluateFeature");
-            return slEvaluateFeature(sl::kFeatureDLSS, *frameToken, inputs, _countof(inputs), nativeCommandList);
+            return slEvaluateFeature(evaluatedFeature, *frameToken, evaluateInputs, evaluateInputCount, nativeCommandList);
         }();
         if (SL_FAILED(result, evaluateResult))
         {
@@ -649,7 +752,11 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
     }
 }
 
-void UpscalingManager::EvaluateFSR3(rhi::CommandList& commandList, const Components::Camera* camera, double elapsedSeconds, org::PixelBuffer* pHDRTarget, org::PixelBuffer* pUpscaledHDRTarget, org::PixelBuffer* pDepthTexture, org::PixelBuffer* pMotionVectors) {
+void UpscalingManager::EvaluateFSR3(rhi::CommandList& commandList, const Components::Camera* camera, double elapsedSeconds, const UpscalingInputs& inputs) {
+    org::PixelBuffer* pHDRTarget = inputs.color;
+    org::PixelBuffer* pUpscaledHDRTarget = inputs.output;
+    org::PixelBuffer* pDepthTexture = inputs.depth;
+    org::PixelBuffer* pMotionVectors = inputs.motionVectors;
     if (!EnsureFSRContext()) {
         spdlog::warn("UpscalingManager::EvaluateFSR3 skipped dispatch because the FSR context is not initialized");
         return;
@@ -708,7 +815,9 @@ void UpscalingManager::EvaluateFSR3(rhi::CommandList& commandList, const Compone
     }
 }
 
-void UpscalingManager::EvaluateNone(rhi::CommandList& commandList, const Components::Camera* camera, org::PixelBuffer* pHDRTarget, org::PixelBuffer* pUpscaledHDRTarget, org::PixelBuffer* pDepthTexture, org::PixelBuffer* pMotionVectors) {
+void UpscalingManager::EvaluateNone(rhi::CommandList& commandList, const Components::Camera* camera, const UpscalingInputs& inputs) {
+    org::PixelBuffer* pHDRTarget = inputs.color;
+    org::PixelBuffer* pUpscaledHDRTarget = inputs.output;
     UINT mipSlice = 0;
     UINT arraySlice = 0;
     UINT dstSubresource = CalcSubresource(
@@ -798,29 +907,30 @@ void UpscalingManager::EvaluateNone(rhi::CommandList& commandList, const Compone
     }
 }
 
-void UpscalingManager::Evaluate(rhi::CommandList& commandList, const Components::Camera* camera, uint64_t frameNumber, double elapsedSeconds, org::PixelBuffer* pHDRTarget, org::PixelBuffer* pUpscaledHDRTarget, org::PixelBuffer* pDepthTexture, org::PixelBuffer* pMotionVectors) {
+void UpscalingManager::Evaluate(rhi::CommandList& commandList, const Components::Camera* camera, uint64_t frameNumber, double elapsedSeconds, const UpscalingInputs& inputs) {
     SyncSettingsFromSettingsManager();
-    const UpscalingMode effectiveMode = ResolveEffectiveUpscalingMode(m_upscalingMode, m_dlssSupported);
-    EvaluateCaptured(effectiveMode, commandList, camera, frameNumber, elapsedSeconds,
-        pHDRTarget, pUpscaledHDRTarget, pDepthTexture, pMotionVectors);
+    const UpscalingMode effectiveMode = ResolveEffectiveUpscalingMode(GetCurrentUpscalingMode(), m_dlssSupported, m_rayReconstructionSupported);
+    EvaluateCaptured(effectiveMode, commandList, camera, frameNumber, elapsedSeconds, inputs);
 }
 
 void UpscalingManager::EvaluateCaptured(UpscalingMode mode, rhi::CommandList& commandList,
     const Components::Camera* camera, uint64_t frameNumber, double elapsedSeconds,
-    org::PixelBuffer* pHDRTarget, org::PixelBuffer* pUpscaledHDRTarget,
-    org::PixelBuffer* pDepthTexture, org::PixelBuffer* pMotionVectors) {
+    const UpscalingInputs& inputs) {
     std::scoped_lock evaluateLock(m_evaluateMutex);
-    const UpscalingMode effectiveMode = ResolveEffectiveUpscalingMode(mode, m_dlssSupported);
+    const UpscalingMode effectiveMode = ResolveEffectiveUpscalingMode(mode, m_dlssSupported, m_rayReconstructionSupported);
     switch (effectiveMode)
     {
 	    case UpscalingMode::None:
-            EvaluateNone(commandList, camera, pHDRTarget, pUpscaledHDRTarget, pDepthTexture, pMotionVectors);
+            EvaluateNone(commandList, camera, inputs);
 			break;
         case UpscalingMode::DLSS:
-			EvaluateDLSS(commandList, camera, frameNumber, pHDRTarget, pUpscaledHDRTarget, pDepthTexture, pMotionVectors);
+			EvaluateDLSS(commandList, camera, frameNumber, inputs, false);
+            break;
+        case UpscalingMode::DLSSRayReconstruction:
+			EvaluateDLSS(commandList, camera, frameNumber, inputs, true);
             break;
         case UpscalingMode::FSR3:
-			EvaluateFSR3(commandList, camera, elapsedSeconds, pHDRTarget, pUpscaledHDRTarget, pDepthTexture, pMotionVectors);
+			EvaluateFSR3(commandList, camera, elapsedSeconds, inputs);
             break;
 	}
 }

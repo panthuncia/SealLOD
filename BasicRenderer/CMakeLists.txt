@@ -494,6 +494,7 @@ set(SOURCES
     "src/VirtualGeometry/Rasterization/RenderPasses/RasterBucketHistogramPass.cpp"
     # src/VirtualGeometry/RayTracing
     "src/VirtualGeometry/RayTracing/CLodRayTracingSystem.cpp"
+    "src/VirtualGeometry/RayTracing/CLodRtShaderTable.cpp"
     # src/VirtualGeometry/Reyes
     "src/VirtualGeometry/Reyes/RenderPasses/ReyesBuildRasterWorkPass.cpp"
     "src/VirtualGeometry/Reyes/RenderPasses/ReyesClassifyPass.cpp"
@@ -644,6 +645,7 @@ add_library(BasicRendererPublicHeaderSmoke OBJECT
     "tests/PublicHeaders/Assets_Import_AssimpGeometryExtractor.cpp"
     "tests/PublicHeaders/Assets_Import_BRNiflyClient.cpp"
     "tests/PublicHeaders/Assets_Import_CLodCache.cpp"
+    "tests/PublicHeaders/Assets_Import_CLodOpacityMicromapCache.cpp"
     "tests/PublicHeaders/Assets_Import_GlTFGeometryExtractor.cpp"
     "tests/PublicHeaders/Assets_Import_USDGeometryExtractor.cpp"
     "tests/PublicHeaders/Assets_Import_USDMaterialCache.cpp"

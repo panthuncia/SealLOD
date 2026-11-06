@@ -51,6 +51,7 @@
 #include "Runtime/Settings/SettingsManager.h"
 #include "BasicRenderer/Assets/MaterialTextureStreaming.h"
 #include "Lighting/Environment/RenderPasses/SkyboxRenderPass.h"
+#include "Lighting/PathTracing/RenderPasses/PathTracePass.h"
 #include "Lighting/Environment/RenderPasses/EnvironmentFilterPass.h"
 #include "Diagnostics/RenderPasses/DebugSpheresPass.h"
 #include "Diagnostics/RenderPasses/DebugSkeletonPass.h"
@@ -194,8 +195,6 @@ void Renderer::CreateRenderGraph() {
             descriptorService->Initialize();
         }
         }
-        if (m_clodRayTracingSystem && currentRenderGraph)
-            m_clodRayTracingSystem->SetUploadService(m_orgRuntime->Uploads());
         if (m_pSkeletonManager && currentRenderGraph)
             m_pSkeletonManager->SetUploadService(m_orgRuntime->Uploads());
         if (currentRenderGraph)
@@ -438,6 +437,16 @@ void Renderer::CreateRenderGraph() {
                 visibilityBuffer->SetName("Visibility Buffer");
                 org::memory::SetResourceUsageHint(*visibilityBuffer, "Canonical surface visibility");
                 newGraph->RegisterResource(Builtin::PrimaryCamera::VisibilityTexture, visibilityBuffer);
+                if (m_rayTracedShadows && DeviceManager::GetInstance().GetCLodRayTracingSupported()) {
+                    org::TextureDescription sunDesc;
+                    sunDesc.channels = 1;
+                    sunDesc.format = rhi::Format::R8_UNorm;
+                    sunDesc.hasSRV = sunDesc.hasUAV = true;
+                    sunDesc.imageDimensions.emplace_back(resolution.x, resolution.y, 0, 0);
+                    auto sunMask = org::PixelBuffer::CreateSharedUnmaterialized(sunDesc);
+                    sunMask->SetName("CLod RT sun shadow");
+                    newGraph->RegisterResource(Builtin::RayTracing::SunShadow, sunMask);
+                }
                 m_pViewManager->AttachVisibilityBuffer(primaryViewID, visibilityBuffer);
                 CreateCanonicalSurfaceResources(newGraph);
                 CreateDebugVisualizationResources(newGraph);
@@ -476,8 +485,18 @@ void Renderer::CreateRenderGraph() {
                 break;
             case Reflections: {
                 const bool rayTraced = m_rayTracedReflections && DeviceManager::GetInstance().GetCLodRayTracingSupported();
-                if (rayTraced) BuildRayTracedReflectionPasses(newGraph);
+                if (rayTraced) BuildRayTracedReflectionPasses(newGraph, m_pMeshManager ? m_pMeshManager->GetCLodSlabResourceGroup() : nullptr, m_pipelineRecipe.Contains<br::pipeline::TerrainRvtTechnique>());
                 else if (m_screenSpaceReflections) BuildSSRPasses(newGraph);
+                break;
+            }
+            case PathTracing: {
+                auto pathTraceState = MakePathTraceState();
+                newGraph->BuildPass<PathTraceArgsPass>("PathTraceArgsPass", pathTraceState);
+                newGraph->SetPassTechnique("PathTraceArgsPass", "Ray Tracing::Path Tracing");
+                newGraph->BuildPass<PathTracePass>("PathTracePass", pathTraceState, m_pMeshManager ? m_pMeshManager->GetCLodSlabResourceGroup() : nullptr,
+                    m_pipelineRecipe.Contains<br::pipeline::TerrainRvtTechnique>(),
+                    UpscalingManager::GetInstance().GetCurrentUpscalingMode() == UpscalingMode::DLSSRayReconstruction);
+                newGraph->SetPassTechnique("PathTracePass", "Ray Tracing::Path Tracing");
                 break;
             }
             case Exposure: {
@@ -500,6 +519,7 @@ void Renderer::CreateRenderGraph() {
                 break;
             }
             case Upscaling:
+                br::render::UpscalingGenerationService::RegisterRayReconstructionGuides(*newGraph);
                 if (UpscalingManager::GetInstance().GetCurrentUpscalingMode() == UpscalingMode::DLSS &&
                     SettingsManager::GetInstance().getSettingGetter<bool>("enableDilatedMotionVectors")()) {
                     newGraph->BuildPass<DilateMotionVectorsPass>("DilateMotionVectorsPass");
@@ -787,6 +807,23 @@ void Renderer::RegisterPipelineExtensions() {
                 SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodVisibleClusterCapacitySettingName)(),
                 CLodMinVisibleClusterCapacity,
                 CLodMaxVisibleClusterCapacity);
+
+            // The BVH exists when anything traces it.
+            auto& deviceManager = DeviceManager::GetInstance();
+            const bool pathTraced = m_pipelineRecipe.Contains<br::pipeline::PathTracingTechnique>();
+            const bool wantsRayTracing = pathTraced || m_rayTracedPrimaryVisibilityMode != 0u || m_rayTracedReflections || m_rayTracedShadows;
+            if (m_clodRayTracingSystem) {
+                // Only the path tracer's alpha test is the one micromaps are baked against.
+                auto& settings = SettingsManager::GetInstance();
+                m_clodRayTracingSystem->RequestOpacityMicromaps(pathTraced && settings.getSettingGetter<bool>("pathTracingOpacityMicromaps")());
+            }
+            const bool rayTracing = wantsRayTracing && deviceManager.GetCLodRayTracingSupported() && m_clodRayTracingSystem
+                && m_clodRayTracingSystem->EnsureInitialized(deviceManager.GetDevice(), deviceManager.GetRayTracingFeatures());
+            if (wantsRayTracing && !rayTracing) {
+                spdlog::warn("CLod ray tracing requested but unavailable on this device; rendering with raster and shadow maps.");
+            }
+            const auto rayTracingSystem = rayTracing ? m_clodRayTracingSystem : nullptr;
+
             currentRenderGraph->RegisterExtension(
                 std::make_unique<CLodExtension>(
                     extensionType,
@@ -799,8 +836,35 @@ void Renderer::RegisterPipelineExtensions() {
                         .virtualShadowCasters = virtualShadowCasters,
                         .persistentState = m_producerPersistentState,
                         .slabResourceGroup = m_pMeshManager
-                            ? m_pMeshManager->GetCLodSlabResourceGroup() : nullptr }),
+                            ? m_pMeshManager->GetCLodSlabResourceGroup() : nullptr,
+                        .rayTracingSystem = id == br::pipeline::TechniqueId::ClusterLod ? rayTracingSystem : nullptr,
+                        .rayTracedPrimaryVisibility = !pathTraced && m_rayTracedPrimaryVisibilityMode == 1u,
+                        .pathTraced = pathTraced }),
                 extensionId);
+
+            if (id == br::pipeline::TechniqueId::ClusterLod && rayTracingSystem) {
+                const uint32_t rayTracingClusters = rayTracingSystem->GetLimits().maxClustersInBvh;
+                currentRenderGraph->RegisterExtension(
+                    std::make_unique<CLodExtension>(
+                        CLodExtensionType::RayTracing,
+                        rayTracingClusters,
+                        CLodExtensionOptions{
+                            .enableReyes = false,
+                            .enableVoxelRasterization = false,
+                            .voxelRasterWorkCapacity = 0u,
+                            .streamingSystem = clodStreamingSystem,
+                            .virtualShadowCasters = virtualShadowCasters,
+                            .persistentState = m_producerPersistentState,
+                            .slabResourceGroup = m_pMeshManager
+                                ? m_pMeshManager->GetCLodSlabResourceGroup() : nullptr,
+                            .rayTracingSystem = rayTracingSystem,
+                            .rayTracedPrimaryVisibility = !pathTraced && m_rayTracedPrimaryVisibilityMode == 1u,
+                            .pathTraced = pathTraced,
+                            .scheduleRayTracedVisibility = !pathTraced && m_rayTracedPrimaryVisibilityMode != 0u,
+                            .rayTracedVisibilityMode = m_rayTracedPrimaryVisibilityMode == 2u ? 1u : 0u,
+                            .rayTracedShadows = !pathTraced && m_rayTracedShadows }),
+                    "CLodRayTracing");
+            }
         });
     // Recipe extensions may register resources consumed by technique extensions
     // (ProceduralWind visibility is consumed by CLod shadow traversal). Register

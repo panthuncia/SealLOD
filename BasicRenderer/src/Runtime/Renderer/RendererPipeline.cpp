@@ -57,6 +57,8 @@ void Renderer::ApplyPendingPipelineReplacement() {
         m_pipelineRecipe.Contains<br::pipeline::TerrainRegionMaterialEvaluationTechnique>());
     settings.getSettingSetter<bool>("enableShadows")(
         m_pipelineRecipe.Contains<br::pipeline::ClusterLodShadowTechnique>());
+    settings.getSettingSetter<bool>("rayReconstructionGuidesAvailable")(
+        m_pipelineRecipe.Contains<br::pipeline::PathTracingTechnique>());
     m_syncingPipelineTopologySettings = false;
 }
 

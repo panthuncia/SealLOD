@@ -78,7 +78,7 @@ extern "C" {
 }
 
 // Set Agility SDK version
-extern "C" { __declspec(dllexport) extern const UINT D3D12SDKVersion = 614;}
+extern "C" { __declspec(dllexport) extern const UINT D3D12SDKVersion = 722;}
 
 extern "C" { __declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D\\"; }
 

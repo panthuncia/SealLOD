@@ -248,14 +248,10 @@ void Renderer::Render() {
             m_context.environmentWork = m_environmentWorkServices;
             m_context.clodRayTracingSystem = m_clodRayTracingSystem;
 
-            if (m_context.rayTracedReflectionsEnabled && m_clodRayTracingSystem && m_pMeshManager) {
+            if (m_clodRayTracingSystem && m_clodRayTracingSystem->IsInitialized() && m_pMeshManager) {
                 std::scoped_lock rayTracingLock(m_clodRayTracingSystem->FrameOperationMutex());
+                m_clodRayTracingSystem->AdvanceFrame();
                 m_clodRayTracingSystem->Refresh(*m_pMeshManager);
-                m_clodRayTracingSystem->UpdateGpuResources(deviceManager.GetDevice(), deviceManager.GetRayTracingFeatures());
-            }
-            else if (m_clodRayTracingSystem) {
-                std::scoped_lock rayTracingLock(m_clodRayTracingSystem->FrameOperationMutex());
-                m_clodRayTracingSystem->Reset();
             }
             m_context.drawStats = drawStats;
             m_context.deltaTime = deltaTime;

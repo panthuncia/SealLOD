@@ -116,6 +116,7 @@ enum class TechniqueId : uint8_t {
     ClusteredLighting,
     PrimaryLighting,
     Reflections,
+    PathTracing,
     Exposure,
     Upscaling,
     Bloom,
@@ -135,6 +136,8 @@ struct EmptyTechniqueOptions {};
 
 struct ClusterLodOptions {
     ReyesMode reyes = ReyesMode::Enabled;
+    // False keeps streaming and the shared CLod buffers but schedules no primary culling, raster or depth passes.
+    bool primaryRasterization = true;
 };
 
 struct ClusterLodVoxelOptions {
@@ -184,6 +187,7 @@ BR_DECLARE_PIPELINE_TECHNIQUE(MaterialEvaluationTechnique, MaterialEvaluation);
 BR_DECLARE_PIPELINE_TECHNIQUE(GtaoTechnique, Gtao);
 BR_DECLARE_PIPELINE_TECHNIQUE(ClusteredLightingTechnique, ClusteredLighting);
 BR_DECLARE_PIPELINE_TECHNIQUE(PrimaryLightingTechnique, PrimaryLighting);
+BR_DECLARE_PIPELINE_TECHNIQUE(PathTracingTechnique, PathTracing);
 struct ReflectionsTechnique {
     using Options = ReflectionsOptions;
     inline static constexpr TechniqueId Id = TechniqueId::Reflections;
@@ -354,6 +358,7 @@ public:
 
     bool Contains(TechniqueId id) const;
     PipelineRecipe& AddExtension(std::string id, RenderGraphExtensionFactory factory);
+    PipelineRecipe& ClearExtensions();
 
     ResourceBindings& Bindings() { return m_bindings; }
     const ResourceBindings& Bindings() const { return m_bindings; }
@@ -373,6 +378,8 @@ namespace Slots {
 }
 
 PipelineRecipe MakeBasicRendererDemoPipeline();
+// The same scene and output stages, with path tracing in place of raster, material evaluation and deferred lighting.
+PipelineRecipe MakePathTracedRecipe(const PipelineRecipe& base);
 PipelineRecipe MakeSarpPipeline();
 PipelineRecipe MakeGeometryMaterialProducerPipeline();
 

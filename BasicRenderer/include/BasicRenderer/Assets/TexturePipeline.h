@@ -11,10 +11,13 @@
 // material binding, or LoadTexture).
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
+#include <span>
 #include <string>
 #include <variant>
 #include <vector>
@@ -114,6 +117,27 @@ namespace br::textures
 	// Writes a pipeline texture's processed cache entry on the calling thread, with no GPU and no running
 	// pipeline, so offline tools can finish a cache the renderer then reads as a hit. Throws on failure.
 	TextureConditionResult ConditionTextureOnCpu(const std::shared_ptr<TextureAsset>& texture);
+	// A pipeline texture's pixels as the renderer streams them, every mip on the CPU: its processed cache entry,
+	// conditioned on the calling thread first when it's missing (ConditionTextureOnCpu). A LoadOnly texture is its
+	// decoded source. For offline consumers that must see what the device samples (the opacity micromap bake). Throws
+	// on failure.
+	[[nodiscard]] std::shared_ptr<TextureSourceData> LoadPreparedTextureOnCpu(const std::shared_ptr<TextureAsset>& texture);
+
+	// One level of an RGBA8 mip chain (sRGB or not, as the BC7 it encodes to), rows rowPitch apart.
+	struct Bc7EncodeLevel
+	{
+		std::uint32_t width = 0;
+		std::uint32_t height = 0;
+		std::uint32_t rowPitch = 0;
+		std::span<const std::byte> pixels;
+	};
+	// Encodes a chain to BC7: each level's rows of 4x4 blocks in turn, at least one block a side, as a BC7 texture lays
+	// them out. Called from any thread, and may block. Nothing to leave that chain to DirectXTex.
+	using Bc7BlockEncoder = std::function<std::optional<std::vector<std::byte>>(std::span<const Bc7EncodeLevel> levels)>;
+	// For offline tools with a GPU encoder of their own: CPU processing (ConditionTextureOnCpu, and the CPU taking a
+	// texture the GPU BC7 job can't) encodes BC7 through it instead of DirectXTex's CPU search, which takes minutes for
+	// a large texture. Process-wide; an empty one restores DirectXTex.
+	void SetBc7BlockEncoder(Bc7BlockEncoder encoder);
 
 	// Decodes a request's source to pixels, unprocessed, on the calling thread: for CPU
 	// consumers of texture data (preprocessing tools). Throws on failure.

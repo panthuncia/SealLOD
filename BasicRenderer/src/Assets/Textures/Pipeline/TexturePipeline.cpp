@@ -2,11 +2,15 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <fstream>
 #include <mutex>
 #include <stdexcept>
 #include <unordered_map>
+
+#include <spdlog/spdlog.h>
 
 #include "Assets/Textures/Pipeline/TexturePipelineStages.h"
 #include "Assets/Textures/Processing/TextureProcessingManager.h"
@@ -144,14 +148,51 @@ namespace br::textures
 			return TextureConditionResult::AlreadyCached;
 		}
 		const TextureFileMeta meta = TextureProcessingMeta(request);
-		auto processed = TextureProcessingManager::GetInstance().Process(DecodeTextureSource(request), meta);
+		using Clock = std::chrono::steady_clock;
+		const auto ms = [](Clock::time_point a, Clock::time_point b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+		const auto t0 = Clock::now();
+		const auto source = DecodeTextureSource(request);
+		const auto t1 = Clock::now();
+		auto processed = TextureProcessingManager::GetInstance().Process(source, meta);
+		const auto t2 = Clock::now();
 		const auto result = processed.gpuCompression
 			? TextureProcessingManager::FinalizeOnCpu(processed.prepared, meta)
 			: processed.result;
+		const auto t3 = Clock::now();
 		if (!result || TextureProcessingManager::WriteCache(cacheKey, *result).empty()) {
 			throw std::runtime_error("ConditionTextureOnCpu: could not write the cache for '" + request.source.identity + "'");
 		}
+		const auto t4 = Clock::now();
+		static const bool timing = [] {
+			char* value = nullptr;
+			std::size_t length = 0;
+			const bool on = _dupenv_s(&value, &length, "SARP_TEXTURE_TIMING") == 0 && value && value[0] == '1';
+			std::free(value);
+			return on;
+		}();
+		if (timing) {
+			const auto dims = [](const std::shared_ptr<TextureSourceData>& a_data) {
+				if (!a_data || a_data->desc.imageDimensions.empty()) return std::string("?");
+				return std::to_string(a_data->desc.imageDimensions[0].width) + "x" + std::to_string(a_data->desc.imageDimensions[0].height) + " fmt " +
+					std::to_string(static_cast<int>(a_data->desc.format)) + " subresources " + std::to_string(a_data->subresources.size());
+			};
+			spdlog::warn("Texture timing '{}': source {} -> {}; decode {:.0f} ms, process {:.0f} ms, {} {:.0f} ms, write {:.0f} ms", request.source.identity,
+				dims(source), dims(result), ms(t0, t1), ms(t1, t2), processed.gpuCompression ? "CPU stand-in for GPU BC7" : "finalize (in process)", ms(t2, t3),
+				ms(t3, t4));
+		}
 		return TextureConditionResult::Built;
+	}
+
+	std::shared_ptr<TextureSourceData> LoadPreparedTextureOnCpu(const std::shared_ptr<TextureAsset>& texture)
+	{
+		if (!texture || !texture->IsPipelineTexture()) throw std::runtime_error("LoadPreparedTextureOnCpu: not a pipeline texture");
+		const TextureRequest& request = *texture->PipelineRequest();
+		if (request.preparation == TexturePreparation::LoadOnly) return DecodeTextureSource(request);
+		ConditionTextureOnCpu(texture);
+		const auto path = std::filesystem::path(TextureProcessingManager::ConditionedCachePath(texture->PipelineCacheKey()));
+		auto data = LoadTextureSourceDataFromConditionedCacheFilePath(path.string(), "prepared on the CPU");
+		if (!data) throw std::runtime_error("LoadPreparedTextureOnCpu: could not read the cache for '" + request.source.identity + "'");
+		return data;
 	}
 
 	std::shared_ptr<TextureSourceData> DecodeTextureSource(const TextureRequest& request)

@@ -40,6 +40,15 @@
 #define CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_GENERATION UintRootConstant39
 #define CLOD_WG_DYNAMIC_WIND_VISIBLE_MEMBERSHIP_DESCRIPTOR_INDEX UintRootConstant40
 
+// Bound only when CLOD_RT_VIEW is set: which groups have CLAS, and where to ask for the rest.
+#define CLOD_WG_RT_GROUP_TABLE_DESCRIPTOR_INDEX UintRootConstant43
+#define CLOD_WG_RT_REQUESTS_DESCRIPTOR_INDEX UintRootConstant44
+#define CLOD_WG_RT_REQUEST_COUNTER_DESCRIPTOR_INDEX UintRootConstant45
+#define CLOD_WG_RT_REQUEST_CAPACITY UintRootConstant46
+// Raw: [consumer count, 3 unused][consumers: draw, provider draw][one word per mesh: the first draw + 1 that qualified].
+#define CLOD_WG_RT_COARSE_CUT_DESCRIPTOR_INDEX UintRootConstant47
+#include "clodRayTracingSetupRootConstants.h" // The layout of what this points at.
+
 #define CLOD_WG_FORCED_TRAVERSAL_DEPTH_ROOT_DISABLED 0xFFFFFFFFu
 
 #define CLOD_WG_FLAG_TELEMETRY_ENABLED (1u << 0)

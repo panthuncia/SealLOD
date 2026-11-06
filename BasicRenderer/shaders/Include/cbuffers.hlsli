@@ -169,5 +169,6 @@ bool GetRootEnableShadows() { return UintRootConstant24 != 0u; }
 bool GetRootEnablePunctualLights() { return UintRootConstant25 != 0u; }
 bool GetRootEnableGTAO() { return UintRootConstant26 != 0u; }
 bool GetRootEnableSkybox() { return UintRootConstant27 != 0u; }
+bool GetRootEnableRayTracedSunShadow() { return UintRootConstant28 != 0u; }
 
 #endif // __CBUFFERS_HLSL__

@@ -724,6 +724,12 @@ void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     setRayTracedReflectionsEnabled = settingsManager.getSettingSetter<bool>("enableRayTracedReflections");
     getRayTracedReflectionsEnabled = settingsManager.getSettingGetter<bool>("enableRayTracedReflections");
     m_rayTracedReflectionsEnabled = getRayTracedReflectionsEnabled();
+    setRayTracedShadowsEnabled = settingsManager.getSettingSetter<bool>("enableRayTracedShadows");
+    m_rayTracedShadowsEnabled = settingsManager.getSettingGetter<bool>("enableRayTracedShadows")();
+    setPathTracingEnabled = settingsManager.getSettingSetter<bool>("enablePathTracing");
+    m_pathTracingEnabled = settingsManager.getSettingGetter<bool>("enablePathTracing")();
+    setRayTracedPrimaryVisibilityMode = settingsManager.getSettingSetter<uint32_t>("rayTracedPrimaryVisibilityMode");
+    m_rayTracedPrimaryVisibilityMode = settingsManager.getSettingGetter<uint32_t>("rayTracedPrimaryVisibilityMode")();
     observerSetting(m_rayTracedReflectionsEnabled, "enableRayTracedReflections");
 
     setJitterEnabled = settingsManager.getSettingSetter<bool>("enableJitter");
@@ -1579,8 +1585,20 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
         if (!clodRtSupported) {
             ImGui::BeginDisabled();
         }
+        if (ImGui::Checkbox("Path Tracing (replaces raster)", &m_pathTracingEnabled)) {
+            setPathTracingEnabled(m_pathTracingEnabled);
+        }
         if (ImGui::Checkbox("Enable Ray Traced Reflections", &m_rayTracedReflectionsEnabled)) {
             setRayTracedReflectionsEnabled(m_rayTracedReflectionsEnabled);
+        }
+        if (ImGui::Checkbox("Enable Ray Traced Sun Shadows", &m_rayTracedShadowsEnabled)) {
+            setRayTracedShadowsEnabled(m_rayTracedShadowsEnabled);
+        }
+        constexpr const char* primaryVisibilityModes[] = { "Raster", "Ray traced", "Raster, compare against rays (see log)" };
+        int primaryVisibilityMode = static_cast<int>(m_rayTracedPrimaryVisibilityMode);
+        if (ImGui::Combo("Primary Visibility", &primaryVisibilityMode, primaryVisibilityModes, IM_ARRAYSIZE(primaryVisibilityModes))) {
+            m_rayTracedPrimaryVisibilityMode = static_cast<uint32_t>(primaryVisibilityMode);
+            setRayTracedPrimaryVisibilityMode(m_rayTracedPrimaryVisibilityMode);
         }
         if (!clodRtSupported) {
             ImGui::EndDisabled();
@@ -1597,16 +1615,13 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
         if (context.clodRayTracingSystem) {
             const auto& clodRtStats = context.clodRayTracingSystem->GetStats();
             ImGui::TextDisabled(
-                "CLod RT: groups %u pages %u clusters %u, GPU %s, CLAS %s, BLAS %s, TLAS %s, pipeline %s, trace %s",
-                clodRtStats.residentGroups,
-                clodRtStats.residentPages,
-                clodRtStats.buildableClusters,
-                clodRtStats.gpuResourcesReady ? "yes" : "no",
-                clodRtStats.clasBuildSubmitted ? "yes" : "no",
-                clodRtStats.blasBuildSubmitted ? "yes" : "no",
-                clodRtStats.tlasBuildSubmitted ? "yes" : "no",
-                clodRtStats.rayPipelineReady ? "yes" : "no",
-                clodRtStats.traceRaysSubmitted ? "yes" : "no");
+                "CLod RT: %u instances, %u clusters, CLAS %llu/%llu MiB (%u groups), %llu MiB",
+                clodRtStats.instances,
+                clodRtStats.clustersInBvh,
+                static_cast<unsigned long long>(clodRtStats.clasBytesUsed >> 20u),
+                static_cast<unsigned long long>(clodRtStats.clasPoolBytes >> 20u),
+                clodRtStats.cachedGroups,
+                static_cast<unsigned long long>(clodRtStats.totalMemoryBytes >> 20u));
         }
         if (ImGui::Checkbox("Enable Jitter", &m_jitterEnabled)) {
             setJitterEnabled(m_jitterEnabled);
@@ -1616,6 +1631,13 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
         if (ImGui::CollapsingHeader("Display and Assets")) {
         DrawWindowResolutionCombo();
         DrawUpscalingCombo();
+        if (UpscalingManager::GetInstance().IsRayReconstructionSupported()) {
+            bool rayReconstruction = m_currentUpscalingMode == UpscalingMode::DLSSRayReconstruction;
+            if (ImGui::Checkbox("DLSS Ray Reconstruction", &rayReconstruction)) {
+                m_currentUpscalingMode = rayReconstruction ? UpscalingMode::DLSSRayReconstruction : UpscalingMode::DLSS;
+                setUpscalingMode(m_currentUpscalingMode);
+            }
+        }
         if (ImGui::Checkbox("Dilated Motion Vectors", &m_dilatedMotionVectorsEnabled)) {
             setDilatedMotionVectorsEnabled(m_dilatedMotionVectorsEnabled);
         }

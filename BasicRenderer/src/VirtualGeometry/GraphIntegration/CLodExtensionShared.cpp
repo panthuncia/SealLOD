@@ -22,6 +22,15 @@ flecs::entity EnsureAlphaBlendTag(flecs::world& ecsWorld)
     return ecsWorld.entity<CLodExtensionAlphaBlendTag>();
 }
 
+flecs::entity EnsureRayTracingTag(flecs::world& ecsWorld)
+{
+    if (!ecsWorld.component<CLodExtensionRayTracingTag>().has(flecs::Exclusive)) {
+        ecsWorld.component<CLodExtensionRayTracingTag>().add(flecs::Exclusive);
+        ecsWorld.add<CLodExtensionRayTracingTag>();
+    }
+    return ecsWorld.entity<CLodExtensionRayTracingTag>();
+}
+
 flecs::entity EnsureShadowTag(flecs::world& ecsWorld)
 {
     if (!ecsWorld.component<CLodExtensionShadowTag>().has(flecs::Exclusive)) {
@@ -33,7 +42,7 @@ flecs::entity EnsureShadowTag(flecs::world& ecsWorld)
 
 const CLodVariantTraits& GetVariantTraits(CLodExtensionType type)
 {
-    static const std::array<CLodVariantTraits, 3> kTraits = {{
+    static const std::array<CLodVariantTraits, 4> kTraits = {{
         {
             CLodExtensionType::VisiblityBuffer,
             &EnsureVisibilityBufferTag,
@@ -68,6 +77,20 @@ const CLodVariantTraits& GetVariantTraits(CLodExtensionType type)
             Engine::Primary::ShadowMapsPass,
             CLodRasterOutputKind::VirtualShadow,
             CLodVariantTraits::ScheduleMode::TwoPassVisibility,
+            false,
+            false,
+            false,
+            true
+        },
+        {
+            // Selects clusters for the BVH. Nothing is rasterized from this list.
+            CLodExtensionType::RayTracing,
+            &EnsureRayTracingTag,
+            "CLodRayTracing::",
+            "CLod[RayTracing] ",
+            Engine::Primary::GBufferPass,
+            CLodRasterOutputKind::VisibilityBuffer,
+            CLodVariantTraits::ScheduleMode::SinglePassCullOnly,
             false,
             false,
             false,

@@ -32,6 +32,7 @@ struct CLodVariantTraits {
 flecs::entity EnsureVisibilityBufferTag(flecs::world& ecsWorld);
 flecs::entity EnsureAlphaBlendTag(flecs::world& ecsWorld);
 flecs::entity EnsureShadowTag(flecs::world& ecsWorld);
+flecs::entity EnsureRayTracingTag(flecs::world& ecsWorld);
 
 const CLodVariantTraits& GetVariantTraits(CLodExtensionType type);
 std::string MakeVariantPassName(const CLodVariantTraits& traits, std::string_view suffix);

@@ -572,7 +572,8 @@ struct MaterialInfo {
     float4 glintParameters;
     uint glintEnabled;
     uint diagnosticReason;
-    uint2 padGlint;
+    uint ommIdentity; // Opacity micromaps baked for this material (CLodOpacityMicromapCache.h), else 0.
+    uint padOmm;
 };
 
 struct MaterialEvalInfo {

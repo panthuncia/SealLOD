@@ -61,7 +61,9 @@ int main(int argc, char** argv) {
     const fs::path mesh = clod / L"scene" / L"Mesh_A.clodbin";
     const fs::path meta = clod / L"scene" / L"Mesh_A.clodmeta";
     const fs::path nif = clod / L"nif" / L"tree.nifmeta";
+    const fs::path mesh_b = clod / L"scene" / L"Mesh_B.clodbin";
     const fs::path changes = fs::path(clod / L"world.sarppack.changes");
+    const fs::path pack = clod / L"world.sarppack";
     const std::string_view step = argc > 1 ? std::string_view(argv[1]) : std::string_view{};
     std::string summary;
     CachePack::Entry entry{};
@@ -83,6 +85,17 @@ int main(int argc, char** argv) {
         WriteFile(mesh, "container v2");
         RunStep(L"rebuild");
         RunStep(L"after-rebuild");
+        // Builds after the first update the pack where it lies.
+        RunStep(L"unchanged");
+        WriteFile(mesh_b, "second mesh");
+        RunStep(L"rewrite-meta");
+        RunStep(L"update");
+        RunStep(L"after-update");
+        fs::remove(nif, ec);
+        RunStep(L"update");
+        RunStep(L"after-removal");
+        RunStep(L"full-rewrite");
+        RunStep(L"after-removal");
         fs::remove_all(root, ec);
         if (g_failures == 0) {
             std::puts("CachePackTests: all passed");
@@ -119,6 +132,30 @@ int main(int argc, char** argv) {
         Check(!fs::exists(changes), "a rebuild forgets stale entries");
     } else if (step == "after-rebuild") {
         Check(Holds(mesh, "container v2"), "a rebuild picks up the rewritten file");
+    } else if (step == "unchanged") {
+        const auto before = fs::last_write_time(pack);
+        Check(CachePack::Build(summary), "a build with nothing changed succeeds");
+        Check(summary.find("up to date") != std::string::npos, "a build with nothing changed says so");
+        Check(fs::last_write_time(pack) == before, "a build with nothing changed writes nothing");
+    } else if (step == "rewrite-meta") {
+        // The same size, so only the noted change tells the build it's stale.
+        WriteFile(meta, "METADATA");
+        CachePack::NoteFileChanged(meta);
+    } else if (step == "update") {
+        Check(CachePack::Build(summary), "an update succeeds");
+        Check(summary.find("in place") != std::string::npos, "a small change updates the pack in place");
+        Check(!fs::exists(changes), "an update forgets stale entries");
+    } else if (step == "after-update") {
+        Check(Holds(mesh_b, "second mesh"), "an update adds a new file");
+        Check(Holds(meta, "METADATA"), "an update replaces a rewritten file of the same size");
+        Check(Holds(mesh, "container v2"), "an update keeps the files it didn't touch");
+        Check(Holds(nif, "nif data"), "an update keeps every other file");
+    } else if (step == "after-removal") {
+        Check(!CachePack::Find(nif, entry), "a deleted file leaves the pack");
+        Check(Holds(mesh, "container v2") && Holds(mesh_b, "second mesh") && Holds(meta, "METADATA"), "the rest stay");
+    } else if (step == "full-rewrite") {
+        Check(CachePack::Build(summary, true), "a full rewrite succeeds");
+        Check(summary.find("in place") == std::string::npos, "a full rewrite rewrites");
     } else {
         Check(false, "unknown step");
     }

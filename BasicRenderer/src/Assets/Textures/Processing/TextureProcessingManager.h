@@ -69,6 +69,7 @@ public:
 	std::optional<rhi::Format> PredictedFormat(const TextureFileMeta& meta) const;
 	static std::wstring ConditionedCachePath(const std::string& cacheKey);
 	ProcessedSource Process(const std::shared_ptr<TextureSourceData>& source, const TextureFileMeta& meta) const;
+	// Finishes a texture Process left to the GPU BC7 job (gpuCompression), on the CPU instead: the same mode-6 BC7.
 	static std::shared_ptr<TextureSourceData> FinalizeOnCpu(
 		const std::shared_ptr<TextureSourceData>& prepared, const TextureFileMeta& meta);
 	// Writes the processed texture to the cache; the conditioned cache path, empty on failure.

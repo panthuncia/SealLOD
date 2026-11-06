@@ -9,7 +9,6 @@
       "features": [ "dx12-binding", "vulkan-binding", "win32-binding" ]
     },
     "directx-headers",
-    "directx12-agility",
     "flecs",
     "nlohmann-json",
     "sqlite3",

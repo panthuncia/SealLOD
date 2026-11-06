@@ -329,7 +329,7 @@ ClodResolvedSurface CLodResolveInterpolateSurface(
     float3 dpdx = 0.0f.xxx;
     float3 dpdy = 0.0f.xxx;
     uint derivativeMaterialFlags = MATERIAL_NORMAL_MAP | MATERIAL_PARALLAX;
-#if defined(PSO_TERRAIN)
+#if defined(PSO_TERRAIN) || defined(CLOD_RESOLVE_PATH_HIT)
     derivativeMaterialFlags |= MATERIAL_TERRAIN;
 #endif
     if ((materialFlags & derivativeMaterialFlags) != 0u)
@@ -403,6 +403,9 @@ MaterialInputs CLodResolveEvaluateMaterial(
     bool isReyesPatch,
     bool useReyesGeometricNormal,
     float reyesObjectNormalMapBlend,
+#if defined(CLOD_RESOLVE_PATH_HIT)
+    bool isTerrain, // A literal at each closest-hit entry, so after inlining the other branch is gone.
+#endif
     inout ClodResolvedSurface surface,
     out float2 materialDebugUv,
     out float materialDebugUvValid,
@@ -426,16 +429,22 @@ MaterialInputs CLodResolveEvaluateMaterial(
     const float4 tangentWS = surface.tangentWS;
 
     MaterialInputs materialInputs;
-#if defined(PSO_TERRAIN)
+#if defined(CLOD_RESOLVE_PATH_HIT)
+    if (isTerrain)
+    {
+#endif
+#if defined(PSO_TERRAIN) || defined(CLOD_RESOLVE_PATH_HIT)
     if (!isReyesPatch)
     {
         float3 terrainDpdxWS;
         float3 terrainDpdyWS;
+#if !defined(CLOD_RESOLVE_RAY_HIT) // This reprojects the camera ray through the pixel, which isn't this ray.
         if (CLodResolveEstimateTerrainTangentPlaneDerivatives(cam, pixel, winSize, worldPosition, worldNormal, terrainDpdxWS, terrainDpdyWS))
         {
             dpdx = terrainDpdxWS;
             dpdy = terrainDpdyWS;
         }
+#endif
     }
 
     materialInputs = (MaterialInputs)0;
@@ -469,7 +478,13 @@ MaterialInputs CLodResolveEvaluateMaterial(
             }
         }
     }
-#else
+#endif
+#if defined(CLOD_RESOLVE_PATH_HIT)
+    }
+    else
+    {
+#endif
+#if !defined(PSO_TERRAIN) || defined(CLOD_RESOLVE_PATH_HIT)
     const bool isObjectTriplanarMaterial = (materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u;
     const bool needsObjectSpaceNormalUv =
         (materialFlags & (MATERIAL_NORMAL_MAP | MATERIAL_OBJECT_SPACE_NORMAL_MAP)) ==
@@ -571,9 +586,7 @@ MaterialInputs CLodResolveEvaluateMaterial(
             materialInputs);
     }
     #endif
-#endif
 
-#if !defined(PSO_TERRAIN)
     if (needsObjectSpaceNormalUv)
     {
 #if defined(PSO_NORMAL_MAP)
@@ -602,12 +615,17 @@ MaterialInputs CLodResolveEvaluateMaterial(
         materialInputs.normalWS = normalize(lerp(worldNormal, materialNormalWS, reyesObjectNormalMapBlend));
     }
 #endif
+#if defined(CLOD_RESOLVE_PATH_HIT)
+    }
+#endif
 
     surface.dpdx = dpdx;
     surface.dpdy = dpdy;
     return materialInputs;
 }
 
+// Path hits resolve in pathTracingHit.hlsli: they have no visibility key, and this path reaches wave ops and Reyes.
+#if !defined(CLOD_RESOLVE_PATH_HIT)
 bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool isBackface, out ClodResolvedCommonSample sample)
 {
     sample = (ClodResolvedCommonSample)0;
@@ -650,15 +668,19 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     {
         return false;
     }
-#else
+#elif !defined(CLOD_RESOLVE_RAY_HIT) // A ray hit has no index into the visible cluster buffer to range check.
     if (clusterIndex >= VISBUF_REYES_PATCH_INDEX_BASE)
     {
         return false;
     }
 #endif
 
+#if defined(CLOD_RESOLVE_RAY_HIT)
+    const uint4 packedVisibleCluster = g_clodRtPackedCluster;
+#else
     ByteAddressBuffer visibleClusterBuffer = ResourceDescriptorHeap[VISBUF_VISIBLE_CLUSTERS_BUFFER_DESCRIPTOR_INDEX];
     const uint4 packedVisibleCluster = CLodLoadVisibleClusterPacked(visibleClusterBuffer, clusterIndex);
+#endif
 #if defined(PSO_CLOD_VOXEL)
     if (!CLodVisibleClusterIsVoxel(packedVisibleCluster))
     {
@@ -680,12 +702,14 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
 #endif
 
     uint assemblyTransformIndex = CLOD_ASSEMBLY_TRANSFORM_SENTINEL;
+#if !defined(CLOD_RESOLVE_RAY_HIT)
     if (VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX != 0xFFFFFFFFu)
     {
         StructuredBuffer<uint> visibleClusterTransformIndices =
             ResourceDescriptorHeap[VISBUF_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
         assemblyTransformIndex = visibleClusterTransformIndices[clusterIndex];
     }
+#endif
 
     MeshletResolveData md = LoadMeshletResolveData_Wave(clusterIndex);
     if (meshletTriangleIndex >= md.triangleCount)
@@ -800,7 +824,20 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     float2 pixelUv = (float2(pixel) + 0.5f) / winSize;
     float2 pixelNdc = float2(pixelUv.x * 2.0f - 1.0f, (1.0f - pixelUv.y) * 2.0f - 1.0f);
 
+#if defined(CLOD_RESOLVE_RAY_HIT)
+    // Barycentrics come from the hit. Gradients come from the width of the ray cone against the triangle edges, so
+    // textures pick a mip for what the ray can actually resolve.
+    const float3 rayHitEdge1 = mul(float4(evalPos1 - evalPos0, 0.0f), obj.model).xyz;
+    const float3 rayHitEdge2 = mul(float4(evalPos2 - evalPos0, 0.0f), obj.model).xyz;
+    const float rayHitDx = g_clodRtConeWidth / max(length(rayHitEdge1), 1e-5f);
+    const float rayHitDy = g_clodRtConeWidth / max(length(rayHitEdge2), 1e-5f);
+    BarycentricDeriv bary;
+    bary.m_lambda = float3(1.0f - g_clodRtBarycentrics.x - g_clodRtBarycentrics.y, g_clodRtBarycentrics.x, g_clodRtBarycentrics.y);
+    bary.m_ddx = float3(-rayHitDx, rayHitDx, 0.0f);
+    bary.m_ddy = float3(-rayHitDy, 0.0f, rayHitDy);
+#else
     BarycentricDeriv bary = CalcFullBary(clip0, clip1, clip2, pixelNdc, winSize);
+#endif
     BarycentricDeriv positionBary = bary;
     if (isReyesPatch)
     {
@@ -1036,5 +1073,6 @@ bool ResolveClodSampleFromVisKey(uint64_t vis, uint2 pixel, out ClodResolvedSamp
 {
     return ResolveClodSampleFromVisKeyWithFace(vis, pixel, false, sample);
 }
+#endif // !CLOD_RESOLVE_PATH_HIT
 
 #endif // __CLOD_RESOLVE_COMMON_HLSLI__

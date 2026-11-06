@@ -28,6 +28,10 @@ namespace CachePack {
 	// Writers call this after changing or deleting a cache file, so a stale entry is never served. Persistent.
 	void NoteFileChanged(const std::filesystem::path& cachePath);
 
-	// Packs every artifact under cache/clod, replacing the pack and forgetting noted changes.
+	// Packs every artifact under cache/clod and forgets noted changes. An existing pack is updated where it lies: new and
+	// rewritten files are appended and the rest keep their place, or nothing is written when nothing changed. It is
+	// rewritten whole when there is none, or when bytes it no longer indexes would pass a quarter of it; a_rewrite
+	// always rewrites it, in an order that keeps each mesh's files together.
 	bool Build(std::string& outSummary);
+	bool Build(std::string& outSummary, bool rewrite);
 }

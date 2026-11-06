@@ -91,6 +91,7 @@ struct ComputeCullingBindings {
     uint32_t maxVisibleClusters = 0u;
     bool isFirstPass = true;
     bool perViewDepthOcclusion = false;
+    uint32_t rtGroupTable = 0u, rtRequests = 0u, rtRequestCounter = 0u, rtRequestCapacity = 0u, rtCoarseCut = 0u;
 };
 
 struct ComputeCullingFrame {

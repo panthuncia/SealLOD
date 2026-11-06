@@ -1147,6 +1147,12 @@ float3 TerrainRvtParallaxPosition(
     out bool applied)
 {
     applied = false;
+#if defined(CLOD_RESOLVE_PATH_HIT)
+    if (!g_clodPathHitIsPrimary) // The view below is the main camera's, which isn't where this ray came from.
+    {
+        return positionWS;
+    }
+#endif
     ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     const bool terrainGeometricDisplacementEnabled = (materialFlags & MATERIAL_GEOMETRIC_DISPLACEMENT) != 0u;
     if (terrainGeometricDisplacementEnabled ||
@@ -1578,9 +1584,11 @@ void ApplyTerrainMaterialInternal(
         inputs.ambientOcclusion = rvtSample.ambientOcclusion;
         inputs.opacity = 1.0f;
         inputs.emissive = 0.0f.xxx;
+#if !defined(CLOD_RESOLVE_PATH_HIT)
         TerrainGlintSample rvtGlint = TerrainSampleDominantGlint(terrainSetIndex, rvtSamplePositionWS);
         inputs.glintEnabled = rvtGlint.enabled;
         inputs.glintParameters = rvtGlint.parameters;
+#endif
         inputs.terrainRvtDebugFlags = 0x3u;
         inputs.terrainRvtRequestedMip = rvtSample.requestedMip;
         inputs.terrainRvtResidentMip = rvtSample.residentMip;
@@ -1663,6 +1671,9 @@ void ApplyTerrainMaterialInternal(
         perFrameBuffer.parallaxOcclusionMappingEnabled != 0u &&
         perFrameBuffer.terrainParallaxOcclusionMappingEnabled != 0u &&
         perFrameBuffer.terrainParallaxHeightScale > 0.0f;
+#if defined(CLOD_RESOLVE_PATH_HIT)
+    terrainParallaxEnabled = terrainParallaxEnabled && g_clodPathHitIsPrimary;
+#endif
     uint terrainParallaxMaxSteps = clamp(perFrameBuffer.terrainParallaxMaxSteps, 4u, 64u);
     if (terrain.regionSizeWorld <= 0.0f ||
         terrain.regionCountX == 0u || terrain.regionCountY == 0u || terrain.layerCount == 0u)
