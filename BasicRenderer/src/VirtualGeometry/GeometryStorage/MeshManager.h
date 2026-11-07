@@ -2,6 +2,7 @@
 
 #include <tbb/concurrent_queue.h>
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <functional>
@@ -117,11 +118,8 @@ public:
 	void PatchCLodGroupError(uint32_t groupGlobalIndex, float error);
 
 	br::render::CLodStreamingDebugStats GetCLodStreamingDebugStats() const;
-	void GetCLodRayTracingResidencySnapshot(br::render::CLodRayTracingResidencySnapshot& outSnapshot) const;
-	// False when the group isn't resident right now.
+	// False when the group isn't resident right now. Takes no lock that publication holds.
 	bool GetCLodRayTracingGroup(uint32_t groupGlobalIndex, br::render::CLodRayTracingGroupLookup& out) const;
-	// Whether the pages a group's CLAS was built from are still its pages.
-	bool IsCLodRayTracingGroupCurrent(const std::shared_ptr<const void>& owner, uint32_t localGroupIndex, uint32_t firstPageId) const;
 	void ProcessCLodDiskStreamingIO();
 
 	// Drains groups that completed disk streaming since the last call.
@@ -302,6 +300,36 @@ private:
 		std::shared_ptr<CLodSharedStreamingState> state;
 	};
 
+	// Global group index -> shared streaming state, readable from any thread without a lock. Writers hold
+	// m_staticTemplatePublicationMutex. The index space is cut into chunks of 4096 groups; each chunk holds the ranges
+	// that overlap it, sorted by begin, as an immutable vector swapped in atomically. A write therefore costs the
+	// chunks its range touches, never the scene, and a read is one atomic load and a binary search.
+	class CLodGroupRangeIndex {
+	public:
+		CLodGroupRangeIndex() = default;
+		CLodGroupRangeIndex(const CLodGroupRangeIndex&) = delete;
+		CLodGroupRangeIndex& operator=(const CLodGroupRangeIndex&) = delete;
+		~CLodGroupRangeIndex();
+		void Insert(const CLodSharedStreamingRange& range);
+		// Removes the range [begin, end) if it still belongs to state.
+		void Remove(uint32_t begin, uint32_t end, const CLodSharedStreamingState* state);
+		std::shared_ptr<CLodSharedStreamingState> Find(uint32_t groupGlobalIndex, uint32_t& outGroupLocalIndex) const;
+
+	private:
+		using Chunk = std::vector<CLodSharedStreamingRange>;
+		using ChunkSlot = std::atomic<std::shared_ptr<const Chunk>>;
+		static constexpr uint32_t kChunkShift = 12u;
+		static constexpr uint32_t kBlockShift = 10u;
+		static constexpr uint32_t kBlockCount = 256u; // 2^30 groups.
+		struct Block {
+			std::array<ChunkSlot, 1u << kBlockShift> chunks;
+		};
+		ChunkSlot* WritableSlot(uint32_t chunk);
+		const ChunkSlot* ReadableSlot(uint32_t chunk) const;
+		template <typename Edit> void EditChunks(uint32_t begin, uint32_t end, Edit&& edit);
+		std::array<std::atomic<Block*>, kBlockCount> m_blocks{};
+	};
+
 	struct CLodStreamingInstanceState {
 		MeshInstance* instance = nullptr;
 		uint32_t meshInstanceIndex = 0;
@@ -348,8 +376,7 @@ private:
 	std::uint32_t m_geometryFramesInFlight = 1;
 	SkeletonManager* m_skeletonManager = nullptr;
 	std::unordered_map<const Skeleton*, std::shared_ptr<Skeleton>> m_windTypeSkeletons;
-	std::vector<CLodSharedStreamingRange> m_clodSharedStreamingRanges;
-	bool m_clodSharedStreamingRangesDirty = true;
+	CLodGroupRangeIndex m_clodGroupRangeIndex;
 	mutable std::mutex m_clodStreamingDomainEventsMutex;
 	std::vector<br::render::CLodStreamingDomainEvent> m_clodStreamingDomainEvents;
 	std::atomic<uint64_t> m_clodStreamingDomainEventGeneration{0};
@@ -503,13 +530,14 @@ private:
  	static void ZeroCLodGroupChunkCounts(ClusterLODGroupChunk& chunk);
 	bool ApplyCLodGroupEviction(CLodSharedStreamingState& state, uint32_t groupLocalIndex, bool clearPageMapEntries);
 
-	void RebuildCLodSharedStreamingRangeIndex();
 	void PublishCLodStreamingDomainEvent(br::render::CLodStreamingDomainEvent event);
 	void EnqueueGeometryResidencyDelta(br::render::GeometryResidencyDelta delta);
 	void PublishGeometryResidencyDelta(const br::render::CLodStreamingDomainEvent& event);
 	void PublishCLodStreamingDomainEventForSharedState(br::render::CLodStreamingDomainEventKind kind, const std::shared_ptr<CLodSharedStreamingState>& sharedState);
 	void RecomputeCLodActiveMaxTraversalDepth();
-	std::shared_ptr<CLodSharedStreamingState> FindCLodSharedStreamingStateByGlobalGroup(uint32_t groupGlobalIndex, uint32_t& outGroupLocalIndex);
+	std::shared_ptr<CLodSharedStreamingState> FindCLodSharedStreamingStateByGlobalGroup(uint32_t groupGlobalIndex, uint32_t& outGroupLocalIndex) const {
+		return m_clodGroupRangeIndex.Find(groupGlobalIndex, outGroupLocalIndex);
+	}
 	std::vector<uint32_t> GetCLodGroupMeshPageIndices(const CLodSharedStreamingState& state, uint32_t groupLocalIndex) const;
 	std::vector<uint32_t> GetCLodGroupPageMapOffsets(const CLodSharedStreamingState& state, uint32_t groupLocalIndex) const;
 

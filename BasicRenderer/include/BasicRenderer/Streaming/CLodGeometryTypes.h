@@ -46,24 +46,18 @@ struct CLodRayTracingResidentGroup {
 	ClusterLODGroup group{};
 	ClusterLODGroupChunk chunk{};
 	std::vector<ClusterLODGroupSegment> segments;
-	std::vector<uint32_t> meshPageIndices;
 	std::vector<PagePool::PageAllocation> pageAllocations;
 };
 
 struct CLodRayTracingGroupLookup {
 	CLodRayTracingResidentGroup group;
 	std::shared_ptr<PagePool> pagePool;
-	// Identifies the group's streaming state for IsCLodRayTracingGroupCurrent.
+	// The group's streaming state.
 	std::shared_ptr<const void> owner;
 	// The mesh's .clodbin, beside which its baked opacity micromaps are (CLodOpacityMicromapCache.h). Empty when unknown.
 	std::wstring containerPath;
 };
 
-struct CLodRayTracingResidencySnapshot {
-	std::vector<CLodRayTracingResidentGroup> residentGroups;
-	std::shared_ptr<PagePool> pagePool;
-	uint64_t pagePoolGeneration = 0;
-};
 
 struct CLodPrefetchedChildLayout {
 	uint32_t groupGlobalIndex = 0;

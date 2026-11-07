@@ -227,10 +227,6 @@ ComputeCullingBindings ComputeCullingPass::Declare(org::PassBuilder& builder)
     bindings.maxVisibleClusters = m_config.maxVisibleClusters;
     bindings.isFirstPass = m_config.isFirstPass;
     bindings.perViewDepthOcclusion = m_config.UsesPerViewDepthOcclusion();
-    bindings.rtGroupTable = m_config.rtGroupTableDescriptor;
-    bindings.rtRequests = m_config.rtRequestsDescriptor;
-    bindings.rtRequestCounter = m_config.rtRequestCounterDescriptor;
-    bindings.rtRequestCapacity = m_config.rtRequestCapacity;
     bindings.rtCoarseCut = m_config.rtCoarseCutDescriptor;
     const auto uav = [&](const auto& resource) { return builder.UnorderedAccess(resource).View(); };
     bindings.visibleClusters = uav(outputs.visibleClusters);

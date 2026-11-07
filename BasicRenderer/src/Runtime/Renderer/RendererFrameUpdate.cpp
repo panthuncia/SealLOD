@@ -12,6 +12,8 @@
 
 #define _USE_MATH_DEFINES
 #include <optional>
+#include <chrono>
+#include <algorithm>
 #include <math.h>
 #include <atlbase.h>
 #include <cstdio>
@@ -280,7 +282,16 @@ void Renderer::Update(float elapsedSeconds) {
 
     runCapturedStage("WaitForFrame", [&]() {
         BT_ZONE_SCOPE("Renderer::Update::WaitForFrame");
+        const auto waitBegin = std::chrono::steady_clock::now();
         WaitForFrame(m_preparationFrameIndex);
+        m_lastWaitForFrameMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waitBegin).count();
+        // Here, not in FrameMaintenance: Update can return before that (publication backpressure). The passes follow there.
+        if (m_lastWaitForFrameMs > 50.0) {
+            org::runtime::MemoryBudgetStats memory{};
+            if (auto* statisticsService = m_orgRuntime->Statistics().get()) memory = statisticsService->GetMemoryBudgetStats();
+            spdlog::warn("Renderer hitch: frame {} waited {:.1f} ms for the GPU; VRAM {} of {} MiB", m_totalFramesRendered, m_lastWaitForFrameMs,
+                memory.usageBytes >> 20u, memory.budgetBytes >> 20u);
+        }
         if (m_pObjectManager) {
             const std::uint64_t retireDelayFrames = static_cast<std::uint64_t>(m_numFramesInFlight) + 1u;
             const std::uint64_t safeFrameNumber = m_totalFramesRendered > retireDelayFrames
@@ -1532,8 +1543,39 @@ void Renderer::Update(float elapsedSeconds) {
         if (currentRenderGraph) {
             BT_ZONE_SCOPE("Renderer::Update::FrameStatistics");
             if (auto* statisticsService = m_orgRuntime->Statistics().get()) {
+                // A long wait means the GPU fell a whole backlog behind. Only then, name the slowest passes of the frame
+                // just waited for, per queue, and how much of the queue's span they leave idle.
+                constexpr double kHitchWaitMs = 50.0;
+                const bool hitch = m_lastWaitForFrameMs > kHitchWaitMs;
+                std::string hitchReport;
+                const auto describeQueue = [&](const char* queueName) {
+                    const auto& stamps = statisticsService->GetCompletedTimestamps();
+                    if (stamps.empty()) return;
+                    uint64_t first = UINT64_MAX;
+                    uint64_t last = 0u;
+                    double busyMs = 0.0;
+                    double ticksToMs = 0.0;
+                    std::vector<const org::runtime::CompletedTimestamp*> passes;
+                    for (const auto& stamp : stamps) {
+                        if (stamp.kind != org::runtime::TimestampRangeKind::Pass || stamp.endTick <= stamp.beginTick) continue;
+                        first = (std::min)(first, stamp.beginTick);
+                        last = (std::max)(last, stamp.endTick);
+                        busyMs += stamp.milliseconds;
+                        if (ticksToMs == 0.0) ticksToMs = stamp.milliseconds / static_cast<double>(stamp.endTick - stamp.beginTick);
+                        passes.push_back(&stamp);
+                    }
+                    if (passes.empty()) return;
+                    std::sort(passes.begin(), passes.end(), [](const auto* a, const auto* b) { return a->milliseconds > b->milliseconds; });
+                    hitchReport += fmt::format(" | {} span {:.1f} ms, passes {:.1f} ms:", queueName, static_cast<double>(last - first) * ticksToMs, busyMs);
+                    for (size_t i = 0; i < passes.size() && i < 6u; ++i) hitchReport += fmt::format(" {}={:.2f}", passes[i]->name, passes[i]->milliseconds);
+                };
                 statisticsService->OnFrameComplete(m_frameIndex, computeQueue); // Gather statistics for the last iteration of the frame
+                if (hitch) describeQueue("compute");
                 statisticsService->OnFrameComplete(m_frameIndex, graphicsQueue); // Gather statistics for the last iteration of the frame
+                if (hitch) {
+                    describeQueue("graphics");
+                    spdlog::warn("Renderer hitch passes: frame {}{}", m_totalFramesRendered, hitchReport);
+                }
             }
         }
         });

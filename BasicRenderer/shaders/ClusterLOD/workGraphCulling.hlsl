@@ -2471,6 +2471,7 @@ bool CLodInstanceRootWantsTraversal(
 
 #include "include/clodRayTracingCoverage.hlsli"
 
+
 bool CLodGroupIsResident(uint groupGlobalIndex)
 {
     StructuredBuffer<CLodStreamingRuntimeState> runtimeState =
@@ -2541,30 +2542,16 @@ void CLodRequestGroupLoad(
 }
 
 #if CLOD_RT_VIEW
-bool CLodRtGroupHasClas(uint groupGlobalIndex)
-{
-    StructuredBuffer<uint2> groupTable = ResourceDescriptorHeap[CLOD_WG_RT_GROUP_TABLE_DESCRIPTOR_INDEX];
-    uint tableElements = 0u;
-    uint tableStride = 0u;
-    groupTable.GetDimensions(tableElements, tableStride);
-    return groupGlobalIndex < tableElements && groupTable[groupGlobalIndex].y != 0u;
-}
+#include "include/clodRayTracingGroups.hlsli"
 
-// A request names the alpha-tested material that asked, if any, which opacity micromaps are baked against.
-void CLodRtRequestClas(uint groupGlobalIndex, uint meshBufferIndex)
+// Whether a CLAS can be built from a resident group at all: a property of the group, not of the CLAS cache, which this
+// view never consults. The cache builds what this view's cluster list ends up naming (rayTracingSceneBuild.hlsl), so a
+// group that could never have a CLAS is treated as not resident, and its coarser parent stands in.
+bool CLodRtGroupUsable(ClusterLODGroup group)
 {
-    RWStructuredBuffer<uint2> requests = ResourceDescriptorHeap[CLOD_WG_RT_REQUESTS_DESCRIPTOR_INDEX];
-    RWStructuredBuffer<uint> requestCounter = ResourceDescriptorHeap[CLOD_WG_RT_REQUEST_COUNTER_DESCRIPTOR_INDEX];
-    uint slot = 0u;
-    InterlockedAdd(requestCounter[0], 1u, slot);
-    if (slot < CLOD_WG_RT_REQUEST_CAPACITY) {
-        StructuredBuffer<PerMeshBuffer> perMeshBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
-        StructuredBuffer<MaterialInfo> materials = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
-        // With the micromaps an alpha-tested draw's material can use: their identity (CLodOpacityMicromapCache.h), else 0.
-        const MaterialInfo material = materials[perMeshBuffer[meshBufferIndex].materialDataIndex];
-        const bool alphaTested = (material.materialFlags & MATERIAL_ALPHA_TEST) != 0u;
-        requests[slot] = uint2(groupGlobalIndex, alphaTested ? material.ommIdentity : 0u);
-    }
+    uint slab = 0u;
+    uint offset = 0u;
+    return CLodRtGroupBuildable(group, CLodRtGroupClusterCount(group), slab, offset);
 }
 #endif
 
@@ -2592,9 +2579,8 @@ bool CLodTouchAndRequestGroupResident(
     {
         WGTelemetryAdd(WG_COUNTER_STREAM_RESIDENT_HITS, 1u);
 #if CLOD_RT_VIEW
-        if (!CLodRtGroupHasClas(groupGlobalIndex))
+        if (!CLodRtGroupUsable(group))
         {
-            CLodRtRequestClas(groupGlobalIndex, meshBufferIndex);
             return false;
         }
 #endif

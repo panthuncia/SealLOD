@@ -1731,12 +1731,7 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
                 config.rayTracingView = true;
                 config.rayTracingViewStreams = m_options.rayTracedPrimaryVisibility || m_options.pathTraced;
                 config.rayTracingViewPathTraced = m_options.pathTraced;
-                const auto descriptors = m_options.rayTracingSystem->GetCullingDescriptors();
-                config.rtGroupTableDescriptor = descriptors.groupTable;
-                config.rtRequestsDescriptor = descriptors.requests;
-                config.rtRequestCounterDescriptor = descriptors.requestCounter;
-                config.rtRequestCapacity = descriptors.requestCapacity;
-                config.rtCoarseCutDescriptor = descriptors.coarseCut;
+                config.rtCoarseCutDescriptor = m_options.rayTracingSystem->GetCullingDescriptors().coarseCut;
             }
             else if (traits.type == CLodExtensionType::VisiblityBuffer && m_options.rayTracedPrimaryVisibility) {
                 config.skipRayTracingCoveredDraws = true;

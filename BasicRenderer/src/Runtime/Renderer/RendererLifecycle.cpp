@@ -233,6 +233,8 @@ void Renderer::Cleanup() {
 	m_pLightManager.reset();
 	// The object manager reads the mesh manager's geometry sequence on commit.
 	if (m_pObjectManager) m_pObjectManager->SetGeometryCoverageSource({});
+	// Its cache job reads the mesh manager.
+	if (m_clodRayTracingSystem) m_clodRayTracingSystem->Shutdown();
 	m_pMeshManager.reset();
 	m_pObjectManager.reset();
     m_pMaterialManager.reset();

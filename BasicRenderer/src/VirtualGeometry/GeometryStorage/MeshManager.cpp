@@ -686,6 +686,13 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 	if (mesh->GetPerMeshBufferView() != nullptr) {
 		return true;
 	}
+	// A CLod mesh is uploaded once: the upload releases the CPU hierarchy it is built from, so another would publish its
+	// groups empty, and leak the first's buffer ranges and global indices.
+	if (const auto registered = m_clodSharedStreamingStateByMesh.find(mesh.get());
+		registered != m_clodSharedStreamingStateByMesh.end() && registered->second != nullptr) {
+		spdlog::error("MeshManager::AddMesh: mesh {} was removed after its CLod upload and can't be added again", mesh->GetGlobalID());
+		return false;
+	}
 
 	mesh->SetCurrentMeshManager(this);
 
@@ -1341,8 +1348,15 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 
 		{
 			ZoneScopedN("MeshManager::AddMesh::PublishSharedStreamingState");
-			m_clodSharedStreamingStateByMesh[mesh.get()] = sharedState;
-			m_clodSharedStreamingRangesDirty = true;
+			auto& registered = m_clodSharedStreamingStateByMesh[mesh.get()];
+			if (registered != nullptr && registered != sharedState) {
+				// Unreachable while AddMesh refuses meshes uploaded before; kept so a state is never left in the index.
+				m_clodGroupRangeIndex.Remove(registered->groupsBase, registered->groupsBase + registered->groupCount, registered.get());
+			}
+			registered = sharedState;
+			if (sharedState->groupCount != 0u) {
+				m_clodGroupRangeIndex.Insert({ sharedState->groupsBase, sharedState->groupsBase + sharedState->groupCount, sharedState });
+			}
 			PublishCLodStreamingDomainEventForSharedState(br::render::CLodStreamingDomainEventKind::SharedMeshAdded, sharedState);
 		}
 	}
@@ -2061,7 +2075,6 @@ void MeshManager::RemoveMeshInstance(MeshInstance* mesh) {
 					// state until a later allocation reuses the same indices.
 					// TODO: add an explicit streaming-system retire callback if
 					// the asset cache starts evicting shared Mesh objects.
-					m_clodSharedStreamingRangesDirty = true;
 					PublishCLodStreamingDomainEventForSharedState(br::render::CLodStreamingDomainEventKind::ActiveRangeRemoved, sharedMeshState);
 					if (removedTraversalDepth >= m_clodActiveMaxTraversalDepth.load(std::memory_order_acquire)) {
 						RecomputeCLodActiveMaxTraversalDepth();
@@ -2173,32 +2186,92 @@ void MeshManager::ProcessCLodDiskStreamingIO() {
 
 
 
-void MeshManager::RebuildCLodSharedStreamingRangeIndex() {
-	std::lock_guard publicationLock(m_staticTemplatePublicationMutex);
-	if (!m_clodSharedStreamingRangesDirty) {
+MeshManager::CLodGroupRangeIndex::~CLodGroupRangeIndex() {
+	for (auto& block : m_blocks) {
+		delete block.load(std::memory_order_relaxed);
+	}
+}
+
+MeshManager::CLodGroupRangeIndex::ChunkSlot* MeshManager::CLodGroupRangeIndex::WritableSlot(uint32_t chunk) {
+	const uint32_t blockIndex = chunk >> kBlockShift;
+	if (blockIndex >= kBlockCount) {
+		return nullptr;
+	}
+	Block* block = m_blocks[blockIndex].load(std::memory_order_acquire);
+	if (block == nullptr) {
+		// Only writers create blocks, and they are serialized.
+		block = new Block();
+		m_blocks[blockIndex].store(block, std::memory_order_release);
+	}
+	return &block->chunks[chunk & ((1u << kBlockShift) - 1u)];
+}
+
+const MeshManager::CLodGroupRangeIndex::ChunkSlot* MeshManager::CLodGroupRangeIndex::ReadableSlot(uint32_t chunk) const {
+	const uint32_t blockIndex = chunk >> kBlockShift;
+	if (blockIndex >= kBlockCount) {
+		return nullptr;
+	}
+	const Block* block = m_blocks[blockIndex].load(std::memory_order_acquire);
+	return block != nullptr ? &block->chunks[chunk & ((1u << kBlockShift) - 1u)] : nullptr;
+}
+
+template <typename Edit>
+void MeshManager::CLodGroupRangeIndex::EditChunks(uint32_t begin, uint32_t end, Edit&& edit) {
+	if (end <= begin) {
 		return;
 	}
-
-	m_clodSharedStreamingRanges.clear();
-	m_clodSharedStreamingRanges.reserve(m_clodSharedStreamingStateByMesh.size());
-
-	for (const auto& [_, sharedState] : m_clodSharedStreamingStateByMesh) {
-		if (sharedState == nullptr || sharedState->groupCount == 0u) {
-			continue;
+	for (uint32_t chunk = begin >> kChunkShift; chunk <= ((end - 1u) >> kChunkShift); ++chunk) {
+		ChunkSlot* slot = WritableSlot(chunk);
+		if (slot == nullptr) {
+			spdlog::error("CLod group range index: groups [{}, {}) are past its {} groups", begin, end, uint64_t(kBlockCount) << (kBlockShift + kChunkShift));
+			return;
 		}
-
-		CLodSharedStreamingRange range{};
-		range.begin = sharedState->groupsBase;
-		range.end = sharedState->groupsBase + sharedState->groupCount;
-		range.state = sharedState;
-		m_clodSharedStreamingRanges.push_back(std::move(range));
+		const std::shared_ptr<const Chunk> current = slot->load(std::memory_order_acquire);
+		auto next = current ? std::make_shared<Chunk>(*current) : std::make_shared<Chunk>();
+		edit(*next);
+		slot->store(std::shared_ptr<const Chunk>(std::move(next)), std::memory_order_release);
 	}
+}
 
-	std::sort(m_clodSharedStreamingRanges.begin(), m_clodSharedStreamingRanges.end(), [](const CLodSharedStreamingRange& a, const CLodSharedStreamingRange& b) {
-		return a.begin < b.begin;
+void MeshManager::CLodGroupRangeIndex::Insert(const CLodSharedStreamingRange& range) {
+	EditChunks(range.begin, range.end, [&](Chunk& chunk) {
+		const auto at = std::upper_bound(chunk.begin(), chunk.end(), range.begin, [](uint32_t value, const CLodSharedStreamingRange& entry) {
+			return value < entry.begin;
+		});
+		chunk.insert(at, range);
 	});
+}
 
-	m_clodSharedStreamingRangesDirty = false;
+void MeshManager::CLodGroupRangeIndex::Remove(uint32_t begin, uint32_t end, const CLodSharedStreamingState* state) {
+	EditChunks(begin, end, [&](Chunk& chunk) {
+		std::erase_if(chunk, [&](const CLodSharedStreamingRange& entry) {
+			return entry.begin == begin && entry.end == end && entry.state.get() == state;
+		});
+	});
+}
+
+std::shared_ptr<MeshManager::CLodSharedStreamingState> MeshManager::CLodGroupRangeIndex::Find(uint32_t groupGlobalIndex, uint32_t& outGroupLocalIndex) const {
+	outGroupLocalIndex = 0u;
+	const ChunkSlot* slot = ReadableSlot(groupGlobalIndex >> kChunkShift);
+	if (slot == nullptr) {
+		return nullptr;
+	}
+	const std::shared_ptr<const Chunk> chunk = slot->load(std::memory_order_acquire);
+	if (!chunk || chunk->empty()) {
+		return nullptr;
+	}
+	auto it = std::upper_bound(chunk->begin(), chunk->end(), groupGlobalIndex, [](uint32_t value, const CLodSharedStreamingRange& entry) {
+		return value < entry.begin;
+	});
+	if (it == chunk->begin()) {
+		return nullptr;
+	}
+	--it;
+	if (groupGlobalIndex >= it->end || it->state == nullptr) {
+		return nullptr;
+	}
+	outGroupLocalIndex = groupGlobalIndex - it->begin;
+	return it->state;
 }
 
 void MeshManager::PublishCLodStreamingDomainEvent(br::render::CLodStreamingDomainEvent event) {
@@ -2625,35 +2698,6 @@ void MeshManager::GetCLodChildGroups(uint32_t parentGroupGlobalIndex, std::vecto
 			outChildGroups.push_back(sharedState->groupsBase + childLocal);
 		}
 	}
-}
-
-std::shared_ptr<MeshManager::CLodSharedStreamingState> MeshManager::FindCLodSharedStreamingStateByGlobalGroup(uint32_t groupGlobalIndex, uint32_t& outGroupLocalIndex) {
-	outGroupLocalIndex = 0u;
-	RebuildCLodSharedStreamingRangeIndex();
-
-	if (m_clodSharedStreamingRanges.empty()) {
-		return nullptr;
-	}
-
-	auto it = std::upper_bound(
-		m_clodSharedStreamingRanges.begin(),
-		m_clodSharedStreamingRanges.end(),
-		groupGlobalIndex,
-		[](uint32_t value, const CLodSharedStreamingRange& range) {
-			return value < range.begin;
-		});
-
-	if (it == m_clodSharedStreamingRanges.begin()) {
-		return nullptr;
-	}
-
-	--it;
-	if (groupGlobalIndex < it->begin || groupGlobalIndex >= it->end || it->state == nullptr) {
-		return nullptr;
-	}
-
-	outGroupLocalIndex = groupGlobalIndex - it->begin;
-	return it->state;
 }
 
 std::vector<uint32_t> MeshManager::GetCLodGroupMeshPageIndices(const CLodSharedStreamingState& state, uint32_t groupLocalIndex) const {
@@ -4087,107 +4131,34 @@ br::render::CLodStreamingDebugStats MeshManager::GetCLodStreamingDebugStats() co
 }
 
 bool MeshManager::GetCLodRayTracingGroup(uint32_t groupGlobalIndex, br::render::CLodRayTracingGroupLookup& out) const {
-	const_cast<MeshManager*>(this)->RebuildCLodSharedStreamingRangeIndex();
-
-	std::lock_guard<std::mutex> residencyLock(m_clodResidencyMutex);
-	for (const CLodSharedStreamingRange& range : m_clodSharedStreamingRanges) {
-		if (groupGlobalIndex < range.begin || groupGlobalIndex >= range.end || !range.state) {
-			continue;
-		}
-		const auto& state = range.state;
-		const uint32_t localGroupIndex = groupGlobalIndex - range.begin;
-		if (localGroupIndex >= state->groups.size()
-			|| localGroupIndex >= state->residentGroupAllocations.size()
-			|| localGroupIndex >= state->baselineGroupChunks.size()
-			|| !IsCLodGroupResident(*state, localGroupIndex)) {
-			return false;
-		}
-		const ClusterLODGroup& group = state->groups[localGroupIndex];
-		out.pagePool = m_clodPagePool;
-		out.owner = state;
-		out.containerPath = state->resolvedContainerPath;
-		out.group.groupGlobalIndex = groupGlobalIndex;
-		out.group.groupLocalIndex = localGroupIndex;
-		out.group.group = group;
-		out.group.chunk = state->baselineGroupChunks[localGroupIndex];
-		out.group.pageAllocations = state->residentGroupAllocations[localGroupIndex].pageAllocations;
-		out.group.segments.clear();
-		if (group.firstSegment < state->segments.size()) {
-			const uint32_t segmentCount = std::min<uint32_t>(group.segmentCount, static_cast<uint32_t>(state->segments.size() - group.firstSegment));
-			out.group.segments.assign(state->segments.begin() + group.firstSegment, state->segments.begin() + group.firstSegment + segmentCount);
-		}
-		return true;
-	}
-	return false;
-}
-
-bool MeshManager::IsCLodRayTracingGroupCurrent(const std::shared_ptr<const void>& owner, uint32_t localGroupIndex, uint32_t firstPageId) const {
-	const auto* state = static_cast<const CLodSharedStreamingState*>(owner.get());
+	uint32_t localGroupIndex = 0u;
+	const auto state = FindCLodSharedStreamingStateByGlobalGroup(groupGlobalIndex, localGroupIndex);
 	if (state == nullptr) {
 		return false;
 	}
-	std::lock_guard<std::mutex> residencyLock(m_clodResidencyMutex);
-	return localGroupIndex < state->residentGroupAllocations.size()
-		&& IsCLodGroupResident(*state, localGroupIndex)
-		&& !state->residentGroupAllocations[localGroupIndex].pageAllocations.empty()
-		&& state->residentGroupAllocations[localGroupIndex].pageAllocations.front().firstPageID == firstPageId;
-}
-
-void MeshManager::GetCLodRayTracingResidencySnapshot(br::render::CLodRayTracingResidencySnapshot& outSnapshot) const {
-	outSnapshot.residentGroups.clear();
-	outSnapshot.pagePool = m_clodPagePool;
-	outSnapshot.pagePoolGeneration = m_clodDiskStreamingGeneration.load(std::memory_order_acquire);
-
-	const_cast<MeshManager*>(this)->RebuildCLodSharedStreamingRangeIndex();
 
 	std::lock_guard<std::mutex> residencyLock(m_clodResidencyMutex);
-	for (const CLodSharedStreamingRange& range : m_clodSharedStreamingRanges) {
-		const auto& state = range.state;
-		if (!state) {
-			continue;
-		}
-
-		const uint32_t groupCount = std::min<uint32_t>(
-			state->groupCount,
-			static_cast<uint32_t>(state->groups.size()));
-		for (uint32_t localGroupIndex = 0; localGroupIndex < groupCount; ++localGroupIndex) {
-			if (!IsCLodGroupResident(*state, localGroupIndex)) {
-				continue;
-			}
-
-			if (localGroupIndex >= state->residentGroupAllocations.size() ||
-				localGroupIndex >= state->baselineGroupChunks.size()) {
-				continue;
-			}
-
-			const ClusterLODGroup& group = state->groups[localGroupIndex];
-			std::vector<uint32_t> meshPageIndices = GetCLodGroupMeshPageIndices(*state, localGroupIndex);
-			if (meshPageIndices.size() != state->residentGroupAllocations[localGroupIndex].pageAllocations.size()) {
-				continue;
-			}
-
-			br::render::CLodRayTracingResidentGroup rtGroup{};
-			rtGroup.groupGlobalIndex = range.begin + localGroupIndex;
-			rtGroup.groupLocalIndex = localGroupIndex;
-			rtGroup.group = group;
-			rtGroup.chunk = state->baselineGroupChunks[localGroupIndex];
-			rtGroup.meshPageIndices = std::move(meshPageIndices);
-			rtGroup.pageAllocations = state->residentGroupAllocations[localGroupIndex].pageAllocations;
-
-			const uint32_t firstSegment = group.firstSegment;
-			const uint32_t segmentCount = group.segmentCount;
-			if (firstSegment < state->segments.size()) {
-				const uint32_t clampedSegmentCount = std::min<uint32_t>(
-					segmentCount,
-					static_cast<uint32_t>(state->segments.size() - firstSegment));
-				rtGroup.segments.assign(
-					state->segments.begin() + firstSegment,
-					state->segments.begin() + firstSegment + clampedSegmentCount);
-			}
-
-			outSnapshot.residentGroups.push_back(std::move(rtGroup));
-		}
+	if (localGroupIndex >= state->groups.size()
+		|| localGroupIndex >= state->residentGroupAllocations.size()
+		|| localGroupIndex >= state->baselineGroupChunks.size()
+		|| !IsCLodGroupResident(*state, localGroupIndex)) {
+		return false;
 	}
+	const ClusterLODGroup& group = state->groups[localGroupIndex];
+	out.pagePool = m_clodPagePool;
+	out.owner = state;
+	out.containerPath = state->resolvedContainerPath;
+	out.group.groupGlobalIndex = groupGlobalIndex;
+	out.group.groupLocalIndex = localGroupIndex;
+	out.group.group = group;
+	out.group.chunk = state->baselineGroupChunks[localGroupIndex];
+	out.group.pageAllocations = state->residentGroupAllocations[localGroupIndex].pageAllocations;
+	out.group.segments.clear();
+	if (group.firstSegment < state->segments.size()) {
+		const uint32_t segmentCount = std::min<uint32_t>(group.segmentCount, static_cast<uint32_t>(state->segments.size() - group.firstSegment));
+		out.group.segments.assign(state->segments.begin() + group.firstSegment, state->segments.begin() + group.firstSegment + segmentCount);
+	}
+	return true;
 }
 
 void MeshManager::UpdatePerMeshBuffer(std::unique_ptr<org::BufferView>& view, PerMeshCB& data) {

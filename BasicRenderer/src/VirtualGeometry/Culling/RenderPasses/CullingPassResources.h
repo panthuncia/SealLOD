@@ -35,10 +35,6 @@ struct CullingPassConfig {
     // Raster side of raytraced primary visibility: leaves out the draws the BVH represents.
     bool skipRayTracingCoveredDraws = false;
     // Filled when rayTracingView is set.
-    uint32_t rtGroupTableDescriptor = 0u;
-    uint32_t rtRequestsDescriptor = 0u;
-    uint32_t rtRequestCounterDescriptor = 0u;
-    uint32_t rtRequestCapacity = 0u;
     uint32_t rtCoarseCutDescriptor = 0u;
 
     // Clusters are classified into hardware and software raster lists.

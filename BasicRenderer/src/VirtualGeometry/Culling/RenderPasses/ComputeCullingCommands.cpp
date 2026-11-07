@@ -253,10 +253,6 @@ private:
         shared[CLOD_WG_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX] = m_frame.viewRasterInfoTable;
         shared[CLOD_WG_VIEW_DEPTH_SRV_INDICES_DESCRIPTOR_INDEX] = b.perViewDepthOcclusion ? m_frame.viewDepthTable : 0u;
         shared[CLOD_WG_VISIBLE_CLUSTERS_CAPACITY] = b.maxVisibleClusters;
-        shared[CLOD_WG_RT_GROUP_TABLE_DESCRIPTOR_INDEX] = b.rtGroupTable;
-        shared[CLOD_WG_RT_REQUESTS_DESCRIPTOR_INDEX] = b.rtRequests;
-        shared[CLOD_WG_RT_REQUEST_COUNTER_DESCRIPTOR_INDEX] = b.rtRequestCounter;
-        shared[CLOD_WG_RT_REQUEST_CAPACITY] = b.rtRequestCapacity;
         shared[CLOD_WG_RT_COARSE_CUT_DESCRIPTOR_INDEX] = b.rtCoarseCut;
 
         shared[CLOD_WG_DYNAMIC_WIND_BOUNDS_CACHE_DESCRIPTOR_INDEX] = UavOrZero(b.windBounds);

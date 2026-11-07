@@ -205,6 +205,7 @@ private:
     // Logical-frame preparation advances independently once async queue
     // prefill is enabled. m_frameIndex remains the acquired swapchain image.
     uint8_t m_preparationFrameIndex = 0;
+    double m_lastWaitForFrameMs = 0.0; // The frame's WaitForFrame, for the hitch log in FrameMaintenance.
     uint64_t m_totalFramesRendered = 0;
 	uint8_t m_numFramesInFlight = 3;
     rhi::TimelinePtr m_frameFence;

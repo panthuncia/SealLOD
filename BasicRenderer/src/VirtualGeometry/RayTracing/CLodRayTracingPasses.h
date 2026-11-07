@@ -52,7 +52,15 @@ public:
         };
         auto& pipelines = bindings.pipelines;
         pipelines.clear = make(L"CLodRtClearCS", "CLod.RayTracing.Clear.PSO");
-        pipelines.buildClasArgs = make(L"CLodRtBuildClasArgsCS", "CLod.RayTracing.BuildClasArgs.PSO");
+        pipelines.cacheInit = make(L"CLodRtCacheInitCS", "CLod.RayTracing.CacheInit.PSO");
+        pipelines.cacheCollect = make(L"CLodRtCacheCollectCS", "CLod.RayTracing.CacheCollect.PSO");
+        pipelines.cacheOmmRetire = make(L"CLodRtCacheOmmRetireCS", "CLod.RayTracing.CacheOmmRetire.PSO");
+        pipelines.cacheEvict = make(L"CLodRtCacheEvictCS", "CLod.RayTracing.CacheEvict.PSO");
+        pipelines.cacheAdmit = make(L"CLodRtCacheAdmitCS", "CLod.RayTracing.CacheAdmit.PSO");
+        pipelines.cacheAssign = make(L"CLodRtCacheAssignCS", "CLod.RayTracing.CacheAssign.PSO");
+        pipelines.cacheArgs = make(L"CLodRtCacheArgsCS", "CLod.RayTracing.CacheArgs.PSO");
+        pipelines.cachePack = make(L"CLodRtCachePackCS", "CLod.RayTracing.CachePack.PSO");
+        pipelines.cacheEnd = make(L"CLodRtCacheEndCS", "CLod.RayTracing.CacheEnd.PSO");
         pipelines.resetDraws = make(L"CLodRtResetDrawsCS", "CLod.RayTracing.ResetDraws.PSO");
         pipelines.count = make(L"CLodRtCountCS", "CLod.RayTracing.Count.PSO");
         pipelines.allocate = make(L"CLodRtAllocateCS", "CLod.RayTracing.Allocate.PSO");
@@ -68,6 +76,8 @@ public:
         builder.ShaderResource(Builtin::PerMeshBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases, Builtin::PerMaterialDataBuffer, Builtin::PerMeshInstanceBuffer,
             Builtin::InstanceDrawRecordBuffer, Builtin::PerInstanceTransformBuffer, Builtin::PerObjectBuffer,
             Builtin::CLod::Offsets, Builtin::CLod::MeshMetadata, Builtin::CLod::Groups, Builtin::CLod::AssemblyTransforms,
+            Builtin::CLod::Segments, Builtin::CLod::GroupPageMap, // The cache finds a group's pages, to build and to place it.
+            Builtin::CLod::StreamingRuntimeState, Builtin::CLod::StreamingNonResidentBits, // And builds again only resident groups.
             Builtin::Material::TextureStreamingMetadataBuffer); // Micromap bakes and the instance check read alpha textures' residency.
         builder.UnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer); // And keep them resident at their test mip.
         return bindings;

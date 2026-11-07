@@ -635,44 +635,17 @@ void Renderer::CreateRenderGraph() {
 
 
 void Renderer::ToggleMeshShaders(bool useMeshShaders) {
-    // We need to:
-    // 1. Remove all meshes in the global mesh library from the mesh manager
-	// 2. Re-add them to the mesh manager
-    // 3. Get all objects with mesh instances by querying the ECS
-	// 4. Remove and re-add all instances to the mesh manager
-	// 5. Remove and re-add all objects from the object manager to rebuild indirect draw info
-
+    // Meshes and mesh instances don't depend on the setting (AddMesh's and AddMeshInstance's flag is unused), and a CLod
+    // mesh can't be uploaded twice: its upload releases the CPU hierarchy. Only the objects' indirect draw info is
+    // rebuilt, by removing and re-adding every active object.
+    (void)useMeshShaders;
     auto& world = RendererECSManager::GetInstance().GetWorld();
-	auto& meshLibrary = world.get_mut<Components::GlobalMeshLibrary>().meshes;
-
-	// Remove all meshes from the mesh manager
-	for (auto& meshPair : meshLibrary) {
-		auto& mesh = meshPair.second;
-		m_pMeshManager->RemoveMesh(mesh.lock().get());
-	}
-	// Re-add them to the mesh manager
-	for (auto& meshPair : meshLibrary) {
-		auto& mesh = meshPair.second;
-        auto ptr = mesh.lock();
-        m_pMeshManager->AddMesh(ptr, useMeshShaders);
-	}
-
-	// Get all active objects with mesh instances by querying the ECS
     auto query = world.query_builder<Components::RenderableObject, Components::ObjectDrawInfo>().with<Components::Active>()
         .build();
 
     world.defer_begin();
     query.each([&](flecs::entity entity, Components::RenderableObject& object, const Components::ObjectDrawInfo& drawInfo) {
         auto meshInstances = entity.try_get<Components::MeshInstances>();
-
-        if (meshInstances) {
-            for (auto& meshInstance : meshInstances->meshInstances) {
-                m_pMeshManager->RemoveMeshInstance(meshInstance.get());
-                m_pMeshManager->AddMeshInstance(meshInstance.get(), useMeshShaders);
-            }
-        }
-
-		// Remove and re-add all objects from the object manager to rebuild indirect draw info
 		m_pObjectManager->RemoveObject(&drawInfo);
 		auto newDrawInfo = m_pObjectManager->AddObject(object.perObjectCB, meshInstances);
 		object.perObjectCB.normalMatrixBufferIndex = newDrawInfo.normalMatrixIndex;

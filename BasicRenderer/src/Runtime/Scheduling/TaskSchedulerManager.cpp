@@ -5,6 +5,10 @@
 
 #include <algorithm>
 #include <array>
+#include <condition_variable>
+#include <functional>
+#include <memory>
+#include <mutex>
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
@@ -372,6 +376,20 @@ struct TaskSchedulerManager::RuntimeState {
     std::priority_queue<DelayedTask, std::vector<DelayedTask>, std::greater<>> timers;
     std::thread timerThread;
     std::uint64_t nextTimer{};
+
+    // Arena enqueues from threads outside the scheduler's tasks, above all the render thread. task_arena::enqueue
+    // advertises the work to oneTBB's market, which takes its global worker-demand mutex; workers take the same mutex
+    // every time they enter or leave an arena, and under streaming load the render thread waited 100-340 ms for it
+    // (WPR, 2026-11-07). So those enqueues are handed to this thread instead, and the caller only takes launchMutex.
+    struct Launch {
+        oneapi::tbb::task_arena* arena = nullptr;
+        std::function<void()> run;
+    };
+    std::mutex launchMutex;
+    std::condition_variable launchCv;
+    std::deque<Launch> launches;
+    bool launcherStopping = false;
+    std::thread launcherThread;
 };
 
 TaskSchedulerManager::RuntimeState::CallbackLifetime::~CallbackLifetime() {
@@ -402,6 +420,24 @@ oneapi::tbb::task_arena& SelectArena(TaskSchedulerManager::RuntimeState& state, 
     if (lane == TaskLane::FrameCritical) return *state.frameArena;
     if (lane == TaskLane::Streaming) return *state.streamingArena;
     return *state.backgroundArena;
+}
+
+// Enqueues a callback on the lane's arena. A oneTBB worker (any thread inside an arena) does it directly; any other
+// thread hands it to the launcher thread (RuntimeState::launches), so it never waits on oneTBB's market mutex.
+template <class F>
+void EnqueueTask(TaskSchedulerManager::RuntimeState& state, TaskLane lane, F&& callback) {
+    auto& arena = SelectArena(state, lane);
+    if (oneapi::tbb::this_task_arena::current_thread_index() != oneapi::tbb::task_arena::not_initialized) {
+        arena.enqueue(std::forward<F>(callback));
+        return;
+    }
+    // Shared, so the callback needn't be copyable; it is destroyed with the last copy, after it runs.
+    auto held = std::make_shared<std::decay_t<F>>(std::forward<F>(callback));
+    {
+        std::lock_guard lock(state.launchMutex);
+        state.launches.push_back({ &arena, [held] { (*held)(); } });
+    }
+    state.launchCv.notify_one();
 }
 } // namespace
 
@@ -516,6 +552,22 @@ void TaskSchedulerManager::Initialize(Config config) {
     state.domains[static_cast<std::size_t>(TaskDomain::GpuBufferBuild)].limit =
         (std::min)(4u, m_workerCount);
     state.sceneGraphLimit = m_workerCount;
+
+    state.launcherThread = std::thread([this] {
+        TracyCSetThreadName("Task Launcher");
+        auto& runtime = *m_runtimeState;
+        std::unique_lock lock(runtime.launchMutex);
+        for (;;) {
+            runtime.launchCv.wait(lock, [&] { return runtime.launcherStopping || !runtime.launches.empty(); });
+            if (runtime.launches.empty()) return; // Stopping, and nothing left to launch.
+            auto batch = std::move(runtime.launches);
+            runtime.launches.clear();
+            lock.unlock();
+            for (auto& launch : batch) launch.arena->enqueue(std::move(launch.run));
+            batch.clear();
+            lock.lock();
+        }
+    });
 
     state.timerThread = std::thread([this] {
         TracyCSetThreadName("Task Timer"); ApplyCpuSets(m_runtimeState->workerCpuSets);
@@ -669,7 +721,7 @@ bool TaskSchedulerManager::SubmitCpu(
     }
 
     // pair destroys the task before releasing the runtime lifetime fence.
-    SelectArena(*m_runtimeState, lane).enqueue([this, work = std::make_pair(std::move(task->callbackLifetime), task)] {
+    EnqueueTask(*m_runtimeState, lane, [this, work = std::make_pair(std::move(task->callbackLifetime), task)] {
         const auto& task = work.second;
         std::uint64_t queuedDepth = 0;
         std::uint32_t activeCount = 0;
@@ -795,7 +847,7 @@ void TaskSchedulerManager::DispatchDomain(TaskDomain domain) {
         if (task.traceTaskID != 0) EmitTaskTrace({ TaskTraceEventID::Admitted,
             task.trace, task.traceTaskID, 0, 0, task.admittedQueuedDepth,
             task.admittedActiveCount, task.domain, task.lane, 0 });
-        SelectArena(*m_runtimeState, task.lane).enqueue([this, work = std::make_pair(std::move(task.callbackLifetime), std::move(task))]() {
+        EnqueueTask(*m_runtimeState, task.lane, [this, work = std::make_pair(std::move(task.callbackLifetime), std::move(task))]() {
             const auto& task = work.second;
             auto contextState = std::make_shared<TaskContext::State>(); contextState->scope = task.scope;
             TaskContext context(contextState); std::exception_ptr error;
@@ -978,7 +1030,7 @@ void TaskSchedulerManager::DispatchSceneGraphWork() {
         if (task.traceTaskID != 0) EmitTaskTrace({ TaskTraceEventID::Admitted,
             task.trace, task.traceTaskID, 0, 0, task.admittedQueuedDepth,
             task.admittedActiveCount, task.domain, task.lane, 0 });
-        SelectArena(*m_runtimeState, task.lane).enqueue([this, work = std::make_pair(std::move(task.callbackLifetime), std::move(task))]() {
+        EnqueueTask(*m_runtimeState, task.lane, [this, work = std::make_pair(std::move(task.callbackLifetime), std::move(task))]() {
             const auto& task = work.second;
             auto contextState = std::make_shared<TaskContext::State>(); contextState->scope = task.scope;
             TaskContext context(contextState); std::exception_ptr error;
@@ -1215,10 +1267,17 @@ void TaskSchedulerManager::Cleanup() {
     // Scope completion precedes callback bookkeeping and excludes custom scopes.
     // Wait for entire arena callbacks, including captured ownership destruction,
     // before tearing down the runtime or its worker observers.
+    // The launcher keeps launching until here: callbacks it holds keep outstandingCallbacks above zero.
     {
         std::unique_lock lock(state.taskMutex);
         state.callbacksFinished.wait(lock, [&] { return state.outstandingCallbacks == 0; });
     }
+    {
+        std::lock_guard lock(state.launchMutex);
+        state.launcherStopping = true;
+    }
+    state.launchCv.notify_all();
+    if (state.launcherThread.joinable()) state.launcherThread.join();
     state.observers = {};
     state.frameArena->terminate(); state.streamingArena->terminate(); state.backgroundArena->terminate();
     m_runtimeState.reset(); m_workerCount = 0;

@@ -242,21 +242,30 @@ void Renderer::Render() {
             m_context.outputResolution = { outputRes.x, outputRes.y };
             m_context.clodRayTracingSupported = deviceManager.GetCLodRayTracingSupported();
             m_context.rayTracedReflectionsEnabled = m_rayTracedReflections && m_context.clodRayTracingSupported;
-            m_context.materialTextureStreamingStats = m_pMaterialManager
-                ? m_pMaterialManager->GetMaterialTextureStreamingStats()
-                : MaterialTextureStreamingStats{};
+            {
+                BT_ZONE_SCOPE("Renderer::Render::PrepareRenderContext::MaterialStreamingStats");
+                m_context.materialTextureStreamingStats = m_pMaterialManager
+                    ? m_pMaterialManager->GetMaterialTextureStreamingStats()
+                    : MaterialTextureStreamingStats{};
+            }
             m_context.environmentWork = m_environmentWorkServices;
             m_context.clodRayTracingSystem = m_clodRayTracingSystem;
 
             if (m_clodRayTracingSystem && m_clodRayTracingSystem->IsInitialized() && m_pMeshManager) {
+                // Reads back the RT cache's statistics and micromap requests, and records new page slabs.
+                BT_ZONE_SCOPE("Renderer::Render::PrepareRenderContext::CLodRayTracing");
                 std::scoped_lock rayTracingLock(m_clodRayTracingSystem->FrameOperationMutex());
                 m_clodRayTracingSystem->AdvanceFrame();
-                m_clodRayTracingSystem->Refresh(*m_pMeshManager);
+                m_clodRayTracingSystem->BeginFrame(*m_pMeshManager);
             }
             m_context.drawStats = drawStats;
             m_context.deltaTime = deltaTime;
-            m_context.sceneOverlapStatus = GetSceneOverlapStatus();
+            {
+                BT_ZONE_SCOPE("Renderer::Render::PrepareRenderContext::SceneOverlapStatus");
+                m_context.sceneOverlapStatus = GetSceneOverlapStatus();
+            }
 
+            BT_ZONE_SCOPE("Renderer::Render::PrepareRenderContext::PrimaryCamera");
             auto primaryCamera = GetValidatedPrimaryRenderCamera(false);
             if (primaryCamera) {
                 m_context.hasPrimaryCamera = true;

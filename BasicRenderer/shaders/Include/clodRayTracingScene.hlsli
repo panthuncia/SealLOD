@@ -4,8 +4,6 @@
 // CLAS bookkeeping shared by the scene build and the passes that interpret hits. CLodRayTracingSystem.h has the
 // C++ side of these layouts.
 
-#define CLOD_RT_INVALID_SLOT 0xFFFFFFFFu
-
 #include "PerPassRootConstants/clodRayTracingSetupRootConstants.h"
 
 // Decoding a TLAS row (see CLOD_RT_INSTANCE_ID_PORTAL). A pass names its instance rows SRV by defining
@@ -49,33 +47,6 @@ uint CLodRtClasGroup(CLodRtClasInfo info)
 bool CLodRtClasHasMicromaps(CLodRtClasInfo info)
 {
     return (info.groupLocalIndex & CLOD_RT_CLAS_INFO_HAS_MICROMAPS) != 0u;
-}
-
-// A contiguous run of meshlets in one page, and the CLAS slots they were given.
-struct CLodRtClasSegment
-{
-    uint slabDescriptor;
-    uint pageOffsetUnits;
-    uint firstMeshlet;
-    uint meshletCount;
-    uint firstClasSlot;
-    uint padding;
-};
-
-// Group table: [first segment, segment count] by global group index. A count of zero means no CLAS yet.
-uint CLodRtFindClasSlot(uint groupTableIndex, uint segmentTableIndex, uint groupGlobal, uint slabDescriptor, uint pageOffsetUnits, uint localMeshlet)
-{
-    StructuredBuffer<uint2> groupTable = ResourceDescriptorHeap[groupTableIndex];
-    StructuredBuffer<CLodRtClasSegment> segments = ResourceDescriptorHeap[segmentTableIndex];
-    const uint2 entry = groupTable[groupGlobal];
-    for (uint i = 0u; i < entry.y; ++i) {
-        const CLodRtClasSegment segment = segments[entry.x + i];
-        if (segment.slabDescriptor == slabDescriptor && segment.pageOffsetUnits == pageOffsetUnits
-            && localMeshlet >= segment.firstMeshlet && localMeshlet - segment.firstMeshlet < segment.meshletCount) {
-            return segment.firstClasSlot + (localMeshlet - segment.firstMeshlet);
-        }
-    }
-    return CLOD_RT_INVALID_SLOT;
 }
 
 #endif // CLOD_RAY_TRACING_SCENE_HLSLI
