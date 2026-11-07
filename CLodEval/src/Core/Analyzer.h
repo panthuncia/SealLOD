@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "Core/CachedMesh.h"
+#include "Core/MergeHierarchy.h"
 #include "Core/Metrics.h"
 
 namespace clodeval {
@@ -16,6 +17,10 @@ namespace clodeval {
 struct AnalysisContext {
 	const CachedMesh& mesh;
 	std::string_view asset;
+	// Shared by every mesh of a run, so merge roots measure each part once. Null: each root opens its own.
+	MergePartLibrary* mergeParts = nullptr;
+	// The coarsest cut the renderer asks of a root: see MergeIssues.
+	float mergeReachCut = 440.0f;
 };
 
 struct AnalyzerInfo {

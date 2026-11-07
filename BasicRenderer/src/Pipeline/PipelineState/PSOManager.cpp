@@ -1704,6 +1704,10 @@ org::PipelineState PSOManager::CreateDeferredPSO(UINT psoFlags)
 {
     auto defines = GetShaderDefines(psoFlags, MaterialCompileFlags::MaterialCompileNone);
     defines.push_back({ L"CLOD_VSM_ADAPTIVE_RECEIVER_SCREEN_TRACE", L"1" });
+    // The receiver telemetry reads a history texture the graph only has with frame telemetry on.
+    if (!br::runtime::renderer_settings::CLodVirtualShadowFrameTelemetryPath().empty()) {
+        defines.push_back({ L"CLOD_VSM_RECEIVER_TELEMETRY", L"1" });
+    }
     org::PipelineState pso = MakeComputePipeline(
         GetComputeRootSignature().GetHandle(),
         L"shaders/deferred.hlsl",

@@ -872,6 +872,15 @@ namespace br::staticimport
 					const auto& cacheSource = mesh->GetCLodCacheSource();
 					RecordCLodMeshSource(key.meshID, group.ModelPath(), part.name, static_cast<std::uint32_t>(key.rasterFlags),
 						cacheSource.sourceIdentifier, cacheSource.primPath, cacheSource.subsetName);
+					// A hierarchy root's parts have no template of their own, but their clusters are what a root draws up close.
+					for (const auto& portalPart : mesh->GetPortalParts()) {
+						if (!portalPart) {
+							continue;
+						}
+						const auto& partSource = portalPart->GetCLodCacheSource();
+						RecordCLodMeshSource(portalPart->GetGlobalID(), group.ModelPath(), "portal part", static_cast<std::uint32_t>(key.rasterFlags),
+							partSource.sourceIdentifier, partSource.primPath, partSource.subsetName);
+					}
 					outRequests.push_back(StaticTemplateRequest{
 						.key = key,
 						.mesh = mesh,

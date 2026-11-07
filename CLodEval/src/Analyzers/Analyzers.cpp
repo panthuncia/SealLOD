@@ -10,6 +10,7 @@ const std::vector<std::unique_ptr<IAnalyzer>>& AllAnalyzers()
 		std::vector<std::unique_ptr<IAnalyzer>> list;
 		list.push_back(MakeHierarchyStructureAnalyzer());
 		list.push_back(MakeHierarchyValidityAnalyzer());
+		list.push_back(MakeMergeHierarchyAnalyzer());
 		list.push_back(MakeMemoryPagesAnalyzer());
 		list.push_back(MakeVoxelDistributionAnalyzer());
 		list.push_back(MakeGeometryTruthAnalyzer());

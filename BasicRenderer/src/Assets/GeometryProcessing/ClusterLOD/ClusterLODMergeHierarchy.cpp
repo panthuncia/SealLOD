@@ -9,6 +9,11 @@
 //   and every child of N - a merge node's G_M, or an item's portal proxy - carries exactly P_N's sphere and error.
 // So N draws when its parent is not good enough and it is, and all of its children switch together: no merged cluster
 // ever stands for part of a child.
+//
+// With voxel items (forked parts) the levels are built twice into one root, a triangle pass and a voxel pass, whose
+// groups are tagged CLOD_GROUP_FLAG_BRANCH_TRIANGLE and _VOXEL. In the voxel pass a voxel item has no triangles: its
+// part's voxel source is voxelized, together with its voxel siblings', by the node above it, into voxel groups (one per
+// material slot) that refine into P_N like the node's triangle group.
 
 #include <BasicRenderer/Assets/Import/ClusterLODMergeHierarchy.h>
 #include <BasicRenderer/Assets/Import/ClusterLODUtilities.h>
@@ -65,10 +70,18 @@ namespace
 		Representation rep;
 		uint32_t level = 0;
 		uint32_t parent = UINT32_MAX;
+		bool folded = false;    // a node holding its children's exact triangles: no children group, no portals below
+		bool absorbed = false;  // not built: a folded node inside a folded node, or a node dissolved into its parent
+		uint32_t rejected = 0;  // groupings of it that would have been over maxNodeError
 		// Groups, once built.
-		uint32_t ownGroup = UINT32_MAX;      // G_N (nodes)
+		uint32_t ownGroup = UINT32_MAX;      // G_N (nodes): the triangle group, or the first voxel group
 		uint32_t childrenGroup = UINT32_MAX; // P_N (nodes)
 		uint32_t proxyGroup = UINT32_MAX;    // the portal proxy (leaves)
+		// Voxel pass.
+		bool voxel = false;          // a leaf drawn as voxels; its part's voxel source is voxelSource
+		Representation voxelSource;  // the source triangles of every voxel item below (leaves: the item's own)
+		std::vector<std::pair<uint32_t, clod_detail::MergeVoxelization>> voxels; // a node's voxels, by palette slot
+		uint32_t ownGroupCount = 0;  // G_N and its voxel groups, consecutive from ownGroup
 	};
 
 	XMFLOAT4 MergeSpheres(XMFLOAT4 a, XMFLOAT4 b)
@@ -170,6 +183,7 @@ namespace
 		const ClusterLODMergeSettings& settings,
 		bool& usedSloppy)
 	{
+		const float maxError = settings.maxNodeError;
 		Representation rep;
 		float childError = 0.0f;
 		for (const uint32_t child : children) {
@@ -185,6 +199,11 @@ namespace
 		const float floorError = childError * 1.0001f + 1e-7f;
 		rep.error = floorError;
 		if (rep.indices.empty()) return rep;
+		// Exact children that fit together: the union is exact, so the node stands for them at every distance.
+		if (childError <= 0.0f && rep.indices.size() <= static_cast<size_t>(triangleBudget) * 3u) {
+			rep.error = 0.0f;
+			return rep;
+		}
 		// Every node simplifies toward its level's error, even under budget: an unsimplified union only duplicates its
 		// children's geometry at their error.
 
@@ -249,12 +268,37 @@ namespace
 				resultError = (std::max)(resultError, sloppyError);
 			}
 		}
+		if (std::isfinite(maxError) && (std::max)(floorError, resultError) > maxError && floorError <= maxError) {
+			// The budget would take the node over the cap, where it could not stand for its children at all. Spend
+			// triangles instead: the fewest within the cap, and at worst the union, which is what the children draw when
+			// open at that cut anyway; but no more than capBudgetFactor budgets, past which the node saves instances
+			// and nothing else, so it is rejected and its children stay as they are.
+			float achieved = 0.0f;
+			const float allowed = (std::max)(maxError * 0.999f - 1e-7f, floorError);
+			size_t capped = meshopt_simplifyWithAttributes(
+				attemptIndices.data(), rep.indices.data(), rep.indices.size(),
+				&rep.vertices[0].position.x, rep.vertices.size(), sizeof(Vertex),
+				attributes.data(), sizeof(float) * 3u, weights, 3u, nullptr,
+				0u, allowed, meshopt_SimplifyErrorAbsolute | meshopt_SimplifyPrune, &achieved);
+			if (capped == 0u || (std::max)(floorError, achieved) > maxError) {
+				std::copy(rep.indices.begin(), rep.indices.end(), attemptIndices.begin());
+				capped = rep.indices.size();
+				achieved = 0.0f;
+			}
+			if (capped <= static_cast<size_t>(triangleBudget) * 3u * (std::max)(settings.capBudgetFactor, 1u)) {
+				std::copy(attemptIndices.begin(), attemptIndices.begin() + capped, simplified.begin());
+				count = capped;
+				resultError = achieved;
+				usedSloppy = false;
+			}
+		}
 		simplified.resize(count);
 
 		// Compact the vertices the result uses.
 		Representation out;
 		out.sphere = rep.sphere;
-		out.error = (std::max)(floorError, resultError);
+		// Exact children simplified without loss (the budget pass removed nothing) are still exact: the node folds.
+		out.error = childError <= 0.0f && resultError <= 0.0f && count == rep.indices.size() ? 0.0f : (std::max)(floorError, resultError);
 		std::vector<uint32_t> remap(rep.vertices.size(), UINT32_MAX);
 		out.indices.reserve(simplified.size());
 		for (size_t t = 0; t + 2u < simplified.size(); t += 3u) {
@@ -275,20 +319,175 @@ namespace
 		return out;
 	}
 
+	std::vector<std::byte> VoxelSourceBytes(const Representation& source, const std::vector<uint32_t>& indices)
+	{
+		constexpr uint32_t stride = MeshVertexLayout::VertexSize(kVertexFlags);
+		std::vector<std::byte> bytes(source.vertices.size() * stride);
+		for (size_t i = 0; i < source.vertices.size(); ++i) {
+			std::byte* dst = bytes.data() + i * stride;
+			const Vertex& v = source.vertices[i];
+			std::memcpy(dst + MeshVertexLayout::PositionOffset, &v.position, sizeof(XMFLOAT3));
+			std::memcpy(dst + MeshVertexLayout::NormalOffset, &v.normal, sizeof(XMFLOAT3));
+			std::memcpy(dst + MeshVertexLayout::TexcoordOffset(kVertexFlags), &v.uv, sizeof(XMFLOAT2));
+			std::memcpy(dst + MeshVertexLayout::ColorOffset(kVertexFlags), &v.color, sizeof(XMFLOAT3));
+		}
+		(void)indices;
+		return bytes;
+	}
+
+	// A voxel-pass node over voxel children: their sources merged and voxelized per material slot, at the coarsest width
+	// above the children's errors that keeps the node within its cube budget. False if that would be over the cap.
+	bool VoxelizeNode(const std::vector<Entity>& entities, Entity& node, const ClusterLODMergeSettings& settings)
+	{
+		float childError = 0.0f;
+		for (const uint32_t child : node.children) {
+			const Entity& c = entities[child];
+			childError = (std::max)(childError, c.rep.error);
+			if (c.voxelSource.indices.empty()) continue;
+			const uint32_t base = static_cast<uint32_t>(node.voxelSource.vertices.size());
+			node.voxelSource.vertices.insert(node.voxelSource.vertices.end(), c.voxelSource.vertices.begin(), c.voxelSource.vertices.end());
+			for (const uint32_t index : c.voxelSource.indices) node.voxelSource.indices.push_back(base + index);
+		}
+		if (node.voxelSource.indices.empty()) return true;
+		node.voxelSource.sphere = SphereOfVertices(node.voxelSource.vertices);
+		node.rep.sphere = MergeSpheres(node.rep.sphere, node.voxelSource.sphere);
+
+		std::unordered_map<uint32_t, std::vector<uint32_t>> bySlot;
+		for (size_t t = 0; t + 2u < node.voxelSource.indices.size(); t += 3u) {
+			auto& list = bySlot[node.voxelSource.vertices[node.voxelSource.indices[t]].slot];
+			list.insert(list.end(), { node.voxelSource.indices[t], node.voxelSource.indices[t + 1u], node.voxelSource.indices[t + 2u] });
+		}
+		const std::vector<std::byte> bytes = VoxelSourceBytes(node.voxelSource, node.voxelSource.indices);
+		const uint32_t stride = MeshVertexLayout::VertexSize(kVertexFlags);
+		const float floorError = childError * 1.0001f + 1e-7f;
+		float width = (std::max)({ floorError, childError * settings.errorGrowth, node.voxelSource.sphere.w * 1e-4f });
+		const float cap = settings.maxNodeError;
+		for (uint32_t attempt = 0; attempt < 12u; ++attempt) {
+			if (std::isfinite(cap) && width > cap) break;
+			std::vector<std::pair<uint32_t, clod_detail::MergeVoxelization>> voxels;
+			uint32_t cubes = 0;
+			bool ok = true;
+			for (const auto& [slot, indices] : bySlot) {
+				clod_detail::MergeVoxelization voxelization;
+				if (!clod_detail::VoxelizeMergeTriangles(bytes, stride, indices, width, settings.voxelRaysPerCell, voxelization)) {
+					// Nothing covered at this width (sub-cell geometry) is fine; a grid too large is not.
+					if (voxelization.cubes == 0u && indices.size() > 0u) {
+						const float extent = node.voxelSource.sphere.w * 2.0f + width;
+						ok = extent / width <= 4096.0f;
+						if (!ok) break;
+					}
+					continue;
+				}
+				cubes += voxelization.cubes;
+				voxels.emplace_back(slot, std::move(voxelization));
+			}
+			if (ok && !voxels.empty() && cubes <= (std::max)(settings.nodeVoxelCubeBudget, 1u)) {
+				std::sort(voxels.begin(), voxels.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+				node.voxels = std::move(voxels);
+				node.rep.error = (std::max)(node.rep.error, width);
+				return true;
+			}
+			width *= 1.5f;
+		}
+		return false;
+	}
+
 	// Size-aware, spatial: each level merges the entities whose error is within errorGrowth of the smallest, in
 	// spatial clusters of `fanout`. Large items wait until the level of their own error; single leftovers pass up.
+	// Nothing merges over maxNodeError: what cannot merge under it is left at the top, as `active`.
 	void BuildLevels(std::vector<Entity>& entities, std::vector<uint32_t>& active, const ClusterLODMergeSettings& settings,
-		uint32_t& levelsOut, uint32_t& sloppyNodes)
+		uint32_t& levelsOut, uint32_t& sloppyNodes, uint32_t& rejectedNodes, uint32_t& dissolvedNodes)
 	{
+		const float cap = settings.maxNodeError;
+		const bool capped = std::isfinite(cap);
+		const uint32_t fanout = (std::max)(settings.fanout, 2u);
+		// Retried groupings change as levels widen, so an entity gets two chances before it is left at the top.
+		constexpr uint32_t kMaxRejections = 2u;
+		std::vector<uint32_t> top;
 		uint32_t level = 0;
-		while (active.size() > 1u && level < settings.maxLevels) {
+		const auto mergeable = [&](uint32_t e) {
+			return entities[e].rejected < kMaxRejections && (!capped || entities[e].rep.error * 1.0001f + 1e-7f <= cap);
+		};
+		const auto makeNode = [&](std::vector<uint32_t> children, uint32_t budget) -> uint32_t {
+			float childError = 0.0f;
+			for (const uint32_t child : children) childError = (std::max)(childError, entities[child].rep.error);
+			const auto reject = [&]() {
+				++rejectedNodes;
+				for (const uint32_t child : children) ++entities[child].rejected;
+				return UINT32_MAX;
+			};
+			if (capped && childError * 1.0001f + 1e-7f > cap) return reject();
+			Entity node;
+			node.leaf = false;
+			node.level = level;
+			node.children = std::move(children);
+			bool sloppy = false;
+			node.rep = BuildNodeRepresentation(entities, node.children, budget, settings, sloppy);
+			if (!VoxelizeNode(entities, node, settings)) {
+				children = std::move(node.children);
+				return reject();
+			}
+			if (capped && node.rep.error > cap) {
+				children = std::move(node.children);
+				return reject();
+			}
+			sloppyNodes += sloppy ? 1u : 0u;
+			// Children that would draw over too narrow a range of cut dissolve into this node, recursively.
+			{
+				std::vector<uint32_t> kept, pending = node.children;
+				while (!pending.empty()) {
+					const uint32_t child = pending.back();
+					pending.pop_back();
+					Entity& c = entities[child];
+					if (!c.leaf && !c.folded && c.rep.error > 0.0f && node.rep.error < c.rep.error * settings.minNodeDrawWindow) {
+						c.absorbed = true;
+						++dissolvedNodes;
+						pending.insert(pending.end(), c.children.begin(), c.children.end());
+						continue;
+					}
+					kept.push_back(child);
+				}
+				node.children = std::move(kept);
+			}
+			bool exactChildren = true;
+			for (const uint32_t child : node.children) {
+				const Entity& c = entities[child];
+				exactChildren &= c.leaf ? c.rep.error <= 0.0f : c.folded;
+			}
+			node.folded = exactChildren && node.rep.error <= 0.0f;
+			if (node.folded) {
+				for (const uint32_t child : node.children) entities[child].absorbed = !entities[child].leaf;
+			}
+			const uint32_t index = static_cast<uint32_t>(entities.size());
+			for (const uint32_t child : node.children) entities[child].parent = index;
+			entities.push_back(std::move(node));
+			return index;
+		};
+
+		while (level < settings.maxLevels) {
+			std::erase_if(active, [&](uint32_t e) {
+				if (mergeable(e)) return false;
+				top.push_back(e);
+				return true;
+			});
+			if (active.size() < 2u) break;
 			++level;
 			std::sort(active.begin(), active.end(), [&](uint32_t a, uint32_t b) { return entities[a].rep.error < entities[b].rep.error; });
-			const uint32_t fanout = (std::max)(settings.fanout, 2u);
 			const float smallest = (std::max)(entities[active[0]].rep.error, 1e-6f);
 			float threshold = smallest * settings.errorGrowth;
-			// At least a full node's worth: near-zero errors would otherwise climb one doubling per level.
-			threshold = (std::max)(threshold, entities[active[(std::min)(static_cast<size_t>(fanout), active.size()) - 1u]].rep.error);
+			// At least a full node's worth, so near-zero errors do not climb one doubling per level; but no further than
+			// the sibling spread allows, so small items merge among themselves before they meet large ones.
+			const float fullNode = entities[active[(std::min)(static_cast<size_t>(fanout), active.size()) - 1u]].rep.error;
+			threshold = (std::max)(threshold, (std::min)(fullNode, smallest * std::pow(settings.errorGrowth, settings.maxSiblingSpreadLevels)));
+			// And wide enough to reach the top (the cap, or the largest error) within the levels left: a big region
+			// banded at errorGrowth runs out of levels and leaves what has not merged at the top.
+			{
+				const float target = capped ? cap : entities[active.back()].rep.error;
+				const uint32_t remaining = settings.maxLevels - level + 1u;
+				if (target > smallest && remaining > 0u) {
+					threshold = (std::max)(threshold, smallest * std::pow(target / smallest, 1.0f / static_cast<float>(remaining)));
+				}
+			}
 			std::vector<uint32_t> candidates, waiting;
 			for (const uint32_t e : active) (entities[e].rep.error <= threshold ? candidates : waiting).push_back(e);
 			const bool lastLevel = level == settings.maxLevels || candidates.size() == active.size();
@@ -309,54 +508,39 @@ namespace
 					next.push_back(candidates[order[first]]);
 					continue;
 				}
-				Entity node;
-				node.leaf = false;
-				node.level = level;
-				for (size_t i = first; i < end; ++i) node.children.push_back(candidates[order[i]]);
-				const bool root = lastLevel && waiting.empty() && order.size() <= fanout;
+				std::vector<uint32_t> children;
+				for (size_t i = first; i < end; ++i) children.push_back(candidates[order[i]]);
+				const bool root = lastLevel && waiting.empty() && top.empty() && order.size() <= fanout;
 				const uint32_t budget = settings.nodeTriangleBudget * (root ? (std::max)(settings.rootMaxGroups, 1u) : 1u);
-				bool sloppy = false;
-				node.rep = BuildNodeRepresentation(entities, node.children, budget, settings, sloppy);
-				sloppyNodes += sloppy ? 1u : 0u;
-				const uint32_t index = static_cast<uint32_t>(entities.size());
-				for (const uint32_t child : node.children) entities[child].parent = index;
-				entities.push_back(std::move(node));
-				next.push_back(index);
+				const uint32_t node = makeNode(children, budget);
+				if (node == UINT32_MAX) {
+					next.insert(next.end(), children.begin(), children.end());
+					continue;
+				}
+				next.push_back(node);
 				++created;
 			}
 			if (created == 0u) {
-				// Nothing within range had a neighbour: merge the two smallest so every level makes progress.
-				Entity node;
-				node.leaf = false;
-				node.level = level;
-				node.children = { active[0], active[1] };
-				bool sloppy = false;
-				node.rep = BuildNodeRepresentation(entities, node.children, settings.nodeTriangleBudget, settings, sloppy);
-				sloppyNodes += sloppy ? 1u : 0u;
-				const uint32_t index = static_cast<uint32_t>(entities.size());
-				for (const uint32_t child : node.children) entities[child].parent = index;
-				entities.push_back(std::move(node));
-				next.assign(active.begin() + 2, active.end());
-				next.push_back(index);
+				// Nothing within range had a neighbour: merge the two smallest so every level makes progress. A rejection
+				// counts against them, so this ends.
+				const uint32_t node = makeNode({ active[0], active[1] }, settings.nodeTriangleBudget);
+				if (node != UINT32_MAX) {
+					next.assign(active.begin() + 2, active.end());
+					next.push_back(node);
+				}
+				else {
+					next = active;
+				}
 			}
 			active = std::move(next);
 		}
-		if (active.size() > 1u) {
+		if (!capped && active.size() > 1u && top.empty()) {
 			// Out of levels: one root over what is left, at the root's budget.
 			++level;
-			Entity node;
-			node.leaf = false;
-			node.level = level;
-			node.children = active;
-			bool sloppy = false;
-			node.rep = BuildNodeRepresentation(entities, node.children,
-				settings.nodeTriangleBudget * (std::max)(settings.rootMaxGroups, 1u), settings, sloppy);
-			sloppyNodes += sloppy ? 1u : 0u;
-			const uint32_t index = static_cast<uint32_t>(entities.size());
-			for (const uint32_t child : node.children) entities[child].parent = index;
-			entities.push_back(std::move(node));
-			active = { index };
+			const uint32_t node = makeNode(active, settings.nodeTriangleBudget * (std::max)(settings.rootMaxGroups, 1u));
+			if (node != UINT32_MAX) active = { node };
 		}
+		active.insert(active.end(), top.begin(), top.end());
 		levelsOut = level;
 	}
 
@@ -379,24 +563,65 @@ ClusterLODPrebuildArtifacts BuildClusterLODMergeHierarchy(
 	if (items.size() < 2u) throw std::runtime_error("merge hierarchy: needs at least two items");
 	ClusterLODMergeStats localStats{};
 	localStats.items = static_cast<uint32_t>(items.size());
-
-	std::vector<Entity> entities;
-	entities.reserve(items.size() * 2u);
-	std::vector<uint32_t> active;
-	for (uint32_t i = 0; i < items.size(); ++i) {
-		if (items[i].geometry >= geometries.size()) throw std::runtime_error("merge hierarchy: item geometry out of range");
-		Entity leaf;
-		leaf.item = i;
-		leaf.rep = LeafRepresentation(geometries[items[i].geometry], items[i]);
-		localStats.inputTriangles += leaf.rep.indices.size() / 3u;
-		active.push_back(static_cast<uint32_t>(entities.size()));
-		entities.push_back(std::move(leaf));
+	for (const ClusterLODMergeItem& item : items) {
+		if (item.geometry >= geometries.size()) throw std::runtime_error("merge hierarchy: item geometry out of range");
+		if (item.voxelGeometry != UINT32_MAX && item.voxelGeometry >= geometries.size()) {
+			throw std::runtime_error("merge hierarchy: item voxel geometry out of range");
+		}
+		localStats.voxelItems += item.voxelGeometry != UINT32_MAX ? 1u : 0u;
 	}
-	BuildLevels(entities, active, settings, localStats.levels, localStats.sloppyNodes);
-	const uint32_t rootEntity = active.front();
-	if (entities[rootEntity].leaf) throw std::runtime_error("merge hierarchy: no node was built");
 
-	// ---- groups: nodes' clusters and children groups, items' portal proxies ----
+	// One pass per branch: the triangle pass alone without voxel items (its groups untagged).
+	struct Pass
+	{
+		bool voxel = false;
+		uint32_t branchFlags = 0u;
+		std::vector<Entity> entities;
+		uint32_t levels = 0u;
+		bool anyNode = false;
+	};
+	std::vector<Pass> passes(localStats.voxelItems != 0u ? 2u : 1u);
+	passes[0].branchFlags = passes.size() > 1u ? CLOD_GROUP_FLAG_BRANCH_TRIANGLE : 0u;
+	if (passes.size() > 1u) {
+		passes[1].voxel = true;
+		passes[1].branchFlags = CLOD_GROUP_FLAG_BRANCH_VOXEL;
+	}
+	for (Pass& pass : passes) {
+		pass.entities.reserve(items.size() * 2u);
+		std::vector<uint32_t> active;
+		for (uint32_t i = 0; i < items.size(); ++i) {
+			const ClusterLODMergeItem& item = items[i];
+			Entity leaf;
+			leaf.item = i;
+			if (pass.voxel && item.voxelGeometry != UINT32_MAX) {
+				// No triangles: the node above voxelizes the part's voxel source with its voxel siblings'.
+				leaf.voxel = true;
+				leaf.voxelSource = LeafRepresentation(geometries[item.voxelGeometry], item);
+				leaf.rep.error = (std::max)(item.voxelError, 0.0f) * MaxScale(item.partToHierarchy);
+				leaf.rep.sphere = leaf.voxelSource.sphere;
+				if (!settings.voxelNodes) leaf.rejected = UINT32_MAX; // stays a portal
+			} else {
+				leaf.rep = LeafRepresentation(geometries[item.geometry], item);
+				if (!pass.voxel) localStats.inputTriangles += leaf.rep.indices.size() / 3u;
+			}
+			active.push_back(static_cast<uint32_t>(pass.entities.size()));
+			pass.entities.push_back(std::move(leaf));
+		}
+		uint32_t sloppy = 0u, rejected = 0u, dissolved = 0u;
+		BuildLevels(pass.entities, active, settings, pass.levels, sloppy, rejected, dissolved);
+		if (!pass.voxel) {
+			localStats.sloppyNodes = sloppy;
+			localStats.rejectedNodes = rejected;
+			localStats.dissolvedNodes = dissolved;
+		}
+		pass.anyNode = std::ranges::any_of(pass.entities, [](const Entity& e) { return !e.leaf; });
+	}
+	if (!std::ranges::any_of(passes, [](const Pass& pass) { return pass.anyNode; })) {
+		// Nothing merges under the cap: the items are better left as they are.
+		if (stats) *stats = localStats;
+		return {};
+	}
+
 	ClusterLODBuildState state{};
 	std::vector<ClusterLODAssemblyTransform> transforms;
 	std::vector<uint32_t> materialBases;
@@ -409,131 +634,215 @@ ClusterLODPrebuildArtifacts BuildClusterLODMergeHierarchy(
 		state.traversalGroupMask.push_back(traversal ? 1u : 0u);
 		return index;
 	};
-	auto parentBounds = [&](const Entity& e) {
-		if (e.parent == UINT32_MAX) return MakeBounds(e.rep.sphere, (std::numeric_limits<float>::max)());
-		const Entity& p = entities[e.parent];
-		return MakeBounds(p.rep.sphere, p.rep.error);
-	};
-
-	// Children groups first, so node clusters can name them.
-	for (Entity& e : entities) {
-		if (e.leaf) continue;
-		ClusterLODGroup children{};
-		children.bounds = MakeBounds(e.rep.sphere, e.rep.error);
-		children.depth = static_cast<int32_t>(e.level);
-		e.childrenGroup = appendGroup(children, false);
-	}
-	for (Entity& e : entities) {
-		if (!e.leaf) continue;
-		const ClusterLODMergeItem& item = items[e.item];
-		const uint32_t transformIndex = static_cast<uint32_t>(transforms.size());
-		transforms.push_back(ToAssemblyTransform(item.partToHierarchy));
-		materialBases.push_back(item.materialBase);
-		ClusterLODAssemblyInstance instance{};
-		instance.targetRootNode = item.partNode;
-		instance.transformIndex = transformIndex;
-		instance.flags = CLOD_ASSEMBLY_INSTANCE_FLAG_PART_PORTAL | item.flags;
-		instance.stackDepth = item.part;
-		ClusterLODGroup proxy{};
-		proxy.bounds = parentBounds(e);
-		proxy.depth = 0;
-		proxy.flags = CLOD_GROUP_FLAG_IS_ASSEMBLY_PROXY;
-		proxy.firstMeshlet = static_cast<uint32_t>(instances.size());
-		instances.push_back(instance);
-		e.proxyGroup = appendGroup(proxy, true);
-	}
-
-	// Node clusters: one group per node, clusters single-material and sorted by slot.
 	std::vector<std::byte> vertexBytes;
 	const uint32_t stride = MeshVertexLayout::VertexSize(kVertexFlags);
 	uint32_t cumulativeMeshlets = 0u;
 	uint32_t cumulativeGroupVertices = 0u;
-	for (Entity& e : entities) {
-		if (e.leaf) continue;
-		localStats.nodes++;
-		localStats.nodeTriangles += e.rep.indices.size() / 3u;
-		const uint32_t vertexBase = static_cast<uint32_t>(vertexBytes.size() / stride);
-		vertexBytes.resize(vertexBytes.size() + e.rep.vertices.size() * stride);
-		for (size_t i = 0; i < e.rep.vertices.size(); ++i) {
-			std::byte* dst = vertexBytes.data() + (static_cast<size_t>(vertexBase) + i) * stride;
-			const Vertex& v = e.rep.vertices[i];
-			std::memcpy(dst + MeshVertexLayout::PositionOffset, &v.position, sizeof(XMFLOAT3));
-			std::memcpy(dst + MeshVertexLayout::NormalOffset, &v.normal, sizeof(XMFLOAT3));
-			std::memcpy(dst + MeshVertexLayout::TexcoordOffset(kVertexFlags), &v.uv, sizeof(XMFLOAT2));
-			std::memcpy(dst + MeshVertexLayout::ColorOffset(kVertexFlags), &v.color, sizeof(XMFLOAT3));
+
+	for (Pass& pass : passes) {
+		std::vector<Entity>& entities = pass.entities;
+		// An item inside a folded node has no portal: the node's exact triangles stand for it at every distance.
+		const auto hasPortal = [&](const Entity& e) {
+			return e.leaf && (e.parent == UINT32_MAX || !entities[e.parent].folded);
+		};
+		// Levels where every grouping was rejected built nothing; group depths must be contiguous for the traversal
+		// hierarchy, so number the levels that hold nodes densely, from 1 over portal proxies (depth 0) or from 0 without.
+		{
+			std::vector<uint32_t> levels;
+			for (const Entity& e : entities) {
+				if (!e.leaf && !e.absorbed) levels.push_back(e.level);
+			}
+			std::sort(levels.begin(), levels.end());
+			levels.erase(std::unique(levels.begin(), levels.end()), levels.end());
+			const bool anyPortal = std::ranges::any_of(entities, hasPortal);
+			for (Entity& e : entities) {
+				if (!e.leaf && !e.absorbed) {
+					e.level = static_cast<uint32_t>(std::lower_bound(levels.begin(), levels.end(), e.level) - levels.begin()) + (anyPortal ? 1u : 0u);
+				}
+			}
+			if (!pass.voxel) localStats.levels = static_cast<uint32_t>(levels.size());
+		}
+		auto parentBounds = [&](const Entity& e) {
+			if (e.parent == UINT32_MAX) return MakeBounds(e.rep.sphere, (std::numeric_limits<float>::max)());
+			const Entity& p = entities[e.parent];
+			return MakeBounds(p.rep.sphere, p.rep.error);
+		};
+
+		// Children groups first, so node clusters can name them. A folded node has none: its clusters are terminal.
+		for (Entity& e : entities) {
+			if (e.leaf || e.folded || e.absorbed) continue;
+			ClusterLODGroup children{};
+			children.bounds = MakeBounds(e.rep.sphere, e.rep.error);
+			children.depth = static_cast<int32_t>(e.level);
+			children.flags = pass.branchFlags;
+			e.childrenGroup = appendGroup(children, false);
+		}
+		for (Entity& e : entities) {
+			if (!hasPortal(e)) {
+				if (!pass.voxel) localStats.foldedItems += e.leaf ? 1u : 0u;
+				continue;
+			}
+			if (e.parent == UINT32_MAX) {
+				(pass.voxel ? localStats.voxelBranchTopPortals : localStats.topPortals) += 1u;
+			}
+			const ClusterLODMergeItem& item = items[e.item];
+			const uint32_t transformIndex = static_cast<uint32_t>(transforms.size());
+			transforms.push_back(ToAssemblyTransform(item.partToHierarchy));
+			materialBases.push_back(item.materialBase);
+			ClusterLODAssemblyInstance instance{};
+			instance.targetRootNode = item.partNode;
+			instance.transformIndex = transformIndex;
+			instance.flags = CLOD_ASSEMBLY_INSTANCE_FLAG_PART_PORTAL | item.flags;
+			instance.stackDepth = item.part;
+			ClusterLODGroup proxy{};
+			proxy.bounds = parentBounds(e);
+			proxy.depth = 0;
+			proxy.flags = CLOD_GROUP_FLAG_IS_ASSEMBLY_PROXY | pass.branchFlags;
+			proxy.firstMeshlet = static_cast<uint32_t>(instances.size());
+			instances.push_back(instance);
+			e.proxyGroup = appendGroup(proxy, true);
 		}
 
-		clod_detail::MergeCapturedGroup captured{};
-		captured.depth = static_cast<int>(e.level);
-		captured.simplified = parentBounds(e);
-		captured.writeMaterialSlots = true;
-		// Partition triangles by slot (each vertex has one), then cut each slot's triangles into meshlets.
-		std::unordered_map<uint32_t, std::vector<uint32_t>> bySlot;
-		for (size_t t = 0; t + 2u < e.rep.indices.size(); t += 3u) {
-			auto& list = bySlot[e.rep.vertices[e.rep.indices[t]].slot];
-			list.insert(list.end(), { e.rep.indices[t], e.rep.indices[t + 1u], e.rep.indices[t + 2u] });
-		}
-		std::vector<uint32_t> slots;
-		for (const auto& [slot, _] : bySlot) slots.push_back(slot);
-		std::sort(slots.begin(), slots.end());
-		for (const uint32_t slot : slots) {
-			const std::vector<uint32_t>& indices = bySlot[slot];
-			const size_t maxMeshlets = meshopt_buildMeshletsBound(indices.size(), MS_MESHLET_SIZE, MS_MESHLET_SIZE);
-			std::vector<meshopt_Meshlet> meshlets(maxMeshlets);
-			std::vector<uint32_t> meshletVertices(maxMeshlets * MS_MESHLET_SIZE);
-			std::vector<unsigned char> meshletTriangles(maxMeshlets * MS_MESHLET_SIZE * 3u);
-			const size_t meshletCount = meshopt_buildMeshlets(meshlets.data(), meshletVertices.data(), meshletTriangles.data(),
-				indices.data(), indices.size(), &e.rep.vertices[0].position.x, e.rep.vertices.size(), sizeof(Vertex),
-				MS_MESHLET_SIZE, MS_MESHLET_SIZE, 0.0f);
-			for (size_t m = 0; m < meshletCount; ++m) {
-				const meshopt_Meshlet& meshlet = meshlets[m];
-				const meshopt_Bounds bounds = meshopt_computeMeshletBounds(&meshletVertices[meshlet.vertex_offset],
-					&meshletTriangles[meshlet.triangle_offset], meshlet.triangle_count, &e.rep.vertices[0].position.x,
-					e.rep.vertices.size(), sizeof(Vertex));
-				clod_detail::MergeCapturedCluster cluster{};
-				cluster.refinedGroup = static_cast<int32_t>(e.childrenGroup);
-				cluster.bounds = MakeBounds(XMFLOAT4(bounds.center[0], bounds.center[1], bounds.center[2], bounds.radius), e.rep.error);
-				cluster.indicesOffset = static_cast<uint32_t>(captured.flattenedIndices.size());
-				cluster.indexCount = meshlet.triangle_count * 3u;
-				cluster.vertexCount = meshlet.vertex_count;
-				cluster.materialSlot = slot;
-				for (uint32_t t = 0; t < meshlet.triangle_count * 3u; ++t) {
-					captured.flattenedIndices.push_back(vertexBase +
-						meshletVertices[meshlet.vertex_offset + meshletTriangles[meshlet.triangle_offset + t]]);
+		// Node clusters: a triangle group per node, clusters single-material and sorted by slot, then its voxel groups.
+		for (Entity& e : entities) {
+			if (e.leaf || e.absorbed) continue;
+			if (pass.voxel) {
+				localStats.voxelBranchNodes++;
+				localStats.voxelBranchNodeTriangles += e.rep.indices.size() / 3u;
+				localStats.voxelNodes += e.voxels.empty() ? 0u : 1u;
+			} else {
+				localStats.nodes++;
+				localStats.foldedNodes += e.folded ? 1u : 0u;
+				localStats.topNodes += e.parent == UINT32_MAX ? 1u : 0u;
+				localStats.nodeTriangles += e.rep.indices.size() / 3u;
+			}
+			if (!e.rep.indices.empty()) {
+				const uint32_t vertexBase = static_cast<uint32_t>(vertexBytes.size() / stride);
+				vertexBytes.resize(vertexBytes.size() + e.rep.vertices.size() * stride);
+				for (size_t i = 0; i < e.rep.vertices.size(); ++i) {
+					std::byte* dst = vertexBytes.data() + (static_cast<size_t>(vertexBase) + i) * stride;
+					const Vertex& v = e.rep.vertices[i];
+					std::memcpy(dst + MeshVertexLayout::PositionOffset, &v.position, sizeof(XMFLOAT3));
+					std::memcpy(dst + MeshVertexLayout::NormalOffset, &v.normal, sizeof(XMFLOAT3));
+					std::memcpy(dst + MeshVertexLayout::TexcoordOffset(kVertexFlags), &v.uv, sizeof(XMFLOAT2));
+					std::memcpy(dst + MeshVertexLayout::ColorOffset(kVertexFlags), &v.color, sizeof(XMFLOAT3));
 				}
-				captured.clusters.push_back(cluster);
+
+				clod_detail::MergeCapturedGroup captured{};
+				captured.depth = static_cast<int>(e.level);
+				captured.simplified = parentBounds(e);
+				captured.writeMaterialSlots = true;
+				// Partition triangles by slot (each vertex has one), then cut each slot's triangles into meshlets.
+				std::unordered_map<uint32_t, std::vector<uint32_t>> bySlot;
+				for (size_t t = 0; t + 2u < e.rep.indices.size(); t += 3u) {
+					auto& list = bySlot[e.rep.vertices[e.rep.indices[t]].slot];
+					list.insert(list.end(), { e.rep.indices[t], e.rep.indices[t + 1u], e.rep.indices[t + 2u] });
+				}
+				std::vector<uint32_t> slots;
+				for (const auto& [slot, _] : bySlot) slots.push_back(slot);
+				std::sort(slots.begin(), slots.end());
+				for (const uint32_t slot : slots) {
+					const std::vector<uint32_t>& indices = bySlot[slot];
+					const size_t maxMeshlets = meshopt_buildMeshletsBound(indices.size(), MS_MESHLET_SIZE, MS_MESHLET_SIZE);
+					std::vector<meshopt_Meshlet> meshlets(maxMeshlets);
+					std::vector<uint32_t> meshletVertices(maxMeshlets * MS_MESHLET_SIZE);
+					std::vector<unsigned char> meshletTriangles(maxMeshlets * MS_MESHLET_SIZE * 3u);
+					const size_t meshletCount = meshopt_buildMeshlets(meshlets.data(), meshletVertices.data(), meshletTriangles.data(),
+						indices.data(), indices.size(), &e.rep.vertices[0].position.x, e.rep.vertices.size(), sizeof(Vertex),
+						MS_MESHLET_SIZE, MS_MESHLET_SIZE, 0.0f);
+					for (size_t m = 0; m < meshletCount; ++m) {
+						const meshopt_Meshlet& meshlet = meshlets[m];
+						const meshopt_Bounds bounds = meshopt_computeMeshletBounds(&meshletVertices[meshlet.vertex_offset],
+							&meshletTriangles[meshlet.triangle_offset], meshlet.triangle_count, &e.rep.vertices[0].position.x,
+							e.rep.vertices.size(), sizeof(Vertex));
+						clod_detail::MergeCapturedCluster cluster{};
+						cluster.refinedGroup = e.folded ? -1 : static_cast<int32_t>(e.childrenGroup);
+						cluster.bounds = MakeBounds(XMFLOAT4(bounds.center[0], bounds.center[1], bounds.center[2], bounds.radius), e.rep.error);
+						cluster.indicesOffset = static_cast<uint32_t>(captured.flattenedIndices.size());
+						cluster.indexCount = meshlet.triangle_count * 3u;
+						cluster.vertexCount = meshlet.vertex_count;
+						cluster.materialSlot = slot;
+						for (uint32_t t = 0; t < meshlet.triangle_count * 3u; ++t) {
+							captured.flattenedIndices.push_back(vertexBase +
+								meshletVertices[meshlet.vertex_offset + meshletTriangles[meshlet.triangle_offset + t]]);
+						}
+						captured.clusters.push_back(cluster);
+					}
+				}
+				if (captured.clusters.empty()) throw std::runtime_error("merge hierarchy: a node simplified to nothing");
+				const uint32_t groupIndex = static_cast<uint32_t>(state.groups.size());
+				clod_detail::MergeGroupOutput built = clod_detail::BuildMergeGroupOutput(
+					captured, groupIndex, vertexBytes, kVertexFlags, stride);
+				ClusterLODGroup group = built.group;
+				group.firstSegment = static_cast<uint32_t>(state.segments.size());
+				group.firstMeshlet = cumulativeMeshlets;
+				group.firstGroupVertex = cumulativeGroupVertices;
+				group.flags = pass.branchFlags;
+				cumulativeMeshlets += group.meshletCount;
+				cumulativeGroupVertices += group.groupVertexCount;
+				state.segments.insert(state.segments.end(), built.segments.begin(), built.segments.end());
+				state.segmentBounds.insert(state.segmentBounds.end(), built.segmentBounds.begin(), built.segmentBounds.end());
+				e.ownGroup = appendGroup(group, true);
+				e.ownGroupCount = 1u;
+				state.groupPageBlobs[e.ownGroup] = std::move(built.pageBlobs);
+				state.groupChunks[e.ownGroup] = built.groupChunk;
+			}
+			for (const auto& [slot, voxelization] : e.voxels) {
+				const uint32_t groupIndex = static_cast<uint32_t>(state.groups.size());
+				clod_detail::MergeGroupOutput built =
+					clod_detail::AppendMergeVoxelGroup(state, voxelization, groupIndex, static_cast<int32_t>(e.childrenGroup));
+				ClusterLODGroup group = built.group;
+				group.bounds = parentBounds(e);
+				group.depth = static_cast<int32_t>(e.level);
+				group.firstSegment = static_cast<uint32_t>(state.segments.size());
+				group.flags |= pass.branchFlags | (slot << CLOD_GROUP_VOXEL_MATERIAL_SLOT_SHIFT);
+				localStats.voxelCubes += voxelization.cubes;
+				state.segments.insert(state.segments.end(), built.segments.begin(), built.segments.end());
+				state.segmentBounds.insert(state.segmentBounds.end(), built.segmentBounds.begin(), built.segmentBounds.end());
+				const uint32_t index = appendGroup(group, true);
+				state.groupPageBlobs[index] = std::move(built.pageBlobs);
+				if (e.ownGroup == UINT32_MAX) e.ownGroup = index;
+				++e.ownGroupCount;
+			}
+			if (e.ownGroup == UINT32_MAX) throw std::runtime_error("merge hierarchy: a node has neither triangles nor voxels");
+		}
+		// The top: every node with no parent (one root, uncapped).
+		if (!pass.voxel) {
+			for (const Entity& e : entities) {
+				if (e.leaf || e.absorbed || e.parent != UINT32_MAX) continue;
+				localStats.rootTriangles += static_cast<uint32_t>(e.rep.indices.size() / 3u);
+				localStats.rootError = (std::max)(localStats.rootError, e.rep.error);
 			}
 		}
-		if (captured.clusters.empty()) throw std::runtime_error("merge hierarchy: a node simplified to nothing");
-		const uint32_t groupIndex = static_cast<uint32_t>(state.groups.size());
-		clod_detail::MergeGroupOutput built = clod_detail::BuildMergeGroupOutput(
-			captured, groupIndex, vertexBytes, kVertexFlags, stride);
-		ClusterLODGroup group = built.group;
-		group.firstSegment = static_cast<uint32_t>(state.segments.size());
-		group.firstMeshlet = cumulativeMeshlets;
-		group.firstGroupVertex = cumulativeGroupVertices;
-		group.flags = 0u;
-		cumulativeMeshlets += group.meshletCount;
-		cumulativeGroupVertices += group.groupVertexCount;
-		state.segments.insert(state.segments.end(), built.segments.begin(), built.segments.end());
-		state.segmentBounds.insert(state.segmentBounds.end(), built.segmentBounds.begin(), built.segmentBounds.end());
-		e.ownGroup = appendGroup(group, true);
-		state.groupPageBlobs[e.ownGroup] = std::move(built.pageBlobs);
-		state.groupChunks[e.ownGroup] = built.groupChunk;
 	}
-	localStats.rootTriangles = static_cast<uint32_t>(entities[rootEntity].rep.indices.size() / 3u);
-	localStats.rootError = entities[rootEntity].rep.error;
 
+	state.voxelGroupMapping.groupToPayloadIndex.resize(state.groups.size(), -1);
+	state.voxelGroupMapping.groupToPackedMetadataIndex.resize(state.groups.size(), -1);
 	clod_detail::BuildClusterLODTraversalHierarchy(state, settings.traversalNodeWidth);
 	// The traversal hierarchy derives parents from refinement only. A child (node group or proxy) is reached through
 	// its parent's children group, so name the parent's own group: a proxy without a parent counts as structural and
 	// always opens, and a missing parent opens its children.
-	for (const Entity& e : entities) {
-		if (e.parent == UINT32_MAX) continue;
-		const uint32_t childGroup = e.leaf ? e.proxyGroup : e.ownGroup;
-		state.groups[childGroup].parentGroupId = static_cast<int32_t>(entities[e.parent].ownGroup);
-		state.groups[childGroup].flags |= CLOD_GROUP_FLAG_MERGE_CHILD;
-		state.groups[childGroup].maxParentError = entities[e.parent].rep.error;
+	for (const Pass& pass : passes) {
+		const std::vector<Entity>& entities = pass.entities;
+		const auto hasPortal = [&](const Entity& e) {
+			return e.leaf && (e.parent == UINT32_MAX || !entities[e.parent].folded);
+		};
+		for (const Entity& e : entities) {
+			if (e.parent == UINT32_MAX || e.absorbed || (e.leaf && !hasPortal(e))) continue;
+			const Entity& parent = entities[e.parent];
+			std::vector<uint32_t> childGroups;
+			if (e.leaf) {
+				childGroups.push_back(e.proxyGroup);
+			} else {
+				// A node's own groups: its triangle group and each of its voxel groups.
+				for (uint32_t g = e.ownGroup; g < e.ownGroup + e.ownGroupCount; ++g) childGroups.push_back(g);
+			}
+			for (const uint32_t childGroup : childGroups) {
+				state.groups[childGroup].parentGroupId = static_cast<int32_t>(parent.ownGroup);
+				state.groups[childGroup].flags |= CLOD_GROUP_FLAG_MERGE_CHILD;
+				state.groups[childGroup].maxParentError = parent.rep.error;
+			}
+		}
 	}
 
 	uint32_t partDepth = 0u;
@@ -576,6 +885,7 @@ ClusterLODPrebuildArtifacts BuildClusterLODMergeHierarchy(
 	data.materialSlotCount = (std::max)(settings.materialSlotCount, 1u);
 	clod_detail::AssignSingleRootPartRecord(data, state.topRootNode);
 	out.cacheBuildData.groupPageBlobs = std::move(state.groupPageBlobs);
+	out.cacheBuildData.voxelGroupMapping = std::move(state.voxelGroupMapping);
 	out.cacheBuildData.meshPageBlobs = std::move(meshPageBlobs);
 	std::string representationError;
 	if (!ValidateClusterLODPageRepresentations(data, &out.cacheBuildData.meshPageBlobs, &representationError)) {

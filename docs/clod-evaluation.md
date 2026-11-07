@@ -37,6 +37,9 @@ SARP pulls BasicRenderer with `EXCLUDE_FROM_ALL`, so these targets only build wh
 | `analyze-cache <path> --out f.jsonl` | Analyzes caches that did not come from a suite, such as `SARPPreprocessor`'s. |
 | `compare <a> <b>` | Exit 0 same, 1 different or over budget, 2 not comparable, 3 error. |
 | `view <suite>` | Opens the viewer on a built variant. See [The viewer](#the-viewer). |
+| `merge-report <path>` | Describes merge-hierarchy roots. See [Merge-hierarchy roots](#merge-hierarchy-roots). `--json`, or `--out f.json`. |
+| `view-root <root>` | Opens the viewer on one merge-hierarchy root and its parts. |
+| `merge-census <tree> --out prefix` | Every merge root in a cache tree through `hierarchy.merge`: results files, `prefix.roots.csv` with a row per root, totals and worst roots. `--reach-cut`, `--threads`. |
 
 ## Suites
 
@@ -125,6 +128,49 @@ NIF sources in the tool still import skinning as a rigid bind pose. glTF has non
 
 To measure what actually ships, point `inspect` or `analyze-cache` at a deployed cache directory. They
 read loose `.clodmeta` files. Entries that exist only in a `world.sarppack` are not listed.
+
+## Merge-hierarchy roots
+
+A root (SARP's `docs/merge_hierarchies.md`) is a CLod cache whose assembly instances are part portals. The cache knows
+its parts only by ordinal, so whoever builds a root also writes `<root>.clodparts` beside its `.clodmeta`
+(`CLodPortalParts.h`): each part's cache key and its metadata path relative to the cache tree, and the palette's
+parts. Tools need nothing else. The renderer never reads the file.
+
+`Core/MergeHierarchy.h` reads the tree back from the cache: nodes (a geometry group refining into a page-less
+children group), portals (proxy groups) and, from the parts file, the parts. `merge-report`, the `hierarchy.merge`
+analyzer and the viewer all use it.
+
+| `merge-report` section | Says |
+|---|---|
+| Summary | Nodes, levels, portals, parts; node triangles against the parts' coarsest triangles; what fully open draws. |
+| By level | Per builder level: fanout, triangles, E(N), radius, E/radius, E over the largest child error (what one merge step adds), child fit (how far a child pokes out of its parent's sphere), draw window. |
+| Draw window | E(parent)/E(N): the range of cuts a node's own geometry draws in. Under 1.1 it hardly ever draws. |
+| Portal depth | Nodes above each portal. |
+| Parts | Sharing, and the most-used parts with their coarse and leaf triangles. |
+| Cut sweep | The whole region at one world cut, from the root's split down by halves: nodes, node and part triangles and clusters, opened portals, and "coarsest" portals, which are open but whose part draws nothing finer than the node had merged. |
+
+The sweep is a uniform cut, as in telephoto: the runtime's per-group distance is not modelled. Its distance column
+reads a cut as the camera distance where one pixel is that cut, at 1080 lines and 60 degrees.
+
+Analysis runs one mesh per worker thread (`--threads`, default one per hardware thread), each into its own sink,
+joined in input order, so results do not depend on the thread count. Roots in a run share a `MergePartLibrary`, so a
+part many roots open is opened and measured once: the census of 6387 SaveLab roots takes about 12 s on 24 threads.
+
+`hierarchy.merge` also emits `merge.issue.*` at a reach cut (`--reach-cut`, default 440: one pixel at 1080 lines and
+60 degrees from about 410,000 units, the far edge of a radius-100 scene). Nodes with E(N) over it never draw, and
+portals under them are open at every distance. See `MergeIssues` in `Core/MergeHierarchy.h`.
+
+`hierarchy.merge` emits the same numbers as metrics, with the sweep at fixed world cuts (2^-2 to 2^14), so two
+builds of one region compare cut by cut with `compare` whatever their settings.
+
+`view-root <root>` writes `clod_eval/roots/<entry>/viewer.json` and runs the viewer with `SARP_CACHE_ROOT` set to the
+tree the root is in. The viewer builds the root and its parts from their caches, with one flat material per palette
+slot coloured by its part, and indexes only those caches. Presets frame the region at each level's mean split. The
+**Merge** overlay colours node geometry by merge level and parts opened through portals white; the selected group
+names its merge node or, for a part, the root that opens it; the Hierarchy window shows the root's report.
+
+Pixels are joined to hierarchies by global group index, through each registered mesh's `groupsBase`, so clusters a
+portal opened resolve to their part rather than to the drawn root.
 
 ## Rendering a cache
 
@@ -237,6 +283,8 @@ Limits:
 - **Sweeps wait 0.5 s of idle per step**, and snapshots 1 s. The headless capture waits 3 s, so use it for numbers
   that will be reported.
 - **Snapshots of fewer than 64 frames are not converged.** Voxel normals are stochastic over 64 frames.
+- **Captures and the viewer render raster.** Path tracing is the renderer's default where the device runs it, and
+  CLodCapture sets `SARP_RT_PATH_TRACING=0` before the renderer starts.
 - **Coverage above 1 at a distance is not an error in itself.** Dropped coverage on thin triangles makes the triangle
   and leaf renders too sparse there, so neither is ground truth for aggregate coverage.
 

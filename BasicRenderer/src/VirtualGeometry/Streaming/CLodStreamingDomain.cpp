@@ -43,6 +43,9 @@ void CLodStreamingSystem::RebuildStreamingDomainFromSnapshot(ICLodGeometryStorag
         }
     }
     for (const auto& range : snapshot.coarsestRanges) {
+        if ((range.branches & m_activeBranches) == 0u) {
+            continue;
+        }
         const uint32_t rangeBegin = std::min(range.groupsBase, m_streamingStorageGroupCapacity);
         const uint32_t rangeEnd = std::min(range.groupsBase + range.groupCount, m_streamingStorageGroupCapacity);
         for (uint32_t groupIndex = rangeBegin; groupIndex < rangeEnd; ++groupIndex) {
@@ -87,9 +90,14 @@ void CLodStreamingSystem::ProcessStreamingDomainEvents() {
         InitializePageLru(meshManager);
     }
 
+    const uint32_t requestedBranches = m_requestedActiveBranches.load(std::memory_order_acquire);
     if (m_streamingDomainFullResetPending) {
         m_streamingDomainFullResetPending = false;
+        m_activeBranches = requestedBranches;
+        meshManager->SetCLodActiveBranches(m_activeBranches);
         RebuildStreamingDomainFromSnapshot(meshManager);
+    } else if (requestedBranches != m_activeBranches) {
+        ApplyActiveBranches(meshManager, requestedBranches);
     }
 
     uint64_t eventGeneration = 0;
@@ -120,25 +128,7 @@ void CLodStreamingSystem::ProcessStreamingDomainEvents() {
     auto releaseRemovedRange = [this, meshManager](uint32_t begin, uint32_t count) {
         const uint32_t end = std::min(begin + count, m_streamingStorageGroupCapacity);
         for (uint32_t groupIndex = begin; groupIndex < end; ++groupIndex) {
-            const uint32_t word = BitWordAddress(groupIndex);
-            const uint32_t mask = BitMask(groupIndex);
-
-            if (UsesPinnedStorage(groupIndex)) {
-                if (IsGroupResident(groupIndex)) {
-                    meshManager->EvictCLodGroupResidency(groupIndex, true);
-                }
-                ReleaseOwnedPagesForGroup(groupIndex, meshManager);
-            }
-
-            if (auto preAllocIt = m_preAllocatedPagesByGroup.find(groupIndex);
-                preAllocIt != m_preAllocatedPagesByGroup.end() && preAllocIt->second.usesPinnedStorage && !IsStreamingRequestInProgress(groupIndex)) {
-                ReleasePreAllocatedPages(preAllocIt->second, meshManager);
-                m_preAllocatedPagesByGroup.erase(preAllocIt);
-            }
-
-            if (word < m_streamingResidencyInitializedBitsCpu.size()) {
-                m_streamingResidencyInitializedBitsCpu[word] &= ~mask;
-            }
+            ReleasePinnedStorageForGroup(groupIndex, meshManager);
             ClearStreamingRequestInProgress(groupIndex);
             ClearPendingLoadPriority(groupIndex);
         }
@@ -168,7 +158,9 @@ void CLodStreamingSystem::ProcessStreamingDomainEvents() {
             ++activeRangesAdded;
             setBitRange(m_streamingActiveGroupsBitsCpu, event.groupsBase, event.groupCount, true);
             for (const auto& pinnedRange : event.coarsestRanges) {
-                setBitRange(m_streamingPinnedGroupsBitsCpu, pinnedRange.groupsBase, pinnedRange.groupCount, true);
+                if ((pinnedRange.branches & m_activeBranches) != 0u) {
+                    setBitRange(m_streamingPinnedGroupsBitsCpu, pinnedRange.groupsBase, pinnedRange.groupCount, true);
+                }
             }
             MarkStreamingActiveGroupsBitsDirty();
             InitializeActiveRange(
@@ -196,6 +188,77 @@ void CLodStreamingSystem::ProcessStreamingDomainEvents() {
     TracyPlot("CLodStreaming.Domain.ActiveRangesRemoved", static_cast<int64_t>(activeRangesRemoved));
     TracyPlot("CLodStreaming.Domain.InitializedActiveGroups", static_cast<int64_t>(initializedGroups));
     TracyPlot("CLodStreaming.Domain.QueuedPinnedGroups", static_cast<int64_t>(queuedPinnedGroups));
+}
+
+void CLodStreamingSystem::ReleasePinnedStorageForGroup(uint32_t groupIndex, ICLodGeometryStorage* meshManager) {
+    const uint32_t word = BitWordAddress(groupIndex);
+    const uint32_t mask = BitMask(groupIndex);
+    if (UsesPinnedStorage(groupIndex)) {
+        if (IsGroupResident(groupIndex)) {
+            meshManager->EvictCLodGroupResidency(groupIndex, true);
+        }
+        ReleaseOwnedPagesForGroup(groupIndex, meshManager);
+    }
+
+    if (auto preAllocIt = m_preAllocatedPagesByGroup.find(groupIndex);
+        preAllocIt != m_preAllocatedPagesByGroup.end() && preAllocIt->second.usesPinnedStorage && !IsStreamingRequestInProgress(groupIndex)) {
+        ReleasePreAllocatedPages(preAllocIt->second, meshManager);
+        m_preAllocatedPagesByGroup.erase(preAllocIt);
+    }
+
+    if (word < m_streamingResidencyInitializedBitsCpu.size()) {
+        m_streamingResidencyInitializedBitsCpu[word] &= ~mask;
+    }
+}
+
+// A view mode change (a graph rebuild) can change which branches of forked DAGs are drawn. Parents follow the new
+// branches; the branches no longer drawn give up their pinned coarsest groups, and the ones newly drawn pin theirs.
+void CLodStreamingSystem::ApplyActiveBranches(ICLodGeometryStorage* meshManager, uint32_t branches) {
+    ZoneScopedN("CLodStreamingSystem::ApplyActiveBranches");
+    m_activeBranches = branches;
+    meshManager->SetCLodActiveBranches(branches);
+    std::fill(m_parentGroupByGroup.begin(), m_parentGroupByGroup.end(), UINT32_MAX);
+
+    br::render::CLodStreamingDomainSnapshot snapshot{};
+    meshManager->GetCLodStreamingDomainSnapshot(snapshot);
+    uint32_t pinned = 0u;
+    uint32_t unpinned = 0u;
+    std::vector<uint32_t> reinitialize;
+    for (const auto& range : snapshot.coarsestRanges) {
+        const bool wantPinned = (range.branches & branches) != 0u;
+        const uint32_t end = std::min(range.groupsBase + range.groupCount, m_streamingStorageGroupCapacity);
+        for (uint32_t groupIndex = range.groupsBase; groupIndex < end; ++groupIndex) {
+            const uint32_t word = BitWordAddress(groupIndex);
+            const uint32_t mask = BitMask(groupIndex);
+            if (word >= m_streamingPinnedGroupsBitsCpu.size() || IsGroupPinned(groupIndex) == wantPinned) {
+                continue;
+            }
+            if (wantPinned) {
+                m_streamingPinnedGroupsBitsCpu[word] |= mask;
+                ++pinned;
+                if (!IsGroupResident(groupIndex) && !IsStreamingRequestInProgress(groupIndex)) {
+                    m_streamingResidencyInitializedBitsCpu[word] &= ~mask;
+                    reinitialize.push_back(groupIndex);
+                }
+            } else {
+                m_streamingPinnedGroupsBitsCpu[word] &= ~mask;
+                ++unpinned;
+                if (UsesPinnedStorage(groupIndex) && !IsStreamingRequestInProgress(groupIndex)) {
+                    ReleasePinnedStorageForGroup(groupIndex, meshManager);
+                    reinitialize.push_back(groupIndex);
+                }
+            }
+        }
+    }
+    uint32_t initializedGroups = 0u;
+    uint32_t queuedPinnedGroups = 0u;
+    for (const uint32_t groupIndex : reinitialize) {
+        InitializeActiveRange(meshManager, groupIndex, 1u, initializedGroups, queuedPinnedGroups);
+    }
+    MarkStreamingActiveGroupsBitsDirty();
+    spdlog::info(
+        "CLod streaming: active branches {} (triangle={} voxel={}): pinned {} groups, unpinned {}, queued {}",
+        branches, (branches & 1u) != 0u, (branches & 2u) != 0u, pinned, unpinned, queuedPinnedGroups);
 }
 
 void CLodStreamingSystem::SetGroupUsesPinnedStorage(uint32_t groupIndex, bool usesPinnedStorage) {

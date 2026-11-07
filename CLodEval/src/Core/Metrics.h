@@ -58,6 +58,10 @@ public:
 	// A non-finite value is meaningless to compare, so it is reported and dropped rather than stored.
 	const std::vector<std::string>& DroppedNonFinite() const { return m_droppedNonFinite; }
 
+	// Takes another sink's records and pending rollups, as if they had been emitted here. Lets meshes be measured in
+	// parallel, each into its own sink, and joined in a fixed order.
+	void Absorb(MetricSink&& other);
+
 	// Records so far, with the asset rollups appended.
 	std::vector<MetricRecord> Finish();
 

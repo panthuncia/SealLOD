@@ -1114,6 +1114,7 @@ namespace CLodCache {
 		boost::hash_combine(seed, static_cast<uint32_t>(1));  // skinned CLod builds run serially for deterministic group/page ordering
 		boost::hash_combine(seed, static_cast<uint32_t>(9));  // page-less root instance portals force traversal instead of duplicating root pages + part voxel tail groups
 		boost::hash_combine(seed, static_cast<uint32_t>(4));  // voxel coverage/SGGX estimator version
+		boost::hash_combine(seed, static_cast<uint32_t>(2));  // automatic voxel fork decision (double-sided + seed + stall + size + surface)
 		// Asset-local settings must only invalidate caches built for the matching
 		// asset. Including the whole settings document here invalidates unrelated
 		// assets (notably every terrain world) whenever one model is tuned.
@@ -1133,6 +1134,11 @@ namespace CLodCache {
 		if (!GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_VOXEL_SURFACE_LOSS").empty()) {
 			hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_SURFACE_LOSS");
 		}
+		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_FORK");
+		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_FORK_STALL");
+		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_FORK_MIN_TRIANGLES");
+		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_FORK_DOUBLE_SIDED_ONLY");
+		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_FORK_SURFACE_LOSS");
 		hashEffectiveNodeBoneLimit();
 		hashEnvironmentString("BASICRENDERER_CLOD_DISABLE_SLOPPY_FALLBACK");
 		hashEnvironmentString("BASICRENDERER_CLOD_SLOPPY_ERROR_FACTOR");

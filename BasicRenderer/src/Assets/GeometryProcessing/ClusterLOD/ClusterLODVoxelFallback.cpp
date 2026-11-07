@@ -2359,18 +2359,171 @@ namespace clod_detail
 			std::count(seedMask.begin(), seedMask.end(), uint8_t{ 1u }), seedsBefore, traced, trialled, emptyProposals);
 	}
 
+	// What the voxel pass replaces in place, kept for a fork: the triangle groups before the pass and the triangle pages of
+	// the groups it replaced.
+	struct VoxelForkStash
+	{
+		bool enabled = false;
+		uint32_t groupCount = 0u;
+		std::vector<ClusterLODGroup> triangleGroups;
+		std::vector<std::vector<std::vector<std::byte>>> trianglePages;
+		std::vector<ClusterLODGroupChunk> triangleChunks;
+	};
+
+	struct VoxelForkResult
+	{
+		uint32_t triangleBranchGroups = 0u;
+		uint32_t voxelBranchGroups = 0u;
+		uint32_t sharedGroups = 0u;
+		uint32_t boundaryGroups = 0u;
+	};
+
+	// Turns the voxel pass's in-place replacement into a fork. The groups it replaced get their triangle versions back,
+	// tagged CLOD_GROUP_FLAG_BRANCH_TRIANGLE; their voxel versions move to the end, after the tail groups, tagged
+	// CLOD_GROUP_FLAG_BRANCH_VOXEL like the tail, with the voxel segments' children renamed to match. Shared groups keep
+	// their triangle bounds; where the pass rewrote them (the cut boundary under a voxel parent), the voxel-branch bounds go
+	// to state.forkVoxelBounds for the traversal hierarchy to turn into shadow records.
+	VoxelForkResult AssembleVoxelFork(ClusterLODBuildState& state, VoxelForkStash& stash)
+	{
+		ZoneScopedN("ClusterLODUtilities::VoxelFallback::AssembleVoxelFork");
+		VoxelForkResult result{};
+		const uint32_t originalCount = stash.groupCount;
+		const uint32_t passCount = static_cast<uint32_t>(state.groups.size());
+		std::vector<uint32_t> replaced;
+		for (uint32_t groupIndex = 0; groupIndex < originalCount; ++groupIndex)
+		{
+			if ((state.groups[groupIndex].flags & CLOD_GROUP_FLAG_IS_VOXEL) != 0u)
+			{
+				replaced.push_back(groupIndex);
+			}
+		}
+		if (replaced.empty())
+		{
+			// Nothing voxelized: the triangle build as it was, without the voxel payloads nothing would draw.
+			for (uint32_t groupIndex = 0; groupIndex < originalCount; ++groupIndex)
+			{
+				state.groups[groupIndex] = stash.triangleGroups[groupIndex];
+			}
+			state.voxelGroupMapping = {};
+			state.voxelCarryPayloads.clear();
+			result.sharedGroups = originalCount;
+			return result;
+		}
+
+		std::vector<int32_t> voxelIndex(passCount, -1);
+		for (size_t k = 0; k < replaced.size(); ++k)
+		{
+			voxelIndex[replaced[k]] = static_cast<int32_t>(passCount + k);
+		}
+		for (uint32_t groupIndex = originalCount; groupIndex < passCount; ++groupIndex)
+		{
+			voxelIndex[groupIndex] = static_cast<int32_t>(groupIndex);
+		}
+		const auto rename = [&](int32_t group) -> int32_t
+		{
+			return group >= 0 && static_cast<uint32_t>(group) < passCount && voxelIndex[group] >= 0 ? voxelIndex[group] : group;
+		};
+
+		const uint32_t finalCount = passCount + static_cast<uint32_t>(replaced.size());
+		state.groupPageBlobs.resize(std::max<size_t>(state.groupPageBlobs.size(), passCount));
+		state.groupChunks.resize(std::max<size_t>(state.groupChunks.size(), passCount));
+		VoxelGroupMapping& mapping = state.voxelGroupMapping;
+		mapping.groupToPayloadIndex.resize(std::max<size_t>(mapping.groupToPayloadIndex.size(), passCount), -1);
+		mapping.groupToPackedMetadataIndex.resize(std::max<size_t>(mapping.groupToPackedMetadataIndex.size(), passCount), -1);
+		for (const uint32_t groupIndex : replaced)
+		{
+			ClusterLODGroup voxel = state.groups[groupIndex];
+			voxel.flags |= CLOD_GROUP_FLAG_BRANCH_VOXEL;
+			state.groups.push_back(voxel);
+			state.groupPageBlobs.push_back(std::move(state.groupPageBlobs[groupIndex]));
+			state.groupChunks.push_back(state.groupChunks[groupIndex]);
+			mapping.groupToPayloadIndex.push_back(mapping.groupToPayloadIndex[groupIndex]);
+			mapping.groupToPackedMetadataIndex.push_back(mapping.groupToPackedMetadataIndex[groupIndex]);
+
+			ClusterLODGroup triangle = stash.triangleGroups[groupIndex];
+			triangle.flags |= CLOD_GROUP_FLAG_BRANCH_TRIANGLE;
+			state.groups[groupIndex] = triangle;
+			state.groupPageBlobs[groupIndex] = std::move(stash.trianglePages[groupIndex]);
+			state.groupChunks[groupIndex] = stash.triangleChunks[groupIndex];
+			mapping.groupToPayloadIndex[groupIndex] = -1;
+			mapping.groupToPackedMetadataIndex[groupIndex] = -1;
+		}
+		for (uint32_t groupIndex = originalCount; groupIndex < passCount; ++groupIndex)
+		{
+			state.groups[groupIndex].flags |= CLOD_GROUP_FLAG_BRANCH_VOXEL;
+		}
+		// Voxel-branch groups refine into the voxel versions of their children.
+		for (uint32_t groupIndex = originalCount; groupIndex < finalCount; ++groupIndex)
+		{
+			const ClusterLODGroup& group = state.groups[groupIndex];
+			const uint32_t end = std::min<uint32_t>(group.firstSegment + group.segmentCount, static_cast<uint32_t>(state.segments.size()));
+			for (uint32_t segmentIndex = group.firstSegment; segmentIndex < end; ++segmentIndex)
+			{
+				state.segments[segmentIndex].refinedGroup = rename(state.segments[segmentIndex].refinedGroup);
+			}
+			state.groups[groupIndex].parentGroupId = -1;
+		}
+
+		state.forkVoxelBounds.assign(finalCount, clodBounds{});
+		state.forkHasVoxelBounds.assign(finalCount, 0u);
+		for (uint32_t groupIndex = 0; groupIndex < originalCount; ++groupIndex)
+		{
+			if (voxelIndex[groupIndex] >= 0)
+			{
+				continue;
+			}
+			const clodBounds voxelBounds = state.groups[groupIndex].bounds;
+			state.groups[groupIndex] = stash.triangleGroups[groupIndex];
+			++result.sharedGroups;
+			if (std::memcmp(&voxelBounds, &state.groups[groupIndex].bounds, sizeof(clodBounds)) != 0)
+			{
+				state.forkVoxelBounds[groupIndex] = voxelBounds;
+				state.forkHasVoxelBounds[groupIndex] = 1u;
+				++result.boundaryGroups;
+			}
+		}
+		state.voxelCarryPayloads.resize(finalCount);
+		if (!state.traversalGroupMask.empty())
+		{
+			state.traversalGroupMask.resize(finalCount, 1u);
+		}
+		result.triangleBranchGroups = static_cast<uint32_t>(replaced.size());
+		result.voxelBranchGroups = finalCount - originalCount;
+		return result;
+	}
+
 	void BuildVoxelFallbackCandidates(
 		ClusterLODBuildState& state,
 		size_t vertexStrideBytes,
 		size_t skinningVertexStrideBytes,
 		const VoxelCoverageMaterialSampler* coverageMaterialSampler,
-		const ClusterLODBuilderSettings& settings)
+		const ClusterLODBuilderSettings& inputSettings)
 	{
 		ZoneScopedN("ClusterLODUtilities::BuildVoxelFallbackCandidates");
-		const bool enabled = settings.coveragePreservationMode == ClusterLODCoveragePreservationMode::Voxel;
-		if (!enabled || state.groups.empty())
+		const bool replaceMode = inputSettings.coveragePreservationMode == ClusterLODCoveragePreservationMode::Voxel;
+		ClusterLODVoxelForkMode forkMode = replaceMode ? ClusterLODVoxelForkMode::Off : inputSettings.voxelFork;
+		if (forkMode == ClusterLODVoxelForkMode::Auto && inputSettings.voxelForkDoubleSidedOnly && !inputSettings.doubleSidedVoxelSourceNormals)
+		{
+			forkMode = ClusterLODVoxelForkMode::Off;
+		}
+		if ((!replaceMode && forkMode == ClusterLODVoxelForkMode::Off) || state.groups.empty())
 		{
 			return;
+		}
+		ClusterLODBuilderSettings settings = inputSettings;
+		if (forkMode == ClusterLODVoxelForkMode::Auto && settings.voxelSurfaceLossLimit <= 0.0f)
+		{
+			// An automatic fork must not voxelize solid surfaces.
+			settings.voxelSurfaceLossLimit = std::max(0.0f, settings.voxelForkSurfaceLoss);
+		}
+		VoxelForkStash fork{};
+		fork.enabled = forkMode != ClusterLODVoxelForkMode::Off;
+		if (fork.enabled)
+		{
+			fork.groupCount = static_cast<uint32_t>(state.groups.size());
+			fork.triangleGroups = state.groups;
+			fork.trianglePages.resize(state.groups.size());
+			fork.triangleChunks.resize(state.groups.size());
 		}
 
 		state.voxelGroupMapping.groupToPayloadIndex.assign(state.groups.size(), -1);
@@ -2996,6 +3149,18 @@ namespace clod_detail
 			group.representationError = packedVoxelRepresentationError;
 			if (replaceGroupWithVoxels)
 			{
+				if (fork.enabled && groupIndex < fork.groupCount)
+				{
+					// The triangle version stays as the triangle branch (AssembleVoxelFork).
+					if (groupIndex < state.groupPageBlobs.size())
+					{
+						fork.trianglePages[groupIndex] = std::move(state.groupPageBlobs[groupIndex]);
+					}
+					if (groupIndex < state.groupChunks.size())
+					{
+						fork.triangleChunks[groupIndex] = state.groupChunks[groupIndex];
+					}
+				}
 				group.flags |= CLOD_GROUP_FLAG_IS_VOXEL;
 				group.meshletCount = 0u;
 				group.groupVertexCount = 0u;
@@ -3060,6 +3225,59 @@ namespace clod_detail
 			if (groupInputs[groupIndex].autoWouldFitBudget)
 			{
 				seedVoxelGroupMask[groupIndex] = 1u;
+			}
+		}
+		uint32_t forkStallRejectedSeeds = 0u;
+		if (forkMode == ClusterLODVoxelForkMode::Auto)
+		{
+			// Voxels win where triangle reduction stalls: the next level keeps most of a seed's triangles (or there is no
+			// next level) while it still has many. Where it does not, the triangle branch is already cheap and the seed
+			// would only cost a fork.
+			std::vector<uint64_t> groupTriangles(originalGroupCount, 0u);
+			std::vector<uint64_t> trianglesKeptByParents(originalGroupCount, 0u);
+			std::vector<uint8_t> hasParent(originalGroupCount, 0u);
+			for (uint32_t groupIndex = 0; groupIndex < originalGroupCount; ++groupIndex)
+			{
+				if (groupIndex >= state.groupMeshletChunks.size())
+				{
+					continue;
+				}
+				const auto& meshlets = state.groupMeshletChunks[groupIndex];
+				const auto* refinedGroups = groupIndex < state.groupMeshletRefinedGroupChunks.size()
+					? &state.groupMeshletRefinedGroupChunks[groupIndex] : nullptr;
+				for (size_t meshletIndex = 0; meshletIndex < meshlets.size(); ++meshletIndex)
+				{
+					const uint32_t triangles = meshlets[meshletIndex].triangle_count;
+					groupTriangles[groupIndex] += triangles;
+					const int32_t child = refinedGroups != nullptr && meshletIndex < refinedGroups->size() ? (*refinedGroups)[meshletIndex] : -1;
+					if (child >= 0 && static_cast<uint32_t>(child) < originalGroupCount)
+					{
+						trianglesKeptByParents[child] += triangles;
+						hasParent[child] = 1u;
+					}
+				}
+			}
+			for (uint32_t groupIndex = 0; groupIndex < originalGroupCount; ++groupIndex)
+			{
+				if (seedVoxelGroupMask[groupIndex] == 0u)
+				{
+					continue;
+				}
+				const bool stalled = hasParent[groupIndex] == 0u ||
+					static_cast<double>(trianglesKeptByParents[groupIndex]) >
+						static_cast<double>(settings.voxelForkStallRatio) * static_cast<double>(groupTriangles[groupIndex]);
+				if (!stalled || groupTriangles[groupIndex] < settings.voxelForkMinTriangles)
+				{
+					seedVoxelGroupMask[groupIndex] = 0u;
+					++forkStallRejectedSeeds;
+				}
+			}
+			if (std::none_of(seedVoxelGroupMask.begin(), seedVoxelGroupMask.end(), [](uint8_t seed) { return seed != 0u; }))
+			{
+				state.voxelGroupMapping = {};
+				state.voxelCarryPayloads.clear();
+				spdlog::debug("ClusterLOD voxel fork: no stalled seed (candidates={} rejected={})", stats.autoCandidateGroups, forkStallRejectedSeeds);
+				return;
 			}
 		}
 		const auto buildSharedCoverageSource = [&](const std::vector<uint8_t>& mask) {
@@ -3688,6 +3906,18 @@ namespace clod_detail
 			spdlog::debug(
 				"ClusterLOD voxel fallback preserved {} root terminal sentinel traversal errors after voxel boundary rewrites",
 				voxelTraversalRootSentinelsPreserved);
+		}
+		if (fork.enabled)
+		{
+			const VoxelForkResult forked = AssembleVoxelFork(state, fork);
+			spdlog::info(
+				"ClusterLOD voxel fork: mode={} triangle_branch_groups={} voxel_branch_groups={} shared_groups={} boundary_groups={} stall_rejected_seeds={}",
+				forkMode == ClusterLODVoxelForkMode::Auto ? "auto" : "forced",
+				forked.triangleBranchGroups,
+				forked.voxelBranchGroups,
+				forked.sharedGroups,
+				forked.boundaryGroups,
+				forkStallRejectedSeeds);
 		}
 	}
 

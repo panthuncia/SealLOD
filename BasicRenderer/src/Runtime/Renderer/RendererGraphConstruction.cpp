@@ -5,6 +5,7 @@
 #include <BasicRenderer/Renderer.h>
 #include "Runtime/Publication/PersistentRendererPublication.h"
 #include "OpenRenderGraph/GraphInstance.h"
+#include <BasicRenderer/Assets/ClusterLODTypes.h>
 
 #define _USE_MATH_DEFINES
 #include <optional>
@@ -837,6 +838,14 @@ void Renderer::RegisterPipelineExtensions() {
                 spdlog::warn("CLod ray tracing requested but unavailable on this device; rendering with raster and shadow maps.");
             }
             const auto rayTracingSystem = rayTracing ? m_clodRayTracingSystem : nullptr;
+            if (id == br::pipeline::TechniqueId::ClusterLod) {
+                // Forked DAGs: raster views with voxel output take the voxel branch, every other view the triangle branch.
+                const uint32_t forcedBranch = GetClusterLODForcedViewBranch();
+                const bool rasterVoxels = forcedBranch == 2u || (forcedBranch == 0u && voxelRasterizationEnabled);
+                uint32_t branches = rasterVoxels ? CLOD_BRANCH_VOXEL : CLOD_BRANCH_TRIANGLE;
+                if (rayTracing) branches |= CLOD_BRANCH_TRIANGLE;
+                clodStreamingSystem->SetActiveBranches(branches);
+            }
 
             currentRenderGraph->RegisterExtension(
                 std::make_unique<CLodExtension>(

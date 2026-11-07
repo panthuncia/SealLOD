@@ -50,6 +50,10 @@ struct ViewerOptions {
 // Opens an interactive window on one built asset, with the same environment its captures get. Waits until it closes.
 bool RunViewer(const Suite& suite, const SuiteVariant& variant, const SuiteAsset& asset, const ViewerOptions& options, std::string& outError);
 
+// Opens the viewer on a merge-hierarchy root (docs/merge_hierarchies.md in SARP) and the parts its portal parts file
+// names, from the cache tree they are in. Writes viewer.json and the log under `directory`.
+bool RunRootViewer(const std::filesystem::path& rootMetadata, const std::filesystem::path& directory, const ViewerOptions& options, std::string& outError);
+
 // Scores a variant's bundles and writes per-view contact sheets under report/<variant>/<asset>/.
 bool ScoreVariant(const Suite& suite, const SuiteVariant& variant, bool transitionOnly, ResultSet& outResults, std::string& outError);
 

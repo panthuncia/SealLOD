@@ -7,8 +7,14 @@
 // portal: when the cut passes it, traversal opens the part (a registered mesh, never copied) through the item's
 // transform, and the part's own hierarchy takes over. The builder knows nothing about where items come from or how
 // they were grouped into a region.
+//
+// Voxel forks: an item whose part forks (CLOD_GROUP_FLAG_BRANCH_*) has a second representation for raster views with
+// voxel output. The hierarchy is then built twice, into one root: a triangle branch from every item's triangles, and a
+// voxel branch in which such items are voxels. A voxel-branch node voxelizes its voxel children together (beside its
+// triangle group for the others), so a stand of foliage becomes one voxel group at distance.
 
 #include <cstdint>
+#include <limits>
 #include <span>
 #include <vector>
 
@@ -38,6 +44,10 @@ struct ClusterLODMergeItem
 	DirectX::XMFLOAT4 partLodSphere = {};      // part-space LOD sphere of what the portal opens
 	uint32_t materialBase = 0;       // root palette index of the part's slot 0
 	uint32_t flags = 0;              // added to the portal's ClusterLODAssemblyInstance::flags
+	// A forked part's voxel branch: the triangles its voxels were made from (into the geometries span), and the cut at
+	// which the part switches from them to voxels, in part space. UINT32_MAX: the part has no voxel branch.
+	uint32_t voxelGeometry = UINT32_MAX;
+	float voxelError = 0.0f;
 };
 
 struct ClusterLODMergeSettings
@@ -50,6 +60,23 @@ struct ClusterLODMergeSettings
 	float weldRelativeTolerance = 0.25f; // weld positions within this fraction of a node's target error
 	uint32_t materialSlotCount = 1;   // the root palette's size
 	uint32_t traversalNodeWidth = 8;
+	// No node is built with an error over this: the coarsest cut a renderer will ask of the hierarchy. What cannot merge
+	// under it stays at the top: nodes that draw from afar, and portals that are open at every distance. Infinity
+	// merges up to one root, at rootMaxGroups times the budget.
+	float maxNodeError = std::numeric_limits<float>::infinity();
+	// A node the budget would take over maxNodeError may spend up to this many budgets of triangles to stay under it.
+	uint32_t capBudgetFactor = 4;
+	// A node draws while E(N) <= cut < E(parent). A child node whose parent's error is less than this factor above its
+	// own would hardly ever draw, so it is dissolved: its children move up to the parent and it is not built.
+	float minNodeDrawWindow = 1.2f;
+	// A level takes at least a full fanout of the smallest entities, but never ones over errorGrowth^this times the
+	// smallest: siblings switch together, so the finest is opened early by that factor.
+	float maxSiblingSpreadLevels = 3.0f;
+	// Voxel branch: whether nodes voxelize their voxel children (false: voxel items stay portals there), the most cubes
+	// a node's voxels may take, and the coverage rays per cell.
+	bool voxelNodes = true;
+	uint32_t nodeVoxelCubeBudget = 512;
+	uint32_t voxelRaysPerCell = 8;
 };
 
 struct ClusterLODMergeStats
@@ -62,9 +89,26 @@ struct ClusterLODMergeStats
 	uint32_t rootTriangles = 0;
 	float rootError = 0.0f;
 	uint32_t sloppyNodes = 0;     // nodes that needed the sloppy fallback to reach their budget
+	uint32_t topNodes = 0;        // nodes with no parent: drawn from afar
+	uint32_t topPortals = 0;      // portals with no parent: open at every distance
+	uint32_t foldedNodes = 0;     // nodes that keep their children's exact triangles, with no portals under them
+	uint32_t foldedItems = 0;     // items inside folded nodes: no portal
+	uint32_t rejectedNodes = 0;   // groupings whose node would have been over maxNodeError
+	uint32_t dissolvedNodes = 0;  // nodes whose parent switched too close to them (minNodeDrawWindow)
+	// Voxel forks. The counts above are the triangle branch's; these are the voxel branch's.
+	uint32_t voxelItems = 0;            // items with a voxel branch
+	uint32_t voxelBranchNodes = 0;      // nodes of the voxel branch
+	uint32_t voxelNodes = 0;            // voxel-branch nodes with voxel groups
+	uint64_t voxelCubes = 0;
+	uint64_t voxelBranchNodeTriangles = 0;
+	uint32_t voxelBranchTopPortals = 0;
 };
 
-// Throws on invalid input. Needs at least two items.
+// An item whose part has no coarser representation than its own triangles (error 0) needs no portal when it merges
+// with other such items while their union fits the budget: the node keeps their exact triangles (a folded node).
+//
+// Throws on invalid input. Needs at least two items. Returns empty artifacts, with stats.nodes 0, when no two items can
+// merge under maxNodeError: the caller should keep them as they are.
 ClusterLODPrebuildArtifacts BuildClusterLODMergeHierarchy(
 	std::span<const ClusterLODMergeGeometry> geometries,
 	std::span<const ClusterLODMergeItem> items,

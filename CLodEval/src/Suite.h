@@ -91,6 +91,11 @@ std::filesystem::path GetResultsPath(const Suite& suite, const std::string& vari
 struct AnalyzeOptions {
 	std::vector<std::string> analyzers;  // empty: all
 	std::string assetFilter;
+	uint32_t threads = 0;  // 0: one per hardware thread
+	float mergeReachCut = 440.0f;  // AnalysisContext::mergeReachCut
+	// A forked mesh (CachedMesh::IsForked) is measured per branch: "" both, as "<mesh>#triangle" and "<mesh>#voxel";
+	// "triangle" or "voxel" just that one, under the mesh's own name (comparable with an unforked build).
+	std::string branch;
 };
 
 struct MeshToAnalyze {

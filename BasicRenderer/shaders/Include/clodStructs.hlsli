@@ -298,6 +298,7 @@ struct ClusterLODGroup
     int parentGroupId; // mesh-local group index of the parent group (-1 for root)
     float maxParentError; // max error of any parent group that refines into this group
     float representationError; // voxel payload quality/diagnostic error; builder uses it to derive cut boundaries
+    int branchGroupId; // shared group of a forked DAG: its voxel-branch shadow record (GPU copy: global), or -1
 };
 
 static const uint CLOD_NODE_INTERNAL = 0u;
@@ -346,6 +347,11 @@ static const uint CLOD_GROUP_FLAG_IS_VOXEL = 1u << 0;
 static const uint CLOD_GROUP_FLAG_IS_ASSEMBLY_PROXY = 1u << 1;
 static const uint CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL = 1u << 2;
 static const uint CLOD_GROUP_FLAG_MERGE_CHILD = 1u << 3; // streaming parent is parentGroupId (ClusterLODShaderTypes.h)
+// Forked DAGs (ClusterLODShaderTypes.h): branch-only groups, and the voxel-branch boundary records of shared groups.
+static const uint CLOD_GROUP_FLAG_BRANCH_TRIANGLE = 1u << 4;
+static const uint CLOD_GROUP_FLAG_BRANCH_VOXEL = 1u << 5;
+static const uint CLOD_GROUP_FLAG_BRANCH_SHADOW = 1u << 6;
+static const uint CLOD_GROUP_VOXEL_MATERIAL_SLOT_SHIFT = 16u; // a voxel group's material slot (ClusterLODShaderTypes.h)
 
 static const uint CLOD_VOXEL_STATIC_BONE_INDEX = 0xFFFFFFFFu;
 static const uint CLOD_VOXEL_MAX_CUBES_PER_CLUSTER = 128u;

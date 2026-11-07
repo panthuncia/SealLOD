@@ -1,12 +1,15 @@
 // Merge hierarchy invariants (docs/merge_hierarchies.md) on a synthetic field of placed parts:
 // - every child of a node (node groups and portal proxies) carries exactly its parent's children-group bounds,
-// - errors grow toward the root, which never refines away,
+// - errors grow toward the root, which never refines away; with a cap, no node is over it and the top is a forest,
+// - items whose triangles are exact fold into nodes that keep them, with no portal,
 // - at any camera distance every item is drawn exactly once: by its open portal or by one drawn ancestor node,
-// - node clusters name material slots inside the palette.
+// - node clusters name material slots inside the palette,
+// - with voxel items (forked parts), each branch on its own holds all of the above, and voxel-branch nodes voxelize them.
 
 #include <BasicRenderer/Assets/Import/ClusterLODMergeHierarchy.h>
 #include <BasicRenderer/Assets/ClusterLODShaderTypes.h>
 
+#include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstdio>
@@ -71,11 +74,24 @@ float ProjectedError(const clodBounds& b, DirectX::XMFLOAT3 camera)
 	return b.error / distance;
 }
 
-void TestHierarchy()
+struct Case {
+	const char* name;
+	uint32_t subdivisions0, subdivisions1;
+	float error0, error1;
+	float cap;
+	bool voxelItems = false; // part 1 forks: its items have a voxel branch
+};
+
+uint32_t Branches(const ClusterLODGroup& group) { return ClusterLODGroupBranches(group.flags); }
+
+void TestHierarchy(const Case& test)
 {
+	std::fprintf(stdout, "case %s\n", test.name);
+	const bool capped = std::isfinite(test.cap);
+	const bool exact = test.error0 <= 0.0f && test.error1 <= 0.0f;
 	std::vector<ClusterLODMergeGeometry> geometries;
-	geometries.push_back(MakeBlob(8, 0.02f, 0));
-	geometries.push_back(MakeBlob(6, 0.03f, 1));
+	geometries.push_back(MakeBlob(test.subdivisions0, test.error0, 0));
+	geometries.push_back(MakeBlob(test.subdivisions1, test.error1, 1));
 	std::vector<ClusterLODMergeItem> items;
 	constexpr int kSide = 12;
 	for (int z = 0; z < kSide; ++z) {
@@ -90,6 +106,10 @@ void TestHierarchy()
 				DirectX::XMMatrixScaling(scale, scale, scale) * DirectX::XMMatrixTranslation(x * 6.0f, 0.0f, z * 6.0f));
 			item.partLodSphere = { 0, 0, 0, 1.0f };
 			item.materialBase = item.geometry; // part 0's slots start at palette 0, part 1's at 1; part 1 uses its slot 1
+			if (test.voxelItems && item.geometry == 1u) {
+				item.voxelGeometry = 1u; // its triangles stand for what its voxels were made from
+				item.voxelError = test.error1 * 1.5f;
+			}
 			items.push_back(item);
 		}
 	}
@@ -97,20 +117,49 @@ void TestHierarchy()
 	settings.fanout = 4;
 	settings.nodeTriangleBudget = 256;
 	settings.materialSlotCount = 3;
+	settings.maxNodeError = test.cap;
 	ClusterLODMergeStats stats{};
 	const ClusterLODPrebuildArtifacts built = BuildClusterLODMergeHierarchy(geometries, items, settings, &stats);
 	const ClusterLODPrebuiltData& data = built.prebuiltData;
+	std::fprintf(stdout, "  top nodes=%u top portals=%u folded nodes=%u folded items=%u rejected=%u\n", stats.topNodes, stats.topPortals, stats.foldedNodes, stats.foldedItems, stats.rejectedNodes);
 	std::fprintf(stdout, "merge hierarchy: items=%u nodes=%u levels=%u input=%llu node=%llu root=%u rootError=%g sloppy=%u groups=%zu nodes=%zu pages=%zu\n",
 		stats.items, stats.nodes, stats.levels, static_cast<unsigned long long>(stats.inputTriangles),
 		static_cast<unsigned long long>(stats.nodeTriangles), stats.rootTriangles, stats.rootError, stats.sloppyNodes,
 		data.groups.size(), data.nodes.size(), built.cacheBuildData.meshPageBlobs.size());
 
+	const size_t portals = items.size() - stats.foldedItems;
+	const uint32_t branchCount = test.voxelItems ? 2u : 1u;
 	CHECK(stats.levels >= 2u);
-	CHECK(data.assemblyInstances.size() == items.size());
-	CHECK(data.assemblyTransforms.size() == items.size());
-	CHECK(data.assemblyTransformMaterialBases.size() == items.size());
+	CHECK(data.assemblyInstances.size() == portals * branchCount);
+	CHECK(data.assemblyTransforms.size() == portals * branchCount);
+	CHECK(data.assemblyTransformMaterialBases.size() == portals * branchCount);
+	if (test.voxelItems) {
+		std::fprintf(stdout, "  voxel items=%u voxel-branch nodes=%u voxel nodes=%u cubes=%llu voxel-branch node tris=%llu\n", stats.voxelItems,
+			stats.voxelBranchNodes, stats.voxelNodes, static_cast<unsigned long long>(stats.voxelCubes),
+			static_cast<unsigned long long>(stats.voxelBranchNodeTriangles));
+		CHECK(stats.voxelItems == items.size() / 2u);
+		CHECK(stats.voxelNodes != 0u && stats.voxelCubes != 0u);
+		// Half the items are voxels there, so the voxel branch merges fewer triangles.
+		CHECK(stats.voxelBranchNodeTriangles < stats.nodeTriangles);
+		uint32_t voxelGroups = 0;
+		for (const ClusterLODGroup& group : data.groups) {
+			CHECK((group.flags & (CLOD_GROUP_FLAG_BRANCH_TRIANGLE | CLOD_GROUP_FLAG_BRANCH_VOXEL)) != 0u);
+			if ((group.flags & CLOD_GROUP_FLAG_IS_VOXEL) == 0u) continue;
+			++voxelGroups;
+			CHECK((group.flags & CLOD_GROUP_FLAG_BRANCH_VOXEL) != 0u);
+			CHECK((group.flags >> CLOD_GROUP_VOXEL_MATERIAL_SLOT_SHIFT) == 2u); // part 1's slot 1 at its palette base 1
+			CHECK(group.representationError > 0.0f && group.pageCount != 0u);
+		}
+		CHECK(voxelGroups >= stats.voxelNodes);
+		CHECK(built.prebuiltData.voxelPageCount != 0u);
+	}
+	for (uint32_t branch = 1u; branch <= (test.voxelItems ? 2u : 1u); ++branch) {
+	const uint32_t branchBit = test.voxelItems ? branch : CLOD_BRANCH_ALL;
 	CHECK(data.materialSlotCount == 3u);
-	CHECK(data.maxTraversalDepth >= 3u + 2u);
+	if (!capped) CHECK(data.maxTraversalDepth >= 3u + 2u);
+	if (exact) CHECK(stats.foldedNodes != 0u && stats.foldedItems != 0u);
+	else CHECK(stats.foldedItems == 0u);
+	if (capped) CHECK(stats.topNodes + stats.topPortals > 1u);
 	for (const ClusterLODAssemblyInstance& instance : data.assemblyInstances) {
 		CHECK((instance.flags & CLOD_ASSEMBLY_INSTANCE_FLAG_PART_PORTAL) != 0u);
 		CHECK(instance.targetRootNode == 7u);
@@ -124,31 +173,45 @@ void TestHierarchy()
 	uint32_t rootGroups = 0;
 	for (uint32_t g = 0; g < data.groups.size(); ++g) {
 		const ClusterLODGroup& group = data.groups[g];
+		if ((Branches(group) & branchBit) == 0u) continue;
 		if ((group.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_PROXY) != 0u) {
 			proxies.push_back(g);
-			CHECK(group.parentGroupId >= 0); // a proxy without a parent would always open
+			// A proxy without a parent always opens: only the top of a capped hierarchy has them.
+			CHECK(group.parentGroupId >= 0 || (capped && group.bounds.error >= (std::numeric_limits<float>::max)()));
 			continue;
 		}
 		if (group.segmentCount == 0u) continue; // children group
 		const int32_t refined = data.segments[group.firstSegment].refinedGroup;
-		CHECK(refined >= 0);
+		if (refined < 0) {
+			// A folded node: exact triangles, no children.
+			CHECK(exact);
+			for (uint32_t s = 0; s < group.segmentCount; ++s) CHECK(data.segments[group.firstSegment + s].refinedGroup < 0);
+			nodes.push_back({ g, UINT32_MAX });
+			if (group.bounds.error >= (std::numeric_limits<float>::max)()) ++rootGroups;
+			continue;
+		}
 		for (uint32_t s = 0; s < group.segmentCount; ++s) CHECK(data.segments[group.firstSegment + s].refinedGroup == refined);
 		const ClusterLODGroup& children = data.groups[static_cast<uint32_t>(refined)];
 		CHECK(children.segmentCount == 0u && children.pageCount == 0u);
 		CHECK(group.bounds.error >= children.bounds.error);
+		CHECK(children.bounds.error <= test.cap);
+		// A voxel-branch node's voxel groups refine into the same children group as its triangle group: count nodes once.
+		const bool sameNode = std::any_of(nodes.begin(), nodes.end(), [&](const NodeInfo& n) { return n.children == static_cast<uint32_t>(refined); });
 		nodes.push_back({ g, static_cast<uint32_t>(refined) });
-		if (group.bounds.error >= (std::numeric_limits<float>::max)()) ++rootGroups;
+		if (group.bounds.error >= (std::numeric_limits<float>::max)() && !sameNode) ++rootGroups;
 	}
-	CHECK(rootGroups == 1u);
-	CHECK(proxies.size() == items.size());
+	if (capped) CHECK(rootGroups > 1u || stats.topPortals != 0u);
+	else CHECK(rootGroups == 1u);
+	CHECK(proxies.size() == portals);
 
 	// Every child carries its parent's children-group bounds.
 	auto parentChildren = [&](uint32_t childGroup) -> const ClusterLODGroup* {
 		const int32_t parentOwn = data.groups[childGroup].parentGroupId;
-		for (const NodeInfo& n : nodes) if (static_cast<int32_t>(n.own) == parentOwn) return &data.groups[n.children];
+		for (const NodeInfo& n : nodes) if (static_cast<int32_t>(n.own) == parentOwn && n.children != UINT32_MAX) return &data.groups[n.children];
 		return nullptr;
 	};
 	for (const uint32_t p : proxies) {
+		if (data.groups[p].parentGroupId < 0) continue;
 		const ClusterLODGroup* pc = parentChildren(p);
 		CHECK(pc != nullptr);
 		if (pc) CHECK(std::memcmp(&pc->bounds, &data.groups[p].bounds, sizeof(clodBounds)) == 0);
@@ -168,7 +231,7 @@ void TestHierarchy()
 			ancestors[i].push_back(static_cast<uint32_t>(parent));
 			parent = data.groups[static_cast<uint32_t>(parent)].parentGroupId;
 		}
-		CHECK(!ancestors[i].empty());
+		CHECK(!ancestors[i].empty() || data.groups[proxies[i]].bounds.error >= (std::numeric_limits<float>::max)());
 	}
 	auto childrenOf = [&](uint32_t own) {
 		for (const NodeInfo& n : nodes) if (n.own == own) return n.children;
@@ -192,7 +255,8 @@ void TestHierarchy()
 			}
 		}
 	}
-	CHECK(opened != 0u && merged != 0u); // the sweep saw both
+	CHECK(exact || (opened != 0u && merged != 0u)); // the sweep saw both (exact items all fold: nothing opens)
+	}
 
 	// Node clusters name palette slots.
 	uint32_t slotsSeen = 0;
@@ -216,7 +280,11 @@ void TestHierarchy()
 int main()
 {
 	try {
-		TestHierarchy();
+		TestHierarchy({ "uncapped", 8, 6, 0.02f, 0.03f, std::numeric_limits<float>::infinity() });
+		TestHierarchy({ "capped", 8, 6, 0.02f, 0.03f, 1.0f });
+		TestHierarchy({ "exact", 2, 1, 0.0f, 0.0f, std::numeric_limits<float>::infinity() });
+		TestHierarchy({ "voxel items", 8, 6, 0.02f, 0.03f, std::numeric_limits<float>::infinity(), true });
+		TestHierarchy({ "voxel items, capped", 8, 6, 0.02f, 0.03f, 1.0f, true });
 	} catch (const std::exception& e) {
 		std::fprintf(stderr, "exception: %s\n", e.what());
 		return 1;

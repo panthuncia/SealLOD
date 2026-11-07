@@ -4,6 +4,9 @@
 // can be rebuilt independently. This binary links neither the renderer nor the generator.
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <thread>
 #include <cstdio>
 #include <exception>
 #include <filesystem>
@@ -23,6 +26,7 @@
 #include "Analyzers/Analyzers.h"
 #include "Capture.h"
 #include "Core/Analyzer.h"
+#include "Core/MergeHierarchy.h"
 #include "Core/Process.h"
 #include "Core/Results.h"
 #include "Suite.h"
@@ -40,15 +44,24 @@ constexpr const char* kUsage = R"(CLodEval: measure CLod hierarchies.
 
   CLodEval build <suite> [--variant name] [--force] [--workspace dir]
       Build each variant's caches with CLodCacheTool. Skipped if nothing changed.
-  CLodEval analyze <suite> [--variant name] [--filter asset] [--analyzer id ...] [--workspace dir]
-      Run analyzers on built caches and write results/<variant>.jsonl and .csv.
+  CLodEval analyze <suite> [--variant name] [--filter asset] [--analyzer id ...] [--branch triangle|voxel] [--workspace dir]
+      Run analyzers on built caches and write results/<variant>.jsonl and .csv. A forked mesh is measured per
+      branch, as <mesh>#triangle and <mesh>#voxel, or only the --branch given under the mesh's own name.
   CLodEval run <suite> [same options as build and analyze]
       build, then analyze, then check the suite's budgets.
   CLodEval inspect <cache.clodmeta|directory> [--group N] [--json]
       Describe caches. Works on any cache, including SARPPreprocessor's.
+  CLodEval fork-census <cache tree> --out rows.csv [--threads N]
+      Every forked (triangle/voxel) mesh in a tree: what each branch draws at a range of cuts, and totals.
+  CLodEval merge-report <root.clodmeta|directory> [--json] [--out report.json]
+      Describe merge-hierarchy roots: the merge tree by level, portals and parts, and what each cut draws.
+  CLodEval merge-census <cache tree> --out prefix [--threads N] [--reach-cut 440] [--branch triangle|voxel]
+      Every merge root in a tree through hierarchy.merge, in parallel: results files, one row per root, totals and worst roots.
+  CLodEval view-root <root.clodmeta|directory> [--size 1920x1080] [--script steps.json]
+      Open the viewer on a merge-hierarchy root and the parts its portals open, from the cache tree alone.
   CLodEval voxel-fidelity <cache.clodmeta|directory> --out rows.csv
       Per voxel group: how much of the source surface its cells cover, and how surface-like that source is.
-  CLodEval analyze-cache <cache.clodmeta|directory> --out results.jsonl [--analyzer id ...] [--asset name]
+  CLodEval analyze-cache <cache.clodmeta|directory> --out results.jsonl [--analyzer id ...] [--asset name] [--branch triangle|voxel]
       Run analyzers on caches that did not come from a suite.
   CLodEval compare <a.jsonl> <b.jsonl> [--threshold 0.01] [--budget file.json] [--all] [--json]
       Compare two results files. Exit 0 same, 1 different or over budget, 2 not comparable, 3 error.
@@ -90,7 +103,8 @@ Arguments ParseArguments(int argc, char** argv)
 {
 	static const std::vector<std::string> kFlags = { "--force", "--json", "--all" };
 	static const std::vector<std::string> kValued = {
-		"--variant", "--workspace", "--filter", "--analyzer", "--group", "--out", "--asset", "--threshold", "--budget", "--cache-tool", "--size", "--script", "--parts" };
+		"--variant", "--workspace", "--filter", "--analyzer", "--group", "--out", "--asset", "--threshold", "--budget", "--cache-tool", "--size", "--script", "--parts",
+		"--threads", "--reach-cut", "--branch" };
 	Arguments arguments;
 	for (int index = 2; index < argc; ++index) {
 		const std::string argument = argv[index];
@@ -172,6 +186,7 @@ int CommandAnalyze(const Suite& suite, const Arguments& arguments)
 	AnalyzeOptions options;
 	options.analyzers = arguments.Has("--analyzer") ? arguments.Values("--analyzer") : suite.analyzers;
 	options.assetFilter = arguments.Value("--filter");
+	options.branch = arguments.Value("--branch");
 	int exitCode = kExitOk;
 	for (const SuiteVariant* variant : SelectVariants(suite, arguments)) {
 		ResultSet results;
@@ -247,6 +262,34 @@ int CommandView(const Suite& suite, const Arguments& arguments)
 	return kExitOk;
 }
 
+int CommandViewRoot(const Arguments& arguments)
+{
+	if (arguments.positional.empty()) {
+		throw std::runtime_error("view-root needs a root's cache file or directory");
+	}
+	const std::vector<fs::path> paths = FindCacheMetadata(arguments.positional.front());
+	if (paths.size() != 1u) {
+		std::cerr << std::format("'{}' holds {} caches; name one root\n", arguments.positional.front(), paths.size());
+		return kExitError;
+	}
+	ViewerOptions options;
+	options.captureTool = GetExecutableDirectory() / "CLodCapture.exe";
+	options.script = arguments.Value("--script");
+	if (const std::string size = arguments.Value("--size"); !size.empty()) {
+		if (std::sscanf(size.c_str(), "%ux%u", &options.width, &options.height) != 2 || options.width == 0u || options.height == 0u) {
+			std::cerr << std::format("--size wants WIDTHxHEIGHT, not '{}'\n", size);
+			return kExitError;
+		}
+	}
+	const fs::path workspace = arguments.Value("--workspace", (fs::current_path() / "clod_eval" / "roots").string());
+	std::string error;
+	if (!RunRootViewer(paths.front(), workspace / paths.front().parent_path().filename(), options, error)) {
+		std::cerr << error << '\n';
+		return kExitError;
+	}
+	return kExitOk;
+}
+
 int CommandScore(const Suite& suite, const Arguments& arguments, bool transitionOnly = false)
 {
 	for (const SuiteVariant* variant : SelectVariants(suite, arguments)) {
@@ -281,6 +324,333 @@ int CommandReport(const Suite& suite)
 	return kExitOk;
 }
 
+// Every merge root under a cache tree, through the hierarchy.merge analyzer, in parallel: the results files, a table
+// with one row per root, and the totals and worst roots for each issue.
+// What each branch of every forked mesh in a tree draws at a range of cuts (object-space error), from the metadata and
+// pages alone: triangles in the triangle branch; triangles and voxel cubes in the voxel branch.
+int CommandForkCensus(const Arguments& arguments)
+{
+	if (arguments.positional.empty() || !arguments.Has("--out")) {
+		throw std::runtime_error("fork-census needs a cache tree (or its clod directory) and --out");
+	}
+	const auto started = std::chrono::steady_clock::now();
+	std::vector<fs::path> paths;
+	std::error_code error;
+	for (fs::recursive_directory_iterator it(arguments.positional.front(), error), end; !error && it != end; it.increment(error)) {
+		if (it->is_regular_file() && it->path().extension() == L".clodmeta") paths.push_back(it->path());
+	}
+	static constexpr float kCuts[] = { 0.5f, 2.0f, 8.0f, 32.0f, 128.0f, 512.0f };
+	constexpr size_t kCutCount = std::size(kCuts);
+	struct Row {
+		bool opened = false, forked = false;
+		std::string name;
+		uint32_t groups = 0, triangleOnly = 0, voxelOnly = 0, shadows = 0;
+		uint64_t triangles[kCutCount]{}, voxelTriangles[kCutCount]{}, voxelCubes[kCutCount]{};
+	};
+	std::vector<Row> rows(paths.size());
+	const auto drawn = [](const CachedMesh& view, float cut, uint64_t& triangles, uint64_t& cubes) {
+		const ClusterLODPrebuiltData& prebuilt = view.Prebuilt();
+		for (uint32_t index = 0; index < prebuilt.groups.size(); ++index) {
+			const ClusterLODGroup& group = prebuilt.groups[index];
+			if (!(group.bounds.error > cut)) continue;
+			for (uint32_t s = 0; s < group.segmentCount; ++s) {
+				const ClusterLODGroupSegment& segment = prebuilt.segments[group.firstSegment + s];
+				if (segment.refinedGroup >= 0 && prebuilt.groups[static_cast<uint32_t>(segment.refinedGroup)].bounds.error > cut) continue;
+				if ((group.flags & CLOD_GROUP_FLAG_IS_VOXEL) == 0u) {
+					view.VisitSegmentMeshlets(index, segment, [&](const CLodCache::TrianglePage&, const CLodCache::TriangleMeshlet& meshlet) {
+						triangles += meshlet.triangleCount;
+					});
+					continue;
+				}
+				uint32_t meshPage = 0;
+				CLodCache::VoxelPage page;
+				if (!CLodCache::ResolveSegmentMeshPage(prebuilt, index, segment, meshPage) || !CLodCache::VoxelPage::Parse(view.Page(meshPage), page)) continue;
+				for (uint32_t c = segment.firstMeshletInPage; c < segment.firstMeshletInPage + segment.meshletCount && c < page.ClusterCount(); ++c) {
+					cubes += page.Cluster(c).cubeCount;
+				}
+			}
+		}
+	};
+	std::atomic<size_t> next{ 0u };
+	const auto work = [&]() {
+		for (size_t index = next.fetch_add(1u); index < paths.size(); index = next.fetch_add(1u)) {
+			std::string openError;
+			const std::unique_ptr<CachedMesh> mesh = CachedMesh::Open(paths[index], openError);
+			if (!mesh) continue;
+			Row& row = rows[index];
+			row.opened = true;
+			row.forked = mesh->IsForked();
+			if (!row.forked) continue;
+			row.name = mesh->Prebuilt().cacheSource.sourceIdentifier + " " + mesh->Name();
+			for (const ClusterLODGroup& group : mesh->Prebuilt().groups) {
+				++row.groups;
+				row.triangleOnly += (group.flags & CLOD_GROUP_FLAG_BRANCH_TRIANGLE) != 0u ? 1u : 0u;
+				row.voxelOnly += (group.flags & CLOD_GROUP_FLAG_BRANCH_VOXEL) != 0u ? 1u : 0u;
+				row.shadows += (group.flags & CLOD_GROUP_FLAG_BRANCH_SHADOW) != 0u ? 1u : 0u;
+			}
+			const auto triangleView = mesh->BranchView(CLOD_BRANCH_TRIANGLE, "");
+			const auto voxelView = mesh->BranchView(CLOD_BRANCH_VOXEL, "");
+			for (size_t c = 0; c < kCutCount; ++c) {
+				uint64_t unusedCubes = 0;
+				drawn(*triangleView, kCuts[c], row.triangles[c], unusedCubes);
+				drawn(*voxelView, kCuts[c], row.voxelTriangles[c], row.voxelCubes[c]);
+			}
+		}
+	};
+	const uint32_t threadCount = arguments.Has("--threads") ? static_cast<uint32_t>(std::stoul(arguments.Value("--threads")))
+		: std::max(1u, std::thread::hardware_concurrency());
+	std::vector<std::thread> workers;
+	for (uint32_t t = 1; t < threadCount; ++t) workers.emplace_back(work);
+	work();
+	for (std::thread& worker : workers) worker.join();
+
+	std::ofstream csv(arguments.Value("--out"));
+	csv << "path,mesh,groups,triangle_only,voxel_only,shadows";
+	for (const float cut : kCuts) csv << std::format(",tris_{0:g},voxel_tris_{0:g},voxel_cubes_{0:g}", cut);
+	csv << '\n';
+	uint64_t opened = 0, forked = 0, sum[3][kCutCount]{};
+	for (const Row& row : rows) {
+		opened += row.opened ? 1u : 0u;
+		if (!row.forked) continue;
+		++forked;
+		std::string name = row.name;
+		std::ranges::replace(name, ',', ';');
+		csv << std::format("{},{},{},{},{},{}", paths[&row - rows.data()].generic_string(), name, row.groups, row.triangleOnly, row.voxelOnly, row.shadows);
+		for (size_t c = 0; c < kCutCount; ++c) {
+			csv << std::format(",{},{},{}", row.triangles[c], row.voxelTriangles[c], row.voxelCubes[c]);
+			sum[0][c] += row.triangles[c];
+			sum[1][c] += row.voxelTriangles[c];
+			sum[2][c] += row.voxelCubes[c];
+		}
+		csv << '\n';
+	}
+	std::cout << std::format("{} caches, {} forked ({:.1f} s) -> {}\n", opened, forked,
+		std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count(), arguments.Value("--out"));
+	std::cout << "      cut   triangle branch   voxel branch: triangles + cubes\n";
+	for (size_t c = 0; c < kCutCount; ++c) {
+		std::cout << std::format("{:9g} {:17} {:14} + {}\n", kCuts[c], sum[0][c], sum[1][c], sum[2][c]);
+	}
+	return kExitOk;
+}
+
+int CommandMergeCensus(const Arguments& arguments)
+{
+	if (arguments.positional.empty() || !arguments.Has("--out")) {
+		throw std::runtime_error("merge-census needs a cache tree (or its clod directory) and --out");
+	}
+	const auto started = std::chrono::steady_clock::now();
+	// Roots are the entries with a portal parts file; the tree holds tens of thousands of other caches.
+	std::vector<MeshToAnalyze> roots;
+	std::error_code error;
+	uint32_t staleRoots = 0;
+	for (fs::recursive_directory_iterator it(arguments.positional.front(), error), end; !error && it != end; it.increment(error)) {
+		if (!it->is_regular_file() || it->path().extension() != L".clodparts") {
+			continue;
+		}
+		fs::path metadata = it->path();
+		metadata.replace_extension(".clodmeta");
+		std::string key = it->path().parent_path().filename().string();
+		try {
+			std::ifstream input(it->path());
+			key = nlohmann::json::parse(input).at("root").at("source").get<std::string>();
+		}
+		catch (const std::exception&) {
+		}
+		// A root left behind by an older schema (its region now builds under another hash) is skipped, not fatal.
+		if (CLodCache::OpenMetadataFile(metadata).status != CLodCache::OpenMetadataStatus::Ok) {
+			++staleRoots;
+			continue;
+		}
+		roots.push_back({ metadata, key });
+	}
+	if (staleRoots != 0u) {
+		std::cerr << std::format("skipped {} roots that this tool cannot read (older schema or damaged)\n", staleRoots);
+	}
+	std::ranges::sort(roots, {}, &MeshToAnalyze::asset);
+	if (roots.empty()) {
+		std::cerr << std::format("no merge roots (.clodparts files) under '{}'\n", arguments.positional.front());
+		return kExitError;
+	}
+	AnalyzeOptions options;
+	options.analyzers = { "hierarchy.merge" };
+	options.threads = arguments.Has("--threads") ? static_cast<uint32_t>(std::stoul(arguments.Value("--threads"))) : 0u;
+	options.mergeReachCut = arguments.Has("--reach-cut") ? std::stof(arguments.Value("--reach-cut")) : options.mergeReachCut;
+	options.branch = arguments.Value("--branch");
+	ResultSet results;
+	std::string analyzeError;
+	if (!AnalyzeMeshes(roots, "census", {}, options, results, analyzeError)) {
+		std::cerr << analyzeError << '\n';
+		return kExitError;
+	}
+	const fs::path out = arguments.Value("--out");
+	if (!WriteResultFiles(fs::path(out).concat(".jsonl"), results, analyzeError)) {
+		std::cerr << analyzeError << '\n';
+		return kExitError;
+	}
+	const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+
+	// One row per root: untagged metrics and the issues.
+	const std::vector<std::string> columns = { "merge.portals", "merge.parts", "merge.nodes", "merge.levels", "merge.node_triangles",
+		"merge.input_triangles", "merge.root_error", "merge.problems", "merge.issue.unreachable_nodes", "merge.issue.unreachable_triangles",
+		"merge.issue.unreachable_levels", "merge.issue.root_draws", "merge.issue.reach_nodes", "merge.issue.reach_portals",
+		"merge.issue.reach_coarsest_portals", "merge.issue.reach_triangles", "merge.issue.reach_node_triangles", "merge.issue.reach_part_triangles", "merge.issue.always_open_portals",
+		"merge.issue.always_open_coarsest_portals", "merge.issue.root_portals", "merge.issue.dead_portals", "merge.issue.dead_portal_triangles",
+		"merge.issue.hardly_drawn_nodes", "merge.issue.hardly_drawn_triangles", "merge.issue.sibling_spread", "merge.issue.sibling_spread_max",
+		"merge.issue.portal_depth_mean", "merge.issue.portal_depth_max" };
+	std::map<std::string, std::map<std::string, double>> rows;
+	for (const MetricRecord& record : results.records) {
+		if (record.mesh == kAssetRollupMesh || std::ranges::find(columns, record.id) == columns.end()) {
+			continue;
+		}
+		if (!record.tags.empty() && !record.tags.contains("reach_cut")) {
+			continue;
+		}
+		rows[record.asset][record.id] = record.value;
+	}
+	{
+		std::ofstream table(fs::path(out).concat(".roots.csv"));
+		table << "root";
+		for (const std::string& column : columns) {
+			table << ',' << column.substr(column.find_last_of('.') + 1u);
+		}
+		table << '\n';
+		for (const auto& [root, values] : rows) {
+			table << root;
+			for (const std::string& column : columns) {
+				const auto found = values.find(column);
+				table << ',' << (found != values.end() ? std::format("{:g}", found->second) : std::string());
+			}
+			table << '\n';
+		}
+	}
+
+	const auto value = [&](const std::map<std::string, double>& row, const std::string& id) {
+		const auto found = row.find(id);
+		return found != row.end() ? found->second : 0.0;
+	};
+	const auto total = [&](const std::string& id) {
+		double sum = 0.0;
+		for (const auto& [root, row] : rows) {
+			sum += value(row, id);
+		}
+		return sum;
+	};
+	const auto rootsWith = [&](const std::string& id) {
+		return std::ranges::count_if(rows, [&](const auto& entry) { return value(entry.second, id) > 0.0; });
+	};
+	const auto percent = [](double part, double whole) { return whole > 0.0 ? 100.0 * part / whole : 0.0; };
+	const double portals = total("merge.portals"), nodes = total("merge.nodes"), nodeTriangles = total("merge.node_triangles");
+	std::cout << std::format("merge census: {} roots in {:.1f} s ({} threads, {} part references), reach cut {:g}\n", rows.size(), seconds,
+		options.threads == 0u ? std::thread::hardware_concurrency() : options.threads, total("merge.parts"), options.mergeReachCut);
+	std::cout << std::format("  {:.0f} portals, {:.0f} nodes, {:.0f} node triangles for {:.0f} input triangles; {} roots with problems\n", portals, nodes,
+		nodeTriangles, total("merge.input_triangles"), rootsWith("merge.problems"));
+	std::cout << std::format("  at the reach cut (each region from its farthest distance): {:.0f} instances ({:.1f}% of portals), {:.0f} of them coarsest; "
+		"{:.0f} node draws; {:.0f} triangles, {:.0f} from nodes and {:.0f} from parts\n", total("merge.issue.reach_portals"),
+		percent(total("merge.issue.reach_portals"), portals), total("merge.issue.reach_coarsest_portals"), total("merge.issue.reach_nodes"),
+		total("merge.issue.reach_triangles"), total("merge.issue.reach_node_triangles"), total("merge.issue.reach_part_triangles"));
+	const auto noNodes = std::ranges::count_if(rows, [&](const auto& entry) { return value(entry.second, "merge.issue.reach_nodes") == 0.0; });
+	std::cout << std::format("  {} roots draw no node geometry even from their farthest distance; {} roots ever draw as their root alone\n", noNodes,
+		rootsWith("merge.issue.root_draws"));
+	std::cout << "\n  issue                                   total   share          roots\n";
+	const auto line = [&](const char* name, const std::string& id, double whole, const char* of) {
+		std::cout << std::format("  {:<36} {:>10.0f} {:>6.1f}% {:<6} {:>6}\n", name, total(id), percent(total(id), whole), of, rootsWith(id));
+	};
+	line("unreachable nodes", "merge.issue.unreachable_nodes", nodes, "nodes");
+	line("unreachable node triangles", "merge.issue.unreachable_triangles", nodeTriangles, "tris");
+	line("always-open portals", "merge.issue.always_open_portals", portals, "ports");
+	line("  of them coarsest at reach", "merge.issue.always_open_coarsest_portals", portals, "ports");
+	line("portals at the top (always open)", "merge.issue.root_portals", portals, "ports");
+	line("dead portals (never open)", "merge.issue.dead_portals", portals, "ports");
+	line("  their parts' triangles, copied", "merge.issue.dead_portal_triangles", total("merge.input_triangles"), "input");
+	line("hardly drawn nodes", "merge.issue.hardly_drawn_nodes", nodes, "nodes");
+	line("hardly drawn node triangles", "merge.issue.hardly_drawn_triangles", nodeTriangles, "tris");
+	{
+		std::vector<double> spreads, depths, levels;
+		for (const auto& [root, row] : rows) {
+			spreads.push_back(value(row, "merge.issue.sibling_spread"));
+			depths.push_back(value(row, "merge.issue.portal_depth_mean"));
+			levels.push_back(value(row, "merge.levels"));
+		}
+		const auto median = [](std::vector<double> v) { std::ranges::sort(v); return v.empty() ? 0.0 : v[v.size() / 2u]; };
+		const auto maximum = [](const std::vector<double>& v) { return v.empty() ? 0.0 : *std::ranges::max_element(v); };
+		std::cout << std::format("  sibling spread (finest sibling opened early by): median root {:.2f}x, worst root {:.2f}x\n", median(spreads), maximum(spreads));
+		std::cout << std::format("  levels: median {:.0f}, max {:.0f}; mean portal depth: median {:.2f}, max {:.2f}\n", median(levels), maximum(levels),
+			median(depths), maximum(depths));
+	}
+	const auto worst = [&](const char* title, const std::string& id) {
+		std::vector<std::pair<double, std::string>> ranked;
+		for (const auto& [root, row] : rows) {
+			ranked.push_back({ value(row, id), root });
+		}
+		std::ranges::sort(ranked, std::greater<>());
+		std::cout << std::format("\n  worst by {}:\n", title);
+		for (size_t i = 0; i < std::min<size_t>(ranked.size(), 5u) && ranked[i].first > 0.0; ++i) {
+			const auto& row = rows[ranked[i].second];
+			std::cout << std::format("    {:>10.4g}  {}  ({:.0f} portals, {:.0f} nodes, {:.0f} levels)\n", ranked[i].first, ranked[i].second,
+				value(row, "merge.portals"), value(row, "merge.nodes"), value(row, "merge.levels"));
+		}
+	};
+	worst("unreachable node triangles", "merge.issue.unreachable_triangles");
+	worst("always-open coarsest portals", "merge.issue.always_open_coarsest_portals");
+	worst("dead portals", "merge.issue.dead_portals");
+	worst("hardly drawn node triangles", "merge.issue.hardly_drawn_triangles");
+	worst("sibling spread", "merge.issue.sibling_spread");
+	std::cout << std::format("\n  -> {}.jsonl, .csv and .roots.csv\n", out.string());
+	return kExitOk;
+}
+
+int CommandMergeReport(const Arguments& arguments)
+{
+	if (arguments.positional.empty()) {
+		throw std::runtime_error("merge-report needs a cache file or directory");
+	}
+	nlohmann::json all = nlohmann::json::array();
+	uint32_t roots = 0;
+	for (const fs::path& path : FindCacheMetadata(arguments.positional.front())) {
+		std::string error;
+		const std::unique_ptr<CachedMesh> mesh = CachedMesh::Open(path, error);
+		if (!mesh) {
+			std::cerr << error << '\n';
+			return kExitError;
+		}
+		// A forked root reports each branch on its own.
+		std::vector<std::unique_ptr<CachedMesh>> views;
+		if (mesh->IsForked()) {
+			views.push_back(mesh->BranchView(CLOD_BRANCH_TRIANGLE, "#triangle"));
+			views.push_back(mesh->BranchView(CLOD_BRANCH_VOXEL, "#voxel"));
+		}
+		std::vector<const CachedMesh*> reported;
+		if (views.empty()) reported.push_back(mesh.get());
+		for (const auto& view : views) reported.push_back(view.get());
+		bool isRoot = false;
+		for (const CachedMesh* view : reported) {
+			const std::unique_ptr<MergeHierarchy> hierarchy = ReadMergeHierarchy(*view, true);
+			if (!hierarchy) {
+				continue;
+			}
+			isRoot = true;
+			if (arguments.Has("--json") || arguments.Has("--out")) {
+				all.push_back(MergeReportJson(*hierarchy, *view));
+			}
+			if (!arguments.Has("--json")) {
+				std::cout << FormatMergeReport(*hierarchy, *view) << '\n';
+			}
+		}
+		roots += isRoot ? 1u : 0u;
+	}
+	if (roots == 0u) {
+		std::cerr << std::format("no merge-hierarchy roots at '{}'\n", arguments.positional.front());
+		return kExitError;
+	}
+	if (arguments.Has("--out")) {
+		std::ofstream(arguments.Value("--out")) << all.dump(1, '\t') << '\n';
+	}
+	if (arguments.Has("--json")) {
+		std::cout << all.dump(2) << '\n';
+	}
+	return kExitOk;
+}
+
 int CommandInspect(const Arguments& arguments)
 {
 	if (arguments.positional.empty()) {
@@ -305,6 +675,11 @@ int CommandInspect(const Arguments& arguments)
 		}
 		else {
 			std::cout << FormatCacheDescription(description);
+			if (std::string openError; const auto mesh = CachedMesh::Open(path, openError)) {
+				if (IsMergeRoot(mesh->Prebuilt())) {
+					std::cout << "  a merge-hierarchy root: depth 0 holds its portal proxies and page-less children groups. merge-report describes the merge tree.\n";
+				}
+			}
 		}
 	}
 	if (arguments.Has("--json")) {
@@ -368,6 +743,8 @@ int CommandAnalyzeCache(const Arguments& arguments)
 	}
 	AnalyzeOptions options;
 	options.analyzers = arguments.Values("--analyzer");
+	options.threads = arguments.Has("--threads") ? static_cast<uint32_t>(std::stoul(arguments.Value("--threads"))) : 0u;
+	options.branch = arguments.Value("--branch");
 	ResultSet results;
 	std::string error;
 	if (!AnalyzeMeshes(meshes, asset, {}, options, results, error) || !WriteResultFiles(arguments.Value("--out"), results, error)) {
@@ -464,6 +841,18 @@ int Run(int argc, char** argv)
 	}
 	if (command == "inspect") {
 		return CommandInspect(arguments);
+	}
+	if (command == "merge-census") {
+		return CommandMergeCensus(arguments);
+	}
+	if (command == "fork-census") {
+		return CommandForkCensus(arguments);
+	}
+	if (command == "merge-report") {
+		return CommandMergeReport(arguments);
+	}
+	if (command == "view-root") {
+		return CommandViewRoot(arguments);
 	}
 	if (command == "analyze-cache") {
 		return CommandAnalyzeCache(arguments);

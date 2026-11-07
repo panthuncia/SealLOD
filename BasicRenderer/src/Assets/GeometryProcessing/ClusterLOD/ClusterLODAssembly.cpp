@@ -533,6 +533,12 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 		{
 			throw std::runtime_error("ClusterLOD assembly: part has no CLod hierarchy");
 		}
+		if (std::any_of(part.groups.begin(), part.groups.end(), [](const ClusterLODGroup& group) { return (group.flags & CLOD_GROUP_BRANCH_FLAGS) != 0u; }))
+		{
+			// Copying a part renumbers its groups, and assembly voxel parents pick part roots by parent: neither knows the
+			// branches of a forked DAG yet.
+			throw std::runtime_error("ClusterLOD assembly: a part has a triangle/voxel fork, which assemblies do not support; build its asset with voxelFork off");
+		}
 		assemblyCoverageParts[partIndex] = VoxelSourceTrianglePart{
 			.vertices = parts[partIndex].coverageVertices,
 			.vertexStrideBytes = parts[partIndex].coverageVertexSize,

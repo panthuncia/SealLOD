@@ -305,8 +305,16 @@ namespace
 		}
 
 		const uint32_t localGroupCount = static_cast<uint32_t>(groups.size());
+		// A forked DAG has a parent per branch (CLOD_GROUP_FLAG_BRANCH_*): an edge counts in the branches both ends are in.
+		const bool forked = std::any_of(groups.begin(), groups.end(), [](const ClusterLODGroup& group) {
+			return (group.flags & CLOD_GROUP_BRANCH_FLAGS) != 0u;
+		});
+		if (forked) {
+			summary.voxelParentGroupByLocal.assign(groups.size(), -1);
+		}
 		for (uint32_t groupLocalIndex = 0u; groupLocalIndex < localGroupCount; ++groupLocalIndex) {
 			const auto& group = groups[groupLocalIndex];
+			const uint32_t parentBranches = ClusterLODGroupBranches(group.flags);
 			const uint32_t segBegin = group.firstSegment;
 			const uint32_t segEnd = std::min<uint32_t>(segBegin + group.segmentCount, static_cast<uint32_t>(segments.size()));
 			for (uint32_t segIndex = segBegin; segIndex < segEnd; ++segIndex) {
@@ -320,7 +328,17 @@ namespace
 					continue;
 				}
 
-				summary.parentGroupByLocal[refinedGroupLocalU32] = static_cast<int32_t>(groupLocalIndex);
+				if (!forked) {
+					summary.parentGroupByLocal[refinedGroupLocalU32] = static_cast<int32_t>(groupLocalIndex);
+					continue;
+				}
+				const uint32_t edgeBranches = parentBranches & ClusterLODGroupBranches(groups[refinedGroupLocalU32].flags);
+				if ((edgeBranches & CLOD_BRANCH_TRIANGLE) != 0u) {
+					summary.parentGroupByLocal[refinedGroupLocalU32] = static_cast<int32_t>(groupLocalIndex);
+				}
+				if ((edgeBranches & CLOD_BRANCH_VOXEL) != 0u) {
+					summary.voxelParentGroupByLocal[refinedGroupLocalU32] = static_cast<int32_t>(groupLocalIndex);
+				}
 			}
 		}
 
@@ -328,10 +346,42 @@ namespace
 		// parent is the parent node's own group.
 		for (uint32_t groupLocalIndex = 0u; groupLocalIndex < localGroupCount; ++groupLocalIndex) {
 			const auto& group = groups[groupLocalIndex];
-			if ((group.flags & CLOD_GROUP_FLAG_MERGE_CHILD) == 0u || summary.parentGroupByLocal[groupLocalIndex] >= 0) continue;
-			if (group.parentGroupId >= 0 && static_cast<uint32_t>(group.parentGroupId) < localGroupCount &&
-				static_cast<uint32_t>(group.parentGroupId) != groupLocalIndex) {
+			if ((group.flags & CLOD_GROUP_FLAG_MERGE_CHILD) == 0u) continue;
+			if (group.parentGroupId < 0 || static_cast<uint32_t>(group.parentGroupId) >= localGroupCount ||
+				static_cast<uint32_t>(group.parentGroupId) == groupLocalIndex) continue;
+			const uint32_t branches = ClusterLODGroupBranches(group.flags);
+			if ((branches & CLOD_BRANCH_TRIANGLE) != 0u && summary.parentGroupByLocal[groupLocalIndex] < 0) {
 				summary.parentGroupByLocal[groupLocalIndex] = group.parentGroupId;
+			}
+			if (forked && (branches & CLOD_BRANCH_VOXEL) != 0u && summary.voxelParentGroupByLocal[groupLocalIndex] < 0) {
+				summary.voxelParentGroupByLocal[groupLocalIndex] = group.parentGroupId;
+			}
+		}
+
+		// The coarsest groups of each branch: the groups in it with no parent in it. Shadow records are in no branch.
+		std::vector<uint32_t> rootBranches(localGroupCount, 0u);
+		for (uint32_t groupLocalIndex = 0u; groupLocalIndex < localGroupCount; ++groupLocalIndex) {
+			if (!forked) {
+				rootBranches[groupLocalIndex] = summary.parentGroupByLocal[groupLocalIndex] < 0 ? CLOD_BRANCH_ALL : 0u;
+				continue;
+			}
+			const uint32_t branches = ClusterLODGroupBranches(groups[groupLocalIndex].flags);
+			if ((branches & CLOD_BRANCH_TRIANGLE) != 0u && summary.parentGroupByLocal[groupLocalIndex] < 0) {
+				rootBranches[groupLocalIndex] |= CLOD_BRANCH_TRIANGLE;
+			}
+			if ((branches & CLOD_BRANCH_VOXEL) != 0u && summary.voxelParentGroupByLocal[groupLocalIndex] < 0) {
+				rootBranches[groupLocalIndex] |= CLOD_BRANCH_VOXEL;
+			}
+		}
+		if (forked) {
+			// Each map answers for every group: a group in one branch only has the same parent in both.
+			for (uint32_t groupLocalIndex = 0u; groupLocalIndex < localGroupCount; ++groupLocalIndex) {
+				const uint32_t branches = ClusterLODGroupBranches(groups[groupLocalIndex].flags);
+				if (branches == CLOD_BRANCH_VOXEL) {
+					summary.parentGroupByLocal[groupLocalIndex] = summary.voxelParentGroupByLocal[groupLocalIndex];
+				} else if (branches == CLOD_BRANCH_TRIANGLE) {
+					summary.voxelParentGroupByLocal[groupLocalIndex] = summary.parentGroupByLocal[groupLocalIndex];
+				}
 			}
 		}
 
@@ -349,25 +399,24 @@ namespace
 		}
 
 		uint32_t runStart = std::numeric_limits<uint32_t>::max();
+		uint32_t runBranches = 0u;
 		for (uint32_t groupLocalIndex = rootGroupBegin; groupLocalIndex < rootGroupEnd; ++groupLocalIndex) {
-			const bool shouldPinForStreaming = summary.parentGroupByLocal[groupLocalIndex] < 0;
-			if (shouldPinForStreaming) {
-				if (runStart == std::numeric_limits<uint32_t>::max()) {
-					runStart = groupLocalIndex;
-				}
-				continue;
-			}
-
-			if (runStart != std::numeric_limits<uint32_t>::max()) {
-				summary.coarsestRanges.push_back({ runStart, groupLocalIndex - runStart });
+			const uint32_t branches = rootBranches[groupLocalIndex];
+			if (runStart != std::numeric_limits<uint32_t>::max() && branches != runBranches) {
+				summary.coarsestRanges.push_back({ runStart, groupLocalIndex - runStart, runBranches });
 				runStart = std::numeric_limits<uint32_t>::max();
+			}
+			if (branches != 0u && runStart == std::numeric_limits<uint32_t>::max()) {
+				runStart = groupLocalIndex;
+				runBranches = branches;
 			}
 		}
 
 		if (runStart != std::numeric_limits<uint32_t>::max()) {
 			summary.coarsestRanges.push_back({
 				runStart,
-				rootGroupEnd - runStart });
+				rootGroupEnd - runStart,
+				runBranches });
 		}
 
 		return summary;

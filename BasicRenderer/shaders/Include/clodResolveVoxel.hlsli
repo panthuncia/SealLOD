@@ -455,8 +455,11 @@ bool ResolveClodVoxelCommonSampleFromPackedCluster(
     const float3x3 normalMatrix = CLodAssemblyAwareNormalMatrix(obj);
     const float3 normalWS = normalize(mul(normalOS, normalMatrix));
 
+    // The root's palette entry culling chose for the voxel group (its side band's .y), or the mesh's own material.
+    const CLodMaterialPaletteEntry paletteEntry =
+        CLodResolveMaterial(instanceData, mesh, visibleClusterTransformIndices[visibleClusterIndex].y);
     StructuredBuffer<MaterialInfo> materialDataBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
-    MaterialInfo materialInfo = materialDataBuffer[mesh.materialDataIndex];
+    MaterialInfo materialInfo = materialDataBuffer[paletteEntry.materialDataIndex];
     const uint materialFlags = materialInfo.materialFlags;
     const float2 uvDensity = float2(
         isfinite(voxelCluster.uvDensity.x) ? max(voxelCluster.uvDensity.x, 0.0f) : 0.0f,

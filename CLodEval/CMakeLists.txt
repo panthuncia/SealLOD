@@ -24,6 +24,8 @@ add_library(CLodEvalCore STATIC
     "src/Core/CachedMesh.h"
     "src/Core/Image.cpp"
     "src/Core/Image.h"
+    "src/Core/MergeHierarchy.cpp"
+    "src/Core/MergeHierarchy.h"
     "src/Core/Metrics.cpp"
     "src/Core/Metrics.h"
     "src/Core/Process.cpp"

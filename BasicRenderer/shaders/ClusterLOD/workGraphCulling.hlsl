@@ -46,6 +46,20 @@
 #ifndef CLOD_WG_ENABLE_VOXEL_OUTPUT
 #define CLOD_WG_ENABLE_VOXEL_OUTPUT 1
 #endif
+#ifndef CLOD_FORCE_VIEW_BRANCH
+#define CLOD_FORCE_VIEW_BRANCH 0
+#endif
+// Forked DAGs (CLOD_GROUP_FLAG_BRANCH_*): a raster view with voxel output takes the voxel branch, every other view the
+// triangle branch. CLOD_FORCE_VIEW_BRANCH (1 triangle, 2 voxel) overrides it for raster views.
+#if CLOD_RT_VIEW
+#define CLOD_VIEW_BRANCH_VOXEL 0
+#elif CLOD_FORCE_VIEW_BRANCH == 1
+#define CLOD_VIEW_BRANCH_VOXEL 0
+#elif CLOD_FORCE_VIEW_BRANCH == 2
+#define CLOD_VIEW_BRANCH_VOXEL 1
+#else
+#define CLOD_VIEW_BRANCH_VOXEL CLOD_WG_ENABLE_VOXEL_OUTPUT
+#endif
 
 #ifndef CLOD_WG_RIGID_ONLY
 #define CLOD_WG_RIGID_ONLY 0
@@ -1535,6 +1549,10 @@ void CLodAppendVoxelRasterClusterWork(
     Camera cullCamera,
     bool clusterDirtyPageCullingEnabled)
 {
+    const PerMeshInstanceBuffer voxelTemplate = LoadMeshTemplateForDraw(instanceIndex);
+    const uint voxelPaletteIndex = CLodTemplateHasPalette(voxelTemplate)
+        ? CLodAssemblyMaterialBase(assemblyTransformIndex) + (voxelGroup.flags >> CLOD_GROUP_VOXEL_MATERIAL_SLOT_SHIFT)
+        : 0u;
     if (voxelSegment.meshletCount == 0u)
     {
         return;
@@ -1742,7 +1760,8 @@ void CLodAppendVoxelRasterClusterWork(
             voxelSegment.pageIndex,
             0u,
             voxelVsmPayload);
-        visibleClusterTransformIndices[visibleClusterIndex] = uint2(assemblyTransformIndex, 0u); // voxels: one material
+        // A voxel group is one material: its slot, through the portal's material base, in the root's palette.
+        visibleClusterTransformIndices[visibleClusterIndex] = uint2(assemblyTransformIndex, voxelPaletteIndex);
 
         CLodVoxelRasterWorkRecord record;
         record.visibleClusterIndex = visibleClusterIndex;
@@ -2355,6 +2374,33 @@ bool CLodTouchAndRequestGroupResident(
     uint viewId,
     float requestPriorityErrorOverDistance);
 
+bool CLodGroupInViewBranch(ClusterLODGroup group)
+{
+#if CLOD_VIEW_BRANCH_VOXEL
+    return (group.flags & (CLOD_GROUP_FLAG_BRANCH_TRIANGLE | CLOD_GROUP_FLAG_BRANCH_SHADOW)) == 0u;
+#else
+    return (group.flags & (CLOD_GROUP_FLAG_BRANCH_VOXEL | CLOD_GROUP_FLAG_BRANCH_SHADOW)) == 0u;
+#endif
+}
+
+// A group as this view's branch sees it: a shared group of a forked DAG keeps its voxel-branch cut boundary and
+// streaming parent in a shadow record.
+ClusterLODGroup CLodViewGroup(ClusterLODGroup group)
+{
+#if CLOD_VIEW_BRANCH_VOXEL
+    if (group.branchGroupId >= 0)
+    {
+        StructuredBuffer<ClusterLODGroup> groups =
+            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
+        const ClusterLODGroup shadow = groups[uint(group.branchGroupId)];
+        group.bounds = shadow.bounds;
+        group.parentGroupId = shadow.parentGroupId;
+        group.maxParentError = shadow.maxParentError;
+    }
+#endif
+    return group;
+}
+
 bool CLodInstanceRootWantsTraversal(
     CLodMeshMetadata clodMeshMetadata,
     ClusterLODNode node,
@@ -2368,14 +2414,18 @@ bool CLodInstanceRootWantsTraversal(
     uint meshBufferIndex,
     uint viewId)
 {
+    StructuredBuffer<ClusterLODGroup> groups =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
+    const ClusterLODGroup storedProxyGroup = groups[node.range.ownerGroupId];
+    if (!CLodGroupInViewBranch(storedProxyGroup))
+    {
+        return false;
+    }
     if (forceLodDecision)
     {
         return true;
     }
-
-    StructuredBuffer<ClusterLODGroup> groups =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
-    const ClusterLODGroup proxyGroup = groups[node.range.ownerGroupId];
+    const ClusterLODGroup proxyGroup = CLodViewGroup(storedProxyGroup);
     const bool structuralRootProxy = proxyGroup.parentGroupId < 0 && proxyGroup.pageCount == 0u;
     if (!parentAllowsRefine)
     {
@@ -2588,7 +2638,7 @@ bool CLodRefinedChildSuppressesParent(
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
 
     const uint childGroupGlobalIndex = groupsBase + childGroupLocalIndex;
-    const ClusterLODGroup childGroup = groups[childGroupGlobalIndex];
+    const ClusterLODGroup childGroup = CLodViewGroup(groups[childGroupGlobalIndex]);
 #if CLOD_RT_VIEW
     // Voxels have no triangles to build a CLAS from, so this view keeps the triangle parent instead.
     allowVoxelChildSuppression = false;
@@ -2675,6 +2725,11 @@ bool CLodPrepareRenderableLeaf(
     StructuredBuffer<ClusterLODGroup> groups =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
     leaf.group = groups[leaf.groupGlobalIndex];
+    if (!CLodGroupInViewBranch(leaf.group))
+    {
+        return false;
+    }
+    leaf.group = CLodViewGroup(leaf.group);
     leaf.isVoxel = (leaf.group.flags & CLOD_GROUP_FLAG_IS_VOXEL) != 0u;
 
     if (leaf.isVoxel)

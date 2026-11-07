@@ -78,10 +78,16 @@ SourceMesh MakeSheet(uint32_t resolution, float zOffset)
 	return mesh;
 }
 
-fs::path SaveBuild(const fs::path& root, const SourceMesh& source, ClusterLODCoveragePreservationMode mode, const std::string& primPath)
+fs::path SaveBuild(
+	const fs::path& root,
+	const SourceMesh& source,
+	ClusterLODCoveragePreservationMode mode,
+	const std::string& primPath,
+	ClusterLODVoxelForkMode fork = ClusterLODVoxelForkMode::Off)
 {
 	ClusterLODBuilderSettings settings = GetDefaultBuilderSettings();
 	settings.coveragePreservationMode = mode;
+	settings.voxelFork = fork;
 	const ClusterLODPrebuildArtifacts artifacts = BuildClusterLODArtifactsFromGeometry(
 		source.vertices, MeshVertexLayout::BaseVertexSize, nullptr, 0u, source.indices, {}, VertexFlags::VERTEX_NORMALS, settings);
 	CHECK(CLodCacheLoader::SavePrebuilt({ "clod_eval_test.source", primPath, "", false }, artifacts.prebuiltData, artifacts.cacheBuildData.AsPayload()));
@@ -195,6 +201,97 @@ void TestVoxelHierarchy(const fs::path& root)
 	for (const MetricRecord& record : results.records) {
 		CHECK(record.id != "hierarchy.coarsest_triangles");
 	}
+}
+
+// At cut t a group draws its segments when its boundary error is above t, except those whose child is too; along any
+// path from a root (error infinite) to a leaf exactly one segment is then drawn as long as errors fall along every edge.
+// Checks that for a branch view, and returns the triangle area drawn at a range of cuts.
+std::vector<double> CheckBranchCoversOnce(const CachedMesh& view, const char* label, bool measureArea)
+{
+	std::vector<double> areas;
+	const ClusterLODPrebuiltData& prebuilt = view.Prebuilt();
+	uint64_t edges = 0, nonMonotonic = 0, badChildren = 0, roots = 0, finiteRoots = 0;
+	std::vector<bool> hasParent(prebuilt.groups.size(), false);
+	for (uint32_t index = 0; index < prebuilt.groups.size(); ++index) {
+		const ClusterLODGroup& group = prebuilt.groups[index];
+		for (uint32_t s = 0; s < group.segmentCount; ++s) {
+			const int32_t child = prebuilt.segments[group.firstSegment + s].refinedGroup;
+			if (child < 0) continue;
+			if (static_cast<size_t>(child) >= prebuilt.groups.size()) { ++badChildren; continue; }
+			hasParent[child] = true;
+			++edges;
+			if (!(group.bounds.error > prebuilt.groups[child].bounds.error)) ++nonMonotonic;
+		}
+	}
+	for (uint32_t index = 0; index < prebuilt.groups.size(); ++index) {
+		if (hasParent[index]) continue;
+		++roots;
+		finiteRoots += prebuilt.groups[index].bounds.error < 1.0e30f ? 1u : 0u;
+	}
+	std::fprintf(stderr, "%s: groups=%zu edges=%llu roots=%llu finite_roots=%llu non_monotonic=%llu\n", label, prebuilt.groups.size(),
+		static_cast<unsigned long long>(edges), static_cast<unsigned long long>(roots), static_cast<unsigned long long>(finiteRoots),
+		static_cast<unsigned long long>(nonMonotonic));
+	CHECK(badChildren == 0u);
+	CHECK(nonMonotonic == 0u);
+	CHECK(roots > 0u && finiteRoots == 0u);
+	if (!measureArea) return areas;
+	for (const float cut : { 0.0f, 1.0e-4f, 1.0e-3f, 4.0e-3f, 1.6e-2f, 6.4e-2f, 0.25f, 1.0f, 1.0e6f }) {
+		double area = 0.0;
+		for (uint32_t index = 0; index < prebuilt.groups.size(); ++index) {
+			const ClusterLODGroup& group = prebuilt.groups[index];
+			if (!(group.bounds.error > cut)) continue;
+			for (uint32_t s = 0; s < group.segmentCount; ++s) {
+				const ClusterLODGroupSegment& segment = prebuilt.segments[group.firstSegment + s];
+				if (segment.refinedGroup >= 0 && prebuilt.groups[segment.refinedGroup].bounds.error > cut) continue;
+				CHECK(view.VisitSegmentMeshlets(index, segment, [&](const CLodCache::TrianglePage& page, const CLodCache::TriangleMeshlet& meshlet) {
+					for (uint32_t t = 0; t < meshlet.triangleCount; ++t) {
+						const auto tri = page.Triangle(meshlet, t);
+						const DirectX::XMFLOAT3 a = page.Position(meshlet, tri[0]), b = page.Position(meshlet, tri[1]), c = page.Position(meshlet, tri[2]);
+						const double ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z, vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
+						const double x = uy * vz - uz * vy, y = uz * vx - ux * vz, z = ux * vy - uy * vx;
+						area += 0.5 * std::sqrt(x * x + y * y + z * z);
+					}
+				}));
+			}
+		}
+		areas.push_back(area);
+	}
+	return areas;
+}
+
+void TestVoxelFork(const fs::path& root)
+{
+	const SourceMesh source = MakeSheet(256u, 0.0f);
+	const fs::path metadata = SaveBuild(root, source, ClusterLODCoveragePreservationMode::PrioritizeEdges, "/fork", ClusterLODVoxelForkMode::Forced);
+	std::string error;
+	const auto mesh = CachedMesh::Open(metadata, error);
+	CHECK(mesh != nullptr);
+	if (!mesh) return;
+	CHECK(mesh->IsForked());
+	{
+		const auto triangles = CachedMesh::Open(SaveBuild(root, source, ClusterLODCoveragePreservationMode::PrioritizeEdges, "/fork-reference"), error);
+		CHECK(triangles != nullptr);
+		if (!triangles) return;
+		CHECK(!triangles->IsForked());
+		const auto view = mesh->BranchView(CLOD_BRANCH_TRIANGLE, "");
+		CHECK(view->Prebuilt().groups.size() == triangles->Prebuilt().groups.size());
+		CHECK(view->LeafGeometryHash() == triangles->LeafGeometryHash());
+		// The triangle branch draws exactly what the triangle build draws, at every cut.
+		const std::vector<double> built = CheckBranchCoversOnce(*triangles, "triangle build", true);
+		const std::vector<double> branch = CheckBranchCoversOnce(*view, "triangle branch", true);
+		CHECK(!built.empty() && built == branch);
+	}
+	const auto voxel = mesh->BranchView(CLOD_BRANCH_VOXEL, "");
+	CheckBranchCoversOnce(*voxel, "voxel branch", false);
+	uint64_t voxelGroups = 0;
+	for (const ClusterLODGroup& group : voxel->Prebuilt().groups) voxelGroups += (group.flags & CLOD_GROUP_FLAG_IS_VOXEL) != 0u ? 1u : 0u;
+	CHECK(voxelGroups > 0u);
+
+	// Analysis measures each branch under its own name.
+	const ResultSet results = Analyze(metadata, "fork");
+	CHECK(Value(results, "hierarchy.voxel_groups", {}, "/fork#voxel") > 0.0);
+	CHECK(Value(results, "hierarchy.leaf_triangles", {}, "/fork#triangle") == static_cast<double>(source.indices.size() / 3u));
+	CHECK(Value(results, "hierarchy.leaf_triangles", {}, "/fork#voxel") == static_cast<double>(source.indices.size() / 3u));
 }
 
 // The same source partitioned differently must agree, and a different source must not.
@@ -518,6 +615,7 @@ int main()
 		TestBadInputsAreErrors(root);
 		TestTriangleHierarchy(root);
 		TestVoxelHierarchy(root);
+		TestVoxelFork(root);
 		TestLeafGeometryHash(root);
 	}
 	catch (const std::exception& error) {

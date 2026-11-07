@@ -9,6 +9,7 @@ public:
 	void DrainCLodStreamingDomainEvents(std::vector<br::render::CLodStreamingDomainEvent>& value, uint64_t& generation) override { m_owner.DrainCLodStreamingDomainEvents(value, generation); }
 	bool TryGetCLodParentGroup(uint32_t group, uint32_t& parent) const override { return m_owner.TryGetCLodParentGroup(group, parent); }
 	void GetCLodChildGroups(uint32_t group, std::vector<uint32_t>& children) const override { m_owner.GetCLodChildGroups(group, children); }
+	void SetCLodActiveBranches(uint32_t branches) override { m_owner.SetCLodActiveBranches(branches); }
 	br::render::CLodStreamingDebugStats GetCLodStreamingDebugStats() const override { return m_owner.GetCLodStreamingDebugStats(); }
 	void ProcessCLodDiskStreamingIO() override { m_owner.ProcessCLodDiskStreamingIO(); }
 	void DrainCompletedCLodDiskStreamingGroups(std::vector<br::render::CLodDiskStreamingCompletion>& value) override { m_owner.DrainCompletedCLodDiskStreamingGroups(value); }

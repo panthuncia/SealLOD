@@ -134,11 +134,31 @@ namespace
             } else if (mode == "prioritizeEdges") {
                 settings.coveragePreservationMode = ClusterLODCoveragePreservationMode::PrioritizeEdges;
             } else if (mode == "voxel") {
+                // A voxel rule keeps a triangle branch for the views without voxels (ray tracing): a forced fork.
+                settings.coveragePreservationMode = ClusterLODCoveragePreservationMode::PrioritizeEdges;
+                settings.voxelFork = ClusterLODVoxelForkMode::Forced;
+            } else if (mode == "voxelReplace") {
                 settings.coveragePreservationMode = ClusterLODCoveragePreservationMode::Voxel;
             } else {
-                throw std::runtime_error("coveragePreservationMode must be none, prioritizeEdges, or voxel");
+                throw std::runtime_error("coveragePreservationMode must be none, prioritizeEdges, voxel, or voxelReplace");
             }
         }
+        if (const auto it = object.find("voxelFork"); it != object.end()) {
+            const std::string fork = it->get<std::string>();
+            if (fork == "off") {
+                settings.voxelFork = ClusterLODVoxelForkMode::Off;
+            } else if (fork == "auto") {
+                settings.voxelFork = ClusterLODVoxelForkMode::Auto;
+            } else if (fork == "forced") {
+                settings.voxelFork = ClusterLODVoxelForkMode::Forced;
+            } else {
+                throw std::runtime_error("voxelFork must be off, auto, or forced");
+            }
+        }
+        ReadSetting(object, "voxelForkStallRatio", settings.voxelForkStallRatio);
+        ReadSetting(object, "voxelForkMinTriangles", settings.voxelForkMinTriangles);
+        ReadSetting(object, "voxelForkDoubleSidedOnly", settings.voxelForkDoubleSidedOnly);
+        ReadSetting(object, "voxelForkSurfaceLoss", settings.voxelForkSurfaceLoss);
         ReadSetting(object, "disableSloppyFallback", settings.disableSloppyFallback);
         ReadSetting(object, "sloppyFallbackErrorFactor", settings.sloppyFallbackErrorFactor);
         ReadSetting(object, "lodErrorMergePrevious", settings.lodErrorMergePrevious);
@@ -190,6 +210,9 @@ ClusterLODBuilderSettings GetDefaultBuilderSettings(std::string_view assetIdenti
     settings.voxelFallbackOpacityThreshold = 0.0f;
     settings.voxelTailMaxLevels = 4u;
     settings.voxelTailGrowthFactor = 1.5f;
+    // An asset's mesh forks into triangles and voxels where voxels are shown to win (ClusterLODVoxelForkMode::Auto).
+    // Builds without an asset (terrain) do not.
+    settings.voxelFork = assetIdentifier.empty() ? ClusterLODVoxelForkMode::Off : ClusterLODVoxelForkMode::Auto;
 
     const std::string normalized = NormalizeObject(assetIdentifier);
     bool matchedOverride = false;
@@ -208,9 +231,11 @@ ClusterLODBuilderSettings GetDefaultBuilderSettings(std::string_view assetIdenti
     if (matchedOverride) {
         const char* mode = settings.coveragePreservationMode == ClusterLODCoveragePreservationMode::None ? "none" :
             settings.coveragePreservationMode == ClusterLODCoveragePreservationMode::Voxel ? "voxel" : "prioritizeEdges";
+        const char* fork = settings.voxelFork == ClusterLODVoxelForkMode::Off ? "off" :
+            settings.voxelFork == ClusterLODVoxelForkMode::Auto ? "auto" : "forced";
         spdlog::info(
-            "SARP asset CLod settings applied: object='{}' coverage_preservation_mode='{}' grid={} rays={} scale={}",
-            assetIdentifier, mode, settings.voxelGridBaseResolution,
+            "SARP asset CLod settings applied: object='{}' coverage_preservation_mode='{}' voxel_fork='{}' grid={} rays={} scale={}",
+            assetIdentifier, mode, fork, settings.voxelGridBaseResolution,
             settings.voxelRaysPerCell, settings.voxelFallbackScalingFactor);
     }
     return settings;

@@ -107,6 +107,10 @@ public:
 	void DrainCLodStreamingDomainEvents(std::vector<br::render::CLodStreamingDomainEvent>& outEvents, uint64_t& outGeneration);
 	bool TryGetCLodParentGroup(uint32_t groupGlobalIndex, uint32_t& outParentGlobalIndex) const;
 	void GetCLodChildGroups(uint32_t parentGroupGlobalIndex, std::vector<uint32_t>& outChildGroups) const;
+	// The CLOD_BRANCH_* the frame's views take (forked DAGs). With the voxel branch active, parents and children follow
+	// it; otherwise the triangle branch's. The streaming system sets this (CLodStreamingSystem::SetActiveBranches).
+	void SetCLodActiveBranches(uint32_t branches) noexcept { m_clodActiveBranches.store(branches, std::memory_order_release); }
+	uint32_t GetCLodActiveBranches() const noexcept { return m_clodActiveBranches.load(std::memory_order_acquire); }
 
 	// Patch a single group's error field in the GPU groups buffer.
 	// Used by the streaming system to override error for residency transitions.
@@ -278,6 +282,10 @@ private:
 		// object lifetime or summary state.
 		std::vector<int32_t> parentGroupByLocal;
 		std::vector<std::vector<uint32_t>> childrenByLocalParent;
+		// A forked DAG's voxel-branch parents and children (ClusterLODRuntimeSummary::voxelParentGroupByLocal). Empty
+		// when the mesh is not forked.
+		std::vector<int32_t> voxelParentGroupByLocal;
+		std::vector<std::vector<uint32_t>> voxelChildrenByLocalParent;
 		std::vector<float> groupErrorByLocal;
 		std::vector<ClusterLODRuntimeSummary::GroupRange> coarsestRanges;
 
@@ -345,6 +353,7 @@ private:
 	mutable std::mutex m_clodStreamingDomainEventsMutex;
 	std::vector<br::render::CLodStreamingDomainEvent> m_clodStreamingDomainEvents;
 	std::atomic<uint64_t> m_clodStreamingDomainEventGeneration{0};
+	std::atomic<uint32_t> m_clodActiveBranches{ 3u };
 	mutable std::mutex m_geometryResidencyPublicationMutex;
 	br::render::RendererStateRequestService* m_rendererStateRequests = nullptr;
 	std::shared_ptr<br::render::GeometryResidencyPublication> m_geometryResidencyPublication;

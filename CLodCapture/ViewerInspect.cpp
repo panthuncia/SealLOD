@@ -54,7 +54,8 @@ namespace clodcapture {
 		VisibleClusterFields fields;
 		fields.instance = words[0] >> 8u;
 		fields.localMeshlet = words[1] & 0x3FFFu;
-		fields.group = ((words[1] >> 14u) & 0x3FFFFu) | ((words[2] & 0x3u) << 18u);
+		// Global group index, 21 bits (visibleClusterPacking.hlsli, CLodVisibleClusterGroupID).
+		fields.group = ((words[1] >> 14u) & 0x3FFFFu) | ((words[2] & 0x3u) << 18u) | (((words[3] >> 30u) & 0x1u) << 20u);
 		fields.voxelPage = (words[2] >> 2u) & 0xFFFFFu;
 		fields.voxel = (words[3] & 0x80000000u) != 0u;
 		return fields;
@@ -71,38 +72,41 @@ namespace clodcapture {
 		frame->clusters = std::move(input.visibleClusters);
 
 		const size_t clusterCount = frame->clusters.size() / (sizeof(uint32_t) * 4u);
-		const size_t drawCount = input.drawRecords->size() / sizeof(InstanceDrawRecordCB);
-		const size_t offsetCount = input.clodOffsets->size() / sizeof(MeshInstanceClodOffsets);
 		const size_t metadataCount = input.meshMetadata->size() / sizeof(CLodMeshMetadata);
-		std::vector<int32_t> meshByDraw(drawCount, -2);
 
-		const auto resolveMesh = [&](uint32_t drawIndex) -> int32_t {
-			if (drawIndex >= drawCount) {
+		// Group indices are global, and a cluster drawn through a portal belongs to the part, not to the draw's mesh. So
+		// the mesh is the registered one whose group range holds the group: ranges sorted by base, each as long as the
+		// cache says.
+		struct GroupRange {
+			uint32_t base = 0;
+			int32_t mesh = -1;
+		};
+		std::vector<GroupRange> ranges;
+		if (hierarchy.Ready()) {
+			std::scoped_lock lock(g_clodMeshSources.mutex);
+			for (size_t row = 0; row < metadataCount; ++row) {
+				CLodMeshMetadata metadata{};
+				std::memcpy(&metadata, input.meshMetadata->data() + row * sizeof(CLodMeshMetadata), sizeof(metadata));
+				const uint64_t identity = (static_cast<uint64_t>(metadata.meshIdentityHi) << 32u) | metadata.meshIdentityLo;
+				const auto known = g_clodMeshSources.meshes.find(identity);
+				if (known == g_clodMeshSources.meshes.end()) {
+					continue;
+				}
+				const int32_t mesh = hierarchy.Find(known->second.cacheSourceIdentifier, known->second.cachePrimPath, known->second.cacheSubsetName);
+				if (mesh >= 0) {
+					ranges.push_back({ metadata.groupsBase, mesh });
+				}
+			}
+		}
+		std::ranges::sort(ranges, {}, &GroupRange::base);
+		const auto resolveGroup = [&](uint32_t globalGroup, uint32_t& outLocal) -> int32_t {
+			const auto after = std::ranges::upper_bound(ranges, globalGroup, {}, &GroupRange::base);
+			if (after == ranges.begin()) {
 				return -1;
 			}
-			int32_t& mesh = meshByDraw[drawIndex];
-			if (mesh != -2) {
-				return mesh;
-			}
-			mesh = -1;
-			InstanceDrawRecordCB draw{};
-			std::memcpy(&draw, input.drawRecords->data() + drawIndex * sizeof(InstanceDrawRecordCB), sizeof(draw));
-			if (draw.clodOffsetIndex >= offsetCount) {
-				return mesh;
-			}
-			MeshInstanceClodOffsets offsets{};
-			std::memcpy(&offsets, input.clodOffsets->data() + draw.clodOffsetIndex * sizeof(MeshInstanceClodOffsets), sizeof(offsets));
-			if (offsets.clodMeshMetadataIndex >= metadataCount) {
-				return mesh;
-			}
-			CLodMeshMetadata metadata{};
-			std::memcpy(&metadata, input.meshMetadata->data() + offsets.clodMeshMetadataIndex * sizeof(CLodMeshMetadata), sizeof(metadata));
-			const uint64_t identity = (static_cast<uint64_t>(metadata.meshIdentityHi) << 32u) | metadata.meshIdentityLo;
-			std::scoped_lock lock(g_clodMeshSources.mutex);
-			if (const auto known = g_clodMeshSources.meshes.find(identity); known != g_clodMeshSources.meshes.end() && hierarchy.Ready()) {
-				mesh = hierarchy.Find(known->second.cacheSourceIdentifier, known->second.cachePrimPath, known->second.cacheSubsetName);
-			}
-			return mesh;
+			const GroupRange& range = *std::prev(after);
+			outLocal = globalGroup - range.base;
+			return outLocal < hierarchy.Meshes()[range.mesh].groups.size() ? range.mesh : -1;
 		};
 
 		for (size_t index = 0; index < input.visibility.size(); ++index) {
@@ -124,14 +128,15 @@ namespace clodcapture {
 			std::array<uint32_t, 4> words{};
 			std::memcpy(words.data(), frame->clusters.data() + pixel.cluster * sizeof(words), sizeof(words));
 			const VisibleClusterFields fields = DecodeVisibleCluster(words);
-			pixel.group = fields.group;
 			if (fields.voxel) {
 				pixel.flags |= kPixelVoxel;
 				++frame->voxelPixels;
 			}
-			const int32_t mesh = resolveMesh(fields.instance);
+			uint32_t localGroup = 0;
+			const int32_t mesh = resolveGroup(fields.group, localGroup);
+			pixel.group = localGroup;
 			pixel.mesh = static_cast<int16_t>(mesh);
-			if (mesh < 0 || pixel.group >= hierarchy.Meshes()[mesh].groups.size()) {
+			if (mesh < 0) {
 				pixel.mesh = -1;
 				++frame->unknownPixels;
 			}
@@ -154,6 +159,7 @@ namespace clodcapture {
 			{ "Position in the group's window", "How far the cut is through the range this group draws in. Blue: it just appeared. Red: it is about to go." },
 			{ "Cut multiple to next switch", "How much the cut has to grow to replace this group. Red: right now. Blue: 16x or more." },
 			{ "Cut where this became voxels", "The hand-over error of each pixel's part of the mesh, on log scale across all meshes. Blue: finest. Red: coarsest. Grey: never." },
+			{ "Merge: node level or part", "Merge roots. Node geometry by merge level, blue: over leaves, red: the root. White: a part opened through a portal. Grey: not a merge root." },
 			{ "Selection", "Yellow: selected group. Cyan: its children. Magenta: its parents. Grey: rest of that mesh." },
 		};
 		return infos[static_cast<int>(mode)];
@@ -259,6 +265,19 @@ namespace clodcapture {
 			case OverlayMode::HandOver: {
 				const float error = group.firstVoxelError * worldScale;
 				out = std::isfinite(error) && handOverHigh > handOverLow ? WithAlpha(RampColor((SafeLog2(error) - handOverLow) / (handOverHigh - handOverLow)), alpha) : Muted(pixel, alpha);
+				break;
+			}
+			case OverlayMode::Merge: {
+				if (group.mergeNode >= 0 && mesh.merge) {
+					const float level = static_cast<float>(mesh.merge->nodes[static_cast<uint32_t>(group.mergeNode)].level);
+					out = WithAlpha(RampColor((level - 1.0f) / std::max(static_cast<float>(hierarchy.MaxMergeLevel()) - 1.0f, 1.0f)), alpha);
+				}
+				else if (!mesh.portalUse.empty()) {
+					out = voxel ? Pack(0.75f, 0.75f, 0.75f, opacity) : Pack(0.95f, 0.95f, 0.95f, opacity);
+				}
+				else {
+					out = Muted(pixel, alpha);
+				}
 				break;
 			}
 			case OverlayMode::Selection: {

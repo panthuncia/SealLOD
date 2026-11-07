@@ -73,6 +73,7 @@ enum class OverlayMode : int {
 	Window,
 	NextSwitch,
 	HandOver,
+	Merge,
 	Selection,
 	Count,
 };

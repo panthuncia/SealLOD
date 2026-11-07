@@ -2,9 +2,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <format>
 #include <limits>
 #include <map>
 #include <vector>
+
+#include "Core/MergeHierarchy.h"
 
 namespace clodeval {
 
@@ -263,8 +266,120 @@ namespace {
 			emitProblem("validity.bad_pages", badPages);
 		}
 	};
+
+	// Merge-hierarchy roots only: the merge tree, and what fixed world cuts draw. The cuts are absolute, so two builds
+	// of one region compare cut by cut whatever their settings.
+	class MergeHierarchyAnalyzer final : public IAnalyzer {
+	public:
+		const AnalyzerInfo& Info() const override
+		{
+			static const AnalyzerInfo info{ "hierarchy.merge", 2, "Merge-hierarchy roots: nodes, fanout, error growth, the cost of fixed cuts, and issues at the reach cut" };
+			return info;
+		}
+
+		void Run(const AnalysisContext& context, MetricSink& sink) const override
+		{
+			const std::unique_ptr<MergeHierarchy> h = ReadMergeHierarchy(context.mesh, true, context.mergeParts);
+			if (!h) {
+				return;
+			}
+			sink.Emit("merge.nodes", static_cast<double>(h->nodes.size()), Unit::Count, Better::Lower, {}, Rollup::Sum);
+			sink.Emit("merge.portals", static_cast<double>(h->portals.size()), Unit::Count, Better::Neutral, {}, Rollup::Sum);
+			sink.Emit("merge.parts", static_cast<double>(h->parts.size()), Unit::Count, Better::Neutral, {}, Rollup::Sum);
+			sink.Emit("merge.levels", static_cast<double>(h->levels), Unit::Count, Better::Lower, {}, Rollup::Max);
+			sink.Emit("merge.node_triangles", static_cast<double>(h->NodeTriangles()), Unit::Count, Better::Lower, {}, Rollup::Sum);
+			sink.Emit("merge.problems", static_cast<double>(h->problems.size()), Unit::Count, Better::Lower, {}, Rollup::Sum);
+			if (h->root >= 0) {
+				double topTriangles = 0.0;
+				for (const uint32_t t : h->tops) {
+					topTriangles += h->nodes[t].triangles;
+				}
+				sink.Emit("merge.root_triangles", topTriangles, Unit::Count, Better::Lower, {}, Rollup::Sum);
+				sink.Emit("merge.root_error", h->nodes[static_cast<uint32_t>(h->root)].error, Unit::MeshUnits, Better::Neutral, {}, Rollup::Max);
+				sink.Emit("merge.top_nodes", static_cast<double>(h->tops.size()), Unit::Count, Better::Neutral, {}, Rollup::Sum);
+				sink.Emit("merge.folded_nodes", static_cast<double>(std::ranges::count_if(h->nodes, [](const MergeNode& n) { return n.folded; })),
+					Unit::Count, Better::Neutral, {}, Rollup::Sum);
+			}
+			if (h->partsOpen) {
+				const double input = static_cast<double>(h->InputTriangles());
+				sink.Emit("merge.input_triangles", input, Unit::Count, Better::Neutral, {}, Rollup::Sum);
+				if (input > 0.0) {
+					sink.Emit("merge.node_triangle_ratio", static_cast<double>(h->NodeTriangles()) / input, Unit::Ratio, Better::Lower);
+				}
+			}
+			std::vector<double> fanout, portalDepth, growth, containment;
+			for (const MergeNode& node : h->nodes) {
+				fanout.push_back(static_cast<double>(node.childNodes.size() + node.childPortals.size()));
+				float childError = 0.0f;
+				bool known = true;
+				for (const uint32_t c : node.childNodes) {
+					childError = std::max(childError, h->nodes[c].error);
+					const MergeNode& child = h->nodes[c];
+					const float dx = child.sphere.x - node.sphere.x, dy = child.sphere.y - node.sphere.y, dz = child.sphere.z - node.sphere.z;
+					containment.push_back(node.sphere.w > 0.0f ? (std::sqrt(dx * dx + dy * dy + dz * dz) + child.sphere.w) / node.sphere.w : 0.0);
+				}
+				for (const uint32_t p : node.childPortals) {
+					if (!h->partsOpen) {
+						known = false;
+						continue;
+					}
+					childError = std::max(childError, h->parts[h->portals[p].part].coarseError * h->portals[p].scale);
+				}
+				if (known && childError > 0.0f) {
+					growth.push_back(node.error / childError);
+				}
+			}
+			for (const MergePortal& portal : h->portals) {
+				portalDepth.push_back(portal.depth);
+			}
+			// Issues at the reach cut (MergeIssues). Per root, summed over a run: the census sorts and totals these.
+			const MergeIssues issues = FindMergeIssues(*h, context.mergeReachCut);
+			const Tags reach{ { "reach_cut", std::format("{:g}", context.mergeReachCut) } };
+			const auto issue = [&](const char* id, double value, Better better = Better::Lower) {
+				sink.Emit(std::string("merge.issue.") + id, value, Unit::Count, better, reach, Rollup::Sum);
+			};
+			issue("unreachable_nodes", issues.unreachableNodes);
+			issue("unreachable_triangles", static_cast<double>(issues.unreachableTriangles));
+			issue("unreachable_levels", issues.unreachableLevels);
+			issue("root_draws", issues.rootDraws ? 1.0 : 0.0, Better::Higher);
+			issue("always_open_portals", issues.alwaysOpenPortals);
+			issue("always_open_coarsest_portals", issues.alwaysOpenCoarsestPortals);
+			issue("dead_portals", issues.deadPortals);
+			issue("dead_portal_triangles", static_cast<double>(issues.deadPortalTriangles));
+			issue("hardly_drawn_nodes", issues.hardlyDrawnNodes);
+			issue("hardly_drawn_triangles", static_cast<double>(issues.hardlyDrawnTriangles));
+			issue("root_portals", issues.rootPortals);
+			issue("reach_nodes", issues.atReach.nodes);
+			issue("reach_portals", issues.atReach.portals);
+			issue("reach_coarsest_portals", issues.atReach.coarsestPortals);
+			issue("reach_triangles", static_cast<double>(issues.atReach.Triangles()));
+			issue("reach_node_triangles", static_cast<double>(issues.atReach.nodeTriangles));
+			issue("reach_part_triangles", static_cast<double>(issues.atReach.partTriangles));
+			sink.Emit("merge.issue.sibling_spread", issues.siblingSpreadMean, Unit::Ratio, Better::Lower, reach);
+			sink.Emit("merge.issue.sibling_spread_max", issues.siblingSpreadMax, Unit::Ratio, Better::Lower, reach, Rollup::Max);
+			sink.Emit("merge.issue.portal_depth_mean", issues.portalDepthMean, Unit::Count, Better::Lower, reach);
+			sink.Emit("merge.issue.portal_depth_max", issues.portalDepthMax, Unit::Count, Better::Lower, reach, Rollup::Max);
+			EmitDistribution(sink, "merge.fanout", fanout, Unit::Count, Better::Neutral);
+			EmitDistribution(sink, "merge.portal_depth", portalDepth, Unit::Count, Better::Lower);
+			EmitDistribution(sink, "merge.error_growth", growth, Unit::Ratio, Better::Neutral);
+			EmitDistribution(sink, "merge.child_containment", containment, Unit::Ratio, Better::Lower);
+			for (int exponent = -2; exponent <= 14; ++exponent) {
+				const float cut = std::ldexp(1.0f, exponent);
+				const MergeCutCost cost = h->CostAt(cut);
+				const Tags tags{ { "cut", std::format("{:g}", cut) } };
+				sink.Emit("merge.cut.nodes", cost.nodes, Unit::Count, Better::Lower, tags, Rollup::Sum);
+				sink.Emit("merge.cut.portals", cost.portals, Unit::Count, Better::Lower, tags, Rollup::Sum);
+				if (cost.partsKnown) {
+					sink.Emit("merge.cut.triangles", static_cast<double>(cost.Triangles()), Unit::Count, Better::Lower, tags, Rollup::Sum);
+					sink.Emit("merge.cut.clusters", static_cast<double>(cost.Clusters()), Unit::Count, Better::Lower, tags, Rollup::Sum);
+					sink.Emit("merge.cut.coarsest_portals", cost.coarsestPortals, Unit::Count, Better::Lower, tags, Rollup::Sum);
+				}
+			}
+		}
+	};
 }
 
+std::unique_ptr<IAnalyzer> MakeMergeHierarchyAnalyzer() { return std::make_unique<MergeHierarchyAnalyzer>(); }
 std::unique_ptr<IAnalyzer> MakeHierarchyStructureAnalyzer() { return std::make_unique<HierarchyStructureAnalyzer>(); }
 std::unique_ptr<IAnalyzer> MakeHierarchyValidityAnalyzer() { return std::make_unique<HierarchyValidityAnalyzer>(); }
 

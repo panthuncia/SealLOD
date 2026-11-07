@@ -8,6 +8,7 @@ namespace clodeval {
 
 std::unique_ptr<IAnalyzer> MakeHierarchyStructureAnalyzer();
 std::unique_ptr<IAnalyzer> MakeHierarchyValidityAnalyzer();
+std::unique_ptr<IAnalyzer> MakeMergeHierarchyAnalyzer();
 std::unique_ptr<IAnalyzer> MakeMemoryPagesAnalyzer();
 std::unique_ptr<IAnalyzer> MakeVoxelDistributionAnalyzer();
 std::unique_ptr<IAnalyzer> MakeVoxelFidelityAnalyzer();

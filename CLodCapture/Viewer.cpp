@@ -87,7 +87,13 @@ namespace clodcapture {
 		for (const nlohmann::json& point : m_config.value("curve", nlohmann::json::array())) {
 			m_savedCurve.push_back({ point.at(0).get<float>(), point.at(1).get<float>() });
 		}
-		m_hierarchy.StartLoading(m_config.at("cache_root").get<std::string>());
+		// A suite's whole cache root, or (for a merge root) just the caches it uses: SARP's tree holds tens of thousands.
+		if (const auto files = m_config.find("cache_files"); files != m_config.end()) {
+			m_hierarchy.StartLoading(files->get<std::vector<std::string>>());
+		}
+		else {
+			m_hierarchy.StartLoading(m_config.at("cache_root").get<std::string>());
+		}
 		m_lastInspectRequest = std::chrono::steady_clock::now();
 		m_lastFlip = m_lastInspectRequest;
 		m_lastCompareFlip = m_lastInspectRequest;
@@ -1173,6 +1179,8 @@ namespace clodcapture {
 
 		// A window that is closed never tears down: nothing the renderer holds outlives the process, and
 		// destroying it mid-frame is only a way to turn a clean exit into a crash.
+		// Path tracing is the renderer default where the device can run it; captures and the viewer measure raster CLod.
+		_putenv_s("SARP_RT_PATH_TRACING", "0");
 		Renderer& renderer = *new Renderer();
 		renderer.Initialize(window, clientWidth, clientHeight, MakeCapturePipeline(true));
 		SettingsManager::GetInstance().getSettingSetter<bool>("enableSceneRenderOverlap")(false);
@@ -1186,6 +1194,9 @@ namespace clodcapture {
 			scene->SetPartFilter(config.value("part_filter", std::string()));
 			for (const nlohmann::json& asset : config.at("assets")) {
 				scene->AddAsset({ asset.at("path").get<std::string>(), asset.value("scale", 1.0f) });
+			}
+			for (const nlohmann::json& root : config.value("cache_roots", nlohmann::json::array())) {
+				scene->AddCacheRoot(root.at("metadata").get<std::string>());
 			}
 			renderer.SetEnvironment(config.value("environment", std::string("sky")));
 			const XMFLOAT3 center = ReadVector(config.at("frame").at("center"));

@@ -64,6 +64,9 @@ public:
     // Initialize and remains valid until Shutdown completes; streaming workers
     // no longer discover it through the process-global settings registry.
     void SetGeometryStorage(ICLodGeometryStorage* storage) noexcept { m_geometryStorage = storage; }
+    // The CLOD_BRANCH_* of forked DAGs the views take (set at graph construction). Only those branches' coarsest groups
+    // are pinned, and streaming parents follow the voxel branch while it is active. Applied by the streaming service.
+    void SetActiveBranches(uint32_t branches) noexcept { m_requestedActiveBranches.store(branches, std::memory_order_release); }
 
     void SetPriorityMode(CLodPriorityMode mode) { m_priorityMode = mode; }
     CLodPriorityMode GetPriorityMode() const { return m_priorityMode; }
@@ -143,6 +146,8 @@ private:
     void EnsureStreamingStorageCapacity(uint32_t requiredGroupCount);
     void ProcessStreamingDomainEvents();
     void RebuildStreamingDomainFromSnapshot(ICLodGeometryStorage* meshManager);
+    void ApplyActiveBranches(ICLodGeometryStorage* meshManager, uint32_t branches);
+    void ReleasePinnedStorageForGroup(uint32_t groupIndex, ICLodGeometryStorage* meshManager);
     void InitializeActiveRange(
         ICLodGeometryStorage* meshManager,
         uint32_t begin,
@@ -664,6 +669,8 @@ private:
     // domain. Incremental domain events are not replayable, so its first update
     // must bootstrap residency from MeshManager's authoritative snapshot.
     bool m_streamingDomainFullResetPending = true;
+    std::atomic<uint32_t> m_requestedActiveBranches{ 3u };
+    uint32_t m_activeBranches = 3u;
 
     struct StreamingWakeState {
         std::mutex mutex;

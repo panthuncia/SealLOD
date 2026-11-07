@@ -1,4 +1,5 @@
 #include "VirtualGeometry/Culling/RenderPasses/ComputeCullingPass.h"
+#include <BasicRenderer/Assets/ClusterLODTypes.h>
 #include "Render/PassBuilders.h"
 
 #include <algorithm>
@@ -124,6 +125,7 @@ ComputeCullingPrograms ComputeCullingPass::DeclarePrograms(org::PassBuilder& bui
         { L"CLOD_RT_VIEW_STREAMS", m_config.rayTracingViewStreams ? L"1" : L"0" },
         { L"CLOD_RT_VIEW_PATH_TRACED", m_config.rayTracingViewPathTraced ? L"1" : L"0" },
         { L"CLOD_SKIP_RT_COVERED", m_config.skipRayTracingCoveredDraws ? L"1" : L"0" },
+        { L"CLOD_FORCE_VIEW_BRANCH", GetClusterLODForcedViewBranch() == 1u ? L"1" : GetClusterLODForcedViewBranch() == 2u ? L"2" : L"0" },
     };
     auto leafDefines = defines;
     leafDefines.push_back({ L"CLOD_PC_LEAF_ONLY", L"1" });

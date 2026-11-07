@@ -73,9 +73,82 @@ std::string CachedMesh::Name() const
 	std::string_view subset = source.subsetName;
 	if (subset.starts_with(kFullMeshSubset)) {
 		subset.remove_prefix(kFullMeshSubset.size());
-		return source.primPath + std::string(subset);
+		return source.primPath + std::string(subset) + m_nameSuffix;
 	}
-	return subset.empty() ? source.primPath : source.primPath + ":" + std::string(subset);
+	return (subset.empty() ? source.primPath : source.primPath + ":" + std::string(subset)) + m_nameSuffix;
+}
+
+bool CachedMesh::IsForked() const
+{
+	return std::ranges::any_of(Prebuilt().groups, [](const ClusterLODGroup& group) { return (group.flags & CLOD_GROUP_BRANCH_FLAGS) != 0u; });
+}
+
+std::unique_ptr<CachedMesh> CachedMesh::BranchView(uint32_t branch, std::string nameSuffix) const
+{
+	auto view = std::make_unique<CachedMesh>();
+	view->m_metadataPath = m_metadataPath;
+	view->m_opened = m_opened;
+	view->m_container = m_container;
+	view->m_metadataBytes = m_metadataBytes;
+	view->m_containerBytes = m_containerBytes;
+	view->m_nameSuffix = std::move(nameSuffix);
+	view->m_branch = branch;
+
+	const ClusterLODPrebuiltData& source = Prebuilt();
+	ClusterLODPrebuiltData& out = view->m_opened.data.prebuiltData;
+	const uint32_t groupCount = static_cast<uint32_t>(source.groups.size());
+	std::vector<int32_t> renamed(groupCount, -1);
+	out.groups.clear();
+	out.groupChunks.clear();
+	out.groupPageReferences.clear();
+	out.groupPageReferenceOffsets.assign(1u, 0u);
+	for (uint32_t index = 0; index < groupCount; ++index) {
+		if ((ClusterLODGroupBranches(source.groups[index].flags) & branch) != 0u) {
+			renamed[index] = static_cast<int32_t>(out.groups.size());
+			out.groups.push_back(source.groups[index]);
+		}
+	}
+	const auto rename = [&](int32_t group) { return group >= 0 && static_cast<uint32_t>(group) < groupCount ? renamed[group] : -1; };
+	for (uint32_t index = 0; index < groupCount; ++index) {
+		if (renamed[index] < 0) continue;
+		ClusterLODGroup& group = out.groups[static_cast<size_t>(renamed[index])];
+		if (branch == CLOD_BRANCH_VOXEL && group.branchGroupId >= 0 && static_cast<uint32_t>(group.branchGroupId) < groupCount) {
+			const ClusterLODGroup& shadow = source.groups[static_cast<size_t>(group.branchGroupId)];
+			group.bounds = shadow.bounds;
+			group.parentGroupId = shadow.parentGroupId;
+			group.maxParentError = shadow.maxParentError;
+		}
+		group.parentGroupId = rename(group.parentGroupId);
+		group.branchGroupId = -1;
+		group.flags &= ~CLOD_GROUP_BRANCH_FLAGS;
+		if (index < source.groupChunks.size()) out.groupChunks.push_back(source.groupChunks[index]);
+		const uint32_t begin = source.groupPageReferenceOffsets[index];
+		const uint32_t end = source.groupPageReferenceOffsets[index + 1u];
+		out.groupPageReferences.insert(out.groupPageReferences.end(), source.groupPageReferences.begin() + begin, source.groupPageReferences.begin() + end);
+		out.groupPageReferenceOffsets.push_back(static_cast<uint32_t>(out.groupPageReferences.size()));
+	}
+	// The groups' segments stay where they are (other branches' become unused); their children are in the branch.
+	for (ClusterLODGroupSegment& segment : out.segments) {
+		segment.refinedGroup = rename(segment.refinedGroup);
+	}
+	for (ClusterLODNode& node : out.nodes) {
+		if (node.range.isGroup == CLOD_NODE_INTERNAL) continue;
+		const int32_t owner = rename(static_cast<int32_t>(node.range.ownerGroupId));
+		if (owner < 0 && node.range.isGroup != CLOD_NODE_INSTANCE_ROOT) {
+			// A leaf of the other branch: an instance root names no group, so nothing walks into it.
+			node.range.isGroup = CLOD_NODE_INSTANCE_ROOT;
+			node.range.ownerGroupId = UINT32_MAX;
+			node.range.countMinusOne = 0u;
+			continue;
+		}
+		if (owner >= 0) node.range.ownerGroupId = static_cast<uint32_t>(owner);
+		if (node.range.countMinusOne != 0u) node.range.countMinusOne = static_cast<uint32_t>(rename(static_cast<int32_t>(node.range.countMinusOne) - 1) + 1);
+	}
+	for (ClusterLODPartRecord& part : out.partRecords) {
+		part.groupBase = 0u;
+		part.groupCount = static_cast<uint32_t>(out.groups.size());
+	}
+	return view;
 }
 
 std::span<const std::byte> CachedMesh::Page(uint32_t meshPageIndex) const

@@ -1,6 +1,8 @@
 #include "Suite.h"
 
 #include <algorithm>
+#include <atomic>
+#include <thread>
 #include <array>
 #include <cctype>
 #include <chrono>
@@ -359,24 +361,82 @@ bool AnalyzeMeshes(
 	outResults.buildKey = buildKey;
 	outResults.provenance = ProvenanceJson();
 
+	// Each mesh is measured on a worker into its own sink, and the sinks are joined in input order, so the results do
+	// not depend on the thread count. Merge roots share one part library.
+	std::vector<const MeshToAnalyze*> selected;
+	for (const MeshToAnalyze& item : meshes) {
+		if (options.assetFilter.empty() || item.asset.find(options.assetFilter) != std::string::npos) {
+			selected.push_back(&item);
+		}
+	}
+	struct Outcome {
+		MetricSink sink;
+		std::string leafKey, leafHash, error;
+	};
+	std::vector<Outcome> outcomes(selected.size());
+	MergePartLibrary mergeParts;
+	std::atomic<size_t> next{ 0u };
+	std::atomic<bool> failed{ false };
+	const auto work = [&]() {
+		for (size_t index = next.fetch_add(1u); index < selected.size() && !failed.load(); index = next.fetch_add(1u)) {
+			const MeshToAnalyze& item = *selected[index];
+			Outcome& outcome = outcomes[index];
+			const std::unique_ptr<CachedMesh> mesh = CachedMesh::Open(item.metadataPath, outcome.error);
+			if (!mesh) {
+				failed.store(true);
+				return;
+			}
+			const std::string meshName = mesh->Name();
+			outcome.leafKey = item.asset + "|" + meshName;
+			outcome.leafHash = std::format("{:016x}", mesh->LeafGeometryHash());
+			std::vector<std::unique_ptr<CachedMesh>> branchViews;
+			std::vector<const CachedMesh*> views = { mesh.get() };
+			if (mesh->IsForked()) {
+				views.clear();
+				if (options.branch.empty() || options.branch == "triangle") {
+					branchViews.push_back(mesh->BranchView(CLOD_BRANCH_TRIANGLE, options.branch.empty() ? "#triangle" : ""));
+				}
+				if (options.branch.empty() || options.branch == "voxel") {
+					branchViews.push_back(mesh->BranchView(CLOD_BRANCH_VOXEL, options.branch.empty() ? "#voxel" : ""));
+				}
+				for (const auto& view : branchViews) views.push_back(view.get());
+			}
+			for (const CachedMesh* view : views) {
+				const AnalysisContext context{ *view, item.asset, &mergeParts, options.mergeReachCut };
+				for (const IAnalyzer* analyzer : analyzers) {
+					outcome.sink.SetScope({ std::string(analyzer->Info().id), analyzer->Info().version, buildName, item.asset, view->Name() });
+					analyzer->Run(context, outcome.sink);
+				}
+			}
+		}
+	};
+	const uint32_t threadCount = static_cast<uint32_t>(std::clamp<size_t>(
+		options.threads != 0u ? options.threads : std::max(1u, std::thread::hardware_concurrency()), 1u, std::max<size_t>(selected.size(), 1u)));
+	std::vector<std::thread> workers;
+	for (uint32_t t = 1; t < threadCount; ++t) {
+		workers.emplace_back(work);
+	}
+	work();
+	for (std::thread& worker : workers) {
+		worker.join();
+	}
 	MetricSink sink;
 	size_t analyzed = 0;
-	for (const MeshToAnalyze& item : meshes) {
-		if (!options.assetFilter.empty() && item.asset.find(options.assetFilter) == std::string::npos) {
-			continue;
-		}
-		const std::unique_ptr<CachedMesh> mesh = CachedMesh::Open(item.metadataPath, outError);
-		if (!mesh) {
+	for (Outcome& outcome : outcomes) {
+		if (!outcome.error.empty()) {
+			outError = outcome.error;
 			return false;
 		}
-		const std::string meshName = mesh->Name();
-		outResults.leafGeometry[item.asset + "|" + meshName] = std::format("{:016x}", mesh->LeafGeometryHash());
-		const AnalysisContext context{ *mesh, item.asset };
-		for (const IAnalyzer* analyzer : analyzers) {
-			sink.SetScope({ std::string(analyzer->Info().id), analyzer->Info().version, buildName, item.asset, meshName });
-			analyzer->Run(context, sink);
+		if (outcome.leafKey.empty()) {
+			continue;
 		}
+		outResults.leafGeometry[outcome.leafKey] = outcome.leafHash;
+		sink.Absorb(std::move(outcome.sink));
 		++analyzed;
+	}
+	if (failed.load()) {
+		outError = "a cache could not be opened";
+		return false;
 	}
 	if (analyzed == 0u) {
 		outError = options.assetFilter.empty() ? "no caches to analyze" : std::format("no caches match filter '{}'", options.assetFilter);
@@ -508,6 +568,17 @@ nlohmann::json DescribeCache(const fs::path& metadataPath, int groupIndex, std::
 	description["parts"] = prebuilt.partRecords.size();
 	description["max_depth"] = prebuilt.maxDepth;
 	description["triangle_pages"] = prebuilt.trianglePageCount;
+	if (mesh->IsForked()) {
+		// A triangle/voxel fork (CLOD_GROUP_FLAG_BRANCH_*): groups only in each branch, and shared groups whose voxel-branch
+		// boundary is a shadow record.
+		uint64_t triangleOnly = 0, voxelOnly = 0, shadows = 0;
+		for (const ClusterLODGroup& group : prebuilt.groups) {
+			triangleOnly += (group.flags & CLOD_GROUP_FLAG_BRANCH_TRIANGLE) != 0u ? 1u : 0u;
+			voxelOnly += (group.flags & CLOD_GROUP_FLAG_BRANCH_VOXEL) != 0u ? 1u : 0u;
+			shadows += (group.flags & CLOD_GROUP_FLAG_BRANCH_SHADOW) != 0u ? 1u : 0u;
+		}
+		description["fork"] = { { "triangle_only_groups", triangleOnly }, { "voxel_only_groups", voxelOnly }, { "boundary_groups", shadows } };
+	}
 	description["voxel_pages"] = prebuilt.voxelPageCount;
 	description["object_sphere"] = {
 		prebuilt.objectBoundingSphere.sphere.x, prebuilt.objectBoundingSphere.sphere.y,
@@ -604,6 +675,11 @@ std::string FormatCacheDescription(const nlohmann::json& description)
 		description.at("max_depth").get<uint32_t>(),
 		description.at("triangle_pages").get<uint32_t>(),
 		description.at("voxel_pages").get<uint32_t>());
+	if (description.contains("fork")) {
+		const nlohmann::json& fork = description.at("fork");
+		text += std::format("  forked: {} triangle-only groups, {} voxel-only groups, {} boundary groups (--branch measures one)\n",
+			fork.at("triangle_only_groups").get<uint64_t>(), fork.at("voxel_only_groups").get<uint64_t>(), fork.at("boundary_groups").get<uint64_t>());
+	}
 	text += "  depth  tri_groups  vox_groups   triangles    min_error    max_error\n";
 	for (const nlohmann::json& level : description.at("levels")) {
 		text += std::format(

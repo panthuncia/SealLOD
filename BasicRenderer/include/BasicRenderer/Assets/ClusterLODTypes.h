@@ -296,7 +296,16 @@ enum class ClusterLODCoveragePreservationMode : uint8_t
 {
 	None,
 	PrioritizeEdges,
-	Voxel,
+	Voxel, // voxel groups replace the triangle groups above the switch: no triangle fallback (grass, voxel-only builds)
+};
+
+// Whether a triangle build (PrioritizeEdges or None) also gets a voxel branch above the levels that voxelize well, so
+// that raster views with voxel output take voxels there while every other view keeps triangles (CLOD_GROUP_FLAG_BRANCH_*).
+enum class ClusterLODVoxelForkMode : uint8_t
+{
+	Off,
+	Auto,   // fork where voxels are shown to win: the seed test, a stalled triangle reduction and the surface test
+	Forced, // fork wherever the seed test passes
 };
 
 struct ClusterLODBuilderSettings
@@ -328,6 +337,18 @@ struct ClusterLODBuilderSettings
 	// 0 turns the test off.
 	float voxelSurfaceLossLimit = 0.0f;
 	bool doubleSidedVoxelSourceNormals = false;
+
+	ClusterLODVoxelForkMode voxelFork = ClusterLODVoxelForkMode::Off;
+	// Auto: a seed's triangle parents must keep more than this share of its triangles (the reduction stalls), or it must
+	// have no parent (reduction stopped)...
+	float voxelForkStallRatio = 0.6f;
+	// ...while it still has this many triangles: a stall at the top of a mesh that reduced well saves too little to fork.
+	uint32_t voxelForkMinTriangles = 512u;
+	// Auto: only double-sided surfaces (doubleSidedVoxelSourceNormals), which is what foliage cards are. Solid surfaces
+	// (architecture, rocks) pass the tests above wherever reduction stops at a large top, but read as blocks voxelized.
+	bool voxelForkDoubleSidedOnly = true;
+	// Auto: the surface-loss limit for fork seeds (voxelSurfaceLossLimit for this decision). 0 turns the test off.
+	float voxelForkSurfaceLoss = 0.008f;
 };
 
 inline std::string GetClusterLODEnvironmentVariable(const char* name)
@@ -346,6 +367,14 @@ inline std::string GetClusterLODEnvironmentVariable(const char* name)
 	const char* value = std::getenv(name);
 	return value != nullptr ? std::string(value) : std::string();
 #endif
+}
+
+// BASICRENDERER_CLOD_FORCE_BRANCH=triangle|voxel makes raster views take that branch of forked DAGs, for A/B runs (the
+// ray tracing view always takes triangles). 0: each view takes its own (CLOD_GROUP_FLAG_BRANCH_*).
+inline uint32_t GetClusterLODForcedViewBranch()
+{
+	const std::string value = GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_FORCE_BRANCH");
+	return value == "triangle" ? 1u : value == "voxel" ? 2u : 0u;
 }
 
 inline ClusterLODBuilderSettings ApplyClusterLODBuilderEnvironmentOverrides(ClusterLODBuilderSettings settings)
@@ -418,6 +447,23 @@ inline ClusterLODBuilderSettings ApplyClusterLODBuilderEnvironmentOverrides(Clus
 	readUint("BASICRENDERER_CLOD_NODE_BONE_LIMIT", settings.nodeBoneLimit);
 	readFloat("BASICRENDERER_CLOD_VOXEL_TAIL_GROWTH", settings.voxelTailGrowthFactor);
 	readFloat("BASICRENDERER_CLOD_VOXEL_SURFACE_LOSS", settings.voxelSurfaceLossLimit);
+	const std::string forkString = GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_VOXEL_FORK");
+	if (forkString == "0" || forkString == "off")
+	{
+		settings.voxelFork = ClusterLODVoxelForkMode::Off;
+	}
+	else if (forkString == "auto")
+	{
+		settings.voxelFork = ClusterLODVoxelForkMode::Auto;
+	}
+	else if (forkString == "forced" || forkString == "1")
+	{
+		settings.voxelFork = ClusterLODVoxelForkMode::Forced;
+	}
+	readFloat("BASICRENDERER_CLOD_VOXEL_FORK_STALL", settings.voxelForkStallRatio);
+	readUint("BASICRENDERER_CLOD_VOXEL_FORK_MIN_TRIANGLES", settings.voxelForkMinTriangles);
+	readBool("BASICRENDERER_CLOD_VOXEL_FORK_DOUBLE_SIDED_ONLY", settings.voxelForkDoubleSidedOnly);
+	readFloat("BASICRENDERER_CLOD_VOXEL_FORK_SURFACE_LOSS", settings.voxelForkSurfaceLoss);
 	readBool("BASICRENDERER_CLOD_DISABLE_SLOPPY_FALLBACK", settings.disableSloppyFallback);
 	readFloat("BASICRENDERER_CLOD_SLOPPY_ERROR_FACTOR", settings.sloppyFallbackErrorFactor);
 
@@ -441,10 +487,14 @@ struct ClusterLODRuntimeSummary
 	{
 		uint32_t firstGroup = 0;
 		uint32_t groupCount = 0;
+		uint32_t branches = 3u; // the CLOD_BRANCH_* in which these groups are coarsest: pinned while one of them is active
 	};
 
 	std::vector<GroupChunkHint> groupChunkHints;
 	std::vector<int32_t> parentGroupByLocal;
+	// A forked DAG: each group's streaming parent while the voxel branch is active (parentGroupByLocal otherwise; the two
+	// differ only for shared groups at the fork). Empty for an unforked mesh.
+	std::vector<int32_t> voxelParentGroupByLocal;
 	std::vector<float> groupErrorByLocal;
 	std::vector<uint32_t> firstGroupVertexByLocal;
 	std::vector<GroupRange> coarsestRanges;

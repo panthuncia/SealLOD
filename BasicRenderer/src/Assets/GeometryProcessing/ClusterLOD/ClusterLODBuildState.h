@@ -125,6 +125,11 @@ namespace clod_detail {
 		uint32_t maxTraversalDepth = 0;
 		VoxelGroupMapping voxelGroupMapping;
 		std::vector<VoxelGroupPayload> voxelCarryPayloads;
+
+		// A forked DAG (CLOD_GROUP_FLAG_BRANCH_*): the voxel-branch bounds of shared groups whose boundary differs there.
+		// BuildClusterLODTraversalHierarchy turns them, and any parent that differs per branch, into shadow records.
+		std::vector<clodBounds> forkVoxelBounds;
+		std::vector<uint8_t> forkHasVoxelBounds;
 	};
 
 	// One group's clusters to pages, for builders that form their own groups (merge hierarchies).
@@ -159,6 +164,26 @@ namespace clod_detail {
 		const std::vector<std::byte>& vertices,
 		unsigned int vertexFlags,
 		size_t vertexStrideBytes);
+
+	// A merge node's voxel children voxelized together (ClusterLODMergeHierarchy.cpp), before it is accepted.
+	struct MergeVoxelization
+	{
+		VoxelGroupPayload payload;
+		uint32_t cubes = 0;
+	};
+	// Voxelizes triangles (MeshVertexLayout: position, normal, then UV set 0) at voxelWidth. False when nothing is
+	// covered or the grid would be too large.
+	bool VoxelizeMergeTriangles(
+		const std::vector<std::byte>& vertices,
+		size_t vertexStrideBytes,
+		const std::vector<uint32_t>& indices,
+		float voxelWidth,
+		uint32_t raysPerCell,
+		MergeVoxelization& out);
+	// An accepted voxelization as group `groupIndex`, every cell refining into refinedGroup: its packed records go into
+	// state's voxel mapping, and the group (CLOD_GROUP_FLAG_IS_VOXEL; bounds, depth and firstSegment are the caller's)
+	// with its segments and pages is returned.
+	MergeGroupOutput AppendMergeVoxelGroup(ClusterLODBuildState& state, const MergeVoxelization& voxels, uint32_t groupIndex, int32_t refinedGroup);
 
 	void FinalizeMeshWidePagePacking(
 		ClusterLODBuildState& state,

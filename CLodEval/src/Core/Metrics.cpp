@@ -90,6 +90,22 @@ void MetricSink::Emit(std::string id, double value, Unit unit, Better better, Ta
 	m_records.push_back(std::move(record));
 }
 
+void MetricSink::Absorb(MetricSink&& other)
+{
+	m_records.insert(m_records.end(), std::make_move_iterator(other.m_records.begin()), std::make_move_iterator(other.m_records.end()));
+	for (auto& [key, pending] : other.m_rollups) {
+		auto [entry, inserted] = m_rollups.try_emplace(key, pending);
+		if (!inserted) {
+			double& total = entry->second.record.value;
+			total = pending.rollup == Rollup::Sum ? total + pending.record.value : std::max(total, pending.record.value);
+		}
+	}
+	m_droppedNonFinite.insert(m_droppedNonFinite.end(), other.m_droppedNonFinite.begin(), other.m_droppedNonFinite.end());
+	other.m_records.clear();
+	other.m_rollups.clear();
+	other.m_droppedNonFinite.clear();
+}
+
 std::vector<MetricRecord> MetricSink::Finish()
 {
 	std::vector<MetricRecord> records = std::move(m_records);

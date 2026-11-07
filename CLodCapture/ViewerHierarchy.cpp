@@ -5,11 +5,13 @@
 #include <cmath>
 #include <format>
 #include <map>
+#include <unordered_map>
 
 #include <BasicRenderer/Assets/CLodPageDecoder.h>
 
 namespace clodcapture {
 	namespace {
+		using clodeval::IsMergeRoot;
 		bool IsVoxel(const ClusterLODGroup& group) { return (group.flags & CLOD_GROUP_FLAG_IS_VOXEL) != 0u; }
 		bool HasMeasuredError(const ClusterLODGroup& group) { return std::isfinite(group.bounds.error) && group.bounds.error > 0.0f && group.bounds.error < 1.0e19f; }
 
@@ -64,6 +66,23 @@ namespace clodcapture {
 				info.shortName = subset.empty() || subset.starts_with("__") ? std::string(prim) : std::format("{} {}", prim, subset);
 			}
 			info.groups.assign(groupCount, GroupInfo{});
+			if (IsMergeRoot(prebuilt)) {
+				std::unique_ptr<clodeval::MergeHierarchy> merge = clodeval::ReadMergeHierarchy(mesh, true);
+				info.mergeReport = clodeval::FormatMergeReport(*merge, mesh);
+				info.mergeLevels = static_cast<int32_t>(merge->levels);
+				info.shortName = std::format("merge root {} ({} nodes, {} portals)", prebuilt.cacheSource.sourceIdentifier, merge->nodes.size(), merge->portals.size());
+				for (uint32_t n = 0; n < merge->nodes.size(); ++n) {
+					info.groups[merge->nodes[n].group].mergeNode = static_cast<int32_t>(n);
+					if (!merge->nodes[n].folded) {
+						info.groups[merge->nodes[n].childrenGroup].mergeNode = static_cast<int32_t>(n);
+						info.groups[merge->nodes[n].childrenGroup].mergeChildren = true;
+					}
+				}
+				for (uint32_t p = 0; p < merge->portals.size(); ++p) {
+					info.groups[merge->portals[p].group].mergePortal = static_cast<int32_t>(p);
+				}
+				info.merge = std::move(merge);
+			}
 
 			std::vector<std::vector<uint32_t>> children(groupCount), parents(groupCount);
 			for (uint32_t groupIndex = 0; groupIndex < groupCount; ++groupIndex) {
@@ -106,6 +125,22 @@ namespace clodcapture {
 				info.maxDepth = std::max(info.maxDepth, out.depth);
 			}
 
+			if (info.merge) {
+				// A node's children are its child nodes' geometry and its portals, reached through its children group.
+				for (auto& list : children) list.clear();
+				for (auto& list : parents) list.clear();
+				const clodeval::MergeHierarchy& merge = *info.merge;
+				for (const clodeval::MergeNode& node : merge.nodes) {
+					for (const uint32_t c : node.childNodes) {
+						children[node.group].push_back(merge.nodes[c].group);
+						parents[merge.nodes[c].group].push_back(node.group);
+					}
+					for (const uint32_t p : node.childPortals) {
+						children[node.group].push_back(merge.portals[p].group);
+						parents[merge.portals[p].group].push_back(node.group);
+					}
+				}
+			}
 			for (uint32_t groupIndex = 0; groupIndex < groupCount; ++groupIndex) {
 				GroupInfo& out = info.groups[groupIndex];
 				out.firstChild = static_cast<uint32_t>(info.links.size());
@@ -184,6 +219,9 @@ namespace clodcapture {
 
 			std::map<int32_t, LevelInfo> levels;
 			for (const GroupInfo& out : info.groups) {
+				if (out.mergePortal >= 0 || out.mergeChildren) {
+					continue;  // a merge root's levels are its nodes'
+				}
 				LevelInfo& level = levels[out.depth];
 				level.depth = out.depth;
 				(out.voxel ? level.voxelGroups : level.triangleGroups) += 1u;
@@ -225,7 +263,12 @@ namespace clodcapture {
 
 	void HierarchyIndex::StartLoading(std::filesystem::path cacheRoot)
 	{
-		m_thread = std::thread([this, root = std::move(cacheRoot)]() { Load(root); });
+		m_thread = std::thread([this, root = std::move(cacheRoot)]() { Load(clodeval::FindCacheMetadata(root)); });
+	}
+
+	void HierarchyIndex::StartLoading(std::vector<std::string> metadataFiles)
+	{
+		m_thread = std::thread([this, files = std::move(metadataFiles)]() { Load({ files.begin(), files.end() }); });
 	}
 
 	std::string HierarchyIndex::Error() const
@@ -234,9 +277,8 @@ namespace clodcapture {
 		return m_error;
 	}
 
-	void HierarchyIndex::Load(const std::filesystem::path& cacheRoot)
+	void HierarchyIndex::Load(std::vector<std::filesystem::path> paths)
 	{
-		const std::vector<std::filesystem::path> paths = clodeval::FindCacheMetadata(cacheRoot);
 		m_total.store(static_cast<uint32_t>(paths.size()));
 		std::vector<MeshInfo> meshes(paths.size());
 		std::atomic<size_t> next{ 0u };
@@ -271,10 +313,34 @@ namespace clodcapture {
 			const ClusterLODCacheSource& source = mesh.cache->Prebuilt().cacheSource;
 			m_byIdentity.emplace(Identity(source.sourceIdentifier, source.primPath, source.subsetName), index);
 			m_maxDepth = std::max(m_maxDepth, mesh.maxDepth);
+			m_maxMergeLevel = std::max(m_maxMergeLevel, mesh.mergeLevels);
 			m_maxVoxelLevel = std::max(m_maxVoxelLevel, mesh.maxVoxelLevel);
 			for (const HandOver& handOver : mesh.handOvers) {
 				m_minHandOver = std::min(m_minHandOver, handOver.error);
 				m_maxHandOver = std::max(m_maxHandOver, handOver.error);
+			}
+		}
+		// Which roots open each part, so a part's pixels can say they came through a portal.
+		std::unordered_map<std::string, int32_t> byPath;
+		for (int32_t index = 0; index < static_cast<int32_t>(m_meshes.size()); ++index) {
+			std::error_code error;
+			byPath.emplace(std::filesystem::weakly_canonical(m_meshes[index].cache->MetadataPath(), error).generic_string(), index);
+		}
+		for (const MeshInfo& root : m_meshes) {
+			if (!root.merge) {
+				continue;
+			}
+			for (const clodeval::MergePart& part : root.merge->parts) {
+				std::error_code error;
+				const auto found = byPath.find(std::filesystem::weakly_canonical(part.metadataPath, error).generic_string());
+				if (found == byPath.end()) {
+					continue;
+				}
+				MeshInfo& target = m_meshes[found->second];
+				target.portalUse += std::format("{}{} portals of {}", target.portalUse.empty() ? "" : "; ", part.portals, root.cache->Prebuilt().cacheSource.sourceIdentifier);
+				if (!part.label.empty()) {
+					target.shortName = part.label;
+				}
 			}
 		}
 		m_ready.store(true);

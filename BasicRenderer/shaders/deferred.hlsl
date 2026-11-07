@@ -1,5 +1,5 @@
-// This pass binds Builtin::Shadows::CLodStats (see DeferredShadingPass).
-#define CLOD_VSM_RECEIVER_TELEMETRY 1
+// CLOD_VSM_RECEIVER_TELEMETRY comes from PSOManager::CreateDeferredPSO, only with SARP_CLOD_VSM_FRAME_TELEMETRY: it
+// reads Builtin::Shadows::CLodReceiverHistory, which exists and is declared (DeferredShadingPass) only then.
 #include "include/vertex.hlsli"
 #include "include/utilities.hlsli"
 #include "include/cbuffers.hlsli"

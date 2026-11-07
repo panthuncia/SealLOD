@@ -31,6 +31,8 @@
 #include <BasicRenderer/StaticImport/ImportedAssetLibrary.h>
 #include <BasicRenderer/StaticImport/StaticImportRuntime.h>
 
+#include "CacheRoots.h"
+
 namespace clodcapture {
 	namespace fs = std::filesystem;
 	using namespace DirectX;
@@ -169,12 +171,36 @@ public:
 		m_unplaced.push_back(std::move(model));
 	}
 
+	// A merge-hierarchy root and its parts, from the cache tree. Placed at the origin, as the root's space is.
+	void AddCacheRoot(const fs::path& rootMetadata)
+	{
+		std::string error;
+		if (!m_rootSource.Load(rootMetadata, error)) {
+			throw std::runtime_error(error);
+		}
+		m_unplacedRoots.push_back(CacheRootSource::KeyFor(rootMetadata));
+	}
+
 	void Tick(Renderer& renderer)
 	{
 		if (!m_runtime) {
 			m_runtime = std::make_unique<br::staticimport::StaticImportRuntime>(
-				m_shared, br::staticimport::StaticImportSettings{}, m_assets, br::staticimport::StaticImportRuntime::Hooks{});
+				m_shared, br::staticimport::StaticImportSettings{}, m_rootSource, br::staticimport::StaticImportRuntime::Hooks{});
 			m_runtime->AttachServices(renderer.GetSceneIngestionServices().StaticScene());
+		}
+		if (!m_unplacedRoots.empty()) {
+			std::vector<br::staticimport::StaticImportGroup> groups;
+			for (const std::string& key : m_unplacedRoots) {
+				auto& group = groups.emplace_back();
+				group.assetKey = key;
+				group.groupID = br::staticimport::recipe::HashString(key, br::staticimport::recipe::HashString("clod-capture-root"));
+				group.batchKey = group.groupID;
+				group.name = key;
+				XMStoreFloat4x4(&group.instanceWorldMatrices.emplace_back(), XMMatrixIdentity());
+			}
+			m_placedParts += groups.size();
+			m_runtime->AddOrUpdateGroups(std::move(groups));
+			m_unplacedRoots.clear();
 		}
 		std::erase_if(m_unplaced, [&](const Model& model) {
 			const auto parts = m_assets.TryGetLoadedParts(model.path);
@@ -223,7 +249,7 @@ public:
 		m_runtime->Tick();
 	}
 
-	bool AllPlaced() const { return m_unplaced.empty(); }
+	bool AllPlaced() const { return m_unplaced.empty() && m_unplacedRoots.empty(); }
 	std::string DescribePlacement() const
 	{
 		return std::format("unplaced_models={} static_parts={} skinned_parts={} pending_groups={} live={}",
@@ -270,6 +296,8 @@ private:
 	};
 	br::staticimport::StaticImportShared m_shared;
 	br::staticimport::ImportedAssetLibrary m_assets;
+	CacheRootSource m_rootSource{ m_assets };
+	std::vector<std::string> m_unplacedRoots;
 	std::unique_ptr<br::staticimport::StaticImportRuntime> m_runtime;
 	std::vector<Model> m_unplaced;
 	uint32_t m_modelsAdded = 0;

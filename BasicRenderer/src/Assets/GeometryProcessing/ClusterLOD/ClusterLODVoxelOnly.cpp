@@ -54,6 +54,123 @@
 
 using namespace clod_detail;
 
+namespace clod_detail
+{
+	bool VoxelizeMergeTriangles(
+		const std::vector<std::byte>& vertices,
+		size_t vertexStrideBytes,
+		const std::vector<uint32_t>& indices,
+		float voxelWidth,
+		uint32_t raysPerCell,
+		MergeVoxelization& out)
+	{
+		ZoneScopedN("ClusterLODUtilities::VoxelizeMergeTriangles");
+		out = {};
+		const size_t vertexCount = vertexStrideBytes != 0u ? vertices.size() / vertexStrideBytes : 0u;
+		if (vertexCount == 0u || indices.empty() || !(voxelWidth > 0.0f) || !std::isfinite(voxelWidth))
+		{
+			return false;
+		}
+		DirectX::XMFLOAT3 aabbMin(std::numeric_limits<float>::max(), std::numeric_limits<float>::max(), std::numeric_limits<float>::max());
+		DirectX::XMFLOAT3 aabbMax(std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest());
+		for (const uint32_t index : indices)
+		{
+			if (index >= vertexCount) return false;
+			const DirectX::XMFLOAT3 position = ReadGroupVertexPosition(vertices, vertexStrideBytes, index);
+			aabbMin = DirectX::XMFLOAT3(std::min(aabbMin.x, position.x), std::min(aabbMin.y, position.y), std::min(aabbMin.z, position.z));
+			aabbMax = DirectX::XMFLOAT3(std::max(aabbMax.x, position.x), std::max(aabbMax.y, position.y), std::max(aabbMax.z, position.z));
+		}
+		// A cubic grid of whole cells, padded by half a cell, as runtime cube placement needs one scalar width.
+		const float longest = std::max({ aabbMax.x - aabbMin.x, aabbMax.y - aabbMin.y, aabbMax.z - aabbMin.z }) + voxelWidth;
+		// Cube coordinates are 10 bits of 4-cell cubes.
+		const uint32_t resolution = std::max(2u, static_cast<uint32_t>(std::ceil(longest / voxelWidth)));
+		if (resolution > 4096u)
+		{
+			return false;
+		}
+		const float extent = static_cast<float>(resolution) * voxelWidth;
+		const DirectX::XMFLOAT3 center(0.5f * (aabbMin.x + aabbMax.x), 0.5f * (aabbMin.y + aabbMax.y), 0.5f * (aabbMin.z + aabbMax.z));
+		const DirectX::XMFLOAT3 gridMin(center.x - 0.5f * extent, center.y - 0.5f * extent, center.z - 0.5f * extent);
+		const DirectX::XMFLOAT3 gridMax(center.x + 0.5f * extent, center.y + 0.5f * extent, center.z + 0.5f * extent);
+
+		// One refinement domain; AppendMergeVoxelGroup names the real one.
+		const std::vector<int32_t> refinedGroups(indices.size() / 3u, 0);
+		VoxelSourceTriangleBVH coverage;
+		coverage.Build(&vertices, vertexStrideBytes, &indices, nullptr, 0u, &refinedGroups, true);
+		VoxelizeTrianglesInput input{};
+		input.vertices = &vertices;
+		input.vertexStrideBytes = vertexStrideBytes;
+		input.triangleIndices = &indices;
+		input.triangleRefinedGroupIds = &refinedGroups;
+		input.doubleSidedTriangles = true;
+		input.coverageSourceTriangles = coverage.IsValid() ? &coverage : nullptr;
+		input.aabbMin = gridMin;
+		input.aabbMax = gridMax;
+		input.voxelWidth = voxelWidth;
+		input.resolution = resolution;
+		input.raysPerCell = std::max(1u, raysPerCell);
+		input.emitSourcePayload = false;
+		VoxelizeTrianglesResult result = VoxelizeTrianglesDetailed(input);
+		if (result.renderPayload.activeCells.empty())
+		{
+			return false;
+		}
+		PackVoxelGroupInput packInput{};
+		packInput.payload = &result.renderPayload;
+		packInput.voxelError = ComputeVoxelRepresentationError(voxelWidth);
+		packInput.dominantBoneIndex = CLOD_VOXEL_STATIC_BONE_INDEX;
+		const PackedVoxelGroupBuildResult packed = PackVoxelGroupToCubes(packInput);
+		out.cubes = static_cast<uint32_t>(packed.cubeRecords.size());
+		out.payload = std::move(result.renderPayload);
+		return out.cubes != 0u;
+	}
+
+	MergeGroupOutput AppendMergeVoxelGroup(ClusterLODBuildState& state, const MergeVoxelization& voxels, uint32_t groupIndex, int32_t refinedGroup)
+	{
+		ZoneScopedN("ClusterLODUtilities::AppendMergeVoxelGroup");
+		VoxelGroupMapping& mapping = state.voxelGroupMapping;
+		const uint32_t firstCluster = static_cast<uint32_t>(mapping.packedClusterRecords.size());
+		const uint32_t firstCube = static_cast<uint32_t>(mapping.packedCubeRecords.size());
+		const uint32_t firstAttribute = static_cast<uint32_t>(mapping.packedAttributeSamples.size());
+		const float voxelError = ComputeVoxelRepresentationError(voxels.payload.voxelWidth);
+		PackVoxelGroupInput packInput{};
+		packInput.payload = &voxels.payload;
+		packInput.voxelError = voxelError;
+		packInput.dominantBoneIndex = CLOD_VOXEL_STATIC_BONE_INDEX;
+		packInput.firstCube = firstCube;
+		packInput.firstAttribute = firstAttribute;
+		PackedVoxelGroupBuildResult packed = PackVoxelGroupToCubes(packInput);
+		packed.metadata.firstCluster = firstCluster;
+		for (CLodVoxelCubeRecord& cube : packed.cubeRecords) cube.refinedGroup = refinedGroup;
+		BuildVoxelClustersFromCubes(packed, CLOD_VOXEL_MAX_CUBES_PER_CLUSTER);
+		for (CLodVoxelClusterRecord& cluster : packed.clusterRecords) cluster.refinedGroup = refinedGroup;
+
+		MergeGroupOutput out{};
+		SplitVoxelClustersIntoPageSegments(packed, out.segments, out.segmentBounds, CLOD_NODE_BONE_LIMIT_DEFAULT);
+		for (ClusterLODGroupSegment& segment : out.segments) segment.refinedGroup = refinedGroup;
+		out.pageBlobs = BuildVoxelGroupPageBlobs(
+			out.segments, packed.clusterRecords, packed.cubeRecords, packed.attributeSamples, firstAttribute, CLOD_NODE_BONE_LIMIT_DEFAULT);
+		out.group.flags = CLOD_GROUP_FLAG_IS_VOXEL;
+		out.group.segmentCount = static_cast<uint32_t>(out.segments.size());
+		out.group.pageCount = static_cast<uint32_t>(out.pageBlobs.size());
+		out.group.representationError = voxelError;
+		for (const ClusterLODGroupSegment& segment : out.segments)
+		{
+			out.group.terminalSegmentCount += segment.refinedGroup < 0 ? 1u : 0u;
+		}
+
+		const uint32_t metadataIndex = static_cast<uint32_t>(mapping.packedGroupMetadata.size());
+		mapping.packedGroupMetadata.push_back(packed.metadata);
+		mapping.packedClusterRecords.insert(mapping.packedClusterRecords.end(), packed.clusterRecords.begin(), packed.clusterRecords.end());
+		mapping.packedCubeRecords.insert(mapping.packedCubeRecords.end(), packed.cubeRecords.begin(), packed.cubeRecords.end());
+		mapping.packedAttributeSamples.insert(mapping.packedAttributeSamples.end(), packed.attributeSamples.begin(), packed.attributeSamples.end());
+		mapping.groupToPayloadIndex.resize(std::max<size_t>(mapping.groupToPayloadIndex.size(), groupIndex + 1u), -1);
+		mapping.groupToPackedMetadataIndex.resize(std::max<size_t>(mapping.groupToPackedMetadataIndex.size(), groupIndex + 1u), -1);
+		mapping.groupToPackedMetadataIndex[groupIndex] = static_cast<int32_t>(metadataIndex);
+		return out;
+	}
+}
+
 ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromGeometry(
 	const std::vector<std::byte>& vertices,
 	unsigned int vertexSize,

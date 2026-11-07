@@ -646,6 +646,7 @@ add_library(BasicRendererPublicHeaderSmoke OBJECT
     "tests/PublicHeaders/Assets_Import_BRNiflyClient.cpp"
     "tests/PublicHeaders/Assets_Import_CLodCache.cpp"
     "tests/PublicHeaders/Assets_Import_CLodOpacityMicromapCache.cpp"
+    "tests/PublicHeaders/Assets_Import_CLodPortalParts.cpp"
     "tests/PublicHeaders/Assets_Import_GlTFGeometryExtractor.cpp"
     "tests/PublicHeaders/Assets_Import_USDGeometryExtractor.cpp"
     "tests/PublicHeaders/Assets_Import_USDMaterialCache.cpp"

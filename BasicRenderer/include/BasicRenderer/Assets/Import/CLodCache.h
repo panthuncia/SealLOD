@@ -43,7 +43,7 @@ bool AcquireMappedContainer(
 	uint32_t expectedPageCount,
 	std::shared_ptr<const MappedContainerLease>& outLease);
 
-inline constexpr uint32_t kSchemaVersion = 80; // 80: meshoptimizer 1.3 clusterizer, partitioner and simplifier.
+inline constexpr uint32_t kSchemaVersion = 81; // 81: forked triangle/voxel DAGs (ClusterLODGroup::branchGroupId, branch flags).
 
 struct CacheKey {
 	std::string sourceIdentifier;

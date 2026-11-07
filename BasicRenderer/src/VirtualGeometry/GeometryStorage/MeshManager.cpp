@@ -1042,6 +1042,16 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 				}
 				sharedState->childrenByLocalParent[parentLocalU32].push_back(childLocal);
 			}
+			sharedState->voxelParentGroupByLocal = summary.voxelParentGroupByLocal;
+			sharedState->voxelChildrenByLocalParent.resize(sharedState->voxelParentGroupByLocal.size());
+			for (uint32_t childLocal = 0; childLocal < static_cast<uint32_t>(sharedState->voxelParentGroupByLocal.size()); ++childLocal) {
+				const int32_t parentLocal = sharedState->voxelParentGroupByLocal[childLocal];
+				if (parentLocal < 0 || static_cast<uint32_t>(parentLocal) >= sharedState->voxelChildrenByLocalParent.size() ||
+					static_cast<uint32_t>(parentLocal) == childLocal) {
+					continue;
+				}
+				sharedState->voxelChildrenByLocalParent[static_cast<uint32_t>(parentLocal)].push_back(childLocal);
+			}
 			sharedState->groupErrorByLocal = summary.groupErrorByLocal;
 			sharedState->coarsestRanges = summary.coarsestRanges;
 		}
@@ -1134,6 +1144,7 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 				group.firstSegment += segmentsBase;
 				group.pageMapBase += pageMapGlobalBase;
 				if (group.parentGroupId >= 0) group.parentGroupId += static_cast<int32_t>(groupsBase);
+				if (group.branchGroupId >= 0) group.branchGroupId += static_cast<int32_t>(groupsBase);
 			}
 			std::vector<ClusterLODGroupSegment> gpuSegments = mesh->GetCLodSegments();
 			for (ClusterLODGroupSegment& segment : gpuSegments) {
@@ -1199,6 +1210,8 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 			float refineError = -1.0f;
 			float coarsestMinError = FLT_MAX;
 			for (const ClusterLODGroup& group : groups) {
+				// The ray tracing view takes the triangle branch of a forked DAG.
+				if ((ClusterLODGroupBranches(group.flags) & CLOD_BRANCH_TRIANGLE) == 0u) continue;
 				for (int axis = 0; axis < 3; ++axis) {
 					const float center = group.bounds.center[axis];
 					minimum[axis] = (std::min)(minimum[axis], center);
@@ -1210,6 +1223,7 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 			const float center[3] = { (minimum[0] + maximum[0]) * 0.5f, (minimum[1] + maximum[1]) * 0.5f, (minimum[2] + maximum[2]) * 0.5f };
 			float radius = 0.0f;
 			for (const ClusterLODGroup& group : groups) {
+				if ((ClusterLODGroupBranches(group.flags) & CLOD_BRANCH_TRIANGLE) == 0u) continue;
 				const float dx = group.bounds.center[0] - center[0];
 				const float dy = group.bounds.center[1] - center[1];
 				const float dz = group.bounds.center[2] - center[2];
@@ -2551,6 +2565,7 @@ void MeshManager::PublishCLodStreamingDomainEventForSharedState(
 		br::render::CLodActiveGroupRange range{};
 		range.groupsBase = sharedState->groupsBase + localRange.firstGroup;
 		range.groupCount = clampedCount;
+		range.branches = localRange.branches;
 		event.coarsestRanges.push_back(range);
 	}
 	PublishCLodStreamingDomainEvent(std::move(event));
@@ -2572,7 +2587,11 @@ bool MeshManager::TryGetCLodParentGroup(uint32_t groupGlobalIndex, uint32_t& out
 		return false;
 	}
 
-	const int32_t parentLocal = sharedState->parentGroupByLocal[localIndex];
+	const bool voxelParents = (GetCLodActiveBranches() & CLOD_BRANCH_VOXEL) != 0u &&
+		localIndex < sharedState->voxelParentGroupByLocal.size();
+	const int32_t parentLocal = voxelParents
+		? sharedState->voxelParentGroupByLocal[localIndex]
+		: sharedState->parentGroupByLocal[localIndex];
 	if (parentLocal < 0) {
 		return false;
 	}
@@ -2595,7 +2614,11 @@ void MeshManager::GetCLodChildGroups(uint32_t parentGroupGlobalIndex, std::vecto
 		return;
 	}
 
-	const auto& localChildren = sharedState->childrenByLocalParent[localIndex];
+	const bool voxelChildren = (GetCLodActiveBranches() & CLOD_BRANCH_VOXEL) != 0u &&
+		localIndex < sharedState->voxelChildrenByLocalParent.size();
+	const auto& localChildren = voxelChildren
+		? sharedState->voxelChildrenByLocalParent[localIndex]
+		: sharedState->childrenByLocalParent[localIndex];
 	outChildGroups.reserve(localChildren.size());
 	for (uint32_t childLocal : localChildren) {
 		if (childLocal < sharedState->groupCount) {
@@ -3942,6 +3965,7 @@ void MeshManager::GetCLodCoarsestUniqueAssetGroupRanges(std::vector<br::render::
 			br::render::CLodActiveGroupRange range{};
 			range.groupsBase = state.groupsBase + localRange.firstGroup;
 			range.groupCount = clampedCount;
+			range.branches = localRange.branches;
 			outRanges.push_back(range);
 		}
 	}
@@ -3993,6 +4017,7 @@ void MeshManager::GetCLodStreamingDomainSnapshot(br::render::CLodStreamingDomain
 			br::render::CLodActiveGroupRange coarsest{};
 			coarsest.groupsBase = state.groupsBase + localRange.firstGroup;
 			coarsest.groupCount = clampedCount;
+			coarsest.branches = localRange.branches;
 			outSnapshot.coarsestRanges.push_back(coarsest);
 		}
 	}

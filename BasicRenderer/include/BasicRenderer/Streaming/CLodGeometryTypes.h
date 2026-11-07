@@ -20,6 +20,7 @@ class CLodResidencyStorageDirectory;
 struct CLodActiveGroupRange {
 	uint32_t groupsBase = 0;
 	uint32_t groupCount = 0;
+	uint32_t branches = 3u; // pinned ranges: the CLOD_BRANCH_* that pin them (ClusterLODRuntimeSummary::GroupRange)
 };
 
 struct CLodStreamingDebugStats {

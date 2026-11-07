@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "Core/CachedMesh.h"
+#include "Core/MergeHierarchy.h"
 
 // What the viewer knows about each cached hierarchy, computed once from the cache on a background thread.
 // Nothing here touches the GPU, so everything it reports is what the build wrote and not what happens to be resident.
@@ -37,6 +38,10 @@ struct GroupInfo {
 	bool voxel = false;
 	bool assemblyVoxel = false;
 	bool terminal = false;  // has segments of original geometry
+	// Merge-hierarchy roots only (docs/merge_hierarchies.md in SARP).
+	int32_t mergeNode = -1;  // the node whose geometry (or children group) this is
+	int32_t mergePortal = -1;  // the portal this proxy is
+	bool mergeChildren = false;  // a page-less children group: never drawn
 };
 
 struct LevelInfo {
@@ -68,6 +73,12 @@ struct MeshInfo {
 	int32_t maxDepth = 0;
 	int32_t maxVoxelLevel = -1;
 
+	// A merge root's tree and report, or a part some root in the index opens.
+	std::shared_ptr<const clodeval::MergeHierarchy> merge;
+	std::string mergeReport;
+	int32_t mergeLevels = 0;
+	std::string portalUse;  // for a part: which roots open it, and how often
+
 	std::vector<uint32_t> Children(uint32_t group) const;
 	std::vector<uint32_t> Parents(uint32_t group) const;
 };
@@ -89,6 +100,8 @@ public:
 	~HierarchyIndex();
 
 	void StartLoading(std::filesystem::path cacheRoot);
+	// These caches only, each a .clodmeta.
+	void StartLoading(std::vector<std::string> metadataFiles);
 	bool Ready() const { return m_ready.load(); }
 	uint32_t Loaded() const { return m_loaded.load(); }
 	uint32_t Total() const { return m_total.load(); }
@@ -98,6 +111,7 @@ public:
 	const std::vector<MeshInfo>& Meshes() const { return m_meshes; }
 	int32_t Find(const std::string& sourceIdentifier, const std::string& primPath, const std::string& subset) const;
 	int32_t MaxDepth() const { return m_maxDepth; }
+	int32_t MaxMergeLevel() const { return m_maxMergeLevel; }
 	int32_t MaxVoxelLevel() const { return m_maxVoxelLevel; }
 	float MinHandOver() const { return m_minHandOver; }
 	float MaxHandOver() const { return m_maxHandOver; }
@@ -105,7 +119,7 @@ public:
 	std::optional<CubeInfo> FindCube(int32_t mesh, uint32_t group, uint32_t pageIndex, uint32_t pageCluster, uint32_t cube) const;
 
 private:
-	void Load(const std::filesystem::path& cacheRoot);
+	void Load(std::vector<std::filesystem::path> paths);
 
 	std::thread m_thread;
 	std::atomic<bool> m_ready{ false };
@@ -115,6 +129,7 @@ private:
 	std::vector<MeshInfo> m_meshes;
 	std::unordered_map<std::string, int32_t> m_byIdentity;
 	int32_t m_maxDepth = 0;
+	int32_t m_maxMergeLevel = 0;
 	int32_t m_maxVoxelLevel = -1;
 	float m_minHandOver = kNoError, m_maxHandOver = 0.0f;
 };

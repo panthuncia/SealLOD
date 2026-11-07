@@ -12,6 +12,7 @@
 #include <nlohmann/json.hpp>
 
 #include "Core/Image.h"
+#include "Core/MergeHierarchy.h"
 #include "Core/Metrics.h"
 #include "Core/Process.h"
 #include "Transition.h"
@@ -801,6 +802,95 @@ bool RunViewer(const Suite& suite, const SuiteVariant& variant, const SuiteAsset
 	std::ofstream(configPath) << config.dump(2) << '\n';
 
 	ProcessRequest request = MakeCaptureProcess(suite, variant, options.captureTool);
+	request.logPath = directory / "viewer.log";
+	request.arguments = { "--view", configPath.string() };
+	if (!options.script.empty()) {
+		request.arguments.push_back("--script");
+		request.arguments.push_back(options.script.string());
+	}
+	const int exitCode = RunProcess(request, outError);
+	if (exitCode != 0) {
+		if (outError.empty()) {
+			outError = std::format("the viewer exited with {}; see '{}'", exitCode, request.logPath.string());
+		}
+		return false;
+	}
+	return true;
+}
+
+bool RunRootViewer(const fs::path& rootMetadata, const fs::path& directory, const ViewerOptions& options, std::string& outError)
+{
+	const std::unique_ptr<CachedMesh> root = CachedMesh::Open(rootMetadata, outError);
+	if (!root) {
+		return false;
+	}
+	const std::unique_ptr<MergeHierarchy> hierarchy = ReadMergeHierarchy(*root, true);
+	if (!hierarchy) {
+		outError = std::format("'{}' is not a merge-hierarchy root", rootMetadata.string());
+		return false;
+	}
+	if (!hierarchy->partsOpen) {
+		outError = std::format("'{}': its parts could not all be opened, so it cannot be drawn", rootMetadata.string());
+		for (const MergePart& part : hierarchy->parts) {
+			if (!part.cache) {
+				outError += std::format("\n  {}: {}", part.label, part.error.empty() ? "no cache named" : part.error);
+				break;
+			}
+		}
+		return false;
+	}
+	// Entries live at <cache root>/clod/<entry>/<file>.clodmeta, and the renderer finds caches under the cache root.
+	const fs::path cacheRoot = rootMetadata.parent_path().parent_path().parent_path();
+	nlohmann::json files = nlohmann::json::array({ rootMetadata.generic_string() });
+	for (const MergePart& part : hierarchy->parts) {
+		files.push_back(part.metadataPath.generic_string());
+	}
+
+	const BoundingSphere& sphere = root->Prebuilt().objectBoundingSphere;
+	const double center[3] = { sphere.sphere.x, sphere.sphere.y, sphere.sphere.z };
+	const double radius = std::max(1.0e-3, static_cast<double>(sphere.sphere.w));
+	constexpr double kFov = 10.0;
+	nlohmann::json presets = nlohmann::json::array();
+	presets.push_back({ { "name", "Telephoto, whole region" }, { "focus", { center[0], center[1], center[2] } },
+		{ "distance", TelephotoDistance(radius * 2.0, kFov) }, { "fov_degrees", kFov } });
+	// The cut at which each level's nodes split, on average: the view a level is built for.
+	std::map<uint32_t, std::pair<double, uint32_t>> levelErrors;
+	for (const MergeNode& node : hierarchy->nodes) {
+		auto& [sum, count] = levelErrors[node.level];
+		sum += node.error;
+		++count;
+	}
+	for (const auto& [level, entry] : levelErrors) {
+		const double cut = entry.first / entry.second;
+		presets.push_back({ { "name", std::format("Telephoto, whole region, at level {}'s mean split ({:.3g})", level, cut) },
+			{ "focus", { center[0], center[1], center[2] } }, { "distance", TelephotoDistance(radius * 2.0, kFov) }, { "fov_degrees", kFov },
+			{ "world_cut", cut } });
+	}
+
+	std::error_code error;
+	fs::create_directories(directory, error);
+	const fs::path assetSettings = directory / "no_asset_settings.json";
+	std::ofstream(assetSettings) << "{}\n";
+	const nlohmann::json config{
+		{ "title", std::format("merge root {}", root->Prebuilt().cacheSource.sourceIdentifier) },
+		{ "assets", nlohmann::json::array() },
+		{ "cache_roots", { { { "metadata", rootMetadata.generic_string() } } } },
+		{ "cache_files", std::move(files) },
+		{ "resolution", { options.width, options.height } },
+		{ "frame", { { "center", { center[0], center[1], center[2] } }, { "radius", radius } } },
+		{ "presets", std::move(presets) },
+		{ "screenshot_directory", (directory / "screenshots").generic_string() },
+	};
+	const fs::path configPath = directory / "viewer.json";
+	std::ofstream(configPath) << config.dump(2) << '\n';
+
+	ProcessRequest request;
+	request.executable = options.captureTool;
+	request.workingDirectory = options.captureTool.parent_path();
+	request.clearEnvironmentPrefixes = { std::string(kSettingPrefix) };
+	request.environment["SARP_ASSET_SETTINGS_CONFIG"] = assetSettings.string();
+	request.environment["SARP_CACHE_ROOT"] = cacheRoot.string();
+	request.pathPrepend = { options.captureTool.parent_path() };
 	request.logPath = directory / "viewer.log";
 	request.arguments = { "--view", configPath.string() };
 	if (!options.script.empty()) {

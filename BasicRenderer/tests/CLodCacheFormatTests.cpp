@@ -101,10 +101,14 @@ SourceMesh MakeBumpySheet(uint32_t resolution)
 	return mesh;
 }
 
-ClusterLODPrebuildArtifacts Build(const SourceMesh& mesh, ClusterLODCoveragePreservationMode mode)
+ClusterLODPrebuildArtifacts Build(
+	const SourceMesh& mesh,
+	ClusterLODCoveragePreservationMode mode,
+	ClusterLODVoxelForkMode fork = ClusterLODVoxelForkMode::Off)
 {
 	ClusterLODBuilderSettings settings = GetDefaultBuilderSettings();
 	settings.coveragePreservationMode = mode;
+	settings.voxelFork = fork;
 	return BuildClusterLODArtifactsFromGeometry(
 		mesh.vertices,
 		MeshVertexLayout::BaseVertexSize,
@@ -295,6 +299,87 @@ void TestVoxelRoundTrip(const fs::path& root, const SourceMesh& source)
 	CHECK(cells >= cubes);  // an empty cube would not have been stored
 }
 
+// A forced fork keeps the triangle build as its triangle branch and adds voxel groups beside it: the groups before the
+// voxel ones are the triangle build's, and each branch is closed (a group refines only into groups in its branches).
+void TestVoxelForkRoundTrip(const fs::path& root, const SourceMesh& source)
+{
+	const ClusterLODPrebuildArtifacts triangles = Build(source, ClusterLODCoveragePreservationMode::PrioritizeEdges);
+	const ClusterLODPrebuildArtifacts artifacts =
+		Build(source, ClusterLODCoveragePreservationMode::PrioritizeEdges, ClusterLODVoxelForkMode::Forced);
+	const ClusterLODPrebuiltData& built = artifacts.prebuiltData;
+	CHECK(built.voxelPageCount > 0u);
+	CHECK(built.voxelPageBase == built.trianglePageCount);
+	CHECK(built.trianglePageCount >= triangles.prebuiltData.trianglePageCount);
+
+	uint32_t triangleOnly = 0, voxelOnly = 0, shadows = 0, boundary = 0, voxelGroups = 0;
+	for (uint32_t index = 0; index < built.groups.size(); ++index) {
+		const ClusterLODGroup& group = built.groups[index];
+		triangleOnly += (group.flags & CLOD_GROUP_FLAG_BRANCH_TRIANGLE) != 0u ? 1u : 0u;
+		voxelOnly += (group.flags & CLOD_GROUP_FLAG_BRANCH_VOXEL) != 0u ? 1u : 0u;
+		shadows += (group.flags & CLOD_GROUP_FLAG_BRANCH_SHADOW) != 0u ? 1u : 0u;
+		voxelGroups += (group.flags & CLOD_GROUP_FLAG_IS_VOXEL) != 0u ? 1u : 0u;
+		if (group.branchGroupId >= 0) {
+			++boundary;
+			CHECK(static_cast<size_t>(group.branchGroupId) < built.groups.size());
+			CHECK((built.groups[group.branchGroupId].flags & CLOD_GROUP_FLAG_BRANCH_SHADOW) != 0u);
+			CHECK(ClusterLODGroupBranches(group.flags) == CLOD_BRANCH_ALL);
+		}
+		if ((group.flags & CLOD_GROUP_FLAG_IS_VOXEL) != 0u) {
+			CHECK((group.flags & CLOD_GROUP_FLAG_BRANCH_VOXEL) != 0u);
+		}
+		if ((group.flags & CLOD_GROUP_FLAG_BRANCH_SHADOW) != 0u) {
+			CHECK(group.segmentCount == 0u && group.pageCount == 0u);
+			continue;
+		}
+		const uint32_t branches = ClusterLODGroupBranches(group.flags);
+		for (uint32_t s = 0; s < group.segmentCount; ++s) {
+			const int32_t child = built.segments[group.firstSegment + s].refinedGroup;
+			if (child < 0) continue;
+			// Every branch the parent is in has the child.
+			CHECK((ClusterLODGroupBranches(built.groups[child].flags) & branches) == branches);
+		}
+	}
+	std::fprintf(stderr, "fork: groups=%zu triangle_only=%u voxel_only=%u voxel=%u shadows=%u boundary=%u\n",
+		built.groups.size(), triangleOnly, voxelOnly, voxelGroups, shadows, boundary);
+	CHECK(triangleOnly > 0u);
+	CHECK(voxelOnly >= triangleOnly);
+	CHECK(voxelGroups > 0u);
+	CHECK(shadows == boundary);
+	CHECK(boundary > 0u);
+
+	// The triangle branch is the triangle build.
+	const auto& plain = triangles.prebuiltData.groups;
+	CHECK(built.groups.size() == plain.size() + voxelOnly + shadows);
+	for (size_t index = 0; index < plain.size() && index < built.groups.size(); ++index) {
+		const ClusterLODGroup& a = plain[index];
+		const ClusterLODGroup& b = built.groups[index];
+		CHECK(std::memcmp(&a.bounds, &b.bounds, sizeof(a.bounds)) == 0);
+		CHECK(a.depth == b.depth && a.meshletCount == b.meshletCount && a.segmentCount == b.segmentCount);
+		CHECK(a.parentGroupId == b.parentGroupId);
+		CHECK(a.maxParentError == b.maxParentError);
+		CHECK((b.flags & CLOD_GROUP_FLAG_BRANCH_VOXEL) == 0u);
+	}
+
+	CLodCacheLoader::MeshCacheIdentity identity{ "clod_format_test.source", "/fork", "", false };
+	CHECK(CLodCacheLoader::SavePrebuilt(identity, built, artifacts.cacheBuildData.AsPayload()));
+	const CLodCache::OpenedMetadata opened = CLodCache::OpenMetadataFile(FindMetadataFile(root, "/fork"));
+	CHECK(opened.status == CLodCache::OpenMetadataStatus::Ok);
+	const ClusterLODPrebuiltData& loaded = opened.data.prebuiltData;
+	CHECK(loaded.groups.size() == built.groups.size());
+	for (size_t index = 0; index < loaded.groups.size(); ++index) {
+		CHECK(loaded.groups[index].branchGroupId == built.groups[index].branchGroupId);
+		CHECK(loaded.groups[index].flags == built.groups[index].flags);
+	}
+	const auto pages = ReadAllPages(opened);
+	CheckTerminalGeometryMatchesSource(loaded, pages, source);
+	for (uint32_t meshPage = 0; meshPage < loaded.trianglePageCount; ++meshPage) {
+		CHECK(CLodCache::GetPageKind(pages[meshPage]) == CLodCache::PageKind::Triangle);
+	}
+	for (uint32_t meshPage = loaded.voxelPageBase; meshPage < loaded.voxelPageBase + loaded.voxelPageCount; ++meshPage) {
+		CHECK(CLodCache::GetPageKind(pages[meshPage]) == CLodCache::PageKind::Voxel);
+	}
+}
+
 void TestOpenFailures(const fs::path& root)
 {
 	CHECK(CLodCache::OpenMetadataFile(root / "missing.clodmeta").status == CLodCache::OpenMetadataStatus::NotFound);
@@ -467,6 +552,7 @@ int main()
 		const SourceMesh source = MakeBumpySheet(256u);
 		TestPrioritizeEdgesRoundTrip(root, source);
 		TestVoxelRoundTrip(root, source);
+		TestVoxelForkRoundTrip(root, source);
 		TestOpenFailures(root);
 		TestOpacityMicromapRoundTrip(root);
 		TestCacheOnlyMode(source);

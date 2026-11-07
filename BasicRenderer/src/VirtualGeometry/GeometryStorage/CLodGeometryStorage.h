@@ -12,6 +12,8 @@ public:
 		std::vector<br::render::CLodStreamingDomainEvent>&, uint64_t&) = 0;
 	virtual bool TryGetCLodParentGroup(uint32_t, uint32_t&) const = 0;
 	virtual void GetCLodChildGroups(uint32_t, std::vector<uint32_t>&) const = 0;
+	// The CLOD_BRANCH_* the views take; parents and children of forked DAGs follow it.
+	virtual void SetCLodActiveBranches(uint32_t) = 0;
 	virtual br::render::CLodStreamingDebugStats GetCLodStreamingDebugStats() const = 0;
 	virtual void ProcessCLodDiskStreamingIO() = 0;
 	virtual void DrainCompletedCLodDiskStreamingGroups(

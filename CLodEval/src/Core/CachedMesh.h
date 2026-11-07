@@ -30,8 +30,16 @@ public:
 	uint64_t MetadataBytes() const { return m_metadataBytes; }
 	uint64_t ContainerBytes() const { return m_containerBytes; }
 
-	// "<prim>" or "<prim>:<subset>", which is stable across builds of the same source.
+	// "<prim>" or "<prim>:<subset>", which is stable across builds of the same source. A branch view adds its suffix.
 	std::string Name() const;
+
+	// A forked DAG has a triangle and a voxel branch (CLOD_GROUP_FLAG_BRANCH_*); every view takes one of them.
+	bool IsForked() const;
+	// One branch of a forked mesh as an unforked mesh: the groups in it, renumbered, with the voxel branch's boundaries
+	// in the voxel view, over the same pages. Its name gets nameSuffix. Analyzers measure each branch this way.
+	std::unique_ptr<CachedMesh> BranchView(uint32_t branch, std::string nameSuffix) const;
+	// The branch a BranchView keeps (CLOD_BRANCH_*); CLOD_BRANCH_ALL for a mesh as stored.
+	uint32_t Branch() const { return m_branch; }
 
 	uint32_t PageCount() const { return static_cast<uint32_t>(Prebuilt().pageDiskLocators.size()); }
 	std::span<const std::byte> Page(uint32_t meshPageIndex) const;
@@ -49,6 +57,8 @@ public:
 private:
 	std::filesystem::path m_metadataPath;
 	CLodCache::OpenedMetadata m_opened;
+	std::string m_nameSuffix;
+	uint32_t m_branch = 3u;
 	std::shared_ptr<const CLodCache::MappedContainerLease> m_container;
 	uint64_t m_metadataBytes = 0;
 	uint64_t m_containerBytes = 0;

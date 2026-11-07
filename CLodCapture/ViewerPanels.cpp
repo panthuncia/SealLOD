@@ -469,6 +469,13 @@ namespace clodcapture {
 		if (m_tableMesh >= 0 && ImGui::CollapsingHeader("Levels", ImGuiTreeNodeFlags_DefaultOpen)) {
 			DrawLevelTable(m_hierarchy.Meshes()[m_tableMesh]);
 		}
+		// A merge root: what CLodEval merge-report prints for it, so the tree is readable next to the image.
+		const int32_t reportMesh = m_tableMesh >= 0 ? m_tableMesh : m_selection.mesh;
+		if (reportMesh >= 0 && !m_hierarchy.Meshes()[reportMesh].mergeReport.empty() && ImGui::CollapsingHeader("Merge tree", ImGuiTreeNodeFlags_DefaultOpen)) {
+			ImGui::BeginChild("merge report", ImVec2(0.0f, 260.0f * m_uiScale), true, ImGuiWindowFlags_HorizontalScrollbar);
+			ImGui::TextUnformatted(m_hierarchy.Meshes()[reportMesh].mergeReport.c_str());
+			ImGui::EndChild();
+		}
 		ImGui::End();
 	}
 
@@ -549,6 +556,15 @@ namespace clodcapture {
 		const GroupInfo& group = mesh.groups[m_selection.group];
 		const float enter = group.enterError * m_worldScale, leave = group.leaveError * m_worldScale;
 		ImGui::TextWrapped("%s", mesh.shortName.c_str());
+		if (!mesh.portalUse.empty()) {
+			ImGui::TextWrapped("A part, drawn through %s.", mesh.portalUse.c_str());
+		}
+		if (mesh.merge && group.mergeNode >= 0) {
+			const clodeval::MergeNode& node = mesh.merge->nodes[static_cast<uint32_t>(group.mergeNode)];
+			ImGui::Text("Merge node %d: level %u, %u nodes above, %zu child nodes, %zu portals", group.mergeNode, node.level, node.depth,
+				node.childNodes.size(), node.childPortals.size());
+			ImGui::Text("Opens its children below a cut of %s; radius %s", FormatWorld(node.error * m_worldScale).c_str(), FormatWorld(node.sphere.w * m_worldScale).c_str());
+		}
 		ImGui::Text("Group %d, depth %d of %d, %s", m_selection.group, group.depth, mesh.maxDepth, group.voxel ? std::format("voxel level {}", group.voxelLevel).c_str() : "triangles");
 		ImGui::Text("Draws for a cut from %s %s", FormatWorld(enter).c_str(), std::isfinite(leave) ? std::format("to {}", FormatWorld(leave)).c_str() : "upward: it is a root");
 		ImGui::Text("Hands over to voxels at %s", FormatWorld(group.firstVoxelError * m_worldScale).c_str());

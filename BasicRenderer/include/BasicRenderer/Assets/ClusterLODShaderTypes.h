@@ -197,7 +197,11 @@ struct ClusterLODGroup
 	int32_t  parentGroupId = -1; // mesh-local group index of the parent group (-1 for root)
 	float maxParentError = 0.0f; // max error of any parent group that refines into this group
 	float representationError = 0.0f; // voxel payload quality/diagnostic error; builder uses it to derive cut boundaries
+	// A shared group of a forked DAG whose boundary differs in the voxel branch: the mesh-local index of the
+	// CLOD_GROUP_FLAG_BRANCH_SHADOW record holding its voxel-branch bounds, parentGroupId and maxParentError. -1 otherwise.
+	int32_t branchGroupId = -1;
 };
+static_assert(sizeof(ClusterLODGroup) == 80, "ClusterLODGroup layout is shared with clodStructs.hlsli");
 
 static constexpr uint32_t CLOD_GROUP_FLAG_IS_VOXEL = 1u << 0;
 static constexpr uint32_t CLOD_GROUP_FLAG_IS_ASSEMBLY_PROXY = 1u << 1;
@@ -206,6 +210,29 @@ static constexpr uint32_t CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL = 1u << 2;
 // a page-less children group), so its streaming parent is parentGroupId. Without this it would look like a coarsest
 // group and be pinned resident.
 static constexpr uint32_t CLOD_GROUP_FLAG_MERGE_CHILD = 1u << 3;
+// Forked DAGs (docs/merge_hierarchies.md, "Voxel forks"): a part whose coarse levels voxelize keeps both representations
+// above the fork, sharing the levels below it. A view takes one branch: raster views with voxel output take the voxel
+// branch, every other view the triangle branch. Untagged groups are in both.
+static constexpr uint32_t CLOD_GROUP_FLAG_BRANCH_TRIANGLE = 1u << 4; // only in the triangle branch
+static constexpr uint32_t CLOD_GROUP_FLAG_BRANCH_VOXEL = 1u << 5;    // only in the voxel branch
+// Not a group: the voxel-branch boundary of the shared group whose branchGroupId names it. No segments, no pages, not in
+// the traversal hierarchy.
+static constexpr uint32_t CLOD_GROUP_FLAG_BRANCH_SHADOW = 1u << 6;
+static constexpr uint32_t CLOD_GROUP_BRANCH_FLAGS = CLOD_GROUP_FLAG_BRANCH_TRIANGLE | CLOD_GROUP_FLAG_BRANCH_VOXEL | CLOD_GROUP_FLAG_BRANCH_SHADOW;
+// A voxel group is one material: its part-local material slot (palette index before the portal's material base) is in
+// the flags' top 16 bits. Triangle clusters name theirs in their descriptors.
+static constexpr uint32_t CLOD_GROUP_VOXEL_MATERIAL_SLOT_SHIFT = 16u;
+// Which branches a group belongs to, as CLOD_BRANCH_* bits.
+static constexpr uint32_t CLOD_BRANCH_TRIANGLE = 1u;
+static constexpr uint32_t CLOD_BRANCH_VOXEL = 2u;
+static constexpr uint32_t CLOD_BRANCH_ALL = CLOD_BRANCH_TRIANGLE | CLOD_BRANCH_VOXEL;
+inline constexpr uint32_t ClusterLODGroupBranches(uint32_t groupFlags)
+{
+	if ((groupFlags & CLOD_GROUP_FLAG_BRANCH_SHADOW) != 0u) return 0u;
+	if ((groupFlags & CLOD_GROUP_FLAG_BRANCH_TRIANGLE) != 0u) return CLOD_BRANCH_TRIANGLE;
+	if ((groupFlags & CLOD_GROUP_FLAG_BRANCH_VOXEL) != 0u) return CLOD_BRANCH_VOXEL;
+	return CLOD_BRANCH_ALL;
+}
 
 static constexpr uint32_t CLOD_NODE_INTERNAL = 0u;
 static constexpr uint32_t CLOD_NODE_VOXEL_LEAF = 1u;

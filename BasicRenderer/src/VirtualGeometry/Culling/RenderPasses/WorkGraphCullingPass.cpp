@@ -1,4 +1,5 @@
 #include "VirtualGeometry/Culling/RenderPasses/WorkGraphCullingPass.h"
+#include <BasicRenderer/Assets/ClusterLODTypes.h>
 #include "Render/PassBuilders.h"
 #include "Render/ShaderAPI.h"
 
@@ -115,6 +116,7 @@ WorkGraphCullingPass::CompiledWorkGraph WorkGraphCullingPass::CompileWorkGraph()
         { L"CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW", virtualShadow ? L"1" : L"0" },
         { L"CLOD_VSM_TWO_LAYER_WORKGRAPH_VERSION", virtualShadow ? L"2" : L"0" },
         { L"CLOD_WG_VOXEL_RASTER_QUEUE_DESCRIPTOR_BUFFER_ID", voxelTableDefine.c_str() },
+        { L"CLOD_FORCE_VIEW_BRANCH", GetClusterLODForcedViewBranch() == 1u ? L"1" : GetClusterLODForcedViewBranch() == 2u ? L"2" : L"0" },
     };
     ShaderLibraryInfo libInfo(L"shaders/ClusterLOD/workGraphCulling.hlsl", L"lib_6_8");
     auto compiled = PSOManager::GetInstance().CompileShaderLibrary(libInfo, defines);

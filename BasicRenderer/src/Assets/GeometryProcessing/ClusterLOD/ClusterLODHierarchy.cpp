@@ -50,6 +50,113 @@
 
 namespace clod_detail
 {
+	namespace
+	{
+		// A forked DAG: each branch has its own parents. A group in one branch takes that branch's; a shared group keeps
+		// the triangle branch's in its record, and gets a shadow record (CLOD_GROUP_FLAG_BRANCH_SHADOW, appended after
+		// every group) for the voxel branch when its bounds or parent differ there.
+		void AssignForkedParents(ClusterLODBuildState& state)
+		{
+			const uint32_t groupCount = static_cast<uint32_t>(state.groups.size());
+			const auto voxelBounds = [&](uint32_t group) -> const clodBounds&
+			{
+				return group < state.forkHasVoxelBounds.size() && state.forkHasVoxelBounds[group] != 0u
+					? state.forkVoxelBounds[group]
+					: state.groups[group].bounds;
+			};
+			struct Parent
+			{
+				float error = 0.0f;
+				int32_t group = -1;
+			};
+			std::vector<Parent> parents[2] = { std::vector<Parent>(groupCount), std::vector<Parent>(groupCount) };
+			for (uint32_t parent = 0; parent < groupCount; ++parent)
+			{
+				const ClusterLODGroup& group = state.groups[parent];
+				const uint32_t parentBranches = ClusterLODGroupBranches(group.flags);
+				for (uint32_t s = 0; s < group.segmentCount; ++s)
+				{
+					const int32_t child = state.segments[group.firstSegment + s].refinedGroup;
+					if (child < 0 || static_cast<uint32_t>(child) >= groupCount)
+					{
+						continue;
+					}
+					const uint32_t childBranches = ClusterLODGroupBranches(state.groups[child].flags);
+					for (uint32_t branch = 0; branch < 2u; ++branch)
+					{
+						const uint32_t bit = branch == 0u ? CLOD_BRANCH_TRIANGLE : CLOD_BRANCH_VOXEL;
+						if ((parentBranches & childBranches & bit) == 0u)
+						{
+							continue;
+						}
+						const float error = branch == 0u ? group.bounds.error : voxelBounds(parent).error;
+						if (error >= parents[branch][child].error)
+						{
+							parents[branch][child] = { error, static_cast<int32_t>(parent) };
+						}
+					}
+				}
+			}
+			for (auto& branch : parents)
+			{
+				for (Parent& parent : branch)
+				{
+					if (parent.group < 0)
+					{
+						parent.error = std::numeric_limits<float>::max();
+					}
+				}
+			}
+
+			for (uint32_t index = 0; index < groupCount; ++index)
+			{
+				ClusterLODGroup& group = state.groups[index];
+				group.branchGroupId = -1;
+				const uint32_t branches = ClusterLODGroupBranches(group.flags);
+				const Parent& own = parents[branches == CLOD_BRANCH_VOXEL ? 1 : 0][index];
+				group.parentGroupId = own.group;
+				group.maxParentError = own.error;
+				if (branches != CLOD_BRANCH_ALL)
+				{
+					continue;
+				}
+				const Parent& voxel = parents[1][index];
+				const bool hasVoxelBounds = index < state.forkHasVoxelBounds.size() && state.forkHasVoxelBounds[index] != 0u;
+				if (!hasVoxelBounds && voxel.group == own.group && voxel.error == own.error)
+				{
+					continue;
+				}
+				ClusterLODGroup shadow{};
+				shadow.bounds = voxelBounds(index);
+				shadow.depth = group.depth;
+				shadow.flags = CLOD_GROUP_FLAG_BRANCH_SHADOW;
+				shadow.firstSegment = static_cast<uint32_t>(state.segments.size());
+				shadow.parentGroupId = voxel.group;
+				shadow.maxParentError = voxel.error;
+				group.branchGroupId = static_cast<int32_t>(state.groups.size());
+				state.groups.push_back(shadow);
+			}
+
+			const size_t finalCount = state.groups.size();
+			state.groupChunks.resize(std::max(state.groupChunks.size(), finalCount));
+			state.groupPageBlobs.resize(std::max(state.groupPageBlobs.size(), finalCount));
+			if (!state.voxelGroupMapping.groupToPayloadIndex.empty())
+			{
+				state.voxelGroupMapping.groupToPayloadIndex.resize(finalCount, -1);
+			}
+			if (!state.voxelGroupMapping.groupToPackedMetadataIndex.empty())
+			{
+				state.voxelGroupMapping.groupToPackedMetadataIndex.resize(finalCount, -1);
+			}
+			if (!state.voxelCarryPayloads.empty())
+			{
+				state.voxelCarryPayloads.resize(finalCount);
+			}
+			state.traversalGroupMask.resize(groupCount, 1u);
+			state.traversalGroupMask.resize(finalCount, 0u);
+		}
+	}
+
 	void BuildClusterLODTraversalHierarchy(ClusterLODBuildState& state, uint32_t preferredNodeWidth)
 	{
 		ZoneScopedN("ClusterLODUtilities::BuildClusterLODTraversalHierarchy");
@@ -152,14 +259,25 @@ namespace clod_detail
 		}
 		// Root groups (no parent) get FLT_MAX so they are always traversed.
 		// Assign parentGroupId to each group.
-		for (uint32_t i = 0; i < uint32_t(state.groups.size()); ++i)
+		const bool forked = std::any_of(state.groups.begin(), state.groups.end(), [](const ClusterLODGroup& group)
 		{
-			if (parentGroupIdForGroup[i] < 0)
+			return (group.flags & CLOD_GROUP_BRANCH_FLAGS) != 0u;
+		});
+		if (!forked)
+		{
+			for (uint32_t i = 0; i < uint32_t(state.groups.size()); ++i)
 			{
-				parentErrorForGroup[i] = std::numeric_limits<float>::max();
+				if (parentGroupIdForGroup[i] < 0)
+				{
+					parentErrorForGroup[i] = std::numeric_limits<float>::max();
+				}
+				state.groups[i].parentGroupId = parentGroupIdForGroup[i];
+				state.groups[i].maxParentError = parentErrorForGroup[i];
 			}
-			state.groups[i].parentGroupId = parentGroupIdForGroup[i];
-			state.groups[i].maxParentError = parentErrorForGroup[i];
+		}
+		else
+		{
+			AssignForkedParents(state);
 		}
 
 		state.lodNodeRanges.assign(lodLevelCount, {});
@@ -274,7 +392,13 @@ namespace clod_detail
 				// Meshoptimizer condition 1 is evaluated against the simplified
 				// error of the group that owns this segment. Internal traversal
 				// nodes propagate the max of their children below.
-				node.traversalMetric.maxQuadricError = TraversalNodeErrorFromGroupError(grp.bounds.error);
+				float leafError = grp.bounds.error;
+				if (info.ownerGroupId < state.forkHasVoxelBounds.size() && state.forkHasVoxelBounds[info.ownerGroupId] != 0u)
+				{
+					// A shared group of a forked DAG: conservative for both branches' cuts (the voxel pass changes errors only).
+					leafError = std::max(leafError, state.forkVoxelBounds[info.ownerGroupId].error);
+				}
+				node.traversalMetric.maxQuadricError = TraversalNodeErrorFromGroupError(leafError);
 			}
 
 			if (leafCount == 1)
@@ -573,7 +697,13 @@ namespace clod_detail
 					}
 
 					const float parentError = group.bounds.error;
-					const float childError = state.groups[childGroupIndex].bounds.error;
+					// A voxel-branch parent bounds its children's voxel-branch boundaries (their shadow records).
+					const ClusterLODGroup& childGroup = state.groups[childGroupIndex];
+					const bool voxelBranchParent = (group.flags & CLOD_GROUP_FLAG_BRANCH_VOXEL) != 0u;
+					const float childError = voxelBranchParent && childGroup.branchGroupId >= 0 &&
+						static_cast<uint32_t>(childGroup.branchGroupId) < state.groups.size()
+						? state.groups[childGroup.branchGroupId].bounds.error
+						: childGroup.bounds.error;
 					const bool finiteParent = IsFiniteContentTraversalError(parentError);
 					const bool finiteChild = IsFiniteContentTraversalError(childError);
 					if (finiteParent && finiteChild && !(parentError > childError))

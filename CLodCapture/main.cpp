@@ -493,6 +493,8 @@ int RunJob(const Job& job)
 	HWND window = CreateHiddenWindow(job.width, job.height);
 	// Deleted only on success. A failed run exits straight away, because unwinding would destroy the
 	// renderer mid-frame and turn the error into a crash with the wrong exit code.
+	// Path tracing is the renderer default where the device can run it; captures and the viewer measure raster CLod.
+	_putenv_s("SARP_RT_PATH_TRACING", "0");
 	Renderer& renderer = *new Renderer();
 	renderer.Initialize(window, job.width, job.height, job.pipeline == "sarp" ? br::pipeline::MakeSarpPipeline() : MakeCapturePipeline());
 	SettingsManager::GetInstance().getSettingSetter<bool>("enableSceneRenderOverlap")(job.sceneRenderOverlap);
