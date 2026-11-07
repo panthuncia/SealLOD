@@ -49,6 +49,23 @@ namespace {
         return enabled;
     }
 
+    // BR_SHADER_DUMP_DIR: every compile writes the source DXC compiled (preprocessed and BRSL-rewritten,
+    // so self-contained), its arguments and, for DXIL, the disassembly. A pso.recompile bypasses the
+    // artifact cache, so hot-reloading a pipeline dumps it. scripts/dxil_stats.py summarizes a dump.
+    const std::filesystem::path* ShaderDumpDirectory()
+    {
+        static const std::optional<std::filesystem::path> directory = []() -> std::optional<std::filesystem::path> {
+            const char* value = std::getenv("BR_SHADER_DUMP_DIR");
+            if (!value || value[0] == '\0') {
+                return std::nullopt;
+            }
+            std::error_code error;
+            std::filesystem::create_directories(value, error);
+            return std::filesystem::path(value);
+        }();
+        return directory ? &*directory : nullptr;
+    }
+
     // BRSL resource arguments must be valid HLSL-like identifiers, but some
     // renderer-neutral graph resources intentionally use URI-style public
     // names. Translate those shader-facing aliases before descriptor lookup.
@@ -2870,6 +2887,52 @@ void PSOManager::CompileShader(
 
     auto obj = ExtractObject(result.Get(), filename, opts.enableDebugInfo);
     ThrowIfFailed(obj.As(&outBlob));
+    DumpCompiledShader(filename, entryPoint, ppBuffer, args, obj.Get(), emitSpirv);
+}
+
+void PSOManager::DumpCompiledShader(
+    const std::wstring& filename,
+    const std::wstring& entryPoint,
+    const DxcBuffer& source,
+    const std::vector<LPCWSTR>& args,
+    IDxcBlob* object,
+    bool emitSpirv)
+{
+    const std::filesystem::path* directory = ShaderDumpDirectory();
+    if (!directory) {
+        return;
+    }
+
+    std::string argumentText;
+    for (LPCWSTR argument : args) {
+        argumentText += argument ? ws2s(argument) : std::string{};
+        argumentText += '\n';
+    }
+    const std::string_view sourceText(static_cast<const char*>(source.Ptr), source.Size);
+    uint64_t hash = std::hash<std::string_view>{}(sourceText);
+    util::hash_combine_u64(hash, std::hash<std::string>{}(argumentText));
+
+    const std::string base = std::format(
+        "{}.{}.{:016X}",
+        std::filesystem::path(filename).stem().string(),
+        ws2s(entryPoint),
+        hash);
+    const std::filesystem::path stem = *directory / base;
+    std::ofstream(stem.string() + ".hlsl", std::ios::binary).write(sourceText.data(), sourceText.size());
+    std::ofstream(stem.string() + ".args.txt", std::ios::binary) << argumentText;
+
+    if (!emitSpirv && object) {
+        const DxcBuffer objectBuffer{ object->GetBufferPointer(), object->GetBufferSize(), 0 };
+        ComPtr<IDxcResult> disassembly;
+        ComPtr<IDxcBlobUtf8> text;
+        if (SUCCEEDED(pCompiler->Disassemble(&objectBuffer, IID_PPV_ARGS(disassembly.GetAddressOf())))
+            && SUCCEEDED(disassembly->GetOutput(DXC_OUT_DISASSEMBLY, IID_PPV_ARGS(text.GetAddressOf()), nullptr))
+            && text) {
+            std::ofstream(stem.string() + ".dxil.txt", std::ios::binary)
+                .write(text->GetStringPointer(), text->GetStringLength());
+        }
+    }
+    spdlog::info("Shader dump: {}", stem.string());
 }
 
 void PSOManager::LoadSource(const std::filesystem::path& path, PSOManager::SourceData& sd) {

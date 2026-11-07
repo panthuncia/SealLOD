@@ -611,26 +611,34 @@ bool CLodReadBit(ByteAddressBuffer bits, uint key)
 }
 
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
-bool CLodVirtualShadowFindClipmapForView(uint viewId, out uint outClipmapIndex, out CLodVirtualShadowClipmapInfo outClipmapInfo)
+// The clip that renders viewId, as an index: kCLodVirtualShadowClipmapCount when none does. A caller that tests one
+// view many times (a node's children, a run's meshlets) resolves it once and passes it to the *InClip helpers, which
+// load the clip's info by index: each lookup reads every clip's camera index.
+uint CLodVirtualShadowClipmapIndexForView(uint viewId)
 {
     StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Shadows::CLodClipmapInfo)];
+    return CLodVirtualShadowFindClipmapIndexForView(viewId, clipmapInfos);
+}
 
-    [unroll]
-    for (uint clipmapIndex = 0u; clipmapIndex < kCLodVirtualShadowClipmapCount; ++clipmapIndex)
+bool CLodVirtualShadowLoadClipmap(uint clipmapIndex, out CLodVirtualShadowClipmapInfo clipmapInfo)
+{
+    if (clipmapIndex >= kCLodVirtualShadowClipmapCount)
     {
-        const CLodVirtualShadowClipmapInfo clipmapInfo = clipmapInfos[clipmapIndex];
-        if (CLodVirtualShadowClipmapIsValid(clipmapInfo) && clipmapInfo.shadowCameraBufferIndex == viewId)
-        {
-            outClipmapIndex = clipmapIndex;
-            outClipmapInfo = clipmapInfo;
-            return true;
-        }
+        clipmapInfo = (CLodVirtualShadowClipmapInfo)0;
+        return false;
     }
+    StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Shadows::CLodClipmapInfo)];
+    clipmapInfo = clipmapInfos[clipmapIndex];
+    return true;
+}
 
-    outClipmapIndex = 0u;
-    outClipmapInfo = (CLodVirtualShadowClipmapInfo)0;
-    return false;
+bool CLodVirtualShadowFindClipmapForView(uint viewId, out uint outClipmapIndex, out CLodVirtualShadowClipmapInfo outClipmapInfo)
+{
+    const uint clipmapIndex = CLodVirtualShadowClipmapIndexForView(viewId);
+    outClipmapIndex = clipmapIndex < kCLodVirtualShadowClipmapCount ? clipmapIndex : 0u;
+    return CLodVirtualShadowLoadClipmap(clipmapIndex, outClipmapInfo);
 }
 
 uint CLodResolveLodViewId(uint cullViewId)
@@ -786,17 +794,17 @@ bool CLodVirtualShadowViewHasDirtyPages(uint viewId)
     return CLodVirtualShadowViewHasActivePages(viewId, false);
 }
 
-bool CLodVirtualShadowBoundsTouchActivePages(
+// For the clip CLodVirtualShadowClipmapIndexForView resolved.
+bool CLodVirtualShadowBoundsTouchActivePagesInClip(
     float3 worldCenter,
     float radiusWorld,
-    uint viewId,
+    uint clipmapIndex,
     bool dynamicLayer)
 {
     WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_SHADOW_DIRTY_QUERIES, 1);
 
-    uint clipmapIndex = 0u;
     CLodVirtualShadowClipmapInfo clipmapInfo;
-    if (!CLodVirtualShadowFindClipmapForView(viewId, clipmapIndex, clipmapInfo))
+    if (!CLodVirtualShadowLoadClipmap(clipmapIndex, clipmapInfo))
     {
         WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_SHADOW_CLIPMAP_MISSES, 1);
         return true;
@@ -856,6 +864,16 @@ bool CLodVirtualShadowBoundsTouchActivePages(
     return touchesDirtyPages;
 }
 
+bool CLodVirtualShadowBoundsTouchActivePages(
+    float3 worldCenter,
+    float radiusWorld,
+    uint viewId,
+    bool dynamicLayer)
+{
+    return CLodVirtualShadowBoundsTouchActivePagesInClip(
+        worldCenter, radiusWorld, CLodVirtualShadowClipmapIndexForView(viewId), dynamicLayer);
+}
+
 bool CLodVirtualShadowBoundsTouchDirtyPages(float3 worldCenter, float radiusWorld, uint viewId)
 {
     return CLodVirtualShadowBoundsTouchActivePages(worldCenter, radiusWorld, viewId, false);
@@ -866,16 +884,20 @@ bool CLodVirtualShadowMeshletTouchesDirtyPages(float3 worldCenter, float radiusW
     return CLodVirtualShadowBoundsTouchDirtyPages(worldCenter, radiusWorld, viewId);
 }
 
-bool CLodVirtualShadowViewUsesDynamicSkinnedCasters(uint viewId)
+bool CLodVirtualShadowClipUsesDynamicSkinnedCasters(uint clipmapIndex)
 {
-    uint clipmapIndex = 0u;
     CLodVirtualShadowClipmapInfo clipmapInfo;
-    if (!CLodVirtualShadowFindClipmapForView(viewId, clipmapIndex, clipmapInfo))
+    if (!CLodVirtualShadowLoadClipmap(clipmapIndex, clipmapInfo))
     {
         // Missing descriptors must remain conservative.
         return true;
     }
     return CLodVirtualShadowClipmapUsesDynamicSkinnedCasters(clipmapInfo);
+}
+
+bool CLodVirtualShadowViewUsesDynamicSkinnedCasters(uint viewId)
+{
+    return CLodVirtualShadowClipUsesDynamicSkinnedCasters(CLodVirtualShadowClipmapIndexForView(viewId));
 }
 
 bool CLodVirtualShadowUvBoundsTouchReceiverOccupancy(
@@ -4082,8 +4104,6 @@ void ClusterCullBody(
     bool pageValid = false;
     bool replaySource = false;
     row_major matrix objectModelMatrix = (float4x4)0;
-    row_major matrix viewMatrix = (float4x4)0;
-    float4 frustumPlanes[6];
     uint pageSlabDesc = 0;
     uint pageSlabOff = 0;
     uint pageMeshletCount = 0;
@@ -4120,9 +4140,12 @@ void ClusterCullBody(
 	bool shadowClipmapAllowsSkinnedDeformation = true;
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
     bool objectInvalidatedThisFrame = false;
+    // The run's view is one clip: found once for its meshlets' page tests and visible-cluster records.
+    const uint bucketShadowClipmapIndex =
+        hasBucket ? CLodVirtualShadowClipmapIndexForView(b.viewId) : kCLodVirtualShadowClipmapCount;
 	if (hasBucket) {
 		shadowClipmapAllowsSkinnedDeformation =
-			CLodVirtualShadowViewUsesDynamicSkinnedCasters(b.viewId);
+			CLodVirtualShadowClipUsesDynamicSkinnedCasters(bucketShadowClipmapIndex);
 	}
 #endif
 
@@ -4140,16 +4163,13 @@ void ClusterCullBody(
         objectInvalidatedThisFrame = CLodVirtualShadowInstanceInvalidatedThisFrame(b.instanceIndex);
 #endif
 
-        // Load only the camera fields needed for the hot culling loop.
-        // Occlusion matrices are deferred to the occlusion branch.
+        // The view matrix and frustum planes are loaded at the frustum test, and the occlusion matrices in the
+        // occlusion branch: loaded here, they stayed in registers across the meshlet's skinned bounds.
         StructuredBuffer<Camera> cameras =
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
         const uint lodViewId = CLodResolveLodViewId(b.viewId);
-        viewMatrix = cameras[b.viewId].view;
         cullCameraIsOrtho = cameras[b.viewId].isOrtho;
         lodCameraIsOrtho = cameras[lodViewId].isOrtho;
-        [unroll] for (uint p = 0; p < 6; p++)
-            frustumPlanes[p] = cameras[b.viewId].clippingPlanes[p].plane;
 
         StructuredBuffer<ClodViewRasterInfo> viewRasterInfoBuffer =
             ResourceDescriptorHeap[CLOD_WG_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX];
@@ -4442,7 +4462,9 @@ void ClusterCullBody(
                 {
                     meshletBounds.sphere = clusterCullHeader.bounds;
                 }
-                meshletCenterViewSpace = ToViewSpace(meshletBounds.sphere.xyz, objectModelMatrix, viewMatrix);
+                StructuredBuffer<Camera> frustumCameras =
+                    ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
+                meshletCenterViewSpace = ToViewSpace(meshletBounds.sphere.xyz, objectModelMatrix, frustumCameras[b.viewId].view);
                 meshletCenterWorld = mul(float4(meshletBounds.sphere.xyz, 1.0f), objectModelMatrix).xyz;
                 meshletRadiusWorld = meshletBounds.sphere.w * cullUniformScale;
                 if (meshletNeedsReyesDisplacement &&
@@ -4460,7 +4482,7 @@ void ClusterCullBody(
                     replaySource ||
                     meshletBoundsClassification == CLOD_MESHLET_BOUNDS_SKINNED_INVALID_SLOT_FALLBACK ||
                     meshletBoundsClassification == CLOD_MESHLET_BOUNDS_SKINNED_NO_VALID_BONE_FALLBACK ||
-                    !SphereOutsideFrustumViewSpace(meshletCenterViewSpace, meshletRadiusWorld, frustumPlanes);
+                    !SphereOutsideFrustumViewSpace(meshletCenterViewSpace, meshletRadiusWorld, frustumCameras[b.viewId]);
                 
                 if (!survives) {
                     if (meshletBoundsClassification == CLOD_MESHLET_BOUNDS_SKINNED_INVALID_SLOT_FALLBACK ||
@@ -4482,10 +4504,10 @@ void ClusterCullBody(
                     bool touchesActivePages = true;
                     if (CLodWorkGraphShadowDirtyPageCullingEnabled())
                     {
-                        touchesActivePages = CLodVirtualShadowBoundsTouchActivePages(
+                        touchesActivePages = CLodVirtualShadowBoundsTouchActivePagesInClip(
                             meshletCenterWorld,
                             meshletRadiusWorld,
-                            b.viewId,
+                            bucketShadowClipmapIndex,
                             dynamicShadowLayer);
                     }
 
@@ -4604,12 +4626,9 @@ void ClusterCullBody(
         uint shadowClipmapIndex = CLOD_PACKED_VISIBLE_CLUSTER_INVALID_SHADOW_CLIPMAP_INDEX;
         CLodVirtualShadowClipmapInfo shadowClipmapInfo = (CLodVirtualShadowClipmapInfo)0;
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
-        if (contributes)
+        if (contributes && CLodVirtualShadowLoadClipmap(bucketShadowClipmapIndex, shadowClipmapInfo))
         {
-            if (!CLodVirtualShadowFindClipmapForView(b.viewId, shadowClipmapIndex, shadowClipmapInfo))
-            {
-                shadowClipmapIndex = CLOD_PACKED_VISIBLE_CLUSTER_INVALID_SHADOW_CLIPMAP_INDEX;
-            }
+            shadowClipmapIndex = bucketShadowClipmapIndex;
         }
 #endif
 

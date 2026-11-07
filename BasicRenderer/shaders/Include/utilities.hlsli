@@ -185,6 +185,13 @@ void RecordTextureStreamingFeedbackRequestedTopMip(
 
     // Mixed textures in one wave: peel off one texture ID per iteration, reducing while all its lanes are still active.
     // (A WaveMatch leader reading its group's lanes after they have returned reads inactive lanes, which is undefined.)
+    // Wave ops skip helper lanes, so a helper whose ID no live lane shares would never lead and would loop forever:
+    // a virtual shadow pixel shader whose alpha test followed its early returns hung the GPU here (DRED: device hung
+    // in the hardware raster). Helpers' requests are not needed.
+    if (IsHelperLane())
+    {
+        return;
+    }
     for (;;)
     {
         const uint leaderTextureID = WaveReadLaneFirst(streamingTextureID);

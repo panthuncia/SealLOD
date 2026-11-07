@@ -4142,7 +4142,7 @@ void CompactClustersAndBuildIndirectArgsCS(uint3 dtid : SV_DispatchThreadID)
             uint dispatchItemCount = count;
             if ((CLOD_COMPACTION_READ_MODE_FLAGS & CLOD_COMPACTION_READ_FLAG_BUILD_SW_DISPATCH) != 0u)
             {
-                dispatchItemCount *= SW_RASTER_GROUPS_PER_CLUSTER;
+                dispatchItemCount = (count + SW_RASTER_CLUSTERS_PER_GROUP - 1u) / SW_RASTER_CLUSTERS_PER_GROUP;
             }
 
             uint dispatchX = (uint) ceil(sqrt((float) dispatchItemCount));

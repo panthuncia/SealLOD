@@ -2004,7 +2004,9 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
         // through the page table in VirtualShadowOutput. Expanding every
         // cluster into one record per active 4x4-page block duplicates both
         // this bookkeeping and the downstream triangle raster work without
-        // tightening the page admission budget.
+        // tightening the page admission budget. Its histogram pass also reads the software
+        // dispatch's arguments as one group per cluster, which they no longer are
+        // (SW_RASTER_CLUSTERS_PER_GROUP): enabling it needs that pass to follow them.
         constexpr bool useComputeSwVirtualShadowBlockExpansion = false;
         if (useComputeSwVirtualShadowBlockExpansion &&
             traits.rasterOutputKind == CLodRasterOutputKind::VirtualShadow) {

@@ -136,14 +136,15 @@ bool DWFindEntry(RWByteAddressBuffer hashTable, uint hash, uint drawRecordIndex,
     return false;
 }
 
-bool DWResolveDispatchCluster(uint3 groupId, out uint sortedClusterIndex)
+// The software raster's dispatch: each group covers SW_RASTER_CLUSTERS_PER_GROUP clusters, one per lane.
+bool DWResolveDispatchCluster(uint3 groupId, uint GI, out uint sortedClusterIndex)
 {
     StructuredBuffer<uint> histogram =
         ResourceDescriptorHeap[CLOD_RASTER_RASTER_BUCKETS_HISTOGRAM_DESCRIPTOR_INDEX];
     const uint bucketId = IndirectCommandSignatureRootConstant2;
     const uint linearizedGroup = groupId.x + groupId.y * IndirectCommandSignatureRootConstant1;
-    const uint clusterIndex = linearizedGroup / SW_RASTER_GROUPS_PER_CLUSTER;
-    if ((linearizedGroup % SW_RASTER_GROUPS_PER_CLUSTER) != 0u || clusterIndex >= histogram[bucketId]) {
+    const uint clusterIndex = linearizedGroup * SW_RASTER_CLUSTERS_PER_GROUP + GI;
+    if (GI >= SW_RASTER_CLUSTERS_PER_GROUP || clusterIndex >= histogram[bucketId]) {
         sortedClusterIndex = 0u;
         return false;
     }
@@ -155,11 +156,10 @@ bool DWResolveDispatchCluster(uint3 groupId, out uint sortedClusterIndex)
 void DynamicWindSkinCacheBuildCS(uint GI : SV_GroupIndex, uint3 groupId : SV_GroupID)
 {
     uint sortedClusterIndex = 0u;
-    if (!DWResolveDispatchCluster(groupId, sortedClusterIndex)) return;
+    if (!DWResolveDispatchCluster(groupId, GI, sortedClusterIndex)) return;
     RWStructuredBuffer<uint> mapping =
         ResourceDescriptorHeap[CLOD_RASTER_DYNAMIC_WIND_SKIN_CACHE_MAPPING_DESCRIPTOR_INDEX];
-    if (GI == 0u) mapping[sortedClusterIndex] = DW_SKIN_CACHE_INVALID;
-    if (GI != 0u) return;
+    mapping[sortedClusterIndex] = DW_SKIN_CACHE_INVALID;
 
     uint4 packedCluster;
     uint assemblyTransformIndex, drawRecordIndex, localMeshletIndex, slabDescriptor, slabOffset, skinningSlot;
@@ -304,7 +304,7 @@ void DynamicWindSkinCacheSkinWorkCS(uint GI : SV_GroupIndex, uint3 groupId : SV_
 void DynamicWindSkinCacheResolveCS(uint GI : SV_GroupIndex, uint3 groupId : SV_GroupID)
 {
     uint sortedClusterIndex = 0u;
-    if (!DWResolveDispatchCluster(groupId, sortedClusterIndex) || GI != 0u) return;
+    if (!DWResolveDispatchCluster(groupId, GI, sortedClusterIndex)) return;
     uint4 packedCluster;
     uint assemblyTransformIndex, drawRecordIndex, localMeshletIndex, slabDescriptor, slabOffset, skinningSlot;
     CLodPageHeader pageHeader;

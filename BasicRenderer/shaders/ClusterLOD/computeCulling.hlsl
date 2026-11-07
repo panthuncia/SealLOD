@@ -600,8 +600,10 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
     }
 	bool deformForTraversal = isSkinned;
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+    // The record's view is one clip: found once for the node's and its children's page tests.
+    const uint shadowClipmapIndex = CLodVirtualShadowClipmapIndexForView(rec.viewId);
 	deformForTraversal = isSkinned &&
-		CLodVirtualShadowViewUsesDynamicSkinnedCasters(rec.viewId);
+		CLodVirtualShadowClipUsesDynamicSkinnedCasters(shadowClipmapIndex);
 #endif
     const row_major matrix objectModelMatrix = instanceTransform.model;
     StructuredBuffer<Camera> cameras =
@@ -766,8 +768,8 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
         if (dirtyPageCullingEnabled) {
             const float3 nodeCullCenterWorld = mul(float4(nodeCullCenterObjectSpace, 1.0f), objectModelMatrix).xyz;
-            nodeTouchesDirtyPages = CLodVirtualShadowBoundsTouchActivePages(
-                nodeCullCenterWorld, nodeRadiusWorld, rec.viewId, deformForTraversal);
+            nodeTouchesDirtyPages = CLodVirtualShadowBoundsTouchActivePagesInClip(
+                nodeCullCenterWorld, nodeRadiusWorld, shadowClipmapIndex, deformForTraversal);
         }
 #endif
 
@@ -935,8 +937,8 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
     if (dirtyPageCullingEnabled) {
         const float3 nodeCullCenterWorld = mul(float4(nodeCullCenterObjectSpace, 1.0f), objectModelMatrix).xyz;
-        if (!CLodVirtualShadowBoundsTouchActivePages(
-                nodeCullCenterWorld, nodeRadiusWorld, rec.viewId, deformForTraversal)) {
+        if (!CLodVirtualShadowBoundsTouchActivePagesInClip(
+                nodeCullCenterWorld, nodeRadiusWorld, shadowClipmapIndex, deformForTraversal)) {
             WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_REJECTED_CLEAN_PAGES, 1);
             return;
         }
@@ -1035,8 +1037,8 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
             if (dirtyPageCullingEnabled) {
                 const float3 childCullCenterWorld = mul(float4(childCullCenterOS, 1.0f), objectModelMatrix).xyz;
-                if (!CLodVirtualShadowBoundsTouchActivePages(
-                        childCullCenterWorld, childRadiusWorld, rec.viewId, deformForTraversal)) {
+                if (!CLodVirtualShadowBoundsTouchActivePagesInClip(
+                        childCullCenterWorld, childRadiusWorld, shadowClipmapIndex, deformForTraversal)) {
                     WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_REJECTED_CLEAN_PAGES, 1);
                     continue;
                 }

@@ -31,7 +31,6 @@
 #endif
 
 #define SW_CLUSTER_RASTER_THREADS 32
-
 #ifndef CLOD_WG_SW_RASTER_THREADS
 #define CLOD_WG_SW_RASTER_THREADS SW_CLUSTER_RASTER_THREADS
 #endif
@@ -101,17 +100,34 @@ struct SWClusterFlags
     uint debugOutputType;
 };
 
-groupshared CLodRasterCluster gs_cluster;
-groupshared SWClusterFlags gs_flags;
-groupshared float2 gs_screenPos[SW_RASTER_MAX_VERTS];
-groupshared float gs_linearDepth[SW_RASTER_MAX_VERTS];
-groupshared float gs_invClipW[SW_RASTER_MAX_VERTS];
+#if defined(CLOD_SW_RASTER_EMBEDDED_WORK_GRAPH)
+#define SW_RASTER_SETUP_SLOTS 1
+#else
+#if SW_RASTER_CLUSTERS_PER_GROUP > SW_CLUSTER_RASTER_THREADS
+#error SW_RASTER_CLUSTERS_PER_GROUP is above one cluster per lane
+#endif
+#define SW_RASTER_SETUP_SLOTS SW_RASTER_CLUSTERS_PER_GROUP
+#endif
+
+groupshared CLodRasterCluster gs_clusters[SW_RASTER_SETUP_SLOTS];
+groupshared SWClusterFlags gs_clusterFlags[SW_RASTER_SETUP_SLOTS];
+groupshared SWClusterWork gs_clusterWork[SW_RASTER_SETUP_SLOTS];
+groupshared uint gs_groupClusterCount;
+// Groupshared memory limits this shader's occupancy (achieved warps times bytes per group stayed
+// near 44 KB per SM as both changed), so each vertex is one entry: screen xy, linear depth and,
+// for perspective views, 1/w. Virtual shadow views are orthographic clipmaps, where w is 1.
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+typedef float3 SWVertex;
+#else
+typedef float4 SWVertex;
+#endif
+groupshared SWVertex gs_vertices[SW_RASTER_MAX_VERTS];
 
 // ---------------------------------------------------------------------------------------------
-// Stage 1: cluster setup (lane 0)
+// Stage 1: cluster setup, one lane per cluster
 // ---------------------------------------------------------------------------------------------
 
-void SWLoadClusterSetup(SWClusterWork work)
+void SWLoadClusterSetup(SWClusterWork work, uint slot)
 {
     CLodRasterClusterSource source;
     source.packedCluster = work.packedCluster;
@@ -122,7 +138,8 @@ void SWLoadClusterSetup(SWClusterWork work)
     CLodRasterCluster cluster;
     // A cluster that fails to load has no vertices or triangles, so the later stages do nothing.
     CLodLoadRasterCluster(source, cluster);
-    gs_cluster = cluster;
+    gs_clusters[slot] = cluster;
+    gs_clusterWork[slot] = work;
 
     SWClusterFlags flags;
     ConstantBuffer<PerFrameBuffer> perFrameBuffer =
@@ -161,7 +178,7 @@ void SWLoadClusterSetup(SWClusterWork work)
     flags.doubleSided = 0u;
 #endif
 #endif
-    gs_flags = flags;
+    gs_clusterFlags[slot] = flags;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -225,14 +242,20 @@ void SWTransformVertices(SWClusterWork work, CLodRasterCluster cluster, ClodView
     {
         const float3 position = SWLoadVertexPosition(work, cluster, slab, v);
         const float4 clipPosition = CLodRasterClipPosition(cluster, position);
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+        const float2 ndc = clipPosition.xy;
+#else
         const float invW = 1.0f / clipPosition.w;
         const float2 ndc = clipPosition.xy * invW;
-
-        gs_screenPos[v] = float2(
+#endif
+        const float2 screenPosition = float2(
             (ndc.x + 1.0f) * 0.5f * visWidth + scissorMinX,
             (1.0f - ndc.y) * 0.5f * visHeight + scissorMinY);
-        gs_linearDepth[v] = CLodRasterLinearDepth(cluster, position);
-        gs_invClipW[v] = invW;
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+        gs_vertices[v] = float3(screenPosition, CLodRasterLinearDepth(cluster, position));
+#else
+        gs_vertices[v] = float4(screenPosition, CLodRasterLinearDepth(cluster, position), invW);
+#endif
     }
 }
 
@@ -246,9 +269,15 @@ struct SWRasterTriangle
     uint3 vertices;
     uint triangleIndex;
     float3 depths;
-    float3 invW;
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
     SWVirtualShadowTrianglePage vsmPage;
+#else
+    float3 invW;
+#endif
+#if CLOD_SW_RASTER_MAY_ALPHA_TEST
+    // Barycentric steps per pixel, for the alpha test's UV gradients.
+    float3 barycentricsDx;
+    float3 barycentricsDy;
 #endif
 };
 
@@ -339,7 +368,9 @@ SWAlphaMaterial SWLoadAlphaMaterial(uint materialDataIndex)
     return material;
 }
 
-bool SWAlphaTestFailed(SWAlphaMaterial material, float2 texcoords)
+// Sampled with the texel's UV gradients, as the hardware raster's alpha test samples with its
+// derivatives. Mip 0 cost a shadow texel covering many texture texels scattered, uncached samples.
+bool SWAlphaTestFailed(SWAlphaMaterial material, float2 texcoords, float2 texcoordsDx, float2 texcoordsDy)
 {
     float alpha = material.baseAlpha;
 
@@ -347,14 +378,14 @@ bool SWAlphaTestFailed(SWAlphaMaterial material, float2 texcoords)
     {
         Texture2D<float4> baseColorTexture = ResourceDescriptorHeap[material.baseColorTextureIndex];
         SamplerState baseColorSamplerState = SamplerDescriptorHeap[material.baseColorSamplerIndex];
-        alpha *= baseColorTexture.SampleLevel(baseColorSamplerState, texcoords, 0.0f).a;
+        alpha *= baseColorTexture.SampleGrad(baseColorSamplerState, texcoords, texcoordsDx, texcoordsDy).a;
     }
 
     if ((material.materialFlags & MATERIAL_OPACITY_TEXTURE) != 0u)
     {
         Texture2D<float4> opacityTexture = ResourceDescriptorHeap[material.opacityTextureIndex];
         SamplerState opacitySamplerState = SamplerDescriptorHeap[material.opacitySamplerIndex];
-        alpha *= opacityTexture.SampleLevel(opacitySamplerState, texcoords, 0.0f).a;
+        alpha *= opacityTexture.SampleGrad(opacitySamplerState, texcoords, texcoordsDx, texcoordsDy).a;
     }
 
     return alpha < material.alphaCutoff;
@@ -411,15 +442,26 @@ void SWRasterPixel(
             return;
         }
 #endif
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+        // Orthographic: the screen barycentrics are already the perspective-correct ones.
+        const float3 perspective = barycentrics;
+        const float invSum = 1.0f;
+#else
         const float3 perspective = barycentrics * tri.invW;
         const float invSum = rcp(perspective.x + perspective.y + perspective.z);
+#endif
         // Decoded here because so few triangles cover a sample: decoding per vertex was a
         // large part of the cost of alpha-tested clusters.
-        const float2 texcoord = (
-            CLodDecodeUv(slab, output.uvStream, tri.vertices.x) * perspective.x +
-            CLodDecodeUv(slab, output.uvStream, tri.vertices.y) * perspective.y +
-            CLodDecodeUv(slab, output.uvStream, tri.vertices.z) * perspective.z) * invSum;
-        if (SWAlphaTestFailed(output.alphaMaterial, texcoord))
+        const float2 uv0 = CLodDecodeUv(slab, output.uvStream, tri.vertices.x);
+        const float2 uv1 = CLodDecodeUv(slab, output.uvStream, tri.vertices.y);
+        const float2 uv2 = CLodDecodeUv(slab, output.uvStream, tri.vertices.z);
+        const float2 texcoord = (uv0 * perspective.x + uv1 * perspective.y + uv2 * perspective.z) * invSum;
+        // Exact for orthographic views; perspective views take the affine gradient.
+        const float2 texcoordDx =
+            uv0 * tri.barycentricsDx.x + uv1 * tri.barycentricsDx.y + uv2 * tri.barycentricsDx.z;
+        const float2 texcoordDy =
+            uv0 * tri.barycentricsDy.x + uv1 * tri.barycentricsDy.y + uv2 * tri.barycentricsDy.z;
+        if (SWAlphaTestFailed(output.alphaMaterial, texcoord, texcoordDx, texcoordDy))
         {
             SWTelemetryAdd(SW_COUNTER_ALPHA_REJECTED_PIXELS, 1u);
             return;
@@ -525,9 +567,13 @@ void SWRasterTriangles(SWClusterWork work, CLodRasterCluster cluster, SWClusterF
             vertices = vertices.xzy;
         }
 
-        float2 s0 = gs_screenPos[vertices.x];
-        float2 s1 = gs_screenPos[vertices.y];
-        float2 s2 = gs_screenPos[vertices.z];
+        // One load per vertex: the depths (and 1/w) of the few surviving triangles come with it.
+        SWVertex v0 = gs_vertices[vertices.x];
+        SWVertex v1 = gs_vertices[vertices.y];
+        SWVertex v2 = gs_vertices[vertices.z];
+        float2 s0 = v0.xy;
+        float2 s1 = v1.xy;
+        float2 s2 = v2.xy;
 
         const float2 e01 = s1 - s0;
         const float2 e02 = s2 - s0;
@@ -542,9 +588,11 @@ void SWRasterTriangles(SWClusterWork work, CLodRasterCluster cluster, SWClusterF
             // The rest of the rasterizer expects front-face winding. The triangle index is
             // unchanged, so the visibility buffer is the same as a hardware back face.
             vertices = vertices.xzy;
-            const float2 swappedPosition = s1;
-            s1 = s2;
-            s2 = swappedPosition;
+            const SWVertex swappedVertex = v1;
+            v1 = v2;
+            v2 = swappedVertex;
+            s1 = v1.xy;
+            s2 = v2.xy;
             twiceArea = -twiceArea;
         }
 
@@ -580,10 +628,11 @@ void SWRasterTriangles(SWClusterWork work, CLodRasterCluster cluster, SWClusterF
         SWRasterTriangle tri;
         tri.vertices = vertices;
         tri.triangleIndex = triangleIndex;
-        tri.depths = float3(gs_linearDepth[vertices.x], gs_linearDepth[vertices.y], gs_linearDepth[vertices.z]);
-        tri.invW = float3(gs_invClipW[vertices.x], gs_invClipW[vertices.y], gs_invClipW[vertices.z]);
+        tri.depths = float3(v0.z, v1.z, v2.z);
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
         tri.vsmPage = trianglePage;
+#else
+        tri.invW = float3(v0.w, v1.w, v2.w);
 #endif
         if (tri.depths.x <= 0.0f || tri.depths.y <= 0.0f || tri.depths.z <= 0.0f)
         {
@@ -603,6 +652,10 @@ void SWRasterTriangles(SWClusterWork work, CLodRasterCluster cluster, SWClusterF
         const float dxB2 = -(dxB0 + dxB1);
         const float dyB0 = -e12.x * invTwiceArea;
         const float dyB1 = -e20.x * invTwiceArea;
+#if CLOD_SW_RASTER_MAY_ALPHA_TEST
+        tri.barycentricsDx = float3(dxB0, dxB1, dxB2);
+        tri.barycentricsDy = float3(dyB0, dyB1, -(dyB0 + dyB1));
+#endif
 
         const int rectWidth = maxPixel.x - minPixel.x + 1;
         // Decided per wave to keep the lanes together.
@@ -669,16 +722,12 @@ void SWRasterTriangles(SWClusterWork work, CLodRasterCluster cluster, SWClusterF
 // One cluster
 // ---------------------------------------------------------------------------------------------
 
-void SWRasterCluster(SWClusterWork work, StructuredBuffer<ClodViewRasterInfo> viewRasterInfoBuffer, uint GI)
+// The setup of slot is in groupshared memory.
+void SWRasterCluster(uint slot, StructuredBuffer<ClodViewRasterInfo> viewRasterInfoBuffer, uint GI)
 {
-    if (GI == 0u)
-    {
-        SWLoadClusterSetup(work);
-    }
-    GroupMemoryBarrierWithGroupSync();
-
-    const CLodRasterCluster cluster = gs_cluster;
-    const SWClusterFlags flags = gs_flags;
+    const SWClusterWork work = gs_clusterWork[slot];
+    const CLodRasterCluster cluster = gs_clusters[slot];
+    const SWClusterFlags flags = gs_clusterFlags[slot];
     const ClodViewRasterInfo rasterInfo = viewRasterInfoBuffer[CLodVisibleClusterViewID(work.packedCluster)];
     if (GI == 0u)
     {
@@ -730,31 +779,24 @@ void WG_SWRaster(
     work.hasResolvedSkinningSlot = false;
     work.resolvedSkinningSlot = 0xFFFFFFFFu;
     work.cachedPositionBase = 0xFFFFFFFFu;
-    SWRasterCluster(work, viewRasterInfoBuffer, GI);
+    if (GI == 0u)
+    {
+        SWLoadClusterSetup(work, 0u);
+    }
+    GroupMemoryBarrierWithGroupSync();
+    SWRasterCluster(0u, viewRasterInfoBuffer, GI);
 }
 
-[shader("compute")]
-[numthreads(SW_CLUSTER_RASTER_THREADS, 1, 1)]
-void SWRasterIndirectCSMain(uint GI : SV_GroupIndex, uint3 groupId : SV_GroupID)
+#if !defined(CLOD_SW_RASTER_EMBEDDED_WORK_GRAPH)
+// The compute raster's dispatch, as clodUtil's raster-bucket arguments lay it out.
+SWClusterWork SWLoadComputeClusterWork(uint sortedClusterIndex)
 {
-    StructuredBuffer<uint> histogram = ResourceDescriptorHeap[CLOD_RASTER_RASTER_BUCKETS_HISTOGRAM_DESCRIPTOR_INDEX];
-    const uint bucketID = IndirectCommandSignatureRootConstant2;
-    const uint linearizedGroupID = groupId.x + groupId.y * IndirectCommandSignatureRootConstant1;
-    const uint clusterIndex = linearizedGroupID / SW_RASTER_GROUPS_PER_CLUSTER;
-    if (clusterIndex >= histogram[bucketID])
-    {
-        return;
-    }
-
-    const uint sortedClusterIndex = IndirectCommandSignatureRootConstant0 + clusterIndex;
     ByteAddressBuffer compactedVisibleClusters =
         ResourceDescriptorHeap[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX];
     StructuredBuffer<uint2> compactedVisibleClusterTransformIndices =
         ResourceDescriptorHeap[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
     StructuredBuffer<CLodSoftwareRasterMapping> sortedToUnsortedMapping =
         ResourceDescriptorHeap[CLOD_RASTER_SORTED_TO_UNSORTED_MAPPING_DESCRIPTOR_INDEX];
-    StructuredBuffer<ClodViewRasterInfo> viewRasterInfoBuffer =
-        ResourceDescriptorHeap[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX];
     const CLodSoftwareRasterMapping mapping = sortedToUnsortedMapping[sortedClusterIndex];
 
     SWClusterWork work;
@@ -777,5 +819,45 @@ void SWRasterIndirectCSMain(uint GI : SV_GroupIndex, uint3 groupId : SV_GroupID)
     work.resolvedSkinningSlot = mapping.skinningInstanceSlot;
     work.cachedPositionBase = 0xFFFFFFFFu;
 #endif
-    SWRasterCluster(work, viewRasterInfoBuffer, GI);
+    return work;
 }
+
+[shader("compute")]
+[numthreads(SW_CLUSTER_RASTER_THREADS, 1, 1)]
+void SWRasterIndirectCSMain(uint GI : SV_GroupIndex, uint3 groupId : SV_GroupID)
+{
+    StructuredBuffer<uint> histogram = ResourceDescriptorHeap[CLOD_RASTER_RASTER_BUCKETS_HISTOGRAM_DESCRIPTOR_INDEX];
+    const uint bucketID = IndirectCommandSignatureRootConstant2;
+    const uint linearizedGroupID = groupId.x + groupId.y * IndirectCommandSignatureRootConstant1;
+    const uint firstClusterIndex = linearizedGroupID * SW_RASTER_CLUSTERS_PER_GROUP;
+    const uint bucketClusterCount = histogram[bucketID];
+    if (firstClusterIndex >= bucketClusterCount)
+    {
+        return;
+    }
+    const uint groupClusterCount = min(SW_RASTER_CLUSTERS_PER_GROUP, bucketClusterCount - firstClusterIndex);
+    StructuredBuffer<ClodViewRasterInfo> viewRasterInfoBuffer =
+        ResourceDescriptorHeap[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX];
+
+    if (GI < groupClusterCount)
+    {
+        SWLoadClusterSetup(SWLoadComputeClusterWork(IndirectCommandSignatureRootConstant0 + firstClusterIndex + GI), GI);
+    }
+    if (GI == 0u)
+    {
+        gs_groupClusterCount = groupClusterCount;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    // The count comes back through groupshared memory to hide its bound, SW_RASTER_CLUSTERS_PER_GROUP,
+    // from the driver's compiler: with the bound in sight, registers grew with it (80 at 1, 171 at 16).
+    const uint loopClusterCount = gs_groupClusterCount;
+    [loop]
+    for (uint slot = 0u; slot < loopClusterCount; ++slot)
+    {
+        SWRasterCluster(slot, viewRasterInfoBuffer, GI);
+        // The next cluster's vertices overwrite this one's.
+        GroupMemoryBarrierWithGroupSync();
+    }
+}
+#endif

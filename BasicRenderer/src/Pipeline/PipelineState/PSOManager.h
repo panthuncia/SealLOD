@@ -524,6 +524,14 @@ private:
         const std::wstring& filename,
         bool writeDebugArtifacts);
 
+    void DumpCompiledShader(
+        const std::wstring& filename,
+        const std::wstring& entryPoint,
+        const DxcBuffer& source,
+        const std::vector<LPCWSTR>& args,
+        IDxcBlob* object,
+        bool emitSpirv);
+
     void WriteDebugArtifacts(
         IDxcResult* result,
         const std::filesystem::path& outDir,

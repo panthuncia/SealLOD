@@ -683,6 +683,14 @@ struct CLodMultiNodeGpuInput
 #define SW_RASTER_GROUPS_PER_CLUSTER 1
 #define SW_RASTER_MAX_VERTS          128
 
+// Clusters per group of the compute software raster's indirect dispatch (and of the dynamic wind
+// skin cache passes, which share its arguments). Each lane loads one cluster's setup, so the setup's
+// chain of dependent loads runs for all of them at once instead of on one lane per cluster.
+// At most SW_CLUSTER_RASTER_THREADS (32).
+#ifndef SW_RASTER_CLUSTERS_PER_GROUP
+#define SW_RASTER_CLUSTERS_PER_GROUP 4
+#endif
+
 // Batched work graph record for software rasterization of small clusters.
 // Broadcasting node: ClusterCull accumulates up to SW_BATCH_MAX_CLUSTERS
 // cluster indices per record. SWRaster reads full VisibleCluster data from

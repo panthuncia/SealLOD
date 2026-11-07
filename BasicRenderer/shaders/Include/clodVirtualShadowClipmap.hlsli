@@ -295,30 +295,60 @@ bool CLodVirtualShadowClipmapIsValid(CLodVirtualShadowClipmapInfo clipmapInfo)
         clipmapInfo.shadowCameraBufferIndex != kInvalidShadowCameraIndex;
 }
 
+// The first valid clip that renders viewID, or kCLodVirtualShadowClipmapCount when none does. Reads each clip's camera
+// index, then the flags of the few that match it. The lookups used to unroll over every clip's whole info: each call
+// loaded the fields it used from every clip and held them in registers until the match was known.
+// Clip indices are below 32 (kCLodVirtualShadowClipmapCount), so the matches fit one word.
+uint CLodVirtualShadowFindClipmapIndexForView(uint viewID, StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos)
+{
+    if (viewID == kInvalidShadowCameraIndex)
+    {
+        return kCLodVirtualShadowClipmapCount;
+    }
+
+    uint matches = 0u;
+    [unroll]
+    for (uint candidateIndex = 0u; candidateIndex < kCLodVirtualShadowClipmapCount; ++candidateIndex)
+    {
+        matches |= clipmapInfos[candidateIndex].shadowCameraBufferIndex == viewID ? (1u << candidateIndex) : 0u;
+    }
+
+    if (matches == 0u)
+    {
+        return kCLodVirtualShadowClipmapCount;
+    }
+    const uint firstMatch = firstbitlow(matches);
+    if ((clipmapInfos[firstMatch].flags & kCLodVirtualShadowClipmapValidFlag) != 0u)
+    {
+        return firstMatch;
+    }
+    // An invalid clip that still names this camera: the later matches, in order.
+    matches &= matches - 1u;
+    [unroll]
+    for (uint laterIndex = 0u; laterIndex < kCLodVirtualShadowClipmapCount; ++laterIndex)
+    {
+        if (((matches >> laterIndex) & 1u) != 0u &&
+            (clipmapInfos[laterIndex].flags & kCLodVirtualShadowClipmapValidFlag) != 0u)
+        {
+            return laterIndex;
+        }
+    }
+    return kCLodVirtualShadowClipmapCount;
+}
+
 bool CLodVirtualShadowTryGetClipmapInfoForView(
     uint viewID,
     StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos,
     out CLodVirtualShadowClipmapInfo clipmapInfo)
 {
-    clipmapInfo = (CLodVirtualShadowClipmapInfo)0;
-
-    [unroll]
-    for (uint candidateIndex = 0u; candidateIndex < kCLodVirtualShadowClipmapCount; ++candidateIndex)
+    const uint clipmapIndex = CLodVirtualShadowFindClipmapIndexForView(viewID, clipmapInfos);
+    if (clipmapIndex >= kCLodVirtualShadowClipmapCount)
     {
-        const CLodVirtualShadowClipmapInfo candidate = clipmapInfos[candidateIndex];
-        if (!CLodVirtualShadowClipmapIsValid(candidate))
-        {
-            continue;
-        }
-
-        if (candidate.shadowCameraBufferIndex == viewID)
-        {
-            clipmapInfo = candidate;
-            return true;
-        }
+        clipmapInfo = (CLodVirtualShadowClipmapInfo)0;
+        return false;
     }
-
-    return false;
+    clipmapInfo = clipmapInfos[clipmapIndex];
+    return true;
 }
 
 bool CLodVirtualShadowPageEntryCanRaster(uint pageEntry)

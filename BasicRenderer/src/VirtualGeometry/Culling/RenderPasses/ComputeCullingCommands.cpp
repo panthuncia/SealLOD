@@ -3,7 +3,10 @@
 #include <algorithm>
 #include <cstdio>
 #include <initializer_list>
+#include <optional>
 #include <utility>
+
+#include <Render/Runtime/IStatisticsService.h>
 
 #include "BasicRenderer/Diagnostics/CLodTelemetry.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
@@ -106,13 +109,24 @@ private:
     {
         m_context.ExecuteIndirect(m_programs.dispatchSignature, arguments.Resource());
     }
-    // Names the next indirect dispatch for PIX and DRED breadcrumbs (a hang report then says which stage and level).
+    // Names the next indirect dispatch for PIX and DRED breadcrumbs (a hang report then says which stage and level),
+    // and opens a sub-range of the pass for it ("<pass>/<stage> L<level>"), timed and profiled when the graph's
+    // recording is. The sub-range closes at the next Mark or EndStage.
     void Mark(const char* stage)
     {
         char label[64];
         std::snprintf(label, sizeof(label), "CLod culling: %s, level %u", stage, m_level);
         rhi::debug::Marker(m_context.Commands(), rhi::debug::Color{ 0xFF808080u }, label);
+        BeginStage(stage);
     }
+    void BeginStage(const char* stage)
+    {
+        EndStage();
+        char name[64];
+        std::snprintf(name, sizeof(name), "%s L%u", stage, m_level);
+        m_stage.emplace(name);
+    }
+    void EndStage() { m_stage.reset(); }
 
     // One batch over the declared buffers in the list; absent ones are skipped.
     void Barrier(TokenList buffers, rhi::ResourceAccessType before, rhi::ResourceAccessType after,
@@ -307,6 +321,7 @@ private:
     {
         const auto& frontiers = m_bindings.frontiers;
         Bind(m_programs.objectCull);
+        BeginStage("object cull");
         RootConstants constants = m_shared;
         constants[CLOD_PC_FRONTIER_OUTPUT_DESCRIPTOR_INDEX] = Uav(frontiers.currentNodes);
         constants[CLOD_PC_FRONTIER_OUTPUT_COUNT_DESCRIPTOR_INDEX] = Uav(frontiers.currentNodeCounter);
@@ -321,6 +336,7 @@ private:
             Push(constants);
             m_context.Commands().Dispatch(workload.dispatchGridX, workload.dispatchGridY, workload.dispatchGridZ);
         }
+        EndStage();
         UavToRead({frontiers.currentNodes, frontiers.currentNodeCounter});
     }
 
@@ -338,6 +354,7 @@ private:
         Push(nodes);
         Mark("seed replay nodes");
         ExecuteIndirect(frontiers.nodeDispatchArgs);
+        EndStage();
         m_nodeArgsInUse = true;
 
         BuildReplayDispatchArgs(frontiers.clusterDispatchArgs, kReplaySourceClusters, kReplayClusterThreadsPerGroup);
@@ -349,6 +366,7 @@ private:
         Push(clusters);
         Mark("seed replay clusters");
         ExecuteIndirect(frontiers.clusterDispatchArgs);
+        EndStage();
         m_clusterArgsInUse = true;
 
         UavToRead({frontiers.currentNodes, frontiers.currentNodeCounter, frontiers.clusters, frontiers.clusterCounter});
@@ -371,6 +389,7 @@ private:
         Push(constants);
         Mark("cull clusters");
         ExecuteIndirect(frontiers.clusterDispatchArgs);
+        EndStage();
         m_clusterArgsInUse = true;
     }
 
@@ -393,6 +412,7 @@ private:
         Push(constants);
         Mark(stage);
         ExecuteIndirect(arguments);
+        EndStage();
     }
 
     void TraverseLevel(uint32_t level)
@@ -481,6 +501,7 @@ private:
     bool m_leafArgsInUse = false;
     bool m_clusterArgsInUse = false;
     uint32_t m_level = 0; // The traversal level being recorded, for Mark.
+    std::optional<org::runtime::RecordingSubRangeScope> m_stage; // The open stage's sub-range (BeginStage).
     // Ping-pong frontier roles for the level being traversed.
     Token m_currentNodes, m_currentNodeCounter, m_nextNodes, m_nextNodeCounter;
     Token m_currentLeaves, m_currentLeafCounter, m_nextLeaves, m_nextLeafCounter;
