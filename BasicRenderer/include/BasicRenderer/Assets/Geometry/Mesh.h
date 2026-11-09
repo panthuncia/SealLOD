@@ -197,6 +197,9 @@ public:
 	// They register before the root, and the root's template keeps their streaming active.
 	void SetPortalParts(std::vector<std::shared_ptr<Mesh>> parts) { m_portalParts = std::move(parts); }
 	const std::vector<std::shared_ptr<Mesh>>& GetPortalParts() const { return m_portalParts; }
+	// What a merged mesh's cache says its portals open and its palette slots take (ClusterLODPrebuiltData).
+	const std::vector<ClusterLODExternalPart>& GetCLodExternalParts() const { return m_clodExternalParts; }
+	const std::vector<uint32_t>& GetCLodPaletteParts() const { return m_clodPaletteParts; }
 	const std::vector<ClusterLODAssemblyTransform>& GetCLodAssemblyTransforms() const {
 		return m_clodAssemblyTransforms;
 	}
@@ -344,6 +347,8 @@ private:
 	uint32_t m_clodMaterialSlotCount = 1;
 	std::vector<std::shared_ptr<Material>> m_materialPalette;
 	std::vector<std::shared_ptr<Mesh>> m_portalParts;
+	std::vector<ClusterLODExternalPart> m_clodExternalParts;
+	std::vector<uint32_t> m_clodPaletteParts;
 	std::vector<ClusterLODAssemblyInstance> m_clodAssemblyInstances;
 	std::vector<ClusterLODAssemblyBoneRemap> m_clodAssemblyBoneRemaps;
 	std::vector<uint32_t> m_clodAssemblyBoneRemapIndices;

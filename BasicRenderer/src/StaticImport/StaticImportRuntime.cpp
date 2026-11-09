@@ -14,6 +14,7 @@
 #include <limits>
 #include <list>
 #include <memory>
+#include <array>
 #include <mutex>
 #include <numeric>
 #include <optional>
@@ -871,7 +872,7 @@ namespace br::staticimport
 					}
 					const auto& cacheSource = mesh->GetCLodCacheSource();
 					RecordCLodMeshSource(key.meshID, group.ModelPath(), part.name, static_cast<std::uint32_t>(key.rasterFlags),
-						cacheSource.sourceIdentifier, cacheSource.primPath, cacheSource.subsetName);
+						cacheSource.sourceIdentifier, cacheSource.primPath, cacheSource.subsetName, mesh);
 					// A hierarchy root's parts have no template of their own, but their clusters are what a root draws up close.
 					for (const auto& portalPart : mesh->GetPortalParts()) {
 						if (!portalPart) {
@@ -879,7 +880,7 @@ namespace br::staticimport
 						}
 						const auto& partSource = portalPart->GetCLodCacheSource();
 						RecordCLodMeshSource(portalPart->GetGlobalID(), group.ModelPath(), "portal part", static_cast<std::uint32_t>(key.rasterFlags),
-							partSource.sourceIdentifier, partSource.primPath, partSource.subsetName);
+							partSource.sourceIdentifier, partSource.primPath, partSource.subsetName, portalPart);
 					}
 					outRequests.push_back(StaticTemplateRequest{
 						.key = key,
@@ -1148,16 +1149,23 @@ namespace br::staticimport
 		public:
 			explicit StaticTemplateMaterialBatch(bool refreshTextureBindings) : refreshBindings(refreshTextureBindings) {}
 
-			// Fails once the lane started on the batch or it is full.
-			[[nodiscard]] bool TryJoin(const std::shared_ptr<Material>& material)
+			// Joins every material or none. Fails once the lane started on the batch or it is full; the first join
+			// always succeeds, however many materials it brings (a merged root's whole palette).
+			[[nodiscard]] bool TryJoin(std::span<const std::shared_ptr<Material>> materials)
 			{
 				// A batch waits for all its materials' textures, so its size bounds how long
 				// one slow texture can hold back unrelated templates.
 				constexpr std::uint32_t kMaxJoins = 256;
+				const auto count = static_cast<std::uint32_t>(materials.size());
 				const auto previous = _state.fetch_add(1, std::memory_order_acq_rel);
-				const bool joined = (previous & kClosed) == 0 &&
-					_joins.fetch_add(1, std::memory_order_relaxed) < kMaxJoins;
-				if (joined) _posted.push(material);
+				bool joined = false;
+				if ((previous & kClosed) == 0) {
+					const auto joins = _joins.fetch_add(count, std::memory_order_relaxed);
+					joined = joins == 0 || joins + count <= kMaxJoins;
+				}
+				if (joined) {
+					for (const auto& material : materials) _posted.push(material);
+				}
 				_state.fetch_sub(1, std::memory_order_acq_rel);
 				return joined;
 			}
@@ -1188,20 +1196,42 @@ namespace br::staticimport
 			std::unordered_map<std::uint32_t, std::pair<std::shared_ptr<Material>, std::uint32_t>> _materials;
 		};
 
+		// Registers each material object with the material manager once: the call posts a mutation to the material
+		// lane, and a merged root's palette repeats materials that thousands of other templates registered already.
+		void RegisterMaterialSourceOnce(br::render::StaticMaterialRequestService& materials, const std::shared_ptr<Material>& material)
+		{
+			if (!material) return;
+			auto& shard = _registeredMaterialSources[std::hash<const Material*>{}(material.get()) % _registeredMaterialSources.size()];
+			{
+				std::lock_guard lock(shard.mutex);
+				auto& known = shard.materials[material.get()];
+				// A weak reference: an address a freed material left behind is registered again.
+				if (known.lock() == material) return;
+				known = material;
+			}
+			materials.RegisterMaterialSource(material);
+		}
+
+		struct RegisteredMaterialShard {
+			std::mutex mutex;
+			std::unordered_map<const Material*, std::weak_ptr<Material>> materials;
+		};
+		std::array<RegisteredMaterialShard, 64> _registeredMaterialSources;
+
 		[[nodiscard]] br::render::ArtifactVersionHandle JoinStaticTemplateMaterialBatch(
 			br::render::RendererStateRequestService& requests,
-			br::render::StaticMaterialRequestService& materials,
-			const std::shared_ptr<Material>& material,
+			br::render::StaticMaterialRequestService& materialService,
+			std::span<const std::shared_ptr<Material>> materials,
 			bool refreshTextureBindings)
 		{
 			if (const auto open = _openMaterialBatch.load(std::memory_order_acquire);
-				open && open->refreshBindings == refreshTextureBindings && open->TryJoin(material)) {
+				open && open->refreshBindings == refreshTextureBindings && open->TryJoin(materials)) {
 				return open->handle;
 			}
 			auto batch = std::make_shared<StaticTemplateMaterialBatch>(refreshTextureBindings);
-			(void)batch->TryJoin(material);
+			(void)batch->TryJoin(materials);
 			auto batchInput = std::make_shared<br::render::MaterialUsageBatchBuildInput>();
-			batchInput->capture = [materialsService = std::addressof(materials), batch]() {
+			batchInput->capture = [materialsService = std::addressof(materialService), batch]() {
 				std::vector<br::render::MaterialUsageCapture> captures;
 				const auto& batchMaterials = batch->Close();
 				captures.reserve(batchMaterials.size());
@@ -1349,11 +1379,24 @@ namespace br::staticimport
 					_shared.sceneIngestionServices.meshes
 						->PrepareStaticMeshTemplateResourcesAsync(resources);
 				}
-				materials->RegisterMaterialSource(materialToAdmit);
+				// A hierarchy root's palette is part of the template: it publishes once every material is admitted. The
+				// template's material and its palette join one batch together, so a root asks for one admission rather
+				// than one per palette entry (126k entries at radius 100 were most of the template builds' time).
+				const auto& palette = meshToPrepare ? meshToPrepare->GetMaterialPalette()
+					: std::vector<std::shared_ptr<Material>>{};
+				std::vector<std::shared_ptr<Material>> admitted;
+				admitted.reserve((std::max)(palette.size(), std::size_t{ 1 }));
+				admitted.push_back(materialToAdmit);
+				for (std::size_t entry = 1; entry < palette.size(); ++entry) {
+					if (!palette[entry]) {
+						return br::render::ArtifactBuildResult::Failure("static template palette has an empty material");
+					}
+					admitted.push_back(palette[entry]);
+				}
+				for (const auto& material : admitted) RegisterMaterialSourceOnce(*materials, material);
 				const bool refreshTextureBindings = _shared.sceneIngestionServices.assetRequests &&
 					_shared.sceneIngestionServices.assetRequests->CanUploadTextures();
-				auto batch = JoinStaticTemplateMaterialBatch(
-					*graphRequests, *materials, materialToAdmit, refreshTextureBindings);
+				auto batch = JoinStaticTemplateMaterialBatch(*graphRequests, *materials, admitted, refreshTextureBindings);
 				if (!batch) {
 					return br::render::ArtifactBuildResult::Failure(
 						"static template material admission request was rejected");
@@ -1362,23 +1405,7 @@ namespace br::staticimport
 				checkpoint->batch = std::move(batch);
 				std::vector<br::render::ArtifactRequirement> requirements{
 					br::render::Exact(checkpoint->batch, br::render::ArtifactReadiness::CpuReady) };
-				// A hierarchy root's palette is part of the template: it publishes once every material is admitted.
-				const auto& palette = meshToPrepare ? meshToPrepare->GetMaterialPalette()
-					: std::vector<std::shared_ptr<Material>>{};
-				for (std::size_t entry = 1; entry < palette.size(); ++entry) {
-					if (!palette[entry]) {
-						return br::render::ArtifactBuildResult::Failure("static template palette has an empty material");
-					}
-					materials->RegisterMaterialSource(palette[entry]);
-					auto paletteBatch = JoinStaticTemplateMaterialBatch(
-						*graphRequests, *materials, palette[entry], refreshTextureBindings);
-					if (!paletteBatch) {
-						return br::render::ArtifactBuildResult::Failure(
-							"static template palette admission request was rejected");
-					}
-					requirements.push_back(br::render::Exact(paletteBatch, br::render::ArtifactReadiness::CpuReady));
-					checkpoint->paletteBatches.push_back(std::move(paletteBatch));
-				}
+				if (palette.size() > 1u) checkpoint->paletteBatches.assign(palette.size() - 1u, checkpoint->batch);
 				return br::render::ArtifactBuildResult::Needs(std::move(requirements),
 					br::render::ArtifactPayload::Make<StaticTemplateMaterialAdmission>(std::move(checkpoint)));
 			}

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <memory>
 #include <unordered_map>
 #include <optional>
@@ -44,6 +45,10 @@ public:
 	using Bc6hCompressorFn = std::function<bool(std::shared_ptr<TextureSourceData>, std::string,
 		std::function<void(std::shared_ptr<TextureSourceData>)>)>;
 	void SetBc6hCompressor(Bc6hCompressorFn fn) { m_bc6hCompressor = std::move(fn); }
+	// On the render thread, when a cubemap prefiltered this session is replaced by its BC6H cache. The frame graph registers
+	// the active environment's cubemaps when it is built and keeps the ones registered until it is rebuilt.
+	using PrefilteredCubemapReplacedFn = std::function<void(const Environment*)>;
+	void SetPrefilteredCubemapReplacedFn(PrefilteredCubemapReplacedFn fn) { m_prefilteredCubemapReplaced = std::move(fn); }
 
 	std::unique_ptr<Environment> CreateEnvironment(std::wstring name = L"");
 	void RemoveEnvironment(Environment* environment);
@@ -80,6 +85,7 @@ private:
 	// Reads a cached RGBA16F skybox and submits it to the GPU BC6H encoder, once (SubmitSkyboxCompression).
 	std::future<void> m_skyboxCompression;
 	Bc6hCompressorFn m_bc6hCompressor;
+	PrefilteredCubemapReplacedFn m_prefilteredCubemapReplaced;
 	unsigned int m_reflectionCubemapResolution = 512;
 
 	// Queue ownership belongs to the renderer-scoped service. The environment
@@ -98,7 +104,11 @@ private:
 	// Per environment, false once it is removed, guarded by *m_environmentUpdateMutex: a conversion submitted after that
 	// queues no SH or prefiltering for it.
 	std::unordered_map<const Environment*, std::shared_ptr<bool>> m_environmentAlive;
-	void ApplyEnvironmentSource(Environment* e, const std::shared_ptr<TextureAsset>& source, bool cachedCubemap);
+	// cachedPrefiltered: the environment's BC6H prefiltered cubemap, loaded with its cached cubemap; null prefilters it.
+	void ApplyEnvironmentSource(Environment* e, const std::shared_ptr<TextureAsset>& source, bool cachedCubemap,
+		const std::shared_ptr<TextureAsset>& cachedPrefiltered);
+	// Under *m_environmentUpdateMutex: loads the BC6H prefiltered cubemap cache just written and swaps it in once resident.
+	void LoadCompressedPrefilteredCubemap(Environment* e, const std::filesystem::path& path);
 
 	std::shared_ptr<org::ResourceGroup> m_workingEnvironmentCubemapGroup; // Temporary group for prefiltered cubemap generation
 	std::shared_ptr<org::ResourceGroup> m_workingHDRIGroup; // Temporary group for prefiltered cubemap generation

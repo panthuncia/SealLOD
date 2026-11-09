@@ -574,6 +574,10 @@ struct MaterialInfo {
     uint diagnosticReason;
     uint ommIdentity; // Opacity micromaps baked for this material (CLodOpacityMicromapCache.h), else 0.
     uint padOmm;
+    // KHR_texture_transform, zero = identity: materialUvTransform.hlsli.
+    float4 uvTransformLinearDelta;
+    float2 uvTransformOffset;
+    uint2 padUvTransform;
 };
 
 struct MaterialEvalInfo {
@@ -650,6 +654,10 @@ struct MaterialEvalInfo {
     uint glintEnabled;
     uint diagnosticReason;
     uint2 padGlint;
+    // KHR_texture_transform, zero = identity: materialUvTransform.hlsli.
+    float4 uvTransformLinearDelta;
+    float2 uvTransformOffset;
+    uint2 padUvTransform;
 };
 
 struct TerrainLayerInfo {

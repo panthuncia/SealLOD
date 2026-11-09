@@ -127,6 +127,9 @@ public:
     Renderer();
     ~Renderer();
 
+    // Starts Streamline's device-independent setup (about a second) in the background, for a later Initialize on
+    // this thread. Does nothing when BASICRENDERER_DISABLE_STREAMLINE is set.
+    static void PrewarmStreamline();
     void Initialize(HWND hwnd, UINT x_res, UINT y_res, br::pipeline::PipelineRecipe recipe);
     void OnResize(UINT newWidth, UINT newHeight);
     void Update(float elapsedSeconds);
@@ -145,6 +148,9 @@ public:
     void IngestExternalSnapshot(const br::render::SceneFrameSnapshot& snapshot);
     br::render::ObjectStorageStats GetObjectManagerStats() const;
     SamplingReadinessSnapshot GetSamplingReadinessSnapshot(bool includeExpensiveDiagnostics = true) const;
+    // Shader pipelines requested and not yet built: on-demand variants (material evaluation, CLod raster) and the graph's pass
+    // pipelines, queued ones included. A pass or material whose pipeline is pending draws nothing yet.
+    uint32_t GetPendingShaderCompileCount() const;
     void SetDeterministicSamplingMode(bool enabled);
     bool GetDeterministicSamplingMode() const { return m_deterministicSamplingMode; }
     br::render::SceneIngestionServices& GetSceneIngestionServices() { return m_sceneIngestionServices; }
@@ -163,8 +169,30 @@ public:
         std::shared_ptr<const std::vector<std::byte>> drawRecords;
         std::shared_ptr<const std::vector<std::byte>> clodOffsets;
         std::shared_ptr<const std::vector<std::byte>> meshMetadata;
+        // Filled when available; a pick (Diagnostics/CLodPixelPick.h) uses them to reach a pixel's mesh and material.
+        std::shared_ptr<const std::vector<std::byte>> perMeshes;      // PerMeshCB rows
+        std::shared_ptr<const std::vector<std::byte>> meshTemplates;  // PerMeshInstanceCB rows
+        std::shared_ptr<const std::vector<std::byte>> groups;         // ClusterLODGroup rows (GPU copy: partIndex)
+        std::shared_ptr<const std::vector<std::byte>> materialPalettes;     // CLodMaterialPaletteEntry rows
+        std::shared_ptr<const std::vector<std::byte>> assemblyMaterialBases; // uint per assembly transform
+        std::vector<std::byte> visibleClusterSideBand;  // uint2 per visible cluster: assembly transform, palette index
+        std::vector<std::byte> reyesDiceQueue;          // CLodReyesDiceQueueEntry rows, for patch keys
+        std::uint32_t reyesPatchIndexBase = 0xFFFFFFFFu; // key clusters at or above this are dice-queue entries
+        std::vector<std::byte> surfaceRecords;          // SARPSurfaceRecordV1 per pixel (32 bytes, row-major)
+        std::vector<std::string> missingReadbacks;      // optional readbacks that had not arrived when it was handed over
+        bool pathTraced = false;  // read after PathTracePass: surface records only, no visibility or clusters
     };
-    bool RequestCLodInspectionFrame(std::function<void(CLodInspectionFrame&&)> done);
+    // A pending inspection. A readback of a resource its anchor pass does not touch never arrives, so a caller that can
+    // live without the optional ones hands over what has arrived.
+    class CLodInspectionRequest {
+    public:
+        virtual ~CLodInspectionRequest() = default;
+        // Delivers the frame now when the visibility and clusters arrived. False when they have not, or it already went.
+        virtual bool FinishWithAvailable() = 0;
+        virtual std::string Missing() const = 0;
+    };
+    std::shared_ptr<CLodInspectionRequest> StartCLodInspectionFrame(std::function<void(CLodInspectionFrame&&)> done);
+    bool RequestCLodInspectionFrame(std::function<void(CLodInspectionFrame&&)> done) { return StartCLodInspectionFrame(std::move(done)) != nullptr; }
     const org::RenderGraph* GetRenderGraph() const { return currentRenderGraph; }
     bool RequestPipelineReplacement(br::pipeline::PipelineRecipe recipe);
     void StartAsyncStateGraphTrace(br::render::AsyncStateGraphTraceConfig config = {});

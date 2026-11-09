@@ -5,6 +5,7 @@
 // dependencies - only standard library, DirectXMath, meshoptimizer, and the
 // CLod shader types header.
 
+#include <cstddef>
 #include <cstdint>
 #include <algorithm>
 #include <cstdlib>
@@ -219,6 +220,32 @@ struct ClusterLODPartRecord
 
 static constexpr uint32_t CLOD_PART_RECORD_FLAG_ROOT = 1u << 0;
 
+// Reserved: a part that has external parts of its own, opened through a GPU-composed nested portal. Merging flattens
+// such parts instead (docs/merge_hierarchies.md), so registration rejects the flag for now.
+static constexpr uint32_t CLOD_EXTERNAL_PART_FLAG_NESTED = 1u << 0;
+
+// A part another CLod mesh holds, which this mesh's part portals open (CLOD_ASSEMBLY_INSTANCE_FLAG_PART_PORTAL, whose
+// stackDepth is the part's index in ClusterLODPrebuiltData::externalParts). Parts are shared between the meshes that
+// open them, so they stay in their own caches. The host address is what the static asset source resolves (asset key,
+// material variant, part and mesh of the asset); the cache identity is what the portal's node numbering was built
+// against, so a rebuilt part that no longer matches is caught.
+struct ClusterLODExternalPart
+{
+	std::string sourceIdentifier;
+	std::string primPath;
+	std::string subsetName;
+	uint64_t buildConfigHash = 0;
+	std::string assetKey;
+	uint64_t variantHash = 0;
+	std::vector<std::byte> variant; // the host's encoding of the material variant; empty for the asset's own materials
+	uint32_t partIndex = 0;
+	uint32_t meshIndex = 0;
+	uint32_t nodeCount = 0;
+	uint32_t flags = 0;
+
+	bool operator==(const ClusterLODExternalPart&) const = default;
+};
+
 struct ClusterLODPrebuiltData
 {
 	std::vector<ClusterLODGroup> groups;
@@ -254,6 +281,10 @@ struct ClusterLODPrebuiltData
 	// base of the portal that reached the part, which is per assembly transform.
 	uint32_t materialSlotCount = 1;
 	std::vector<uint32_t> assemblyTransformMaterialBases;
+	// A merged mesh's references (docs/merge_hierarchies.md): the parts its portals open, and for each palette slot the
+	// external part whose material it takes. Empty for every other mesh.
+	std::vector<ClusterLODExternalPart> externalParts;
+	std::vector<uint32_t> paletteParts;
 };
 
 struct ClusterLODCacheBuildPayload

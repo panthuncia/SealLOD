@@ -14,7 +14,8 @@ namespace USDMaterialCache {
 // Version 6 invalidates manifests that can replay pre-skinning-aware CLod
 // assembly identities. The manifest fast path bypasses USD extraction, so its
 // version must advance whenever the assembly payload ABI advances.
-inline constexpr std::uint32_t kManifestVersion = 6;
+// Version 7 adds MaterialDescription::uvTransform to the serialized material.
+inline constexpr std::uint32_t kManifestVersion = 7;
 
 struct AssemblyMaterialEntry {
 	CLodCacheLoader::MeshCacheIdentity identity;

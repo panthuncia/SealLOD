@@ -131,13 +131,13 @@ read loose `.clodmeta` files. Entries that exist only in a `world.sarppack` are 
 
 ## Merge-hierarchy roots
 
-A root (SARP's `docs/merge_hierarchies.md`) is a CLod cache whose assembly instances are part portals. The cache knows
-its parts only by ordinal, so whoever builds a root also writes `<root>.clodparts` beside its `.clodmeta`
-(`CLodPortalParts.h`): each part's cache key and its metadata path relative to the cache tree, and the palette's
-parts. Tools need nothing else. The renderer never reads the file.
+A root (SARP's `docs/merge_hierarchies.md`) is a merged mesh: a CLod cache in `clod/merged/` whose assembly instances
+are part portals, and whose metadata names the parts (`ClusterLODPrebuiltData::externalParts`: each part's cache key,
+build hash and host address, and the palette's parts; `ClusterLODMergedMesh.h`). Tools find a part's metadata in the
+same cache tree with `CLodCache::RelativeMetadataPath`, so they need nothing else.
 
 `Core/MergeHierarchy.h` reads the tree back from the cache: nodes (a geometry group refining into a page-less
-children group), portals (proxy groups) and, from the parts file, the parts. `merge-report`, the `hierarchy.merge`
+children group), portals (proxy groups) and, from the root's part table, the parts. `merge-report`, the `hierarchy.merge`
 analyzer and the viewer all use it.
 
 | `merge-report` section | Says |

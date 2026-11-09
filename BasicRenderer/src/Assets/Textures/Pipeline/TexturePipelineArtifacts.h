@@ -67,6 +67,8 @@ struct PublishedTextureProcessed {
     org::TextureDescription fullDesc;  // every mip
     std::wstring cachePath;            // a hit's cache file
     std::shared_ptr<TextureProcessedResult> result;  // a miss's result
+    // A provided texture its processing leaves as it is: residency reads its mip windows from the provider.
+    std::shared_ptr<br::textures::ITextureMipProvider> provider;
 };
 
 struct TextureCacheWriteInput {

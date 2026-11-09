@@ -7,6 +7,9 @@
 #include <BasicRenderer/Streaming/TaskScheduler.h>
 #include "Runtime/Device/DeletionManager.h"
 #include "Runtime/Device/DescriptorHeapManager.h"
+#include "Pipeline/PipelineState/PSOManager.h"
+#include "OpenRenderGraph/Runtime.h"
+#include "Render/PipelineLibrary.h"
 
 #include <BasicTelemetry/Tracy.h>
 #include <d3d12.h>
@@ -14,6 +17,12 @@
 #include "Diagnostics/Telemetry/FrameTaskGraphTelemetry.h"
 #include <sstream>
 #include <utility>
+
+uint32_t Renderer::GetPendingShaderCompileCount() const {
+    uint32_t pending = PSOManager::GetInstance().PendingAsyncPipelineCount();
+    if (m_orgRuntime && m_orgRuntime->Pipelines()) pending += m_orgRuntime->Pipelines()->BuildsPending();
+    return pending;
+}
 
 br::render::ObjectStorageStats Renderer::GetObjectManagerStats() const {
     return m_pObjectManager ? m_pObjectManager->GetStats() : br::render::ObjectStorageStats{};

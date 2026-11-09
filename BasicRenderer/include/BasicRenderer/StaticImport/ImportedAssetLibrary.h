@@ -63,6 +63,8 @@ namespace br::staticimport
 			DirectX::XMFLOAT4X4 localMatrix{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
 			bool skinned{ false };
 			std::string name;
+			// Instance placements within the file, each including localMatrix; empty: placed once at localMatrix.
+			std::vector<DirectX::XMFLOAT4X4> instanceMatrices;
 		};
 
 		explicit ImportedAssetLibrary(br::import::ImportSettings settings = {});

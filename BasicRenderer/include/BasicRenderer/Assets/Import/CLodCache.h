@@ -95,8 +95,34 @@ uint64_t ComputeBuildConfigHash(std::string_view assetIdentifier = {});
 CacheLookup BuildCacheLookup(const CacheKey& key, uint64_t buildConfigHash);
 std::wstring BuildCacheFileName(const CacheKey& key, uint64_t buildConfigHash);
 std::wstring GetCacheFilePathForSource(const std::wstring& fileName, const std::string& sourceIdentifier);
+// Where an entry's metadata is within a cache tree (relative to the cache root, as "clod\..."), for tools that open a
+// tree other than this process's cache root.
+std::filesystem::path RelativeMetadataPath(const CacheKey& key, uint64_t buildConfigHash);
 
 std::optional<CacheData> TryLoad(const CacheKey& key, uint64_t expectedBuildConfigHash);
+
+// Merged meshes (docs/merge_hierarchies.md): CLod meshes whose part portals open parts other meshes hold, named by a
+// host asset key and kept together in cache/clod/merged. Their metadata carries the parts (externalParts) and palette.
+inline constexpr std::string_view kMergedMeshPrimPath = "/MergedMesh";
+CacheKey MergedMeshCacheKey(std::string_view assetKey);
+uint64_t MergedMeshBuildConfigHash(std::string_view assetKey);
+std::optional<CacheData> TryLoadMergedMesh(std::string_view assetKey);
+// Replaces whatever an earlier build saved under the key.
+bool SaveMergedMesh(std::string_view assetKey, const ClusterLODPrebuiltData& prebuiltData, const ClusterLODCacheBuildPayload& payload);
+// Deletes the merged mesh's files, and stops the cache pack serving them.
+void RemoveMergedMesh(std::string_view assetKey);
+// The asset keys of the merged meshes on disk (loose or in the pack) whose keys start with the prefix, sorted.
+std::vector<std::string> ListMergedMeshes(std::string_view assetKeyPrefix);
+// Whether a .clodmeta file is what TryLoad would read for its own key today: the current schema, and the build config
+// hash ComputeBuildConfigHash gives its source now (which its file name also encodes). False for older builds left
+// behind by a schema or settings change, and for anything unreadable. Reads the pack, when this process reads it, or
+// the loose file.
+bool IsCurrentMetadataFile(const std::filesystem::path& metadataPath);
+// The same for a metadata file's bytes held elsewhere (the cache pack), named fileName.
+bool IsCurrentMetadata(std::span<const std::byte> fileBytes, const std::wstring& fileName);
+// Changes whenever IsCurrentMetadataFile could judge any file differently: the schema, the build settings and the asset
+// settings document. A caller may keep verdicts for unchanged files under it.
+uint64_t CurrentSettingsFingerprint();
 bool Save(const CacheKey& key, const CacheData& data);
 bool Save(const CacheKey& key, uint64_t buildConfigHash, const ClusterLODPrebuiltData& prebuiltData, const ClusterLODCacheBuildPayload& payload);
 bool Save(const CacheKey& key, uint64_t buildConfigHash, const ClusterLODPrebuiltData& prebuiltData, const ClusterLODCacheBuildPayload& payload, ClusterLODPrebuiltData* outSavedPrebuiltData);
@@ -158,6 +184,9 @@ bool LoadMeshPagesSelectiveDirectStorage(
 
 // Open a container file and validate its header.  Returns true on success.
 // The caller keeps the ifstream around for repeated mesh-page interval loads.
+// The container's page count from its header, read from the cache pack when it holds the container. OpenContainerFile
+// reads only the loose file: once the pack build deletes loose files, use this or the mapped readers instead.
+bool ReadContainerPageCount(const ClusterLODCacheSource& cacheSource, uint32_t& outPageCount);
 bool OpenContainerFile(const ClusterLODCacheSource& cacheSource,
 	std::ifstream& outFile,
 	uint32_t& outPageCount);

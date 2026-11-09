@@ -250,6 +250,8 @@ void BuildClodMaterialUvData(
         bindings.heightCacheIndex = bindings.cacheIndexBySlot[MATERIAL_TEXTURE_SLOT_HEIGHT];
         bindings.hasHeightSource = bindings.heightCacheIndex != MATERIAL_INVALID_UV_CACHE_INDEX;
     }
+
+    ApplyMaterialUvTransformToCache(cache, materialInfo);
 }
 
 void BuildClodMaterialUvData(
@@ -507,6 +509,8 @@ void BuildClodMaterialUvData(
         bindings.heightCacheIndex = bindings.cacheIndexBySlot[MATERIAL_TEXTURE_SLOT_HEIGHT];
         bindings.hasHeightSource = bindings.heightCacheIndex != MATERIAL_INVALID_UV_CACHE_INDEX;
     }
+
+    ApplyMaterialUvTransformToCache(cache, materialInfo);
 }
 
 #endif // CLOD_MATERIAL_UVS_HLSLI

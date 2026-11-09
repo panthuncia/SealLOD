@@ -142,13 +142,16 @@ bool CLodRtTriangleIsTransparentAt(CLodRtClasInfo info, uint drawRecord, uint tr
 
     StructuredBuffer<MaterialInfo> materials = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
     const MaterialInfo material = materials[cluster.materialDataIndex];
+    // The material's KHR_texture_transform. Such a material has no micromaps (Material::SetUvTransform).
+    const float2 materialUv = TransformMaterialUv(material, uv);
+    const float materialFootprintUv = footprintUv * MaterialUvTransformFootprintScale(material.uvTransformLinearDelta);
     float alpha = material.baseColorFactor.a;
     if ((material.materialFlags & MATERIAL_BASE_COLOR_TEXTURE) != 0u) {
-        alpha *= CLodRtSampleAlpha(material.baseColorTextureIndex, material.baseColorSamplerIndex, material.baseColorStreamingTextureID, uv, footprintUv,
+        alpha *= CLodRtSampleAlpha(material.baseColorTextureIndex, material.baseColorSamplerIndex, material.baseColorStreamingTextureID, materialUv, materialFootprintUv,
             CLodRtClasHasMicromaps(info));
     }
     if ((material.materialFlags & MATERIAL_OPACITY_TEXTURE) != 0u) {
-        alpha *= CLodRtSampleAlpha(material.opacityTextureIndex, material.opacitySamplerIndex, material.opacityStreamingTextureID, uv, footprintUv,
+        alpha *= CLodRtSampleAlpha(material.opacityTextureIndex, material.opacitySamplerIndex, material.opacityStreamingTextureID, materialUv, materialFootprintUv,
             CLodRtClasHasMicromaps(info));
     }
     return !CLodRtAlphaIsOpaque(alpha, material.alphaCutoff);

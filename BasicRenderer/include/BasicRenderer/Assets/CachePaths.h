@@ -9,6 +9,9 @@
 std::string ws2s(const std::wstring_view& wstr);
 std::wstring s2ws(const std::string_view& str);
 std::filesystem::path GetCacheRootPath();
+// Chooses the process's cache root, which is otherwise SARP_CACHE_ROOT or <exe>/cache. The root is resolved once, on
+// first use: before that this always succeeds; after, it succeeds only if root is the root already in use.
+bool SetCacheRootPath(const std::filesystem::path& root);
 // Construct a cache path without touching the filesystem. Use this for reads
 // where the cache directory must already exist.
 std::wstring BuildCacheFilePath(const std::wstring& fileName, const std::wstring& directory);

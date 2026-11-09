@@ -1151,6 +1151,8 @@ void CLodStreamingSystem::ResetStreamingStateForShutdown() {
     std::fill(m_pendingStreamingRequestHeapIndexByGroup.begin(), m_pendingStreamingRequestHeapIndexByGroup.end(), UINT32_MAX);
     std::fill(m_pendingStreamingRequestGenerationByGroup.begin(), m_pendingStreamingRequestGenerationByGroup.end(), 0u);
     std::fill(m_streamingDiagnosticsByGroup.begin(), m_streamingDiagnosticsByGroup.end(), StreamingDiagnosticsRecord{});
+    m_activeStreamingDiagnosticGroups.clear();
+    std::fill(m_activeStreamingDiagnosticListed.begin(), m_activeStreamingDiagnosticListed.end(), 0u);
     m_streamingDiagnosticsDecodedRequestsThisFrame = 0u;
     m_streamingDiagnosticsQueuedLoadRequestsThisFrame = 0u;
     m_streamingDiagnosticsDuplicateRequestsThisFrame = 0u;
@@ -2537,11 +2539,15 @@ void CLodStreamingSystem::AccumulateStreamingDiagnostics(CLodStreamingOperationS
     stats.commitToResidentWorstTicks = m_streamingDiagnosticsCommitToResidentWorstThisFrame;
 
     uint32_t diskIoCount = 0u;
-    for (uint32_t groupIndex = 0; groupIndex < static_cast<uint32_t>(m_streamingDiagnosticsByGroup.size()); ++groupIndex) {
-        const auto& diag = m_streamingDiagnosticsByGroup[groupIndex];
-        if (!diag.active) {
+    // Only groups activated since their last reset can be active; drop the ones that no longer are.
+    size_t keptActive = 0u;
+    for (const uint32_t groupIndex : m_activeStreamingDiagnosticGroups) {
+        if (groupIndex >= m_streamingDiagnosticsByGroup.size() || !m_streamingDiagnosticsByGroup[groupIndex].active) {
+            if (groupIndex < m_activeStreamingDiagnosticListed.size()) m_activeStreamingDiagnosticListed[groupIndex] = 0u;
             continue;
         }
+        m_activeStreamingDiagnosticGroups[keptActive++] = groupIndex;
+        const auto& diag = m_streamingDiagnosticsByGroup[groupIndex];
         if (diag.cpuQueuedTick != 0u && diag.diskQueuedTick == 0u) {
             const uint32_t age = static_cast<uint32_t>(
                 std::min<uint64_t>(m_streamingDiagnosticTick - diag.cpuQueuedTick, UINT32_MAX));
@@ -2568,6 +2574,7 @@ void CLodStreamingSystem::AccumulateStreamingDiagnostics(CLodStreamingOperationS
             }
         }
     }
+    m_activeStreamingDiagnosticGroups.resize(keptActive);
     stats.pendingCpuRequests = m_pendingStreamingRequestCount;
     stats.pendingCpuHeapRequests = static_cast<uint32_t>(m_pendingStreamingRequests.size());
     stats.waitingForPagesRequests = m_waitingForPagesRequestCount;
@@ -3276,9 +3283,17 @@ void CLodStreamingSystem::ProcessStreamingRequestsBudgeted() {
         }
         m_streamingCpuUploadBudgetRequests = std::max(m_streamingCpuUploadBudgetRequests, 1u);
     }
-    // Preserve the configured admission ceiling while consuming a CPU backlog
-    // in small continuations that do not monopolize a OneTBB worker.
-    const uint32_t budget = std::min<uint32_t>(m_streamingCpuUploadBudgetRequests, 32u);
+    // The configured admission ceiling (clodStreamingCpuUploadBudgetRequests, 500 by
+    // default) is also the per-pass budget. Each pass carries fixed bookkeeping (page
+    // protection, maintenance, stats), so a smaller cap bounds throughput: the former
+    // 32 held a radius-100 load at about 3.3k groups/s, against about 10k at 500.
+    // BASICRENDERER_CLOD_STREAMING_PASS_REQUESTS caps it further.
+    static const uint32_t passRequestCap = [] {
+        const char* text = std::getenv("BASICRENDERER_CLOD_STREAMING_PASS_REQUESTS");
+        const unsigned long value = text != nullptr && text[0] != '\0' ? std::strtoul(text, nullptr, 10) : 0ul;
+        return value != 0ul ? static_cast<uint32_t>(std::min<unsigned long>(value, 4096ul)) : 4096u;
+    }();
+    const uint32_t budget = std::min<uint32_t>(m_streamingCpuUploadBudgetRequests, passRequestCap);
     {
         ZoneScopedN("CLodStreamingSystem::ProcessStreamingRequestsBudgeted::ConfigureEvictionBudget");
         m_pagePopEvictionsThisUpdate = 0u;

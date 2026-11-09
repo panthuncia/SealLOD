@@ -2550,8 +2550,8 @@ void CLodRequestGroupLoad(
 bool CLodRtGroupUsable(ClusterLODGroup group)
 {
     uint slab = 0u;
-    uint offset = 0u;
-    return CLodRtGroupBuildable(group, CLodRtGroupClusterCount(group), slab, offset);
+    uint signature = 0u;
+    return CLodRtGroupBuildable(group, CLodRtGroupClusterCount(group), slab, signature);
 }
 #endif
 

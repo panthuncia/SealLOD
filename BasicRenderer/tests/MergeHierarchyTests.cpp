@@ -7,13 +7,17 @@
 // - with voxel items (forked parts), each branch on its own holds all of the above, and voxel-branch nodes voxelize them.
 
 #include <BasicRenderer/Assets/Import/ClusterLODMergeHierarchy.h>
+#include <BasicRenderer/Assets/Import/CLodCache.h>
 #include <BasicRenderer/Assets/ClusterLODShaderTypes.h>
 
 #include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <string>
 #include <limits>
 #include <vector>
 
@@ -275,11 +279,322 @@ void TestHierarchy(const Case& test)
 	}
 	CHECK(slotsSeen == 0x5u); // part 0's slot 0 (base 0) and part 1's slot 1 (base 1) reach the merged geometry
 }
+
+// A merged mesh's references survive its cache: the external parts and palette are in its metadata, it can be listed
+// by key prefix, and removing it removes it. The builder rejects a palette that does not match the clusters' slots.
+void TestMergedMeshCache()
+{
+	std::fprintf(stdout, "case merged mesh cache\n");
+	std::vector<ClusterLODMergeGeometry> geometries{ MakeBlob(4, 0.02f, 0), MakeBlob(3, 0.03f, 1) };
+	std::vector<ClusterLODMergeItem> items;
+	for (int i = 0; i < 6; ++i) {
+		ClusterLODMergeItem item;
+		item.geometry = static_cast<uint32_t>(i & 1);
+		item.part = item.geometry;
+		item.partNode = 0;
+		DirectX::XMStoreFloat4x4(&item.partToHierarchy, DirectX::XMMatrixTranslation(i * 3.0f, 0.0f, 0.0f));
+		item.partLodSphere = { 0, 0, 0, 1.0f };
+		item.materialBase = item.geometry;
+		items.push_back(item);
+	}
+	ClusterLODMergeSettings settings;
+	settings.fanout = 4;
+	settings.nodeTriangleBudget = 128;
+	settings.materialSlotCount = 3;
+	for (uint32_t p = 0; p < 2; ++p) {
+		ClusterLODExternalPart part;
+		part.sourceIdentifier = "part_source_" + std::to_string(p);
+		part.primPath = "/mesh";
+		part.buildConfigHash = 0x1234u + p;
+		part.assetKey = "meshes/part" + std::to_string(p) + ".nif";
+		part.variantHash = p == 1u ? 0xABCDu : 0u;
+		if (p == 1u) part.variant = { std::byte{ 1 }, std::byte{ 2 }, std::byte{ 3 } };
+		part.partIndex = p;
+		part.meshIndex = 2u * p;
+		part.nodeCount = 9u + p;
+		settings.externalParts.push_back(part);
+	}
+	settings.paletteParts = { 0u, 1u, 1u };
+
+	ClusterLODMergeSettings badPalette = settings;
+	badPalette.paletteParts = { 0u, 1u };
+	bool threw = false;
+	try {
+		(void)BuildClusterLODMergeHierarchy(geometries, items, badPalette);
+	} catch (const std::exception&) {
+		threw = true;
+	}
+	CHECK(threw);
+
+	const ClusterLODPrebuildArtifacts built = BuildClusterLODMergeHierarchy(geometries, items, settings);
+	CHECK(built.prebuiltData.externalParts == settings.externalParts);
+	const std::string key = "test-merged:world_r00001";
+	CHECK(CLodCache::SaveMergedMesh(key, built.prebuiltData, built.cacheBuildData.AsPayload()));
+	CHECK(CLodCache::SaveMergedMesh(key, built.prebuiltData, built.cacheBuildData.AsPayload())); // replaces
+	const auto loaded = CLodCache::TryLoadMergedMesh(key);
+	CHECK(loaded.has_value());
+	if (loaded) {
+		CHECK(loaded->prebuiltData.externalParts == settings.externalParts);
+		CHECK(loaded->prebuiltData.paletteParts == settings.paletteParts);
+		CHECK(loaded->prebuiltData.materialSlotCount == 3u);
+		CHECK(loaded->prebuiltData.assemblyInstances.size() == built.prebuiltData.assemblyInstances.size());
+	}
+	const auto listed = CLodCache::ListMergedMeshes("test-merged:");
+	CHECK(listed.size() == 1u && listed.front() == key);
+	CHECK(CLodCache::ListMergedMeshes("other-prefix:").empty());
+	CLodCache::RemoveMergedMesh(key);
+	CHECK(!CLodCache::TryLoadMergedMesh(key).has_value());
+	CHECK(CLodCache::ListMergedMeshes("test-merged:").empty());
+}
+
+ClusterLODExternalPart TestPart(uint32_t p)
+{
+	ClusterLODExternalPart part;
+	part.sourceIdentifier = "part_source_" + std::to_string(p);
+	part.primPath = "/mesh";
+	part.buildConfigHash = 0x1234u + p;
+	part.assetKey = "meshes/part" + std::to_string(p) + ".nif";
+	part.partIndex = p;
+	part.nodeCount = 9u + p;
+	return part;
+}
+
+// A capped, forked field of the two test parts, as a merged mesh: it has top portals and voxel-branch groups.
+ClusterLODPrebuildArtifacts BuildFieldMesh(const std::vector<ClusterLODMergeGeometry>& geometries, float offset)
+{
+	std::vector<ClusterLODMergeItem> items;
+	for (int z = 0; z < 5; ++z) {
+		for (int x = 0; x < 5; ++x) {
+			ClusterLODMergeItem item;
+			item.geometry = static_cast<uint32_t>((x + z) & 1);
+			item.part = item.geometry;
+			item.partNode = 7;
+			item.partTraversalDepth = 3;
+			const float scale = 1.0f + 0.5f * ((x * 7 + z * 3) % 4);
+			DirectX::XMStoreFloat4x4(&item.partToHierarchy,
+				DirectX::XMMatrixScaling(scale, scale, scale) * DirectX::XMMatrixTranslation(offset + x * 6.0f, 0.0f, z * 6.0f));
+			item.partLodSphere = { 0, 0, 0, 1.0f };
+			item.materialBase = item.geometry;
+			if (item.geometry == 1u) {
+				item.voxelGeometry = 1u;
+				item.voxelError = 0.045f;
+			}
+			items.push_back(item);
+		}
+	}
+	ClusterLODMergeSettings settings;
+	settings.fanout = 4;
+	settings.nodeTriangleBudget = 256;
+	settings.materialSlotCount = 3;
+	settings.maxNodeError = 1.0f;
+	settings.externalParts = { TestPart(0), TestPart(1) };
+	settings.paletteParts = { 0u, 1u, 1u };
+	return BuildClusterLODMergeHierarchy(geometries, items, settings);
+}
+
+bool Near(const DirectX::XMFLOAT4& a, const DirectX::XMFLOAT4& b)
+{
+	return std::abs(a.x - b.x) < 1e-4f && std::abs(a.y - b.y) < 1e-4f && std::abs(a.z - b.z) < 1e-4f && std::abs(a.w - b.w) < 1e-3f;
+}
+
+// Every group a page's clusters refine into is one of the mesh's.
+void CheckPagesRefineInside(const ClusterLODPrebuildArtifacts& built)
+{
+	const auto groupCount = static_cast<int32_t>(built.prebuiltData.groups.size());
+	for (const auto& blob : built.cacheBuildData.meshPageBlobs) {
+		uint32_t magic = 0;
+		std::memcpy(&magic, blob.data(), sizeof(magic));
+		if (magic == CLOD_TRIANGLE_PAGE_MAGIC) {
+			CLodPageHeader header{};
+			std::memcpy(&header, blob.data(), sizeof(header));
+			for (uint32_t m = 0; m < header.meshletCount; ++m) {
+				CLodMeshletDescriptor desc{};
+				std::memcpy(&desc, blob.data() + header.descriptorOffset + m * sizeof(desc), sizeof(desc));
+				CHECK(static_cast<int32_t>(desc.triangleCountAndRefinedGroup >> 16u) - 1 < groupCount);
+			}
+		} else if (magic == CLOD_VOXEL_PAGE_MAGIC) {
+			CLodVoxelPageHeader header{};
+			std::memcpy(&header, blob.data(), sizeof(header));
+			for (uint32_t c = 0; c < header.clusterCount; ++c) {
+				CLodVoxelClusterRecord record{};
+				std::memcpy(&record, blob.data() + header.descriptorOffset + c * header.clusterRecordStride, sizeof(record));
+				CHECK(record.refinedGroup < groupCount);
+			}
+		}
+	}
+}
+
+// Nesting: merged meshes embedded in a bigger one keep their groups (both branches), and their portals open the leaf
+// parts, renamed into the root's table, under transforms composed with the item's and material bases past the
+// palette block their palette landed in. A root that embeds them can itself be embedded.
+void TestEmbedding()
+{
+	std::fprintf(stdout, "case embedding\n");
+	std::vector<ClusterLODMergeGeometry> partGeometries{ MakeBlob(8, 0.02f, 0), MakeBlob(6, 0.03f, 1) };
+	const ClusterLODPrebuildArtifacts m1 = BuildFieldMesh(partGeometries, 0.0f);
+	const ClusterLODPrebuildArtifacts m2 = BuildFieldMesh(partGeometries, 40.0f);
+	std::vector<ClusterLODMergeEmbeddedMesh> embedded(2);
+	embedded[0] = { m1.prebuiltData, m1.cacheBuildData.meshPageBlobs };
+	embedded[1] = { m2.prebuiltData, m2.cacheBuildData.meshPageBlobs };
+	const auto voxelGroups = [](const ClusterLODPrebuiltData& d) {
+		return std::count_if(d.groups.begin(), d.groups.end(), [](const ClusterLODGroup& g) { return (g.flags & CLOD_GROUP_FLAG_BRANCH_VOXEL) != 0u; });
+	};
+	CHECK(voxelGroups(m1.prebuiltData) != 0);
+
+	// The embedded meshes' coarsest stand-ins (a merge only needs triangles in their space, and their error), and a leaf.
+	std::vector<ClusterLODMergeGeometry> geometries{ MakeBlob(6, 1.5f, 1), MakeBlob(8, 0.02f, 0) };
+	DirectX::XMMATRIX placement[3] = {
+		DirectX::XMMatrixTranslation(0.0f, 0.0f, 0.0f),
+		DirectX::XMMatrixScaling(2.0f, 2.0f, 2.0f) * DirectX::XMMatrixRotationY(0.5f) * DirectX::XMMatrixTranslation(100.0f, 0.0f, 10.0f),
+		DirectX::XMMatrixTranslation(60.0f, 0.0f, -20.0f) };
+	std::vector<ClusterLODMergeItem> items(3);
+	for (uint32_t i = 0; i < 3; ++i) {
+		ClusterLODMergeItem& item = items[i];
+		DirectX::XMStoreFloat4x4(&item.partToHierarchy, placement[i]);
+		item.partLodSphere = { 0, 0, 0, 1.0f };
+		if (i < 2) {
+			item.geometry = 0;
+			item.embeddedMesh = i;
+			item.partTraversalDepth = (i == 0 ? m1 : m2).prebuiltData.maxTraversalDepth;
+		} else {
+			item.geometry = 1;
+			item.part = 0;
+			item.partNode = 7;
+			item.materialBase = 0;
+		}
+	}
+	ClusterLODMergeSettings settings;
+	settings.fanout = 4;
+	settings.nodeTriangleBudget = 256;
+	settings.materialSlotCount = 1;
+	settings.externalParts = { TestPart(0) };
+	settings.paletteParts = { 0u };
+	settings.embeddedMeshes = embedded;
+	ClusterLODMergeStats stats{};
+	const ClusterLODPrebuildArtifacts built = BuildClusterLODMergeHierarchy(geometries, items, settings, &stats);
+	const ClusterLODPrebuiltData& data = built.prebuiltData;
+	std::fprintf(stdout, "  embedded items=%u groups=%u, root groups=%zu nodes=%zu instances=%zu parts=%zu slots=%u\n", stats.embeddedItems,
+		stats.embeddedGroups, data.groups.size(), data.nodes.size(), data.assemblyInstances.size(), data.externalParts.size(), data.materialSlotCount);
+
+	CHECK(stats.embeddedItems == 2u);
+	CHECK(stats.embeddedGroups == m1.prebuiltData.groups.size() + m2.prebuiltData.groups.size());
+	// Part 0 is shared by the leaf and both embedded meshes: one row each.
+	CHECK(data.externalParts.size() == 2u && data.externalParts[0] == TestPart(0) && data.externalParts[1] == TestPart(1));
+	// The leaf's palette, then each embedded mesh's, whole.
+	CHECK(data.materialSlotCount == 7u);
+	CHECK((data.paletteParts == std::vector<uint32_t>{ 0u, 0u, 1u, 1u, 0u, 1u, 1u }));
+	CHECK(voxelGroups(data) == voxelGroups(m1.prebuiltData) + voxelGroups(m2.prebuiltData));
+
+	// Transforms: the root's own (one per proxy), then each copy's, composed with its item's.
+	const size_t copied = m1.prebuiltData.assemblyTransforms.size() + m2.prebuiltData.assemblyTransforms.size();
+	CHECK(data.assemblyTransforms.size() > copied);
+	const size_t own = data.assemblyTransforms.size() - copied;
+	for (uint32_t k = 0; k < 2; ++k) {
+		const ClusterLODPrebuiltData& source = (k == 0 ? m1 : m2).prebuiltData;
+		const size_t base = own + (k == 0 ? 0u : m1.prebuiltData.assemblyTransforms.size());
+		const uint32_t paletteBase = k == 0 ? 1u : 4u;
+		for (size_t t = 0; t < source.assemblyTransforms.size(); ++t) {
+			// Row-vector: part -> embedded mesh -> root.
+			const ClusterLODAssemblyTransform& s = source.assemblyTransforms[t];
+			const DirectX::XMMATRIX sm = DirectX::XMMatrixSet(s.row0.x, s.row1.x, s.row2.x, 0, s.row0.y, s.row1.y, s.row2.y, 0,
+				s.row0.z, s.row1.z, s.row2.z, 0, s.row0.w, s.row1.w, s.row2.w, 1);
+			DirectX::XMFLOAT4X4 expected;
+			DirectX::XMStoreFloat4x4(&expected, sm * placement[k]);
+			const ClusterLODAssemblyTransform& c = data.assemblyTransforms[base + t];
+			CHECK(Near(c.row0, { expected._11, expected._21, expected._31, expected._41 }));
+			CHECK(Near(c.row1, { expected._12, expected._22, expected._32, expected._42 }));
+			CHECK(Near(c.row2, { expected._13, expected._23, expected._33, expected._43 }));
+			CHECK(data.assemblyTransformMaterialBases[base + t] == paletteBase + source.assemblyTransformMaterialBases[t]);
+		}
+	}
+
+	// Instances: portals open leaf parts; the two into the copies target their roots, inside the root.
+	uint32_t intoCopies = 0;
+	for (const ClusterLODAssemblyInstance& instance : data.assemblyInstances) {
+		if ((instance.flags & CLOD_ASSEMBLY_INSTANCE_FLAG_PART_PORTAL) != 0u) {
+			CHECK(instance.stackDepth < data.externalParts.size());
+			CHECK(instance.targetRootNode == 7u);
+		} else {
+			++intoCopies;
+			CHECK(instance.targetRootNode < data.nodes.size());
+		}
+	}
+	CHECK(intoCopies == 2u);
+	for (const ClusterLODNode& node : data.nodes) {
+		if (node.range.isGroup == CLOD_NODE_INTERNAL) {
+			CHECK(node.range.indexOrOffset + node.range.countMinusOne < data.nodes.size());
+			continue;
+		}
+		CHECK(node.range.ownerGroupId < data.groups.size());
+		if (node.range.isGroup == CLOD_NODE_INSTANCE_ROOT) CHECK(node.range.indexOrOffset < data.assemblyInstances.size());
+		if (node.range.isGroup == CLOD_NODE_SEGMENT_LEAF) CHECK(node.range.indexOrOffset < data.segments.size());
+	}
+	for (const ClusterLODGroup& group : data.groups) {
+		CHECK(group.parentGroupId < static_cast<int32_t>(data.groups.size()));
+		CHECK(group.branchGroupId < static_cast<int32_t>(data.groups.size()));
+		for (uint32_t s = 0; s < group.segmentCount; ++s) {
+			CHECK(data.segments[group.firstSegment + s].refinedGroup < static_cast<int32_t>(data.groups.size()));
+		}
+	}
+	CheckPagesRefineInside(built);
+
+	// The root's cache round-trips with the merged tables.
+	const std::string key = "test-merged:world_nested";
+	CHECK(CLodCache::SaveMergedMesh(key, data, built.cacheBuildData.AsPayload()));
+	const auto loaded = CLodCache::TryLoadMergedMesh(key);
+	CHECK(loaded.has_value());
+	if (loaded) {
+		CHECK(loaded->prebuiltData.externalParts == data.externalParts);
+		CHECK(loaded->prebuiltData.paletteParts == data.paletteParts);
+		CHECK(loaded->prebuiltData.groups.size() == data.groups.size());
+	}
+	CLodCache::RemoveMergedMesh(key);
+
+	// One more level: the nested root, embedded beside one of the meshes it embeds.
+	std::vector<ClusterLODMergeEmbeddedMesh> outer(2);
+	outer[0] = { data, built.cacheBuildData.meshPageBlobs };
+	outer[1] = { m1.prebuiltData, m1.cacheBuildData.meshPageBlobs };
+	std::vector<ClusterLODMergeItem> outerItems(2);
+	for (uint32_t i = 0; i < 2; ++i) {
+		outerItems[i].geometry = 0;
+		outerItems[i].embeddedMesh = i;
+		outerItems[i].partLodSphere = { 0, 0, 0, 1.0f };
+		DirectX::XMStoreFloat4x4(&outerItems[i].partToHierarchy, DirectX::XMMatrixTranslation(i * 300.0f, 0.0f, 0.0f));
+	}
+	ClusterLODMergeSettings outerSettings;
+	outerSettings.fanout = 4;
+	outerSettings.nodeTriangleBudget = 256;
+	outerSettings.embeddedMeshes = outer;
+	ClusterLODMergeStats outerStats{};
+	const ClusterLODPrebuildArtifacts top = BuildClusterLODMergeHierarchy(geometries, outerItems, outerSettings, &outerStats);
+	CHECK(outerStats.embeddedItems == 2u);
+	CHECK(top.prebuiltData.externalParts.size() == 2u);
+	CHECK(top.prebuiltData.materialSlotCount == 10u); // 7 + 3
+	uint32_t outerIntoCopies = 0;
+	for (const ClusterLODAssemblyInstance& instance : top.prebuiltData.assemblyInstances) {
+		if ((instance.flags & CLOD_ASSEMBLY_INSTANCE_FLAG_PART_PORTAL) != 0u) {
+			CHECK(instance.stackDepth < 2u);
+		} else {
+			++outerIntoCopies;
+			CHECK(instance.targetRootNode < top.prebuiltData.nodes.size());
+		}
+	}
+	CHECK(outerIntoCopies == 2u + 2u); // its own two, and the two inside the nested root's copy
+	CheckPagesRefineInside(top);
+}
 }
 
 int main()
 {
+	// The merged-mesh cache case writes a cache: keep it out of the real one.
+	const std::filesystem::path cacheRoot = std::filesystem::temp_directory_path() / "sarp_merge_hierarchy_tests";
+	std::error_code ec;
+	std::filesystem::remove_all(cacheRoot, ec);
+	_putenv_s("SARP_CACHE_ROOT", cacheRoot.string().c_str());
+	_putenv_s("SARP_CACHE_PACK", "0");
 	try {
+		TestMergedMeshCache();
+		TestEmbedding();
 		TestHierarchy({ "uncapped", 8, 6, 0.02f, 0.03f, std::numeric_limits<float>::infinity() });
 		TestHierarchy({ "capped", 8, 6, 0.02f, 0.03f, 1.0f });
 		TestHierarchy({ "exact", 2, 1, 0.0f, 0.0f, std::numeric_limits<float>::infinity() });

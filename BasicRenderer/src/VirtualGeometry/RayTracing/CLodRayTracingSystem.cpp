@@ -139,7 +139,8 @@ CLodRayTracingSystem::CLodRayTracingSystem() {
             m_frameCsv.reset(file);
             std::fputs("ms,frame,instances,coarse,clusters,requests,persistent,transient,transient_clusters,refused,evicted,stale,"
                 "admitted,not_built,discarded,discarded_clusters,missing,cached_groups,cached_pages,free_pages,builds,"
-                "ms_count,ms_cache,ms_allocate,ms_place,ms_blas,ms_instances,ms_tlas\n", file);
+                "ms_count,ms_cache,ms_allocate,ms_place,ms_blas,ms_instances,ms_tlas,"
+                "watch_bright,watch_bad_material,watch_dark_terrain,watch_resolve_failed,watch_dark_albedo,watch_primary_ended,watch_max_luminance,watch_non_finite\n", file);
             m_frameCsvStartTicks = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
         }
         else {
@@ -147,6 +148,22 @@ CLodRayTracingSystem::CLodRayTracingSystem() {
         }
     }
     std::free(csvPath);
+
+    if (const char* watch = std::getenv("SARP_RT_PIXEL_WATCH"); watch && watch[0] != '\0') {
+        m_watchBright = std::strtof(watch, nullptr);
+        if (!(m_watchBright > 0.0f)) m_watchBright = 0.0f;
+    }
+    char* watchCsvPath = nullptr;
+    size_t watchCsvLength = 0;
+    if (m_watchBright > 0.0f && _dupenv_s(&watchCsvPath, &watchCsvLength, "SARP_RT_PIXEL_WATCH_CSV") == 0 && watchCsvPath && watchCsvPath[0] != '\0') {
+        std::FILE* file = nullptr;
+        if (fopen_s(&file, watchCsvPath, "w") == 0 && file) {
+            m_watchCsv.reset(file);
+            // Words as the GPU wrote them (see pathTracingWatch.hlsli); a, b and c are floats or uints by kind.
+            std::fputs("frame,kind,bounce,flags,x,y,instance_id,instance_index,cluster,primitive,misc,a0,a1,a2,b0,b1,b2,c0,c1,c2\n", file);
+        }
+    }
+    std::free(watchCsvPath);
 }
 
 CLodRayTracingSystem::~CLodRayTracingSystem() {
@@ -247,6 +264,7 @@ bool CLodRayTracingSystem::EnsureInitialized(rhi::Device device, const RayTracin
     m_framesInFlight = std::max<uint32_t>(1u, SettingsManager::GetInstance().getSettingGetter<uint8_t>("numFramesInFlight")());
     m_sliceHasReadback.assign(m_framesInFlight, 0u);
     m_sliceHasStats.assign(m_framesInFlight, 0u);
+    m_sliceHasWatch.assign(m_framesInFlight, 0u);
     const bool dxr2 = features.backendTier == RayTracingBackendTier::DXR_2_0;
     m_ommEnabled = m_ommRequested && features.opacityMicromap && dxr2;
     if (m_ommRequested && !m_ommEnabled) {
@@ -367,6 +385,10 @@ bool CLodRayTracingSystem::EnsureInitialized(rhi::Device device, const RayTracin
     ok = ok && CreateBuffer(m_tlasInstances, uint64_t(m_limits.maxInstances) * sizeof(rhi::PackedRayTracingInstanceDesc), local, uavFlag, "CLod RT TLAS instances", View::Structured, sizeof(rhi::PackedRayTracingInstanceDesc));
     ok = ok && CreateBuffer(m_visibilityHash, uint64_t(m_limits.visibilityHashEntries) * 8u, local, uavFlag, "CLod RT visible cluster hash", View::Raw);
     ok = ok && CreateBuffer(m_visibilityStats, kStatsBytes, local, uavFlag, "CLod RT visibility comparison", View::Raw);
+    if (m_watchBright > 0.0f) {
+        ok = ok && CreateBuffer(m_pixelWatch, CLOD_RT_WATCH_WORDS * 4u, local, uavFlag, "CLod RT pixel watch", View::Raw);
+        spdlog::info("CLod RT: pixel watch on, bright above luminance {}", m_watchBright);
+    }
 
     // Opacity micromaps: what the GPU found missing, what the CPU loaded, the groups to build again.
     ok = ok && CreateBuffer(m_ommTable, uint64_t(CLOD_RT_OMM_TABLE_ENTRIES) * 16u, local, uavFlag, "CLod RT micromap table", View::Structured, 16u);
@@ -389,7 +411,8 @@ bool CLodRayTracingSystem::EnsureInitialized(rhi::Device device, const RayTracin
         m_ommScope = TaskSchedulerManager::GetInstance().CreateScope("CLodRayTracingMicromaps");
     }
 
-    m_readbackSliceBytes = AlignUp(uint64_t(kCountersBytes) + kStatsBytes + kCtrlBytes + kSceneTimers * 8u + uint64_t(budget) * 8u + kReleaseBytes, 256u);
+    m_watchReadbackOffset = AlignUp(uint64_t(kCountersBytes) + kStatsBytes + kCtrlBytes + kSceneTimers * 8u + uint64_t(budget) * 8u + kReleaseBytes, 16u);
+    m_readbackSliceBytes = AlignUp(m_watchReadbackOffset + (m_watchBright > 0.0f ? CLOD_RT_WATCH_WORDS * 4u : 0u), 256u);
     ok = ok && CreateBuffer(m_readback, m_readbackSliceBytes * m_framesInFlight, rhi::HeapType::Readback, {}, "CLod RT readback");
     if (!ok) return false;
     std::memset(m_slabAddresses.mapped, 0, m_slabAddresses.bytes);
@@ -527,6 +550,13 @@ void CLodRayTracingSystem::BeginFrame(MeshManager& meshManager) {
         std::memcpy(m_stats.comparison.data(), base + kCountersBytes, kStatsBytes);
         m_stats.comparisonValid = true;
     }
+    std::array<uint32_t, CLOD_RT_WATCH_HEADER_WORDS> watchCounts{};
+    if (m_sliceHasWatch[sliceIndex] != 0u) {
+        m_sliceHasWatch[sliceIndex] = 0u;
+        const auto* words = reinterpret_cast<const uint32_t*>(base + m_watchReadbackOffset);
+        std::memcpy(watchCounts.data(), words, sizeof(watchCounts));
+        ReadPixelWatch(words);
+    }
 
     uint32_t ctrl[CLOD_RT_CTRL_WORDS]{};
     std::memcpy(ctrl, base + kCountersBytes + kStatsBytes, sizeof(ctrl));
@@ -594,12 +624,17 @@ void CLodRayTracingSystem::BeginFrame(MeshManager& meshManager) {
         const Stats& c = m_stats;
         const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::duration(
             static_cast<int64_t>(static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count()) - m_frameCsvStartTicks))).count();
-        std::fprintf(m_frameCsv.get(), "%.1f,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
+        float maxLuminance = 0.0f;
+        std::memcpy(&maxLuminance, &watchCounts[CLOD_RT_WATCH_MAX_LUMINANCE], 4u);
+        std::fprintf(m_frameCsv.get(), "%.1f,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%u,%u,%u,%u,%u,%u,%.1f,%u\n",
             ms, m_frame, c.instances, c.coarseConsumers, c.clustersInBvh, c.requestsLastFrame, c.persistentLastFrame, c.transientLastFrame,
             c.transientClustersLastFrame, c.refusedLastFrame, c.evictedLastFrame, c.staleLastFrame,
             c.admittedLastFrame, c.notBuiltLastFrame, c.discardedLastFrame, c.discardedClustersLastFrame, c.missingClustersLastFrame,
             c.cachedGroups, c.cachedPages, c.freePages, c.clasBuildsLastFrame,
-            c.msCount, c.msClasBuild, c.msAllocate, c.msPlace, c.msBlasBuild, c.msWriteInstances, c.msTlasBuild);
+            c.msCount, c.msClasBuild, c.msAllocate, c.msPlace, c.msBlasBuild, c.msWriteInstances, c.msTlasBuild,
+            watchCounts[CLOD_RT_WATCH_BRIGHT_PIXEL], watchCounts[CLOD_RT_WATCH_BAD_MATERIAL], watchCounts[CLOD_RT_WATCH_DARK_TERRAIN_PIXEL],
+            watchCounts[CLOD_RT_WATCH_RESOLVE_FAILED], watchCounts[CLOD_RT_WATCH_DARK_TERRAIN_ALBEDO], watchCounts[CLOD_RT_WATCH_PRIMARY_ENDED],
+            maxLuminance, watchCounts[CLOD_RT_WATCH_NON_FINITE]);
     }
 
     if ((m_frame % 120u) == 0u) LogStats();
@@ -682,11 +717,16 @@ void CLodRayTracingSystem::SubmitOmmOpen(uint32_t group, uint32_t identity, uint
                     if (!file && reason != "no file") {
                         spdlog::warn("CLod RT: ignoring '{}': {}", std::filesystem::path(path).filename().string(), reason);
                     }
+                    else if (!file && std::getenv("SARP_RT_OMM_LOG_MISSING") != nullptr) {
+                        spdlog::info("CLod RT: no micromaps baked: '{}'", std::filesystem::path(path).string());
+                    }
                     std::scoped_lock lock(m_ommMutex);
                     m_ommFiles.try_emplace(path, OmmFile{ file, 0u, 0u });
                 }
                 CLodCache::OpacityMicromapGroupView view{};
-                if (file && file->Group(localIndex, view) && view.clusterCount == clusters) {
+                const bool inFile = file && file->Group(localIndex, view);
+                load.noneReason = !file ? OmmLoad::NoFile : !inFile ? OmmLoad::NoGroup : OmmLoad::ClusterMismatch;
+                if (inFile && view.clusterCount == clusters) {
                     load.none = false;
                     load.clusters = clusters;
                     load.descCount = static_cast<uint32_t>(view.descs.size());
@@ -809,6 +849,7 @@ void CLodRayTracingSystem::StageOmmLoads() {
         if (load.none) {
             if (!InsertOmmEntry(load.group, none)) m_ommKnown.erase(load.group);
             ++m_stats.ommGroupsWithout;
+            ++m_stats.ommWithoutReasons[load.noneReason];
             continue;
         }
         const uint64_t indexBytes = load.indices.size();
@@ -820,6 +861,7 @@ void CLodRayTracingSystem::StageOmmLoads() {
         if (uploadBytes > m_limits.ommUploadBytesPerFrame || (hasArray && (!OmmArraySize(load.levelCounts, arrayBytes, scratchBytes) || scratchBytes > m_ommScratch.bytes))) {
             if (!InsertOmmEntry(load.group, none)) m_ommKnown.erase(load.group); // Never fits: any-hit instead of waiting forever.
             ++m_stats.ommGroupsWithout;
+            ++m_stats.ommWithoutReasons[OmmLoad::TooLarge];
             continue;
         }
         if (m_ommUploadBytes + uploadBytes > m_limits.ommUploadBytesPerFrame || m_ommScratchUsed + scratchBytes > m_ommScratch.bytes) break; // Next frame.
@@ -970,8 +1012,9 @@ void CLodRayTracingSystem::LogStats() {
         s.evictedTotal, s.transientClustersTotal, s.notBuiltTotal, s.discardedTotal, s.missingClustersTotal, s.keepAge,
         s.msCount, s.msClasBuild, s.msAllocate, s.msPlace, s.msBlasBuild, s.msWriteInstances, s.msTlasBuild);
     if (m_ommEnabled) {
-        spdlog::info("CLod RT micromaps: groups loaded={} without={} pending={} waiting for room={} released={} pressure={} rebuilt last frame={} micromaps={} uploaded {} MiB, arrays {} of {} MiB, index clusters {} of {}, files {} | instances alpha={} with={} disabled={}",
-            s.ommGroupsLoaded, s.ommGroupsWithout, s.ommPending, s.ommRetries, s.ommReleasedTotal, s.ommPressure, s.rebuiltLastFrame, s.ommMicromapsTotal, s.ommUploadBytesTotal >> 20u,
+        spdlog::info("CLod RT micromaps: groups loaded={} without={} (no container {}, no file {}, not in file {}, cluster mismatch {}, too large {}) pending={} waiting for room={} released={} pressure={} rebuilt last frame={} micromaps={} uploaded {} MiB, arrays {} of {} MiB, index clusters {} of {}, files {} | instances alpha={} with={} disabled={}",
+            s.ommGroupsLoaded, s.ommGroupsWithout, s.ommWithoutReasons[0], s.ommWithoutReasons[1], s.ommWithoutReasons[2], s.ommWithoutReasons[3],
+            s.ommWithoutReasons[4], s.ommPending, s.ommRetries, s.ommReleasedTotal, s.ommPressure, s.rebuiltLastFrame, s.ommMicromapsTotal, s.ommUploadBytesTotal >> 20u,
             s.ommArrayBytesUsed >> 20u, m_limits.ommArrayPoolBytes >> 20u, s.ommIndexUnitsUsed, m_limits.ommIndexUnits, s.ommFilesOpen,
             s.alphaInstances, s.ommInstances, s.ommDisabledInstances);
     }
@@ -1376,6 +1419,81 @@ void CLodRayTracingSystem::RecordVisibilityEnd(org::RecordingContext& recording,
         rhi::ResourceSyncState::Copy, rhi::ResourceAccessType::CopySource);
     commands.CopyBufferRegion(m_readback.Handle(), SliceOffset(m_readbackSliceBytes, sliceIndex) + kCountersBytes, m_visibilityStats.Handle(), 0u, kStatsBytes);
     m_sliceHasStats[sliceIndex] = 1u;
+}
+
+uint32_t CLodRayTracingSystem::GetPixelWatchUav() const noexcept {
+    return m_watchBright > 0.0f && m_pixelWatch.bytes != 0u ? m_pixelWatch.uav : CLOD_RT_PT_NO_DESCRIPTOR;
+}
+
+void CLodRayTracingSystem::RecordPixelWatchBegin(org::RecordingContext& recording, const org::PipelineState& clearPipeline) {
+    if (GetPixelWatchUav() == CLOD_RT_PT_NO_DESCRIPTOR) return;
+    auto& commands = recording.Commands();
+    MiscConstants constants{};
+    constants[CLOD_RT_CLEAR_UAV] = m_pixelWatch.uav;
+    constants[CLOD_RT_CLEAR_WORD_COUNT] = CLOD_RT_WATCH_WORDS;
+    recording.BindComputePipeline(clearPipeline);
+    PushMiscConstants(recording, constants);
+    commands.Dispatch((CLOD_RT_WATCH_WORDS + kUavClearDispatchWidth - 1u) / kUavClearDispatchWidth, 1u, 1u);
+    GlobalUavBarrier(commands);
+}
+
+void CLodRayTracingSystem::RecordPixelWatchEnd(org::RecordingContext& recording) {
+    if (GetPixelWatchUav() == CLOD_RT_PT_NO_DESCRIPTOR) return;
+    auto& commands = recording.Commands();
+    const uint32_t sliceIndex = m_frame % m_framesInFlight;
+    BufferBarrier(commands, m_pixelWatch.Handle(), rhi::ResourceSyncState::All, rhi::ResourceAccessType::UnorderedAccess,
+        rhi::ResourceSyncState::Copy, rhi::ResourceAccessType::CopySource);
+    commands.CopyBufferRegion(m_readback.Handle(), SliceOffset(m_readbackSliceBytes, sliceIndex) + m_watchReadbackOffset, m_pixelWatch.Handle(), 0u,
+        CLOD_RT_WATCH_WORDS * 4u);
+    BufferBarrier(commands, m_pixelWatch.Handle(), rhi::ResourceSyncState::Copy, rhi::ResourceAccessType::CopySource,
+        rhi::ResourceSyncState::All, rhi::ResourceAccessType::UnorderedAccess);
+    m_sliceHasWatch[sliceIndex] = 1u;
+}
+
+void CLodRayTracingSystem::ReadPixelWatch(const uint32_t* words) {
+    static constexpr const char* kKindNames[CLOD_RT_WATCH_KINDS + 1u] = { "", "bright pixel", "bad material", "dark terrain pixel", "resolve failed",
+        "dark terrain albedo", "primary path ended" };
+    bool any = false;
+    for (uint32_t kind = 1u; kind <= CLOD_RT_WATCH_KINDS; ++kind) {
+        m_watchTotals[kind] += words[kind];
+        any = any || words[kind] != 0u;
+    }
+    m_watchTotals[CLOD_RT_WATCH_NON_FINITE] += words[CLOD_RT_WATCH_NON_FINITE];
+    any = any || words[CLOD_RT_WATCH_NON_FINITE] != 0u;
+    if (!any) return;
+    const auto asFloat = [](uint32_t word) { float value; std::memcpy(&value, &word, 4u); return value; };
+
+    if (m_watchCsv) {
+        for (uint32_t kind = 1u; kind <= CLOD_RT_WATCH_KINDS; ++kind) {
+            const uint32_t records = std::min(words[kind], CLOD_RT_WATCH_RECORDS);
+            for (uint32_t index = 0u; index < records; ++index) {
+                const uint32_t* r = words + CLOD_RT_WATCH_HEADER_WORDS + ((kind - 1u) * CLOD_RT_WATCH_RECORDS + index) * CLOD_RT_WATCH_RECORD_WORDS;
+                std::fprintf(m_watchCsv.get(), "%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u\n", m_frame, r[0] & 0xFFu, (r[0] >> 8u) & 0xFFu,
+                    r[0] >> 16u, r[1] & 0xFFFFu, r[1] >> 16u, r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12], r[13], r[14], r[15]);
+            }
+        }
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (now - m_watchLastLog < std::chrono::seconds(1)) return;
+    m_watchLastLog = now;
+    spdlog::warn("CLod RT pixel watch, frame {}: bright pixels={} (max luminance {:.0f}) bad materials={} dark terrain pixels={} resolve failures={} "
+                 "dark terrain albedo={} primary paths ended={} non-finite={} | totals {} {} {} {} {} {} {}",
+        m_frame, words[CLOD_RT_WATCH_BRIGHT_PIXEL], asFloat(words[CLOD_RT_WATCH_MAX_LUMINANCE]), words[CLOD_RT_WATCH_BAD_MATERIAL],
+        words[CLOD_RT_WATCH_DARK_TERRAIN_PIXEL], words[CLOD_RT_WATCH_RESOLVE_FAILED], words[CLOD_RT_WATCH_DARK_TERRAIN_ALBEDO],
+        words[CLOD_RT_WATCH_PRIMARY_ENDED], words[CLOD_RT_WATCH_NON_FINITE], m_watchTotals[1], m_watchTotals[2], m_watchTotals[3],
+        m_watchTotals[4], m_watchTotals[5], m_watchTotals[6], m_watchTotals[CLOD_RT_WATCH_NON_FINITE]);
+    // One example of each kind, a few times each.
+    for (uint32_t kind = 1u; kind <= CLOD_RT_WATCH_KINDS; ++kind) {
+        if (words[kind] == 0u || m_watchLogged[kind] >= 20u) continue;
+        ++m_watchLogged[kind];
+        const uint32_t* r = words + CLOD_RT_WATCH_HEADER_WORDS + (kind - 1u) * CLOD_RT_WATCH_RECORDS * CLOD_RT_WATCH_RECORD_WORDS;
+        spdlog::warn("CLod RT pixel watch {}: pixel {},{} bounce {} flags {:#x} instance {} index {} cluster {} primitive {} misc {:#x} "
+                     "a ({:.4g} {:.4g} {:.4g}) b ({:.4g} {:.4g} {:.4g}) c ({:.4g} {:.4g} {:.4g}) | raw a {} {} {} b {} {} {} c {} {} {}",
+            kKindNames[kind], r[1] & 0xFFFFu, r[1] >> 16u, (r[0] >> 8u) & 0xFFu, r[0] >> 16u, r[2], r[3], r[4], r[5], r[6],
+            asFloat(r[7]), asFloat(r[8]), asFloat(r[9]), asFloat(r[10]), asFloat(r[11]), asFloat(r[12]), asFloat(r[13]), asFloat(r[14]), asFloat(r[15]),
+            r[7], r[8], r[9], r[10], r[11], r[12], r[13], r[14], r[15]);
+    }
 }
 
 void CLodRayTracingSystem::AdvanceFrame() noexcept {

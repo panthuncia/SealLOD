@@ -171,20 +171,6 @@ std::string TryGetSourceVersionTag(const TextureFileMeta& meta) {
 	return std::to_string(lastWriteTime.time_since_epoch().count());
 }
 
-std::wstring BuildProcessingCachePath(const std::string& key) {
-	size_t seed = 0;
-	boost::hash_combine(seed, key);
-
-	std::ostringstream fileName;
-	fileName << "processed_"
-		<< std::hex
-		<< std::setw(static_cast<int>(sizeof(size_t) * 2))
-		<< std::setfill('0')
-		<< seed
-		<< ".dds";
-	return GetCacheFilePath(s2ws(fileName.str()), L"textures");
-}
-
 std::wstring BuildProcessingConditionedCachePath(const std::string& key) {
 	size_t seed = 0;
 	boost::hash_combine(seed, key);
@@ -481,7 +467,6 @@ std::shared_ptr<TextureSourceData> BuildSourceDataFromScratchImage(const Scratch
 std::wstring TryWriteTextureSourceDataToCache(const std::string& key, const TextureSourceData& sourceData) {
 	std::scoped_lock cacheWriteLock(GetCacheWriteMutexForKey(key));
 
-	const std::wstring cachePath = BuildProcessingCachePath(key);
 	const std::wstring conditionedCachePath = BuildProcessingConditionedCachePath(key);
 	std::wstring writtenConditionedCachePath;
 	if (TryWriteConditionedTextureCache(conditionedCachePath, sourceData)) {
@@ -496,32 +481,7 @@ std::wstring TryWriteTextureSourceDataToCache(const std::string& key, const Text
 		spdlog::warn("TextureProcessingManager: failed to write conditioned cache file '{}'", ws2s(conditionedCachePath));
 	}
 
-	ScratchImage cachedImage;
-	const HRESULT initHr = InitializeScratchImageFromSource(sourceData, cachedImage);
-	if (FAILED(initHr)) {
-		spdlog::warn("TextureProcessingManager: failed to initialize cache image for '{}'", ws2s(cachePath));
-		return writtenConditionedCachePath;
-	}
-
-	const HRESULT writeHr = SaveToDDSFile(
-		cachedImage.GetImages(),
-		cachedImage.GetImageCount(),
-		cachedImage.GetMetadata(),
-		DDS_FLAGS_NONE,
-		cachePath.c_str());
-	if (FAILED(writeHr)) {
-		spdlog::warn("TextureProcessingManager: failed to write cache file '{}'", ws2s(cachePath));
-		return writtenConditionedCachePath;
-	}
-
-	spdlog::debug(
-		"TextureProcessingManager: wrote cache file '{}' format={} subresources={} fullMipChain={} blockCompressed={}",
-		ws2s(cachePath),
-		static_cast<uint32_t>(sourceData.desc.format),
-		sourceData.subresources.size(),
-		sourceData.hasFullMipChain,
-		sourceData.isBlockCompressed);
-
+	// Only the conditioned file is read; a DDS copy of it beside each entry doubled the cache for nothing.
 	return writtenConditionedCachePath;
 }
 
@@ -1229,20 +1189,33 @@ std::shared_ptr<TextureSourceData> PrepareTextureSourceDataForBackend(
 	return BuildSourceDataFromScratchImage(*currentImage);
 }
 
-std::shared_mutex g_bc7EncoderMutex;
-br::textures::Bc7BlockEncoder g_bc7Encoder;
+std::shared_mutex g_blockEncoderMutex;
+br::textures::BlockEncoder g_blockEncoder;
 
-// A chain encoded to BC7 by the encoder an offline tool set (br::textures::SetBc7BlockEncoder), as Compress would have
-// encoded it: RGBA8 of the target's sRGB-ness in, blocks out. False to leave it to Compress.
-bool CompressBc7WithEncoder(const ScratchImage& a_image, DXGI_FORMAT a_target, ScratchImage& a_out)
+std::optional<br::textures::BlockEncodeFormat> EncoderFormat(DXGI_FORMAT a_target)
 {
-	br::textures::Bc7BlockEncoder encoder;
-	{
-		std::shared_lock lock(g_bc7EncoderMutex);
-		encoder = g_bc7Encoder;
+	switch (a_target) {
+	case DXGI_FORMAT_BC7_UNORM:
+	case DXGI_FORMAT_BC7_UNORM_SRGB: return br::textures::BlockEncodeFormat::BC7;
+	case DXGI_FORMAT_BC5_UNORM: return br::textures::BlockEncodeFormat::BC5;
+	case DXGI_FORMAT_BC4_UNORM: return br::textures::BlockEncodeFormat::BC4;
+	default: return std::nullopt;
 	}
+}
+
+// A chain encoded by the encoder an offline tool set (br::textures::SetBlockEncoder), as Compress would have encoded it:
+// RGBA8 of the target's sRGB-ness in, blocks out, a slice (array item or cube face) at a time. False to leave it to
+// Compress.
+bool CompressWithEncoder(const ScratchImage& a_image, DXGI_FORMAT a_target, ScratchImage& a_out)
+{
+	br::textures::BlockEncoder encoder;
+	{
+		std::shared_lock lock(g_blockEncoderMutex);
+		encoder = g_blockEncoder;
+	}
+	const auto format = EncoderFormat(a_target);
 	const TexMetadata& metadata = a_image.GetMetadata();
-	if (!encoder || metadata.dimension != TEX_DIMENSION_TEXTURE2D || metadata.arraySize != 1u || metadata.depth != 1u) return false;
+	if (!encoder || !format || metadata.dimension != TEX_DIMENSION_TEXTURE2D || metadata.depth != 1u) return false;
 	const DXGI_FORMAT rgba = IsSRGB(a_target) ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
 	ScratchImage converted;
 	const ScratchImage* source = &a_image;
@@ -1250,26 +1223,29 @@ bool CompressBc7WithEncoder(const ScratchImage& a_image, DXGI_FORMAT a_target, S
 		if (FAILED(Convert(a_image.GetImages(), a_image.GetImageCount(), metadata, rgba, TEX_FILTER_DEFAULT, TEX_THRESHOLD_DEFAULT, converted))) return false;
 		source = &converted;
 	}
-	std::vector<br::textures::Bc7EncodeLevel> levels;
-	for (std::size_t mip = 0; mip < source->GetMetadata().mipLevels; ++mip) {
-		const Image* image = source->GetImage(mip, 0, 0);
-		if (!image) return false;
-		levels.push_back({ static_cast<std::uint32_t>(image->width), static_cast<std::uint32_t>(image->height), static_cast<std::uint32_t>(image->rowPitch),
-			{ reinterpret_cast<const std::byte*>(image->pixels), image->slicePitch } });
-	}
-	const auto blocks = encoder(levels);
-	if (!blocks) return false;
 	TexMetadata outMetadata = source->GetMetadata();
 	outMetadata.format = a_target;
 	if (FAILED(a_out.Initialize(outMetadata))) return false;
-	std::size_t offset = 0;
-	for (std::size_t mip = 0; mip < outMetadata.mipLevels; ++mip) {
-		const Image* image = a_out.GetImage(mip, 0, 0);
-		if (!image || offset + image->slicePitch > blocks->size()) return false;
-		std::memcpy(image->pixels, blocks->data() + offset, image->slicePitch);
-		offset += image->slicePitch;
+	for (std::size_t item = 0; item < outMetadata.arraySize; ++item) {
+		std::vector<br::textures::BlockEncodeLevel> levels;
+		for (std::size_t mip = 0; mip < outMetadata.mipLevels; ++mip) {
+			const Image* image = source->GetImage(mip, item, 0);
+			if (!image) return false;
+			levels.push_back({ static_cast<std::uint32_t>(image->width), static_cast<std::uint32_t>(image->height), static_cast<std::uint32_t>(image->rowPitch),
+				{ reinterpret_cast<const std::byte*>(image->pixels), image->slicePitch } });
+		}
+		const auto blocks = encoder(*format, levels);
+		if (!blocks) return false;
+		std::size_t offset = 0;
+		for (std::size_t mip = 0; mip < outMetadata.mipLevels; ++mip) {
+			const Image* image = a_out.GetImage(mip, item, 0);
+			if (!image || offset + image->slicePitch > blocks->size()) return false;
+			std::memcpy(image->pixels, blocks->data() + offset, image->slicePitch);
+			offset += image->slicePitch;
+		}
+		if (offset != blocks->size()) return false;
 	}
-	return offset == blocks->size();
+	return true;
 }
 
 std::shared_ptr<TextureSourceData> FinalizeTextureSourceDataOnCpu(
@@ -1344,8 +1320,7 @@ std::shared_ptr<TextureSourceData> FinalizeTextureSourceDataOnCpu(
 		meta.preferSRGB);
 	const auto compressionStart = std::chrono::steady_clock::now();
 
-	const bool bc7 = targetFormat == DXGI_FORMAT_BC7_UNORM || targetFormat == DXGI_FORMAT_BC7_UNORM_SRGB;
-	if (bc7 && CompressBc7WithEncoder(preparedImage, targetFormat, compressedImage)) {
+	if (CompressWithEncoder(preparedImage, targetFormat, compressedImage)) {
 		return BuildSourceDataFromScratchImage(compressedImage);
 	}
 	hr = Compress(
@@ -1919,7 +1894,7 @@ void TextureProcessingManager::FailProcessing(const std::shared_ptr<TextureProce
 	NotifyPipelineJobFinished(handle);
 }
 
-void br::textures::SetBc7BlockEncoder(Bc7BlockEncoder encoder) {
-	std::unique_lock lock(g_bc7EncoderMutex);
-	g_bc7Encoder = std::move(encoder);
+void br::textures::SetBlockEncoder(BlockEncoder encoder) {
+	std::unique_lock lock(g_blockEncoderMutex);
+	g_blockEncoder = std::move(encoder);
 }

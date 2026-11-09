@@ -6,6 +6,8 @@
 #include <spdlog/spdlog.h>
 
 #include <BasicRenderer/Assets/Import/Filetypes.h>
+#include <BasicRenderer/Assets/Import/SceneManifest.h>
+#include <memory>
 #include "Assets/Import/GlTF/GlTFLoader.h"
 #include "BasicRenderer/Assets/USD/USDLoader.h"
 #include "BasicRenderer/Assets/Import/NifLoader.h"
@@ -18,12 +20,29 @@ std::optional<br::import::ImportedAssetPayload> br::import::LoadImportedAsset(
 		return std::nullopt;
 	}
 	const std::filesystem::path path(filePath);
+	if (IsSceneManifestPath(path)) {
+		// A scene cache: its root and profile, then its source scene as usual.
+		try {
+			const SceneManifest manifest = ReadSceneManifest(path);
+			(void)ApplySceneManifestCacheRoot(path);
+			const auto source = ResolveSceneManifestSource(path, manifest);
+			ImportSettings sceneSettings = settings;
+			if (manifest.profile) sceneSettings.profile = std::make_shared<const ImportProfile>(*manifest.profile);
+			sceneSettings.expectedSourceIdentifier = manifest.sourceIdentifier;
+			spdlog::info("Scene manifest {}: loading {}", filePath, source.string());
+			return LoadImportedAsset(source.string(), sceneSettings);
+		}
+		catch (const std::exception& error) {
+			spdlog::error("Scene manifest {}: {}", filePath, error.what());
+			return std::nullopt;
+		}
+	}
 	std::string extension = path.extension().string();
 	std::transform(extension.begin(), extension.end(), extension.begin(),
 		[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 	switch (GetSceneLoader(extension)) {
 	case SceneLoader::GlTF:
-		return GlTFLoader::LoadImportedAssetFromFile(filePath);
+		return GlTFLoader::LoadImportedAssetFromFile(filePath, settings);
 	case SceneLoader::OpenUSD: {
 		USDLoader::InMemoryStageOptions options{};
 		options.sourceIdentifier = filePath;

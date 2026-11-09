@@ -1,8 +1,11 @@
 #include "Lighting/Environment/EnvironmentManager.h"
 
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <DirectXTex.h>
+#include <DirectXPackedVector.h>
 #include <BasicTelemetry/Tracy.h>
 #include <spdlog/spdlog.h>
 #include <rhi.h>
@@ -82,12 +85,14 @@ std::unique_ptr<Environment> EnvironmentManager::CreateEnvironment(std::wstring 
 namespace {
 
 // The skybox as BC6H: 32 MiB at 2048 a face instead of 192 MiB of RGBA16F, for the sky raster and path tracing read
-// (RGB only; alpha is unused). The GPU encodes it once, and the next launch loads the result. Written under a temporary
-// name, so a cache is either complete or absent.
-void WriteCompressedSkybox(const std::shared_ptr<TextureSourceData>& data, const std::filesystem::path& destination) {
+// (RGB only; alpha is unused). The GPU encodes it once, and the next launch loads the result. The prefiltered cubemap
+// is cached the same way (PrefilteredCubemapCachePath). Written under a temporary name, so a cache is either complete or
+// absent.
+bool WriteCompressedCubemap(const std::shared_ptr<TextureSourceData>& data, const std::filesystem::path& destination,
+	std::string_view label) {
 	if (!data || data->subresources.empty()) {
-		spdlog::warn("EnvironmentManager: BC6H compression of the skybox failed");
-		return;
+		spdlog::warn("EnvironmentManager: BC6H compression of the {} failed", label);
+		return false;
 	}
 	const auto& desc = data->desc;
 	DirectX::TexMetadata metadata{};
@@ -100,14 +105,14 @@ void WriteCompressedSkybox(const std::shared_ptr<TextureSourceData>& data, const
 	metadata.format = DXGI_FORMAT_BC6H_UF16;
 	metadata.dimension = DirectX::TEX_DIMENSION_TEXTURE2D;
 	DirectX::ScratchImage image;
-	if (FAILED(image.Initialize(metadata))) return;
+	if (FAILED(image.Initialize(metadata))) return false;
 	for (size_t slice = 0; slice < metadata.arraySize; ++slice) {
 		for (size_t mip = 0; mip < metadata.mipLevels; ++mip) {
 			const DirectX::Image* target = image.GetImage(mip, slice, 0);
 			const auto& bytes = data->subresources[slice * metadata.mipLevels + mip];
 			if (!target || !bytes || bytes->size() != target->slicePitch) {
-				spdlog::warn("EnvironmentManager: BC6H skybox subresource {} has the wrong size", slice * metadata.mipLevels + mip);
-				return;
+				spdlog::warn("EnvironmentManager: BC6H {} subresource {} has the wrong size", label, slice * metadata.mipLevels + mip);
+				return false;
 			}
 			std::memcpy(target->pixels, bytes->data(), bytes->size());
 		}
@@ -118,15 +123,16 @@ void WriteCompressedSkybox(const std::shared_ptr<TextureSourceData>& data, const
 	if (FAILED(DirectX::SaveToDDSFile(image.GetImages(), image.GetImageCount(), metadata, DirectX::DDS_FLAGS_NONE, temporary.c_str()))) {
 		spdlog::warn("EnvironmentManager: could not write '{}'", temporary.string());
 		std::filesystem::remove(temporary, error);
-		return;
+		return false;
 	}
 	std::filesystem::rename(temporary, destination, error);
 	if (error) {
 		spdlog::warn("EnvironmentManager: could not move '{}' into place: {}", temporary.string(), error.message());
 		std::filesystem::remove(temporary, error);
-		return;
+		return false;
 	}
-	spdlog::info("EnvironmentManager: wrote the BC6H skybox cache '{}'", destination.filename().string());
+	spdlog::info("EnvironmentManager: wrote the BC6H {} cache '{}'", label, destination.filename().string());
+	return true;
 }
 
 void SubmitSkyboxCompression(const EnvironmentManager::Bc6hCompressorFn& compressor,
@@ -138,14 +144,114 @@ void SubmitSkyboxCompression(const EnvironmentManager::Bc6hCompressorFn& compres
 		return;
 	}
 	const bool submitted = compressor(std::move(data), "Skybox", [destination, started](std::shared_ptr<TextureSourceData> blocks) {
-		WriteCompressedSkybox(blocks, destination);
+		WriteCompressedCubemap(blocks, destination, "skybox");
 		spdlog::info("EnvironmentManager: skybox BC6H compression took {:.2f} s",
 			std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count());
 	});
 	if (!submitted) spdlog::info("EnvironmentManager: GPU BC6H compression unavailable; the skybox stays RGBA16F");
 }
 
+// The BC6H encoder reads float RGB. The prefilter writes RGBA8 UNorm, so the values are already in [0, 1] and convert
+// exactly.
+std::shared_ptr<TextureSourceData> ToHalfFloat(const std::shared_ptr<TextureSourceData>& data) {
+	if (!data || data->isBlockCompressed || data->desc.format != rhi::Format::R8G8B8A8_UNorm ||
+		data->desc.imageDimensions.size() != data->subresources.size()) return nullptr;
+	auto converted = std::make_shared<TextureSourceData>(*data);
+	converted->desc.format = rhi::Format::R16G16B16A16_Float;
+	converted->desc.srvFormat = rhi::Format::R16G16B16A16_Float;
+	converted->desc.uavFormat = rhi::Format::Unknown;
+	converted->desc.hasUAV = false;
+	converted->desc.generateMipMaps = false;
+	std::array<uint16_t, 256> halfOf{};
+	for (uint32_t value = 0; value < 256; ++value)
+		halfOf[value] = DirectX::PackedVector::XMConvertFloatToHalf(static_cast<float>(value) / 255.0f);
+	for (size_t index = 0; index < data->subresources.size(); ++index) {
+		const auto& source = data->subresources[index];
+		auto& dims = converted->desc.imageDimensions[index];
+		const uint64_t sourcePitch = dims.rowPitch;
+		if (!source || sourcePitch < uint64_t{ dims.width } * 4u || source->size() < sourcePitch * dims.height) return nullptr;
+		dims.rowPitch = uint64_t{ dims.width } * 8u;
+		dims.slicePitch = dims.rowPitch * dims.height;
+		auto bytes = std::make_shared<std::vector<uint8_t>>(dims.slicePitch);
+		auto* out = reinterpret_cast<uint16_t*>(bytes->data());
+		for (uint32_t y = 0; y < dims.height; ++y) {
+			const uint8_t* row = source->data() + y * sourcePitch;
+			for (uint32_t x = 0; x < dims.width * 4u; ++x) *out++ = halfOf[row[x]];
+		}
+		converted->subresources[index] = std::move(bytes);
+	}
+	return converted;
+}
+
+// Reads back the freshly prefiltered cubemap (RGBA8, every mip), encodes it as BC6H and writes destination. then runs
+// once the cache is written; nothing runs on failure, and the RGBA8 cubemap stays in use for the session.
+void CachePrefilteredCubemap(const EnvironmentManager::RequestReadbackFn& readback, const EnvironmentManager::Bc6hCompressorFn& compressor,
+	std::shared_ptr<org::PixelBuffer> cubemap, std::filesystem::path destination, std::function<void()> then) {
+	if (!readback || !compressor) return;
+	auto intermediate = destination;
+	intermediate.replace_extension(L".rgba8.dds");
+	readback(std::move(cubemap), intermediate.wstring(), [compressor, intermediate, destination, then = std::move(then)]() mutable {
+		const auto started = std::chrono::steady_clock::now();
+		auto data = ToHalfFloat(LoadTextureSourceDataFromDDSFilePath(intermediate.string(), false, "prefiltered cubemap BC6H compression"));
+		std::error_code error;
+		std::filesystem::remove(intermediate, error);
+		if (!data) {
+			spdlog::warn("EnvironmentManager: could not read the prefiltered cubemap '{}' back to compress it", intermediate.string());
+			return;
+		}
+		const bool submitted = compressor(std::move(data), "Environment prefiltered cubemap",
+			[destination, started, then = std::move(then)](std::shared_ptr<TextureSourceData> blocks) {
+				if (!WriteCompressedCubemap(blocks, destination, "prefiltered cubemap")) return;
+				spdlog::info("EnvironmentManager: prefiltered cubemap BC6H compression took {:.2f} s",
+					std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count());
+				if (then) then();
+			});
+		if (!submitted) spdlog::info("EnvironmentManager: GPU BC6H compression unavailable; the prefiltered cubemap stays RGBA8");
+	}, true);
+}
+
+// Per environment and resolution; the skybox cache it was filtered from is per environment too.
+std::filesystem::path PrefilteredCubemapCachePath(const std::wstring& name, unsigned int resolution) {
+	return GetCacheFilePath(name + L"_prefiltered_" + std::to_wstring(resolution) + L"_bc6h.dds", L"environments");
+}
+
 } // namespace
+
+// Under *m_environmentUpdateMutex: the BC6H cache just written for a cubemap prefiltered this session. The load is started
+// from ReleaseUploadedWork, outside the lock; once it is resident, the next ReleaseUploadedWork puts it in place of the
+// environment's prefiltered cubemap. (A later launch loads the cache with the cubemap instead, SetFromHDRI.) The frame
+// graph registered the RGBA8 cubemap it replaces when it was built: m_prefilteredCubemapReplaced has the renderer rebuild
+// it, once, so it lets go.
+void EnvironmentManager::LoadCompressedPrefilteredCubemap(Environment* e, const std::filesystem::path& path) {
+	const auto found = m_environmentAlive.find(e);
+	if (found == m_environmentAlive.end()) return;
+	m_workParkedForUpload.push_back([this, e, path, alive = found->second, pending = m_pendingSourceLoads,
+		mutex = m_environmentUpdateMutex] {
+		br::textures::TextureRequest request;
+		request.preparation = br::textures::TexturePreparation::LoadOnly;
+		request.source = br::textures::MakeFileTextureSource(path);
+		request.debugName = "Environment prefiltered cubemap";
+		auto texture = br::textures::RequestTexture(std::move(request));
+		br::textures::LoadTexture(texture, [this, e, path, texture, alive, pending, mutex](bool loaded) {
+			std::lock_guard<std::mutex> lock(*mutex);
+			if (!pending->alive || !*alive) return;
+			if (!loaded) {
+				spdlog::warn("EnvironmentManager: the BC6H prefiltered cubemap '{}' failed to load", path.string());
+				return;
+			}
+			m_workParkedForUpload.push_back([this, e, texture, alive, mutex] {
+				std::lock_guard<std::mutex> lock(*mutex);
+				if (!*alive) return;
+				texture->SetName("Environment prefiltered cubemap");
+				org::memory::SetResourceUsageHint(*texture->ImagePtr(), "Environment lighting");
+				m_environmentPrefilteredCubemapGroup->RemoveResource(e->GetEnvironmentPrefilteredCubemap().get());
+				e->SetEnvironmentPrefilteredCubemap(texture);
+				m_environmentPrefilteredCubemapGroup->AddResource(texture->ImagePtr());
+				if (m_prefilteredCubemapReplaced) m_prefilteredCubemapReplaced(e);
+			});
+		});
+	});
+}
 
 EnvironmentManager::~EnvironmentManager() {
 	if (m_skyboxCompression.valid()) m_skyboxCompression.wait();
@@ -182,28 +288,65 @@ void EnvironmentManager::SetFromHDRI(Environment* e, std::string hdriPath) {
 		request.debugName = "Environment HDRI";
 	}
 	auto source = br::textures::RequestTexture(std::move(request));
+	// A cached cubemap's prefiltered cubemap may be cached too (as BC6H, PrefilteredCubemapCachePath): it loads beside the
+	// cubemap, so the environment is complete when it applies and nothing prefilters it.
+	std::shared_ptr<TextureAsset> prefiltered;
+	if (cachedCubemap) {
+		DirectX::TexMetadata metadata{};
+		const std::filesystem::path cubemapPath = compressedCubemap ? compressedSkyboxPath : skyboxPath;
+		if (SUCCEEDED(DirectX::GetMetadataFromDDSFile(cubemapPath.c_str(), DirectX::DDS_FLAGS_NONE, metadata))) {
+			const auto prefilteredPath = PrefilteredCubemapCachePath(e->GetName(), static_cast<unsigned int>(metadata.width));
+			std::error_code error;
+			if (std::filesystem::exists(prefilteredPath, error)) {
+				br::textures::TextureRequest prefilteredRequest;
+				prefilteredRequest.preparation = br::textures::TexturePreparation::LoadOnly;
+				prefilteredRequest.source = br::textures::MakeFileTextureSource(prefilteredPath);
+				prefilteredRequest.debugName = "Environment prefiltered cubemap";
+				prefiltered = br::textures::RequestTexture(std::move(prefilteredRequest));
+			}
+		}
+	}
 	std::uint64_t generation = 0;
 	{
 		std::lock_guard<std::mutex> lock(*m_environmentUpdateMutex);
 		generation = ++m_pendingSourceLoads->nextGeneration;
 		m_pendingSourceLoads->generations[e] = generation;
 	}
-	// The environment's own processing starts once its source is resident.
-	br::textures::LoadTexture(source, [this, e, generation, cachedCubemap, source,
-		pending = m_pendingSourceLoads, mutex = m_environmentUpdateMutex](bool loaded) {
+	// The environment's own processing starts once its sources are resident.
+	struct SourceLoads {
+		std::atomic<int> remaining = 0;
+		std::atomic_bool sourceLoaded = false, prefilteredLoaded = false;
+	};
+	auto loads = std::make_shared<SourceLoads>();
+	loads->remaining = prefiltered ? 2 : 1;
+	auto finish = [this, e, generation, cachedCubemap, source, prefiltered, loads,
+		pending = m_pendingSourceLoads, mutex = m_environmentUpdateMutex] {
 		std::lock_guard<std::mutex> lock(*mutex);
 		const auto it = pending->generations.find(e);
 		if (!pending->alive || it == pending->generations.end() || it->second != generation) return;
 		pending->generations.erase(it);
-		if (!loaded) {
+		if (!loads->sourceLoaded) {
 			spdlog::error("EnvironmentManager: environment source '{}' failed to load", source->Meta().filePath);
 			return;
 		}
-		ApplyEnvironmentSource(e, source, cachedCubemap);
+		if (prefiltered && !loads->prefilteredLoaded)
+			spdlog::warn("EnvironmentManager: the BC6H prefiltered cubemap '{}' failed to load; prefiltering again", prefiltered->Meta().filePath);
+		ApplyEnvironmentSource(e, source, cachedCubemap, loads->prefilteredLoaded ? prefiltered : nullptr);
+	};
+	br::textures::LoadTexture(source, [loads, finish](bool loaded) {
+		loads->sourceLoaded = loaded;
+		if (--loads->remaining == 0) finish();
 	});
+	if (prefiltered) {
+		br::textures::LoadTexture(prefiltered, [loads, finish](bool loaded) {
+			loads->prefilteredLoaded = loaded;
+			if (--loads->remaining == 0) finish();
+		});
+	}
 }
 
-void EnvironmentManager::ApplyEnvironmentSource(Environment* e, const std::shared_ptr<TextureAsset>& source, bool cachedCubemap) {
+void EnvironmentManager::ApplyEnvironmentSource(Environment* e, const std::shared_ptr<TextureAsset>& source, bool cachedCubemap,
+	const std::shared_ptr<TextureAsset>& cachedPrefiltered) {
 	auto& name = e->GetName();
 	std::shared_ptr<TextureAsset> skybox;
 	unsigned int res = m_reflectionCubemapResolution;
@@ -255,43 +398,69 @@ void EnvironmentManager::ApplyEnvironmentSource(Environment* e, const std::share
 		};
 	}
 
-	//Re-create environment cubemap at full res
-	m_environmentPrefilteredCubemapGroup->RemoveResource(e->GetEnvironmentPrefilteredCubemap().get());
-	org::ImageDimensions dims;
-	dims.height = res;
-	dims.width = res;
-	dims.rowPitch = res * 4;
-	dims.slicePitch = res * res * 4;
+	// The prefiltered cubemap is cached as BC6H (128 MiB of RGBA8 at 2048 a face; 32 MiB as BC6H). A converted HDRI is a
+	// new skybox, so what was filtered from the old one is stale.
+	const auto prefilteredCachePath = PrefilteredCubemapCachePath(name, res);
+	std::error_code cacheError;
+	if (!cachedCubemap) std::filesystem::remove(prefilteredCachePath, cacheError);
 
-	org::TextureDescription prefilteredDesc;
-	for (int i = 0; i < 6; i++) {
-		prefilteredDesc.imageDimensions.push_back(dims);
-	}
-	prefilteredDesc.channels = 3;
-	prefilteredDesc.isCubemap = true;
-	prefilteredDesc.format = rhi::Format::R8G8B8A8_UNorm;
-	prefilteredDesc.generateMipMaps = true;
-	prefilteredDesc.hasUAV = true;
-
-	auto prefilteredEnvironmentCubemap = org::PixelBuffer::CreateShared(prefilteredDesc);
-	org::memory::SetResourceUsageHint(*prefilteredEnvironmentCubemap, "Environment lighting");
-	auto sampler = org::Sampler::GetDefaultSampler();
-	auto prefilteredEnvironment = TextureAsset::CreateFromImage(prefilteredEnvironmentCubemap, sampler, "Environment prefiltered cubemap");
-	e->SetEnvironmentPrefilteredCubemap(prefilteredEnvironment);
-	m_environmentPrefilteredCubemapGroup->AddResource(prefilteredEnvironment->ImagePtr());
-
-
-	m_workingEnvironmentCubemapGroup->AddResource(skybox->ImagePtr());
-	// SH and prefiltering read the environment's cubemap: queued now for a cached one, after its conversion otherwise.
 	auto& alive = m_environmentAlive[e];
 	if (!alive) alive = std::make_shared<bool>(true);
+	std::optional<br::render::EnvironmentPrefilterWork> prefilter;
+	if (cachedPrefiltered) {
+		m_environmentPrefilteredCubemapGroup->RemoveResource(e->GetEnvironmentPrefilteredCubemap().get());
+		cachedPrefiltered->SetName("Environment prefiltered cubemap");
+		org::memory::SetResourceUsageHint(*cachedPrefiltered->ImagePtr(), "Environment lighting");
+		e->SetEnvironmentPrefilteredCubemap(cachedPrefiltered);
+		m_environmentPrefilteredCubemapGroup->AddResource(cachedPrefiltered->ImagePtr());
+	}
+	else {
+		//Re-create environment cubemap at full res
+		m_environmentPrefilteredCubemapGroup->RemoveResource(e->GetEnvironmentPrefilteredCubemap().get());
+		org::ImageDimensions dims;
+		dims.height = res;
+		dims.width = res;
+		dims.rowPitch = res * 4;
+		dims.slicePitch = res * res * 4;
+
+		org::TextureDescription prefilteredDesc;
+		for (int i = 0; i < 6; i++) {
+			prefilteredDesc.imageDimensions.push_back(dims);
+		}
+		prefilteredDesc.channels = 3;
+		prefilteredDesc.isCubemap = true;
+		prefilteredDesc.format = rhi::Format::R8G8B8A8_UNorm;
+		prefilteredDesc.generateMipMaps = true;
+		prefilteredDesc.hasUAV = true;
+
+		auto prefilteredEnvironmentCubemap = org::PixelBuffer::CreateShared(prefilteredDesc);
+		org::memory::SetResourceUsageHint(*prefilteredEnvironmentCubemap, "Environment lighting");
+		auto sampler = org::Sampler::GetDefaultSampler();
+		auto prefilteredEnvironment = TextureAsset::CreateFromImage(prefilteredEnvironmentCubemap, sampler, "Environment prefiltered cubemap");
+		e->SetEnvironmentPrefilteredCubemap(prefilteredEnvironment);
+		m_environmentPrefilteredCubemapGroup->AddResource(prefilteredEnvironment->ImagePtr());
+
+		m_workingEnvironmentCubemapGroup->AddResource(skybox->ImagePtr());
+		prefilter = br::render::EnvironmentPrefilterWork{skybox->ImagePtr(), prefilteredEnvironmentCubemap,
+			e->GetReflectionCubemapResolution(), e->GetEnvironmentIndex(), m_workingEnvironmentCubemapGroup, m_environmentUpdateMutex};
+		// Once the GPU has filtered it: read it back, encode it, and swap the BC6H copy in (it also serves later launches).
+		prefilter->then = [this, e, alive, pending = m_pendingSourceLoads, mutex = m_environmentUpdateMutex,
+			cubemap = prefilteredEnvironmentCubemap, path = prefilteredCachePath] {
+			if (!pending->alive || !*alive) return;
+			CachePrefilteredCubemap(m_requestReadback, m_bc6hCompressor, cubemap, path, [this, e, alive, pending, mutex, path] {
+				std::lock_guard<std::mutex> lock(*mutex);
+				if (pending->alive && *alive) LoadCompressedPrefilteredCubemap(e, path);
+			});
+		};
+	}
+
+	// SH and prefiltering read the environment's cubemap: queued now for a cached one, after its conversion otherwise.
 	auto filter = [work = m_workServices, alive,
 		sh = br::render::EnvironmentSHWork{skybox->ImagePtr(), e->GetEnvironmentIndex(), e->GetReflectionCubemapResolution()},
-		prefilter = br::render::EnvironmentPrefilterWork{skybox->ImagePtr(), prefilteredEnvironmentCubemap,
-			e->GetReflectionCubemapResolution(), e->GetEnvironmentIndex(), m_workingEnvironmentCubemapGroup, m_environmentUpdateMutex}]() mutable {
+		prefilter = std::move(prefilter)]() mutable {
 		if (!*alive) return;
 		work.sphericalHarmonics.Enqueue(sh);
-		work.prefilter.Enqueue(prefilter);
+		if (prefilter) work.prefilter.Enqueue(*prefilter);
 	};
 	if (conversion) {
 		// The cache copy must follow the conversion: a readback queued sooner saves an unwritten cubemap, and later
@@ -400,4 +569,9 @@ void br::render::EnvironmentConversionWork::Discard() const {
 void br::render::EnvironmentPrefilterWork::Commit() const {
     std::lock_guard lock(*publicationMutex);
     sourceGroup->RemoveResource(srcCubemap.get());
+}
+
+void br::render::EnvironmentPrefilterWork::Complete() const {
+    std::lock_guard lock(*publicationMutex);
+    if (then) then();
 }

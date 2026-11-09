@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <map>
@@ -157,6 +158,9 @@ public:
         uint32_t ommIndexUnitsUsed = 0;
         uint64_t ommGroupsLoaded = 0; // Loaded with their baked micromaps, since start.
         uint64_t ommGroupsWithout = 0; // Asked for, but nothing baked for the material, or no room.
+        // Why, by OmmLoad::NoneReason: no pages or container, no file, the group not in it, a cluster count that doesn't
+        // match, too large to load.
+        std::array<uint64_t, 5> ommWithoutReasons{};
         uint64_t ommMicromapsTotal = 0; // Micromaps uploaded, since start.
         uint64_t ommUploadBytesTotal = 0;
         uint32_t ommFilesOpen = 0;
@@ -219,6 +223,12 @@ public:
     void RecordSceneBuild(org::RecordingContext& recording, const ScenePipelines& pipelines, uint32_t clustersSrv, uint32_t sideBandSrv, uint32_t counterSrv, uint32_t clusterCapacity);
     void RecordVisibilityBegin(org::RecordingContext& recording, const org::PipelineState& clearPipeline, bool clearStats);
     void RecordVisibilityEnd(org::RecordingContext& recording, bool readStats);
+    // Pixel watch (SARP_RT_PIXEL_WATCH=<luminance>): the path trace pass clears it before tracing and reads it back after.
+    // GetPixelWatchUav is CLOD_RT_PT_NO_DESCRIPTOR when it's off.
+    uint32_t GetPixelWatchUav() const noexcept;
+    float GetPixelWatchBright() const noexcept { return m_watchBright; }
+    void RecordPixelWatchBegin(org::RecordingContext& recording, const org::PipelineState& clearPipeline);
+    void RecordPixelWatchEnd(org::RecordingContext& recording);
     // At the start of each frame, before BeginFrame.
     void AdvanceFrame() noexcept;
 
@@ -272,6 +282,8 @@ private:
         uint32_t group = 0;
         uint32_t identity = 0;
         bool none = true; // Nothing baked for this material, or it doesn't match the group.
+        enum NoneReason : uint8_t { NoContainer, NoFile, NoGroup, ClusterMismatch, TooLarge };
+        NoneReason noneReason = NoContainer;
         uint32_t clusters = 0;
         uint32_t descCount = 0;
         uint32_t localIndex = 0;
@@ -339,6 +351,7 @@ private:
     RawBuffer m_blasArgs, m_blasAddressArray, m_blasResult, m_blasScratch, m_blasAddresses, m_blasSizes;
     RawBuffer m_tlasInstances, m_tlasStorage, m_tlasScratch;
     RawBuffer m_visibilityHash, m_visibilityStats;
+    RawBuffer m_pixelWatch;
     RawBuffer m_readback;
     uint64_t m_readbackSliceBytes = 0;
     uint64_t m_arenaBytes = 0; // The build arena's size.
@@ -396,6 +409,14 @@ private:
     // Per frame in flight: the readback slice the scene build writes and BeginFrame reads.
     std::vector<uint8_t> m_sliceHasReadback;
     std::vector<uint8_t> m_sliceHasStats;
+    std::vector<uint8_t> m_sliceHasWatch;
+    uint64_t m_watchReadbackOffset = 0; // In each readback slice.
+    float m_watchBright = 0.0f; // Zero when the watch is off.
+    std::array<uint64_t, 16> m_watchTotals{};
+    std::array<uint64_t, 16> m_watchLogged{};
+    std::chrono::steady_clock::time_point m_watchLastLog{};
+    std::unique_ptr<std::FILE, int (*)(std::FILE*)> m_watchCsv{ nullptr, &std::fclose };
+    void ReadPixelWatch(const uint32_t* words);
     // SARP_RT_FRAME_CSV: one row of cache statistics per frame read back, for analysis. Off unless set.
     std::unique_ptr<std::FILE, int (*)(std::FILE*)> m_frameCsv{ nullptr, &std::fclose };
     uint64_t m_frameCsvStartTicks = 0;

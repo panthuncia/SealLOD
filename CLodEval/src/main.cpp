@@ -439,36 +439,32 @@ int CommandMergeCensus(const Arguments& arguments)
 		throw std::runtime_error("merge-census needs a cache tree (or its clod directory) and --out");
 	}
 	const auto started = std::chrono::steady_clock::now();
-	// Roots are the entries with a portal parts file; the tree holds tens of thousands of other caches.
+	// Roots are the merged meshes, which share one directory of the tree (CLodCache::kMergedMeshPrimPath): the tree holds
+	// tens of thousands of other caches.
 	std::vector<MeshToAnalyze> roots;
 	std::error_code error;
 	uint32_t staleRoots = 0;
-	for (fs::recursive_directory_iterator it(arguments.positional.front(), error), end; !error && it != end; it.increment(error)) {
-		if (!it->is_regular_file() || it->path().extension() != L".clodparts") {
+	fs::path directory = arguments.positional.front();
+	if (fs::is_directory(directory / "clod" / "merged")) directory /= fs::path("clod") / "merged";
+	else if (fs::is_directory(directory / "merged")) directory /= "merged";
+	for (fs::directory_iterator it(directory, error), end; !error && it != end; it.increment(error)) {
+		if (!it->is_regular_file() || it->path().extension() != L".clodmeta") {
 			continue;
 		}
-		fs::path metadata = it->path();
-		metadata.replace_extension(".clodmeta");
-		std::string key = it->path().parent_path().filename().string();
-		try {
-			std::ifstream input(it->path());
-			key = nlohmann::json::parse(input).at("root").at("source").get<std::string>();
-		}
-		catch (const std::exception&) {
-		}
 		// A root left behind by an older schema (its region now builds under another hash) is skipped, not fatal.
-		if (CLodCache::OpenMetadataFile(metadata).status != CLodCache::OpenMetadataStatus::Ok) {
+		const CLodCache::OpenedMetadata opened = CLodCache::OpenMetadataFile(it->path());
+		if (opened.status != CLodCache::OpenMetadataStatus::Ok || opened.data.prebuiltData.externalParts.empty()) {
 			++staleRoots;
 			continue;
 		}
-		roots.push_back({ metadata, key });
+		roots.push_back({ it->path(), opened.data.prebuiltData.cacheSource.sourceIdentifier });
 	}
 	if (staleRoots != 0u) {
 		std::cerr << std::format("skipped {} roots that this tool cannot read (older schema or damaged)\n", staleRoots);
 	}
 	std::ranges::sort(roots, {}, &MeshToAnalyze::asset);
 	if (roots.empty()) {
-		std::cerr << std::format("no merge roots (.clodparts files) under '{}'\n", arguments.positional.front());
+		std::cerr << std::format("no merged meshes (clod/merged/*.clodmeta) under '{}'\n", arguments.positional.front());
 		return kExitError;
 	}
 	AnalyzeOptions options;

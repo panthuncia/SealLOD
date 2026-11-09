@@ -106,7 +106,7 @@ struct MergeHierarchy {
 	uint32_t topPortals = 0;  // portals with no parent: open at every distance
 	uint32_t levels = 0;
 	uint32_t materialSlots = 0;
-	bool partsFile = false;  // the root had a portal parts file
+	bool partsFile = false;  // the root's cache names its parts (externalParts)
 	bool partsOpen = false;  // and every part in it opened
 	std::vector<int32_t> nodeOfGroup;  // G_N or P_N -> node, else -1
 	std::vector<int32_t> portalOfGroup;  // proxy -> portal, else -1

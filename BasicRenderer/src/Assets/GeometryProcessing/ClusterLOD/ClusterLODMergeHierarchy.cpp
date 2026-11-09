@@ -14,6 +14,9 @@
 // groups are tagged CLOD_GROUP_FLAG_BRANCH_TRIANGLE and _VOXEL. In the voxel pass a voxel item has no triangles: its
 // part's voxel source is voxelized, together with its voxel siblings', by the node above it, into voxel groups (one per
 // material slot) that refine into P_N like the node's triangle group.
+//
+// An item may embed a merged mesh (the header's "Nesting"): its proxy then leads to a non-portal instance whose target is
+// a copy of that mesh, appended after the root's own hierarchy is built (EmbedMergedMesh).
 
 #include <BasicRenderer/Assets/Import/ClusterLODMergeHierarchy.h>
 #include <BasicRenderer/Assets/Import/ClusterLODUtilities.h>
@@ -23,8 +26,11 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <cstddef>
+#include <format>
 #include <numeric>
 #include <stdexcept>
+#include <string>
 #include <unordered_map>
 
 #include <meshoptimizer.h>
@@ -552,24 +558,276 @@ namespace
 		b.error = error;
 		return b;
 	}
+
+	// a after b, both column-vector 3x4 rows.
+	ClusterLODAssemblyTransform Compose(const ClusterLODAssemblyTransform& a, const ClusterLODAssemblyTransform& b)
+	{
+		const XMFLOAT4* ar[3] = { &a.row0, &a.row1, &a.row2 };
+		ClusterLODAssemblyTransform out{};
+		XMFLOAT4* orows[3] = { &out.row0, &out.row1, &out.row2 };
+		for (uint32_t i = 0; i < 3u; ++i) {
+			const XMFLOAT4& r = *ar[i];
+			orows[i]->x = r.x * b.row0.x + r.y * b.row1.x + r.z * b.row2.x;
+			orows[i]->y = r.x * b.row0.y + r.y * b.row1.y + r.z * b.row2.y;
+			orows[i]->z = r.x * b.row0.z + r.y * b.row1.z + r.z * b.row2.z;
+			orows[i]->w = r.x * b.row0.w + r.y * b.row1.w + r.z * b.row2.w + r.w;
+		}
+		return out;
+	}
+
+	template <class T>
+	T LoadAt(const std::vector<std::byte>& blob, size_t offset)
+	{
+		if (offset + sizeof(T) > blob.size()) throw std::runtime_error("merge hierarchy: an embedded mesh's page is truncated");
+		T value;
+		std::memcpy(&value, blob.data() + offset, sizeof(T));
+		return value;
+	}
+	template <class T>
+	void StoreAt(std::vector<std::byte>& blob, size_t offset, const T& value)
+	{
+		std::memcpy(blob.data() + offset, &value, sizeof(T));
+	}
+
+	// Pages name the groups their clusters refine into, mesh-locally: a copy at groupBase renames them. Triangle
+	// descriptors keep refined group + 1 in the top 16 bits of word 5; voxel cluster and cube records keep it whole.
+	void RebasePageGroups(std::vector<std::byte>& blob, uint32_t groupBase)
+	{
+		const auto rebase = [&](int32_t group) { return group >= 0 ? group + static_cast<int32_t>(groupBase) : group; };
+		const uint32_t magic = LoadAt<uint32_t>(blob, 0u);
+		if (magic == CLOD_VOXEL_PAGE_MAGIC) {
+			const CLodVoxelPageHeader header = LoadAt<CLodVoxelPageHeader>(blob, 0u);
+			if (header.clusterRecordStride < sizeof(CLodVoxelClusterRecord) || header.cubeRecordStride < sizeof(CLodVoxelCubeRecord)) {
+				throw std::runtime_error("merge hierarchy: an embedded mesh's voxel page has an unknown record layout");
+			}
+			for (uint32_t c = 0; c < header.clusterCount; ++c) {
+				const size_t offset = static_cast<size_t>(header.descriptorOffset) + static_cast<size_t>(c) * header.clusterRecordStride;
+				CLodVoxelClusterRecord record = LoadAt<CLodVoxelClusterRecord>(blob, offset);
+				record.refinedGroup = rebase(record.refinedGroup);
+				StoreAt(blob, offset, record);
+			}
+			for (uint32_t c = 0; c < header.cubeCount; ++c) {
+				const size_t offset = static_cast<size_t>(header.cubeRecordsOffset) + static_cast<size_t>(c) * header.cubeRecordStride;
+				CLodVoxelCubeRecord record = LoadAt<CLodVoxelCubeRecord>(blob, offset);
+				record.refinedGroup = rebase(record.refinedGroup);
+				StoreAt(blob, offset, record);
+			}
+			return;
+		}
+		if (magic != CLOD_TRIANGLE_PAGE_MAGIC) throw std::runtime_error("merge hierarchy: an embedded mesh has a page of unknown kind");
+		const CLodPageHeader header = LoadAt<CLodPageHeader>(blob, 0u);
+		for (uint32_t m = 0; m < header.meshletCount; ++m) {
+			const size_t offset = static_cast<size_t>(header.descriptorOffset) + static_cast<size_t>(m) * sizeof(CLodMeshletDescriptor) +
+				offsetof(CLodMeshletDescriptor, triangleCountAndRefinedGroup);
+			uint32_t word = LoadAt<uint32_t>(blob, offset);
+			const int32_t refined = static_cast<int32_t>(word >> 16u) - 1;
+			if (refined < 0) continue;
+			const uint32_t renamed = static_cast<uint32_t>(rebase(refined)) + 1u;
+			if (renamed > 0xFFFFu) throw std::runtime_error("merge hierarchy: an embedded mesh's refined group is past the 16 bits a descriptor holds");
+			word = (word & 0xFFFFu) | (renamed << 16u);
+			StoreAt(blob, offset, word);
+		}
+	}
+
+	struct BuildTables
+	{
+		std::vector<ClusterLODAssemblyTransform> transforms;
+		std::vector<uint32_t> materialBases;
+		std::vector<ClusterLODAssemblyInstance> instances;
+		uint32_t cumulativeMeshlets = 0u;
+		uint32_t cumulativeGroupVertices = 0u;
+	};
+
+	// Copies an embedded merged mesh into the root under the item's transform (whose material base is where the mesh's
+	// palette starts), its portals renamed to the root's external parts. Returns the copy's root node.
+	uint32_t EmbedMergedMesh(ClusterLODBuildState& state, BuildTables& tables, const ClusterLODMergeItem& item,
+		const ClusterLODMergeEmbeddedMesh& mesh, std::span<const uint32_t> partOrdinals)
+	{
+		const ClusterLODPrebuiltData& m = mesh.data;
+		const uint32_t groupBase = static_cast<uint32_t>(state.groups.size());
+		const uint32_t segmentBase = static_cast<uint32_t>(state.segments.size());
+		const uint32_t nodeBase = static_cast<uint32_t>(state.nodes.size());
+		const uint32_t transformBase = static_cast<uint32_t>(tables.transforms.size());
+		const uint32_t instanceBase = static_cast<uint32_t>(tables.instances.size());
+		if (static_cast<uint64_t>(groupBase) + m.groups.size() >= 0xFFFFu) {
+			throw std::runtime_error("merge hierarchy: embedding would take the root to 65535 groups, past what a cluster's refined group holds");
+		}
+		if (m.groupPageReferenceOffsets.size() != m.groups.size() + 1u) throw std::runtime_error("merge hierarchy: an embedded mesh has no page map");
+		if (m.nodes.empty()) throw std::runtime_error("merge hierarchy: an embedded mesh has no nodes");
+
+		std::vector<std::vector<std::byte>> pages(mesh.meshPageBlobs.size());
+		std::vector<uint8_t> rebased(mesh.meshPageBlobs.size(), 0u);
+		const auto page = [&](uint32_t meshPage) -> const std::vector<std::byte>& {
+			if (meshPage >= mesh.meshPageBlobs.size() || mesh.meshPageBlobs[meshPage].empty()) {
+				throw std::runtime_error("merge hierarchy: an embedded mesh is missing a page");
+			}
+			if (!rebased[meshPage]) {
+				pages[meshPage] = mesh.meshPageBlobs[meshPage];
+				RebasePageGroups(pages[meshPage], groupBase);
+				rebased[meshPage] = 1u;
+			}
+			return pages[meshPage];
+		};
+
+		for (uint32_t g = 0; g < m.groups.size(); ++g) {
+			const ClusterLODGroup& source = m.groups[g];
+			ClusterLODGroup group = source;
+			group.firstSegment = static_cast<uint32_t>(state.segments.size());
+			group.pageMapBase = 0u;
+			if (group.parentGroupId >= 0) group.parentGroupId += static_cast<int32_t>(groupBase);
+			if (group.branchGroupId >= 0) group.branchGroupId += static_cast<int32_t>(groupBase);
+			if ((group.flags & CLOD_GROUP_FLAG_IS_ASSEMBLY_PROXY) != 0u) {
+				group.firstMeshlet += instanceBase; // a proxy's instance
+			} else {
+				group.firstMeshlet = tables.cumulativeMeshlets;
+				group.firstGroupVertex = tables.cumulativeGroupVertices;
+				tables.cumulativeMeshlets += group.meshletCount;
+				tables.cumulativeGroupVertices += group.groupVertexCount;
+			}
+			for (uint32_t s = 0; s < source.segmentCount; ++s) {
+				const uint32_t index = source.firstSegment + s;
+				if (index >= m.segments.size()) throw std::runtime_error("merge hierarchy: an embedded mesh's segment is out of range");
+				ClusterLODGroupSegment segment = m.segments[index];
+				if (segment.refinedGroup >= 0) segment.refinedGroup += static_cast<int32_t>(groupBase);
+				if (segment.meshletCount != 0u && source.pageCount != 0u) {
+					if (segment.pageIndex < source.pageMapBase || segment.pageIndex >= source.pageMapBase + source.pageCount) {
+						throw std::runtime_error("merge hierarchy: an embedded mesh's segment names a page outside its group");
+					}
+					segment.pageIndex -= source.pageMapBase; // into the group's own page list, which packing rebuilds
+				}
+				state.segments.push_back(segment);
+				state.segmentBounds.push_back(index < m.segmentBounds.size() ? m.segmentBounds[index] : BoundingSphere{});
+			}
+			std::vector<std::vector<std::byte>> groupPages;
+			for (uint32_t r = m.groupPageReferenceOffsets[g]; r < m.groupPageReferenceOffsets[g + 1u]; ++r) {
+				if (r >= m.groupPageReferences.size()) throw std::runtime_error("merge hierarchy: an embedded mesh's page map is out of range");
+				groupPages.push_back(page(m.groupPageReferences[r]));
+			}
+			state.groups.push_back(group);
+			state.groupChunks.push_back(g < m.groupChunks.size() ? m.groupChunks[g] : ClusterLODGroupChunk{});
+			state.groupPageBlobs.push_back(std::move(groupPages));
+			state.traversalGroupMask.push_back(1u);
+		}
+
+		for (ClusterLODNode node : m.nodes) {
+			if (node.range.isGroup == CLOD_NODE_INTERNAL) {
+				node.range.indexOrOffset += nodeBase;
+			} else {
+				if (node.range.isGroup == CLOD_NODE_SEGMENT_LEAF) node.range.indexOrOffset += segmentBase;
+				else if (node.range.isGroup == CLOD_NODE_INSTANCE_ROOT) node.range.indexOrOffset += instanceBase;
+				// A voxel leaf's offset is a segment within its own group.
+				node.range.ownerGroupId += groupBase;
+				if (node.range.countMinusOne != 0u) node.range.countMinusOne += groupBase; // refined group + 1
+			}
+			state.nodes.push_back(node);
+		}
+
+		// Its own clusters draw under the item's transform (which the instance below carries, and its portals compose).
+		const ClusterLODAssemblyTransform itemTransform = ToAssemblyTransform(item.partToHierarchy);
+		for (uint32_t t = 0; t < m.assemblyTransforms.size(); ++t) {
+			tables.transforms.push_back(Compose(itemTransform, m.assemblyTransforms[t]));
+			tables.materialBases.push_back(item.materialBase + (t < m.assemblyTransformMaterialBases.size() ? m.assemblyTransformMaterialBases[t] : 0u));
+		}
+		for (ClusterLODAssemblyInstance instance : m.assemblyInstances) {
+			if (instance.transformIndex != CLOD_ASSEMBLY_TRANSFORM_SENTINEL) instance.transformIndex += transformBase;
+			if ((instance.flags & CLOD_ASSEMBLY_INSTANCE_FLAG_PART_PORTAL) != 0u) {
+				if (instance.stackDepth >= partOrdinals.size()) throw std::runtime_error("merge hierarchy: an embedded mesh's portal names no part");
+				instance.stackDepth = partOrdinals[instance.stackDepth];
+			} else {
+				instance.targetRootNode += nodeBase;
+			}
+			tables.instances.push_back(instance);
+		}
+
+		const uint32_t rootNode = !m.partRecords.empty() && m.rootPartIndex < m.partRecords.size() ? m.partRecords[m.rootPartIndex].rootNode : 0u;
+		if (rootNode >= m.nodes.size()) throw std::runtime_error("merge hierarchy: an embedded mesh's root node is out of range");
+		return nodeBase + rootNode;
+	}
+
+	// A part's table key: everything that tells two parts apart.
+	std::string ExternalPartKey(const ClusterLODExternalPart& part)
+	{
+		std::string key = std::format("{}\x1f{}\x1f{}\x1f{:x}\x1f{}\x1f{:x}\x1f{}\x1f{}\x1f{}\x1f", part.sourceIdentifier, part.primPath, part.subsetName,
+			part.buildConfigHash, part.assetKey, part.variantHash, part.partIndex, part.meshIndex, part.flags);
+		key.append(reinterpret_cast<const char*>(part.variant.data()), part.variant.size());
+		return key;
+	}
 }
 
 ClusterLODPrebuildArtifacts BuildClusterLODMergeHierarchy(
 	std::span<const ClusterLODMergeGeometry> geometries,
-	std::span<const ClusterLODMergeItem> items,
+	std::span<const ClusterLODMergeItem> inputItems,
 	const ClusterLODMergeSettings& settings,
 	ClusterLODMergeStats* stats)
 {
-	if (items.size() < 2u) throw std::runtime_error("merge hierarchy: needs at least two items");
+	if (inputItems.size() < 2u) throw std::runtime_error("merge hierarchy: needs at least two items");
 	ClusterLODMergeStats localStats{};
-	localStats.items = static_cast<uint32_t>(items.size());
-	for (const ClusterLODMergeItem& item : items) {
+	localStats.items = static_cast<uint32_t>(inputItems.size());
+	const std::span<const ClusterLODMergeEmbeddedMesh> embedded = settings.embeddedMeshes;
+	bool anyEmbedded = false;
+	bool anyLeaf = false;
+	for (const ClusterLODMergeItem& item : inputItems) {
 		if (item.geometry >= geometries.size()) throw std::runtime_error("merge hierarchy: item geometry out of range");
 		if (item.voxelGeometry != UINT32_MAX && item.voxelGeometry >= geometries.size()) {
 			throw std::runtime_error("merge hierarchy: item voxel geometry out of range");
 		}
 		localStats.voxelItems += item.voxelGeometry != UINT32_MAX ? 1u : 0u;
+		if (item.embeddedMesh != UINT32_MAX) {
+			if (item.embeddedMesh >= embedded.size()) throw std::runtime_error("merge hierarchy: item embedded mesh out of range");
+			const ClusterLODPrebuiltData& mesh = embedded[item.embeddedMesh].data;
+			if (mesh.externalParts.empty() || mesh.paletteParts.size() != (std::max)(mesh.materialSlotCount, 1u)) {
+				throw std::runtime_error("merge hierarchy: an embedded mesh is not a merged mesh (no external parts, or no palette)");
+			}
+			anyEmbedded = true;
+			continue;
+		}
+		anyLeaf = true;
+		if (!settings.externalParts.empty() && item.part >= settings.externalParts.size()) {
+			throw std::runtime_error("merge hierarchy: item part out of range of the external parts");
+		}
 	}
+	if (!settings.externalParts.empty() || !settings.paletteParts.empty()) {
+		if (settings.paletteParts.size() != (std::max)(settings.materialSlotCount, 1u)) {
+			throw std::runtime_error("merge hierarchy: the palette's size differs from materialSlotCount");
+		}
+		for (const uint32_t part : settings.paletteParts) {
+			if (part >= settings.externalParts.size()) throw std::runtime_error("merge hierarchy: palette slot names no external part");
+		}
+	} else if (anyEmbedded && anyLeaf) {
+		throw std::runtime_error("merge hierarchy: embedding merged meshes beside leaf items needs the leaves' external parts and palette");
+	}
+
+	// The root's tables: the given ones, then each embedded mesh's parts (shared ones once) and its palette, whole, so
+	// that its clusters' slots stay valid under a single base.
+	std::vector<ClusterLODExternalPart> externalParts = settings.externalParts;
+	std::vector<uint32_t> paletteParts = settings.paletteParts;
+	std::vector<std::vector<uint32_t>> embeddedPartOrdinals(embedded.size());
+	std::vector<uint32_t> embeddedPaletteBase(embedded.size(), UINT32_MAX);
+	std::vector<ClusterLODMergeItem> itemStorage(inputItems.begin(), inputItems.end());
+	if (anyEmbedded) {
+		std::unordered_map<std::string, uint32_t> ordinalOf;
+		for (uint32_t p = 0; p < externalParts.size(); ++p) ordinalOf.try_emplace(ExternalPartKey(externalParts[p]), p);
+		for (ClusterLODMergeItem& item : itemStorage) {
+			if (item.embeddedMesh == UINT32_MAX) continue;
+			const uint32_t e = item.embeddedMesh;
+			if (embeddedPaletteBase[e] == UINT32_MAX) {
+				const ClusterLODPrebuiltData& mesh = embedded[e].data;
+				for (const ClusterLODExternalPart& part : mesh.externalParts) {
+					auto [it, added] = ordinalOf.try_emplace(ExternalPartKey(part), static_cast<uint32_t>(externalParts.size()));
+					if (added) externalParts.push_back(part);
+					embeddedPartOrdinals[e].push_back(it->second);
+				}
+				embeddedPaletteBase[e] = static_cast<uint32_t>(paletteParts.size());
+				for (const uint32_t part : mesh.paletteParts) {
+					if (part >= embeddedPartOrdinals[e].size()) throw std::runtime_error("merge hierarchy: an embedded mesh's palette names no part");
+					paletteParts.push_back(embeddedPartOrdinals[e][part]);
+				}
+			}
+			item.materialBase = embeddedPaletteBase[e];
+		}
+	}
+	const uint32_t materialSlotCount = anyEmbedded ? static_cast<uint32_t>(paletteParts.size()) : (std::max)(settings.materialSlotCount, 1u);
+	const std::span<const ClusterLODMergeItem> items = itemStorage;
 
 	// One pass per branch: the triangle pass alone without voxel items (its groups untagged).
 	struct Pass
@@ -623,9 +881,12 @@ ClusterLODPrebuildArtifacts BuildClusterLODMergeHierarchy(
 	}
 
 	ClusterLODBuildState state{};
-	std::vector<ClusterLODAssemblyTransform> transforms;
-	std::vector<uint32_t> materialBases;
-	std::vector<ClusterLODAssemblyInstance> instances;
+	BuildTables tables;
+	std::vector<ClusterLODAssemblyTransform>& transforms = tables.transforms;
+	std::vector<uint32_t>& materialBases = tables.materialBases;
+	std::vector<ClusterLODAssemblyInstance>& instances = tables.instances;
+	// Instances into embedded meshes, by item: their target is the copy's root, once it is made.
+	std::vector<std::pair<uint32_t, uint32_t>> embeddedInstances;
 	auto appendGroup = [&](const ClusterLODGroup& group, bool traversal) {
 		const uint32_t index = static_cast<uint32_t>(state.groups.size());
 		state.groups.push_back(group);
@@ -636,8 +897,8 @@ ClusterLODPrebuildArtifacts BuildClusterLODMergeHierarchy(
 	};
 	std::vector<std::byte> vertexBytes;
 	const uint32_t stride = MeshVertexLayout::VertexSize(kVertexFlags);
-	uint32_t cumulativeMeshlets = 0u;
-	uint32_t cumulativeGroupVertices = 0u;
+	uint32_t& cumulativeMeshlets = tables.cumulativeMeshlets;
+	uint32_t& cumulativeGroupVertices = tables.cumulativeGroupVertices;
 
 	for (Pass& pass : passes) {
 		std::vector<Entity>& entities = pass.entities;
@@ -689,11 +950,14 @@ ClusterLODPrebuildArtifacts BuildClusterLODMergeHierarchy(
 			const uint32_t transformIndex = static_cast<uint32_t>(transforms.size());
 			transforms.push_back(ToAssemblyTransform(item.partToHierarchy));
 			materialBases.push_back(item.materialBase);
+			// A leaf opens its part through a portal; an embedded merged mesh is entered at its copy's root, inside the root.
+			const bool embeds = item.embeddedMesh != UINT32_MAX;
 			ClusterLODAssemblyInstance instance{};
 			instance.targetRootNode = item.partNode;
 			instance.transformIndex = transformIndex;
-			instance.flags = CLOD_ASSEMBLY_INSTANCE_FLAG_PART_PORTAL | item.flags;
-			instance.stackDepth = item.part;
+			instance.flags = (embeds ? 0u : CLOD_ASSEMBLY_INSTANCE_FLAG_PART_PORTAL) | item.flags;
+			instance.stackDepth = embeds ? 1u : item.part;
+			if (embeds) embeddedInstances.emplace_back(static_cast<uint32_t>(instances.size()), e.item);
 			ClusterLODGroup proxy{};
 			proxy.bounds = parentBounds(e);
 			proxy.depth = 0;
@@ -845,6 +1109,26 @@ ClusterLODPrebuildArtifacts BuildClusterLODMergeHierarchy(
 		}
 	}
 
+	// Embedded merged meshes, copied after the root's own hierarchy (which never sees their groups): one copy per item
+	// that still draws through one, shared by its triangle and voxel branch instances. The copies' coarsest groups have
+	// no parent in the root, so they stay resident like the merged mesh's own did.
+	{
+		std::vector<uint32_t> copyRoot(items.size(), UINT32_MAX);
+		for (const auto& [instanceIndex, itemIndex] : embeddedInstances) {
+			uint32_t& root = copyRoot[itemIndex];
+			if (root == UINT32_MAX) {
+				const ClusterLODMergeItem& item = items[itemIndex];
+				const uint32_t groupsBefore = static_cast<uint32_t>(state.groups.size());
+				root = EmbedMergedMesh(state, tables, item, embedded[item.embeddedMesh], embeddedPartOrdinals[item.embeddedMesh]);
+				localStats.embeddedItems++;
+				localStats.embeddedGroups += static_cast<uint32_t>(state.groups.size()) - groupsBefore;
+			}
+			instances[instanceIndex].targetRootNode = root;
+		}
+		state.voxelGroupMapping.groupToPayloadIndex.resize(state.groups.size(), -1);
+		state.voxelGroupMapping.groupToPackedMetadataIndex.resize(state.groups.size(), -1);
+	}
+
 	uint32_t partDepth = 0u;
 	for (const ClusterLODMergeItem& item : items) partDepth = (std::max)(partDepth, item.partTraversalDepth);
 	state.maxTraversalDepth = clod_detail::ComputeCLodTraversalDepth(state.nodes, state.topRootNode) + partDepth;
@@ -882,7 +1166,9 @@ ClusterLODPrebuildArtifacts BuildClusterLODMergeHierarchy(
 	data.assemblyInstances = std::move(instances);
 	data.maxDepth = state.maxDepth;
 	data.maxTraversalDepth = state.maxTraversalDepth;
-	data.materialSlotCount = (std::max)(settings.materialSlotCount, 1u);
+	data.materialSlotCount = (std::max)(materialSlotCount, 1u);
+	data.externalParts = std::move(externalParts);
+	data.paletteParts = std::move(paletteParts);
 	clod_detail::AssignSingleRootPartRecord(data, state.topRootNode);
 	out.cacheBuildData.groupPageBlobs = std::move(state.groupPageBlobs);
 	out.cacheBuildData.voxelGroupMapping = std::move(state.voxelGroupMapping);

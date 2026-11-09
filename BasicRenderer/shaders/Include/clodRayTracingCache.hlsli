@@ -4,10 +4,10 @@
 // The ray tracing CLAS cache, kept by the GPU within the frame (CLodRayTracingSystem.h, rayTracingSceneBuild.hlsl).
 //
 // It is driven by the RT view's cluster list, after culling: whatever groups the list references are the scene. Per
-// group, 16 bytes of state: [entry + 1 (0: none, UNCACHEABLE), slab descriptor and byte offset of the group's first page
-// when its CLAS were built, frame mark]. The frame mark is the last frame the list used the group, with REQUESTED when it
-// had no current CLAS then. A group whose first page has moved since it was built is stale: its CLAS describe the right
-// triangles, but their hit information names the old pages, so they are not used.
+// group, 16 bytes of state: [entry + 1 (0: none, UNCACHEABLE), the group's first page's slab descriptor and the signature
+// of all its pages when its CLAS were built (CLodRtGroupPlacement), frame mark]. The frame mark is the last frame the list
+// used the group, with REQUESTED when it had no current CLAS then. A group any of whose pages has moved since it was built
+// is stale: its CLAS describe the right triangles, but their hit information names the old pages, so they are not used.
 //
 // A group the list needs has a CLAS that frame when the build budget and memory allow it. Either it is cached: an entry
 // owns a chain of 8 KiB pages its CLAS are packed in, and CLAS ID chunks of 32; or it is transient: moved from the build
@@ -46,19 +46,11 @@ uint CLodRtCacheFindSlot(ByteAddressBuffer state, ByteAddressBuffer entries, Str
     const ClusterLODGroup group = groups[groupGlobal];
     uint ordinal = 0u;
     bool found = false;
-    bool haveFirst = false;
-    uint firstSlab = 0u;
-    uint firstOffset = 0u;
     [loop]
     for (uint s = 0u; s < group.segmentCount && !found; ++s) {
         const ClusterLODGroupSegment segment = segments[group.firstSegment + s];
         if (segment.meshletCount == 0u) continue;
         const GroupPageMapEntry page = LoadGroupPageMapEntry(0u, segment.pageIndex);
-        if (!haveFirst) {
-            haveFirst = true;
-            firstSlab = page.slabDescriptorIndex;
-            firstOffset = page.slabByteOffset;
-        }
         if (localMeshlet >= segment.firstMeshletInPage && localMeshlet - segment.firstMeshletInPage < segment.meshletCount
             && page.slabDescriptorIndex == slabDescriptor
             && (page.slabByteOffset >> CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_SHIFT) == pageOffsetUnits) {
@@ -81,7 +73,10 @@ uint CLodRtCacheFindSlot(ByteAddressBuffer state, ByteAddressBuffer entries, Str
     uint entry = 0u;
     if (!CLodRtCacheStateEntry(groupState.x, entryCapacity, entry)) return CLOD_RT_CACHE_INVALID;
     if (entries.Load(entry * CLOD_RT_CACHE_ENTRY_BYTES) != groupGlobal) return CLOD_RT_CACHE_INVALID;
-    if (groupState.y != firstSlab || groupState.z != firstOffset) return CLOD_RT_CACHE_INVALID; // Stale.
+    uint slab = 0u;
+    uint signature = 0u;
+    // Stale: some page of the group isn't where its CLAS were built from (see CLodRtGroupPlacement).
+    if (!CLodRtGroupLocation(group, slab, signature) || groupState.y != slab || groupState.z != signature) return CLOD_RT_CACHE_INVALID;
     return CLodRtCacheEntryId(entries, entry, ordinal);
 }
 

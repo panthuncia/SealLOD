@@ -476,6 +476,7 @@ void TestAlpha(in float2 texcoords, in uint materialDataIndex)
     uint materialFlags = materialInfo.materialFlags;
     float2 dTexcoordsDx = ddx(texcoords);
     float2 dTexcoordsDy = ddy(texcoords);
+    TransformMaterialUvAndGradients(materialInfo, texcoords, dTexcoordsDx, dTexcoordsDy);
         
     float4 baseColor = materialInfo.baseColorFactor;
 
@@ -1364,6 +1365,54 @@ MaterialUvSample MakeDefaultMaterialUvSample()
     MaterialUvSample sample = (MaterialUvSample)0;
     sample.uvSetIndex = 0u;
     return sample;
+}
+
+// Applies the material's KHR_texture_transform (materialUvTransform.hlsli) to every UV set a cache holds, so each texture
+// slot and the UV-derived tangent frame see transformed UVs. Called once, where the cache is built for the material. The
+// object Reyes height atlas UV set is a baked atlas, not a material texture mapping, and keeps its UVs.
+void ApplyMaterialUvTransformToCache(
+    inout MaterialUvCache cache,
+    float4 linearDelta,
+    float2 offset,
+    bool skipAtlasUvSet,
+    uint atlasUvSetIndex)
+{
+    if (!any(linearDelta != 0.0f) && !any(offset != 0.0f))
+    {
+        return;
+    }
+
+    [unroll]
+    for (uint i = 0u; i < MATERIAL_MAX_UNIQUE_UV_SETS; ++i)
+    {
+        if (i >= cache.count || (skipAtlasUvSet && cache.samples[i].uvSetIndex == atlasUvSetIndex))
+        {
+            continue;
+        }
+        cache.samples[i].uv = ApplyMaterialUvTransformToUv(linearDelta, offset, cache.samples[i].uv);
+        cache.samples[i].dUVdx = ApplyMaterialUvTransformToGradient(linearDelta, cache.samples[i].dUVdx);
+        cache.samples[i].dUVdy = ApplyMaterialUvTransformToGradient(linearDelta, cache.samples[i].dUVdy);
+    }
+}
+
+void ApplyMaterialUvTransformToCache(inout MaterialUvCache cache, MaterialInfo materialInfo)
+{
+    ApplyMaterialUvTransformToCache(
+        cache,
+        materialInfo.uvTransformLinearDelta,
+        materialInfo.uvTransformOffset,
+        materialInfo.objectSurfaceSamplingMode == 2u && (materialInfo.materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) == 0u,
+        materialInfo.heightUvSetIndex);
+}
+
+void ApplyMaterialUvTransformToCache(inout MaterialUvCache cache, MaterialEvalInfo materialInfo)
+{
+    ApplyMaterialUvTransformToCache(
+        cache,
+        materialInfo.uvTransformLinearDelta,
+        materialInfo.uvTransformOffset,
+        materialInfo.objectSurfaceSamplingMode == 2u && (materialInfo.materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) == 0u,
+        materialInfo.heightUvSetIndex);
 }
 
 MaterialUvCache BuildSingleUvCache(float2 uv, float2 dUVdx, float2 dUVdy)
@@ -2472,6 +2521,7 @@ void BuildForwardTransparentMaterialUvData(
         bindings.heightCacheIndex = bindings.cacheIndexBySlot[MATERIAL_TEXTURE_SLOT_HEIGHT];
         bindings.hasHeightSource = bindings.heightCacheIndex != MATERIAL_INVALID_UV_CACHE_INDEX;
     }
+    ApplyMaterialUvTransformToCache(cache, materialInfo);
 #endif
 }
 
@@ -2631,6 +2681,7 @@ MaterialUvCache BuildMaterialUvCacheFromForwardInput(
     AppendOpenPBRForwardUvSamples(cache, input, LoadOpenPBRMaterialInfo(materialInfo));
 #endif
 
+    ApplyMaterialUvTransformToCache(cache, materialInfo);
     return cache;
 }
 #endif
@@ -3796,6 +3847,7 @@ void SampleMaterialCorePrecompiled(
     out MaterialInputs ret)
 {
     MaterialUvCache uvCache = BuildSingleUvCache(uv, dUVdx, dUVdy);
+    ApplyMaterialUvTransformToCache(uvCache, materialInfo);
     MaterialUvBindings uvBindings = BuildMaterialUvBindings(materialInfo, materialFlags, uvCache);
     SampleMaterialFromUvCache(uvCache, uvBindings, normalWSBase, posWS, float3(1.0f, 1.0f, 1.0f), materialInfo, materialFlags, ddx(posWS), ddy(posWS), ret);
     return;
@@ -3983,6 +4035,7 @@ void GetMaterialInfoForFragment(in const PSInput input, out MaterialInputs ret)
     MaterialInfo materialInfo = materialDataBuffer[meshBuffer.materialDataIndex];
     uint materialFlags = materialInfo.materialFlags;
     MaterialUvCache uvCache = BuildSingleUvCache(input.texcoord, ddx(input.texcoord), ddy(input.texcoord));
+    ApplyMaterialUvTransformToCache(uvCache, materialInfo);
     MaterialUvBindings uvBindings = BuildMaterialUvBindings(materialInfo, materialFlags, uvCache);
     SampleMaterialFromUvCacheWithVertexTangent(uvCache, uvBindings, input.normalWorldSpace, input.tangentWorldSpace, input.positionWorldSpace.xyz, input.color, materialInfo, materialFlags, ddx(input.positionWorldSpace.xyz), ddy(input.positionWorldSpace.xyz), ret);
 }
@@ -3996,6 +4049,7 @@ void GetMaterialInfoForFragmentPrecompiled(in const PSInput input, out MaterialI
     MaterialInfo materialInfo = materialDataBuffer[meshBuffer.materialDataIndex];
     uint materialFlags = materialInfo.materialFlags;
     MaterialUvCache uvCache = BuildSingleUvCache(input.texcoord, ddx(input.texcoord), ddy(input.texcoord));
+    ApplyMaterialUvTransformToCache(uvCache, materialInfo);
     MaterialUvBindings uvBindings = BuildMaterialUvBindings(materialInfo, materialFlags, uvCache);
     SampleMaterialFromUvCacheWithVertexTangent(
         uvCache,
@@ -4055,6 +4109,7 @@ void SampleMaterialCS(
     MaterialInfo materialInfo = materialDataBuffer[materialDataIndex];
     uint materialFlags = materialInfo.materialFlags;
     MaterialUvCache uvCache = BuildSingleUvCache(uv, dUVdx, dUVdy);
+    ApplyMaterialUvTransformToCache(uvCache, materialInfo);
     MaterialUvBindings uvBindings = BuildMaterialUvBindings(materialInfo, materialFlags, uvCache);
     SampleMaterialFromUvCache(uvCache, uvBindings, normalWSBase, posWS, float3(1.0f, 1.0f, 1.0f), materialInfo, materialFlags, dpdx, dpdy, ret);
 }

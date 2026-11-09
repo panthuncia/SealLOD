@@ -162,6 +162,77 @@ uint TerrainRvtClipInfoIndex(TerrainRvtInfo info, uint terrainSetIndex, uint cli
     return terrainSetIndex * max(info.maxClipLevels, 1u) + clipLevel;
 }
 
+// Where a generation entry's tile lands: its physical page's tile origin in the atlas and its pool (array slice). False for
+// an entry TerrainRvtGeneratePagesCS skips, which TerrainRvtEncodePagesCS (compressed atlases) must skip too: its scratch
+// slice holds nothing.
+bool TerrainRvtGenerationTile(
+    TerrainRvtInfo info,
+    TerrainRvtGenerationRequest generation,
+    StructuredBuffer<TerrainRvtClipInfo> clipInfos,
+    out uint2 tileOrigin,
+    out uint atlasPoolIndex)
+{
+    tileOrigin = 0u.xx;
+    atlasPoolIndex = 0u;
+    if (generation.physicalPageIndex >= info.maxPhysicalPages ||
+        generation.terrainSetIndex >= info.maxTerrainSets || generation.clipLevel >= info.maxClipLevels)
+    {
+        return false;
+    }
+    if (clipInfos[TerrainRvtClipInfoIndex(info, generation.terrainSetIndex, generation.clipLevel)].valid == 0u)
+    {
+        return false;
+    }
+    const uint tileSide = max(info.physicalTileTexelSide, 1u);
+    const uint pagesPerPool = max(info.physicalAtlasPagesWide * info.physicalAtlasPagesHigh, 1u);
+    atlasPoolIndex = min(generation.physicalPageIndex / pagesPerPool, max(info.physicalAtlasPoolCount, 1u) - 1u);
+    const uint localPhysicalPageIndex = generation.physicalPageIndex - atlasPoolIndex * pagesPerPool;
+    const uint2 physicalPage = uint2(
+        localPhysicalPageIndex % max(info.physicalAtlasPagesWide, 1u),
+        localPhysicalPageIndex / max(info.physicalAtlasPagesWide, 1u));
+    tileOrigin = physicalPage * tileSide;
+    return true;
+}
+
+// The compression scratch (TerrainRvtGeneratePagesCS to TerrainRvtEncodePagesCS): a uint per texel of each generation's
+// tile, generation-major then row-major.
+uint TerrainRvtScratchIndex(TerrainRvtInfo info, uint generationIndex, uint2 tileTexel)
+{
+    const uint tileSide = max(info.physicalTileTexelSide, 1u);
+    return (generationIndex * tileSide + tileTexel.y) * tileSide + tileTexel.x;
+}
+
+uint TerrainRvtPackUnorm4x8(float4 value)
+{
+    const uint4 bytes = (uint4)round(saturate(value) * 255.0f);
+    return bytes.x | (bytes.y << 8u) | (bytes.z << 16u) | (bytes.w << 24u);
+}
+
+// In byte units [0, 255], as the block encoders take them.
+float4 TerrainRvtUnpackUnorm4x8Bytes(uint packed)
+{
+    return float4(packed & 0xffu, (packed >> 8u) & 0xffu, (packed >> 16u) & 0xffu, packed >> 24u);
+}
+
+uint TerrainRvtPackUnorm2x16(float2 value)
+{
+    const uint2 halves = (uint2)round(saturate(value) * 65535.0f);
+    return halves.x | (halves.y << 16u);
+}
+
+float2 TerrainRvtUnpackUnorm2x16Bytes(uint packed)
+{
+    return float2(packed & 0xffffu, packed >> 16u) * (255.0f / 65535.0f);
+}
+
+// Tangent normal from an atlas sample's xy ([0,1]-packed). The z the generation stored is dropped: a BC5 atlas has none,
+// and the terrain's tangent normals face up, so rebuilding it gives the same normal for both atlas formats.
+float3 TerrainRvtDecodeNormal(float2 packedXY)
+{
+    const float2 xy = packedXY * 2.0f - 1.0f;
+    return normalize(float3(xy, sqrt(saturate(1.0f - dot(xy, xy)))));
+}
+
 uint TerrainRvtPageTableSlot(TerrainRvtClipInfo clipInfo, uint2 pageCoord)
 {
     const uint resolution = max(clipInfo.tableResolution, 1u);
@@ -1630,7 +1701,7 @@ bool TerrainRvtTrySampleMaterial(
 #if TERRAIN_RVT_ENABLE_HOT_SAMPLE_DEBUG
     sampleOut.albedoPoint = albedoAtlas.SampleLevel(g_pointClamp, atlasUv, 0.0f).rgb;
 #endif
-    sampleOut.normalTS = normalize(normalAtlas.SampleLevel(g_linearClamp, atlasUv, 0.0f).xyz * 2.0f - 1.0f);
+    sampleOut.normalTS = TerrainRvtDecodeNormal(normalAtlas.SampleLevel(g_linearClamp, atlasUv, 0.0f).xy);
     sampleOut.normalWS = TerrainRvtTangentToWorldNormal(sampleOut.normalTS, normalWSBase);
     const float4 materialParams = materialAtlas.SampleLevel(g_linearClamp, atlasUv, 0.0f);
     sampleOut.roughness = materialParams.r;
@@ -1741,7 +1812,7 @@ bool TerrainRvtTrySampleNormalBiasedFromMaterialSample(
     float3 atlasUv;
     TerrainRvtPhysicalPageUv(info, physicalPageIndex, residentAddress.pageUv, atlasUv);
     Texture2DArray<float4> normalAtlas = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtNormalAtlas)];
-    normalTS = normalize(normalAtlas.SampleLevel(g_linearClamp, atlasUv, 0.0f).xyz * 2.0f - 1.0f);
+    normalTS = TerrainRvtDecodeNormal(normalAtlas.SampleLevel(g_linearClamp, atlasUv, 0.0f).xy);
     normalWS = TerrainRvtTangentToWorldNormal(normalTS, normalWSBase);
     return true;
 }
@@ -1844,7 +1915,7 @@ bool TerrainRvtTrySampleNormalBiased(
     float3 atlasUv;
     TerrainRvtPhysicalPageUv(info, physicalPageIndex, residentAddress.pageUv, atlasUv);
     Texture2DArray<float4> normalAtlas = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtNormalAtlas)];
-    normalTS = normalize(normalAtlas.SampleLevel(g_linearClamp, atlasUv, 0.0f).xyz * 2.0f - 1.0f);
+    normalTS = TerrainRvtDecodeNormal(normalAtlas.SampleLevel(g_linearClamp, atlasUv, 0.0f).xy);
     normalWS = TerrainRvtTangentToWorldNormal(normalTS, normalWSBase);
     return true;
 }

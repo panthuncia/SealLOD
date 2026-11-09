@@ -505,7 +505,6 @@ private:
 
 	// Keep only a small amount of work beyond the active I/O workers. Priority
 	// remains mutable in m_clodDiskStreamingRequests until a task is admitted.
-	static constexpr uint32_t kMaxIoBatchSize = 128u;
 
 	void DispatchCLodDiskStreamingBatch();
 	bool QueueCLodDiskStreamingRequest(uint32_t groupGlobalIndex, const std::shared_ptr<CLodSharedStreamingState>& state, uint32_t groupLocalIndex, bool& outQueued, const std::vector<bool>& segmentNeedsFetch = {}, const std::vector<uint32_t>& preAllocatedPages = {}, uint32_t priority = 0u, const CLodCache::GroupPayloadLayoutMetadata* prefetchedLayout = nullptr);

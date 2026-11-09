@@ -179,6 +179,7 @@ namespace br::staticimport
 							const auto& part = payload->parts[index];
 							LoadedPart loaded{ .index = index, .skinned = IsSkinnedPart(part.meshes), .name = part.name };
 							DirectX::XMStoreFloat4x4(&loaded.localMatrix, part.localMatrix);
+							loaded.instanceMatrices = part.instanceMatrices;
 							entryPtr->loadedParts.push_back(std::move(loaded));
 						}
 						entryPtr->payload = std::move(payload);

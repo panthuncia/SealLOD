@@ -27,6 +27,8 @@
 #include <map>
 #include <mutex>
 #include <numeric>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -51,6 +53,9 @@
 #include <BasicRenderer/Assets/Import/BRNiflyClient.h>
 #include <BasicRenderer/Assets/CachePaths.h>
 #include <BasicRenderer/Assets/Import/CLodCache.h>
+#include <BasicRenderer/Assets/Import/ImportProfile.h>
+
+#include "GltfSceneBuild.h"
 
 #include <pxr/usd/sdf/layer.h>
 #include <pxr/usd/usd/primFlags.h>
@@ -72,6 +77,9 @@ static std::mutex g_reportMutex;
 static uint32_t g_usdTessellationFactor = 1u;
 static fs::path g_assetOverridesConfig;
 static std::unordered_map<std::string, std::string> g_sourceIdentifierOverrides;
+// glTF scene builds (GltfSceneBuild.h).
+static GltfSceneBuildOptions g_gltfScene;
+static fs::path g_profilePath;
 
 // Helpers
 
@@ -92,6 +100,15 @@ static AssetFormat DetectFormat(const fs::path& path) {
 	if (ext == ".nif" || ext == ".bto")
         return AssetFormat::Nif;
     return AssetFormat::Assimp;   // fbx, obj, dae, ...
+}
+
+// Files a directory scan queues. Anything else in a scene's folder (buffers, images) is read through its scene.
+static bool IsSceneFile(const fs::path& path) {
+    static const std::unordered_set<std::string> extensions = {
+        ".usd", ".usda", ".usdc", ".usdz", ".gltf", ".glb", ".nif", ".bto",
+        ".fbx", ".obj", ".dae", ".3ds", ".ply", ".stl", ".blend", ".x", ".lwo", ".ms3d",
+    };
+    return extensions.contains(ToLower(path.extension().string()));
 }
 
 static const char* FormatName(AssetFormat f) {
@@ -1139,6 +1156,8 @@ static void WriteClusterLODReport(
 }
 
 static constexpr std::string_view kCacheRootPrefix = "--cache-root=";
+// --out: the cache root as well, and the directory a glTF scene's manifest is written to.
+static constexpr std::string_view kOutPrefix = "--out=";
 static fs::path g_manifestPath;
 
 struct ManifestFileResult {
@@ -1251,13 +1270,40 @@ static bool TryConsumeOption(const std::string& arg) {
 
     if (arg == "--cache-only") {
         CLodCache::SetCacheOnlyMode(true);
+        g_gltfScene.cacheOnly = true;
+        return true;
+    }
+    if (arg == "--no-textures") {
+        g_gltfScene.conditionTextures = false;
         return true;
     }
 
     // Read before anything else runs, because the cache root is resolved once per process.
-    if (arg.rfind(kCacheRootPrefix, 0) == 0) {
+    if (arg.rfind(kCacheRootPrefix, 0) == 0 || arg.rfind(kOutPrefix, 0) == 0) {
         return true;
     }
+
+    auto value = [&arg](std::string_view prefix) -> std::optional<std::string> {
+        if (arg.rfind(prefix, 0) != 0) return std::nullopt;
+        return arg.substr(prefix.size());
+    };
+    auto number = [](const std::string& text, const char* name) -> double {
+        char* end = nullptr;
+        const double parsed = std::strtod(text.c_str(), &end);
+        if (end == text.c_str() || parsed < 0.0) throw std::runtime_error(std::string(name) + " needs a non-negative number");
+        return parsed;
+    };
+    if (auto v = value("--profile=")) { g_profilePath = *v; return true; }
+    if (auto v = value("--only-mesh=")) { g_gltfScene.onlyMeshes = *v; return true; }
+    if (auto v = value("--skip-meshes=")) { g_gltfScene.skipMeshes = *v; return true; }
+    if (auto v = value("--memory-budget-gb=")) {
+        g_gltfScene.memoryBudgetBytes = static_cast<uint64_t>(number(*v, "--memory-budget-gb") * 1024.0 * 1024.0 * 1024.0);
+        return true;
+    }
+    if (auto v = value("--bytes-per-triangle=")) { g_gltfScene.bytesPerTriangle = static_cast<uint64_t>(number(*v, "--bytes-per-triangle")); return true; }
+    if (auto v = value("--jobs=")) { g_gltfScene.jobs = static_cast<unsigned>(number(*v, "--jobs")); return true; }
+    if (auto v = value("--shard-index=")) { g_gltfScene.shardIndex = static_cast<uint32_t>(number(*v, "--shard-index")); return true; }
+    if (auto v = value("--shard-count=")) { g_gltfScene.shardCount = (std::max)(1u, static_cast<uint32_t>(number(*v, "--shard-count"))); return true; }
 
     const std::string manifestPrefixString(manifestPrefix);
     if (arg.rfind(manifestPrefixString, 0) == 0) {
@@ -1404,23 +1450,16 @@ static bool ProcessFile(const fs::path& path) {
         }
         case AssetFormat::GlTF: {
             ZoneScopedN("CLodCacheTool::ProcessFile::GlTF");
-            spdlog::info("  Loading glTF...");
-            auto result = GlTFGeometryExtractor::ExtractAll(pathStr);
-            uint64_t extractedTriangles = 0;
-            for (const auto& primitive : result.primitives) {
-                extractedTriangles += primitive.result.ingest.GetIndices().size() / 3ull;
+            GltfSceneBuildOptions options = g_gltfScene;
+            options.outDirectory = GetCacheRootPath();
+            if (g_reportEnabled) {
+                options.report = [&canonical](const std::string& label, const MeshPreprocessResult& result) {
+                    WriteClusterLODReport(canonical, label, result);
+                };
             }
-            spdlog::info("  glTF result: primitives extracted: {}, extracted_triangles={}",
-                         result.primitives.size(),
-                         extractedTriangles);
-            for (const auto& primitive : result.primitives) {
-                WriteClusterLODReport(
-                    canonical,
-                    "glTF mesh " + std::to_string(primitive.meshIndex) + " primitive " + std::to_string(primitive.primitiveIndex),
-                    primitive.result);
+            if (!BuildGltfScene(canonical, options)) {
+                return false;
             }
-            if (result.primitives.empty())
-                spdlog::warn("  No primitives found in glTF file!");
             break;
         }
         case AssetFormat::Nif: {
@@ -1526,8 +1565,13 @@ int main(int argc, char* argv[]) {
 
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg(argv[i]);
-        if (arg.starts_with(kCacheRootPrefix)) {
-            SetProcessEnvironment("SARP_CACHE_ROOT", std::string(arg.substr(kCacheRootPrefix.size())));
+        std::string_view root;
+        if (arg.starts_with(kCacheRootPrefix)) root = arg.substr(kCacheRootPrefix.size());
+        if (arg.starts_with(kOutPrefix)) root = arg.substr(kOutPrefix.size());
+        if (!root.empty()) {
+            const auto absoluteRoot = fs::absolute(fs::path(std::string(root)));
+            SetProcessEnvironment("SARP_CACHE_ROOT", absoluteRoot.string());
+            (void)SetCacheRootPath(absoluteRoot);
         }
     }
 
@@ -1551,7 +1595,21 @@ int main(int argc, char* argv[]) {
 
     if (argc < 2) {
         spdlog::error("No arguments provided.");
-            std::cerr << "Usage: CLodCacheTool [--cache-root=dir] [--manifest=path] [--cache-only] [--asset-overrides=config.json] [--clod-report=path] [--usd-tessellation-factor=N] [--clod-coverage-preservation-mode=none|prioritizeEdges|voxel] <file1|dir1> [file2|dir2 ...]\n";
+            std::cerr <<
+                "Usage: CLodCacheTool [options] <file|dir> ...\n"
+                "  --out=dir                  cache root; a glTF scene's manifest (<scene>.brscene.json) is written there\n"
+                "  --cache-root=dir           cache root, without implying a manifest location (same as --out otherwise)\n"
+                "  --profile=profile.json     import profile: mesh skips and material channel conventions\n"
+                "  --only-mesh=regex          glTF: only meshes whose name matches\n"
+                "  --skip-meshes=regex        glTF: leave out meshes whose name matches\n"
+                "  --shard-index=i --shard-count=n  glTF: meshes whose index % n == i\n"
+                "  --memory-budget-gb=N       glTF: bound primitives building at once (default half of RAM)\n"
+                "  --bytes-per-triangle=N     glTF: build memory estimate per triangle (default 1024)\n"
+                "  --jobs=N                   glTF: primitives building at once at most (default hardware threads)\n"
+                "  --cache-only               report misses instead of building\n"
+                "  --no-textures              glTF: skip the texture stage\n"
+                "  --manifest=path --asset-overrides=config.json --clod-report=path --usd-tessellation-factor=N\n"
+                "  --clod-coverage-preservation-mode=none|prioritizeEdges|voxel --clod-voxel-*=... --debug\n";
         return 1;
     }
 
@@ -1570,7 +1628,15 @@ int main(int argc, char* argv[]) {
         ZoneScopedN("CLodCacheTool::GatherFiles");
         for (int i = 1; i < argc; ++i) {
         const std::string arg(argv[i]);
-        if (TryConsumeOption(arg)) {
+        bool consumed = false;
+        try {
+            consumed = TryConsumeOption(arg);
+        } catch (const std::exception& error) {
+            spdlog::error("Bad option {}: {}", arg, error.what());
+            scheduler.Cleanup();
+            return 1;
+        }
+        if (consumed) {
             spdlog::info("Consumed option: {}", arg);
             continue;
         }
@@ -1584,7 +1650,7 @@ int main(int argc, char* argv[]) {
             spdlog::info("Scanning directory: {}", fs::weakly_canonical(p).string());
             size_t before = files.size();
             for (auto& entry : fs::recursive_directory_iterator(p)) {
-                if (entry.is_regular_file())
+                if (entry.is_regular_file() && IsSceneFile(entry.path()))
                     files.push_back(entry.path());
             }
             spdlog::info("  Found {} file(s) in directory.", files.size() - before);
@@ -1681,6 +1747,17 @@ int main(int argc, char* argv[]) {
             } catch (const std::exception& error) {
                 spdlog::error("Failed to load asset overrides '{}': {}", g_assetOverridesConfig.string(), error.what());
             }
+        }
+    }
+
+    if (!g_profilePath.empty()) {
+        try {
+            g_gltfScene.profile = std::make_shared<const br::import::ImportProfile>(br::import::LoadImportProfile(g_profilePath.string()));
+            spdlog::info("Import profile '{}' from {}", g_gltfScene.profile->name, g_profilePath.string());
+        } catch (const std::exception& error) {
+            spdlog::error("{}", error.what());
+            scheduler.Cleanup();
+            return 1;
         }
     }
 

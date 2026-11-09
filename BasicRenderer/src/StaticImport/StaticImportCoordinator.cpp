@@ -927,8 +927,28 @@ namespace br::staticimport
 		stats.pendingGroupDiagnostics.clear();
 		// A single failed variant can fan out to hundreds of placement groups at
 		// large radii. Keep this diagnostic bounded, but do not suppress it merely
-		// because the terminal asset is widely instanced.
-		if (_state.pendingGroups.size() <= 2048) {
+		// because the terminal asset is widely instanced. Past 2048 pending groups,
+		// list only suspended groups, at most 64 (only while the load has stopped
+		// moving, so a large load pays nothing): a lost dependency can hold
+		// thousands of ready groups behind one suspended one.
+		const bool listAll = _state.pendingGroups.size() <= 2048;
+		std::vector<std::uint64_t> suspendedIDs;
+		if (!listAll && _importState->benchmarkDiagnosticsEnabled && _state.workerInFlightGroups.empty()) {
+			for (const auto& [groupID, _] : _state.groupSuspensions) {
+				if (suspendedIDs.size() >= 64u) break;
+				suspendedIDs.push_back(groupID);
+			}
+		}
+		const auto forEachListed = [&](auto&& body) {
+			if (listAll) {
+				for (const auto& [groupID, record] : _state.pendingGroups) body(groupID, record);
+				return;
+			}
+			for (const auto groupID : suspendedIDs) {
+				if (const auto it = _state.pendingGroups.find(groupID); it != _state.pendingGroups.end()) body(groupID, it->second);
+			}
+		};
+		{
 			auto dependencyName = [](StaticImportDependencyKind kind) {
 				switch (kind) {
 				case StaticImportDependencyKind::Template: return "template";
@@ -939,8 +959,8 @@ namespace br::staticimport
 				}
 				return "unknown";
 			};
-			for (const auto& [groupID, record] : _state.pendingGroups) {
-				if (!record) continue;
+			forEachListed([&](std::uint64_t groupID, const auto& record) {
+				if (!record) return;
 				const auto& group = record->descriptor;
 				std::string stage = "unqueued";
 				if (_state.readyGroups.contains(groupID)) stage = "ready_tracked";
@@ -959,23 +979,27 @@ namespace br::staticimport
 				const auto transition = _state.pendingGroupLastTransition.find(groupID);
 				std::size_t pendingDependencyCount = 0;
 				std::size_t delayedDependencyCount = 0;
+				std::size_t variantJobsPending = 0;
 				if (const auto suspended = _state.groupSuspensions.find(groupID); suspended != _state.groupSuspensions.end()) {
 					for (const auto& dependency : suspended->second.remaining) {
 						pendingDependencyCount += _state.pendingDependencyRequests.contains(dependency) ? 1u : 0u;
 						delayedDependencyCount += _state.delayedDependencyRequests.contains(dependency) ? 1u : 0u;
+						variantJobsPending += dependency.kind == StaticImportDependencyKind::MaterialVariant &&
+							_state.pendingMaterialVariantKeys.contains(dependency.stringKey) ? 1u : 0u;
 					}
 				}
 				stats.pendingGroupDiagnostics.push_back(fmt::format(
-					"group=0x{:016X} stage={} last_transition={} placements={} model='{}' batch=0x{:016X} residency={} residency_generation={} live={} host_liveness_generation={} dependencies=[{}] pending_dependency_requests={} delayed_dependency_requests={} worker_drains_active={} group_jobs={} group_results={} asset_jobs={} asset_results={}",
+					"group=0x{:016X} stage={} last_transition={} placements={} model='{}' batch=0x{:016X} residency={} residency_generation={} live={} host_liveness_generation={} dependencies=[{}] pending_dependency_requests={} delayed_dependency_requests={} variant_jobs_pending={} variant_jobs_queued={} variant_results_queued={} worker_drains_active={} group_jobs={} group_results={} asset_jobs={} asset_results={}",
 					groupID, stage, transition == _state.pendingGroupLastTransition.end() ? "none" : transition->second,
 					group.placementCount, group.ModelPath(), group.batchKey,
 					static_cast<unsigned>(group.residencyClass), group.residencyGeneration,
 					IsGroupLive(*record), _state.hostLivenessGeneration,
-					dependencies, pendingDependencyCount, delayedDependencyCount,
+					dependencies, pendingDependencyCount, delayedDependencyCount, variantJobsPending,
+					_bus->staticImportMaterialVariantJobs.Size(), _bus->staticImportMaterialVariantResults.Size(),
 					_importState->staticImportWorkerDrainsActive.load(std::memory_order_acquire),
 					0, _shared->graphCompletions->StaticGroupCount(),
 					_bus->staticImportAssetPublishJobs.Size(), _bus->staticImportAssetPublishResults.Size()));
-			}
+			});
 		}
 		{
 			std::lock_guard lock(_importState->staticImportServiceStatsMutex);

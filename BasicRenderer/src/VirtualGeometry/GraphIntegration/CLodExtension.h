@@ -145,6 +145,12 @@ private:
     std::shared_ptr<org::Buffer> m_compactedVisibleClustersBufferSw;
     std::shared_ptr<org::Buffer> m_compactedVisibleClusterTransformIndicesBuffer;
     std::shared_ptr<org::Buffer> m_compactedVisibleClusterTransformIndicesBufferSw;
+    // Phase 2 compacts into its own buffers: no pass reads phase 1's compacted entries after phase 1 rasterizes them,
+    // so the two phases' copies alias with each other and with what lives between them. Null for one-phase variants.
+    std::shared_ptr<org::Buffer> m_compactedVisibleClustersBufferPhase2;
+    std::shared_ptr<org::Buffer> m_compactedVisibleClustersBufferPhase2Sw;
+    std::shared_ptr<org::Buffer> m_compactedVisibleClusterTransformIndicesBufferPhase2;
+    std::shared_ptr<org::Buffer> m_compactedVisibleClusterTransformIndicesBufferPhase2Sw;
     std::shared_ptr<org::Buffer> m_rasterBucketsWriteCursorBuffer;
     // TODO: Raster-bucket indirect args have exhibited invalid data when reused across otherwise separate
     // CLod rasterization paths. Until the root cause is understood, keep HW, compute SW, and SW page-job
@@ -168,6 +174,9 @@ private:
     std::shared_ptr<org::Buffer> m_reyesSplitQueueCounterBufferA;
     std::shared_ptr<org::Buffer> m_reyesSplitQueueOverflowBufferA;
     std::shared_ptr<org::Buffer> m_reyesSplitQueueBufferB;
+    // Phase 2's seed starts the split queues over (ReyesQueueResetPass), so it splits in its own pair.
+    std::shared_ptr<org::Buffer> m_reyesSplitQueueBufferAPhase2;
+    std::shared_ptr<org::Buffer> m_reyesSplitQueueBufferBPhase2;
     std::shared_ptr<org::Buffer> m_reyesSplitQueueCounterBufferB;
     std::shared_ptr<org::Buffer> m_reyesSplitQueueOverflowBufferB;
     std::shared_ptr<org::Buffer> m_reyesReplaySplitQueueBuffer;
@@ -205,6 +214,11 @@ private:
     uint32_t m_voxelRasterWorkCapacity = 0u;
     std::shared_ptr<org::Buffer> m_sortedToUnsortedMappingBuffer;
     std::shared_ptr<org::Buffer> m_sortedToUnsortedMappingBufferSw;
+    std::shared_ptr<org::Buffer> m_sortedToUnsortedMappingBufferPhase2;
+    std::shared_ptr<org::Buffer> m_sortedToUnsortedMappingBufferPhase2Sw;
+    // Each culling pass clears the voxel queue counters, so phase 2 queues into its own buffers too.
+    std::shared_ptr<org::Buffer> m_voxelRasterWorkBufferPhase2;
+    std::shared_ptr<org::Buffer> m_skinnedVoxelRasterWorkBufferPhase2;
     std::shared_ptr<org::Buffer> m_deepVisibilityNodesBuffer;
     std::shared_ptr<org::Buffer> m_deepVisibilityCounterBuffer;
     std::shared_ptr<org::Buffer> m_deepVisibilityOverflowCounterBuffer;

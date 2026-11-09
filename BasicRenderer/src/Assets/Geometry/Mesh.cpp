@@ -663,6 +663,8 @@ void Mesh::ApplyPrebuiltClusterLODData(const ClusterLODPrebuiltData& data)
 	m_clodAssemblyTransforms = data.assemblyTransforms;
 	m_clodAssemblyTransformMaterialBases = data.assemblyTransformMaterialBases;
 	m_clodMaterialSlotCount = (std::max)(data.materialSlotCount, 1u);
+	m_clodExternalParts = data.externalParts;
+	m_clodPaletteParts = data.paletteParts;
 	m_clodAssemblyInstances = data.assemblyInstances;
 	m_clodAssemblyBoneRemaps = data.assemblyBoneRemaps;
 	m_clodAssemblyBoneRemapIndices = data.assemblyBoneRemapIndices;
@@ -825,6 +827,8 @@ ClusterLODPrebuiltData Mesh::GetClusterLODPrebuiltData() const
 	}
 	out.assemblyTransformMaterialBases = m_clodAssemblyTransformMaterialBases;
 	out.materialSlotCount = m_clodMaterialSlotCount;
+	out.externalParts = m_clodExternalParts;
+	out.paletteParts = m_clodPaletteParts;
 	if (!m_clodAssemblyInstances.empty()) {
 		out.assemblyInstances = m_clodAssemblyInstances;
 	}

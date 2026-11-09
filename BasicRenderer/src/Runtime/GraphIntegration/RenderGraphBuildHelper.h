@@ -242,6 +242,33 @@ inline void RegisterVisUtilResources(
     }
 
     if (terrainRvt) {
+    // Compression scratch (TerrainRvt::CompressionEnabled): a tile per page of the per-frame generation budget, written by
+    // TerrainRvtGeneratePagesCS and read by TerrainRvtEncodePagesCS in the same frame. Buffers, not textures: the alias planner
+    // pools by resource class, and the frame's buffer pool has room at the RVT passes (its peak is CLod culling), where a
+    // texture would get a pool of its own. Built with every graph, never kept with the persistent RVT resources below.
+    if (TerrainRvt::CompressionEnabled()) {
+        const uint32_t scratchTileSide = TerrainRvt::PageSize() + TerrainRvt::BorderTexels() * 2u;
+        const uint32_t scratchTexels = scratchTileSide * scratchTileSide * TerrainRvt::MaxGeneratedPagesPerFrame();
+        auto createTerrainRvtScratch = [&](std::string_view name, const char* debugName) {
+            auto buffer = org::Buffer::CreateUnmaterializedStructuredBuffer(scratchTexels, sizeof(uint32_t), true, false, false,
+                rhi::HeapType::DeviceLocal);
+            buffer->SetAllowAlias(true);
+            buffer->SetName(debugName);
+            org::memory::SetResourceUsageHint(*buffer, "Terrain RVT compression scratch");
+            graph->RegisterResource(name, buffer);
+        };
+        // A uint per texel: albedo and material as RGBA8, the normal's xy as two 16-bit values (more than the atlas used to
+        // keep, for BC5's endpoint fit).
+        createTerrainRvtScratch(Builtin::Terrain::RvtScratchAlbedo, "TerrainRvt::ScratchAlbedo");
+        createTerrainRvtScratch(Builtin::Terrain::RvtScratchNormal, "TerrainRvt::ScratchNormal");
+        createTerrainRvtScratch(Builtin::Terrain::RvtScratchMaterial, "TerrainRvt::ScratchMaterial");
+        auto encodeArgs = org::Buffer::CreateUnmaterializedStructuredBuffer(
+            1, sizeof(D3D12_DISPATCH_ARGUMENTS), true, true, false, rhi::HeapType::DeviceLocal);
+        encodeArgs->SetAllowAlias(false);
+        encodeArgs->SetName("TerrainRvt::EncodeDispatchArgs");
+        org::memory::SetResourceUsageHint(*encodeArgs, "Terrain RVT");
+        graph->RegisterResource(Builtin::Terrain::RvtEncodeDispatchArgs, encodeArgs);
+    }
     if (persistentTerrainRvtResources && !persistentTerrainRvtResources->empty()) {
         for (const auto& [name, resource] : *persistentTerrainRvtResources) {
             graph->RegisterResource(name, resource);
@@ -565,9 +592,12 @@ inline void RegisterVisUtilResources(
         static_cast<uint64_t>(terrainRvtAtlasSide) *
         static_cast<uint64_t>(terrainRvtAtlasHeight) *
         static_cast<uint64_t>(TerrainRvt::AtlasPoolCount());
-    const uint64_t terrainRvtAtlasBytes = terrainRvtAtlasTexels * (2u + 4u + 8u + 4u);
+    const bool terrainRvtCompressed = TerrainRvt::CompressionEnabled();
+    // Height R16F, then albedo, normal and material: RGBA8, R10G10B10A2 and RGBA8, or BC7, BC5 and BC7 (a byte a texel).
+    const uint64_t terrainRvtAtlasBytes = terrainRvtAtlasTexels * (2u + (terrainRvtCompressed ? 3u : 12u));
     spdlog::info(
-        "Terrain RVT atlas allocation: pageSize={} border={} tileSide={} pages={}x{} pools={} texture={}x{} totalAtlasBytes={} ({:.2f} MiB)",
+        "Terrain RVT atlas allocation: compressed={} pageSize={} border={} tileSide={} pages={}x{} pools={} texture={}x{} totalAtlasBytes={} ({:.2f} MiB)",
+        terrainRvtCompressed,
         TerrainRvt::PageSize(),
         TerrainRvt::BorderTexels(),
         terrainRvtPhysicalTileSide,
@@ -578,7 +608,10 @@ inline void RegisterVisUtilResources(
         terrainRvtAtlasHeight,
         terrainRvtAtlasBytes,
         static_cast<double>(terrainRvtAtlasBytes) / (1024.0 * 1024.0));
-    auto createTerrainRvtAtlas = [&](std::string_view name, const char* debugName, rhi::Format format, uint32_t channels) {
+    // compressedFormat: the block-compressed format, used when compression is on. Its UAV is one R32G32B32A32_UINT texel per
+    // block, which TerrainRvtEncodePagesCS writes; readers sample the compressed format.
+    auto createTerrainRvtAtlas = [&](std::string_view name, const char* debugName, rhi::Format format, uint32_t channels,
+        rhi::Format compressedFormat = rhi::Format::Unknown) {
         org::TextureDescription desc;
         desc.arraySize = TerrainRvt::AtlasPoolCount();
         desc.channels = channels;
@@ -591,6 +624,13 @@ inline void RegisterVisUtilResources(
         desc.srvFormat = format;
         desc.uavFormat = format;
         desc.allowAlias = false;
+        if (terrainRvtCompressed && compressedFormat != rhi::Format::Unknown) {
+            desc.format = compressedFormat;
+            desc.srvFormat = compressedFormat;
+            desc.uavFormat = rhi::Format::R32G32B32A32_UInt;
+            desc.castableFormats = { rhi::Format::R32G32B32A32_UInt };
+            desc.hasNonShaderVisibleUAV = false;
+        }
         desc.imageDimensions.push_back({ terrainRvtAtlasSide, terrainRvtAtlasHeight, 0, 0 });
         auto texture = org::PixelBuffer::CreateSharedUnmaterialized(desc);
         texture->SetName(debugName);
@@ -599,10 +639,14 @@ inline void RegisterVisUtilResources(
     };
 
     createTerrainRvtAtlas(Builtin::Terrain::RvtHeightAtlas, "TerrainRvt::HeightAtlas", rhi::Format::R16_Float, 1);
-    createTerrainRvtAtlas(Builtin::Terrain::RvtAlbedoAtlas, "TerrainRvt::AlbedoAtlas", rhi::Format::R8G8B8A8_UNorm, 4);
-    // A [0,1]-packed tangent normal (w unused): 10 bits per channel match FP16 over that range at half the size.
-    createTerrainRvtAtlas(Builtin::Terrain::RvtNormalAtlas, "TerrainRvt::NormalAtlas", rhi::Format::R10G10B10A2_UNorm, 4);
-    createTerrainRvtAtlas(Builtin::Terrain::RvtMaterialAtlas, "TerrainRvt::MaterialAtlas", rhi::Format::R8G8B8A8_UNorm, 4);
+    createTerrainRvtAtlas(Builtin::Terrain::RvtAlbedoAtlas, "TerrainRvt::AlbedoAtlas", rhi::Format::R8G8B8A8_UNorm, 4,
+        rhi::Format::BC7_UNorm);
+    // A [0,1]-packed tangent normal (w unused): 10 bits per channel match FP16 over that range at half the size. Compressed,
+    // only its xy (BC5): readers rebuild z (TerrainRvtDecodeNormal).
+    createTerrainRvtAtlas(Builtin::Terrain::RvtNormalAtlas, "TerrainRvt::NormalAtlas", rhi::Format::R10G10B10A2_UNorm, 4,
+        rhi::Format::BC5_UNorm);
+    createTerrainRvtAtlas(Builtin::Terrain::RvtMaterialAtlas, "TerrainRvt::MaterialAtlas", rhi::Format::R8G8B8A8_UNorm, 4,
+        rhi::Format::BC7_UNorm);
     if (persistentTerrainRvtResources) {
         const std::string_view persistentNames[] = {
             Builtin::Terrain::RvtInfo, Builtin::Terrain::RvtClipInfos,
@@ -649,6 +693,10 @@ inline void BuildTerrainRvtPipeline(org::RenderGraph* graph)
     TagPassTechnique(graph, "TerrainRvtBuildMaterialGenerateDispatchArgsPass", "Primary Visibility::Terrain RVT");
     graph->BuildPass<TerrainRvtGeneratePagesPass>("TerrainRvtGenerateMaterialPagesPass");
     TagPassTechnique(graph, "TerrainRvtGenerateMaterialPagesPass", "Primary Visibility::Terrain RVT");
+    if (TerrainRvt::CompressionEnabled()) {
+        graph->BuildPass<TerrainRvtEncodePagesPass>("TerrainRvtEncodeMaterialPagesPass");
+        TagPassTechnique(graph, "TerrainRvtEncodeMaterialPagesPass", "Primary Visibility::Terrain RVT");
+    }
     graph->BuildPass<TerrainRvtFinalizeGeneratedPagesPass>("TerrainRvtFinalizeGeneratedMaterialPagesPass");
     TagPassTechnique(graph, "TerrainRvtFinalizeGeneratedMaterialPagesPass", "Primary Visibility::Terrain RVT");
     graph->BuildPass<TerrainRvtBuildHeightResidentCachePass>("TerrainRvtBuildHeightResidentCachePass");
@@ -743,6 +791,10 @@ inline void BuildCanonicalSurfacePipeline(
 
             graph->BuildPass<TerrainRvtGeneratePagesPass>("TerrainRvtGenerateMaterialPagesPass");
             TagPassTechnique(graph, "TerrainRvtGenerateMaterialPagesPass", "Primary Visibility::Terrain RVT");
+            if (TerrainRvt::CompressionEnabled()) {
+                graph->BuildPass<TerrainRvtEncodePagesPass>("TerrainRvtEncodeMaterialPagesPass");
+                TagPassTechnique(graph, "TerrainRvtEncodeMaterialPagesPass", "Primary Visibility::Terrain RVT");
+            }
 
             graph->BuildPass<TerrainRvtFinalizeGeneratedPagesPass>("TerrainRvtFinalizeGeneratedMaterialPagesPass");
             TagPassTechnique(graph, "TerrainRvtFinalizeGeneratedMaterialPagesPass", "Primary Visibility::Terrain RVT");

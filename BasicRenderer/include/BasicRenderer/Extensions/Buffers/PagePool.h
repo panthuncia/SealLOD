@@ -185,6 +185,7 @@ private:
 	std::array<std::vector<uint32_t>, kPageSizeClassCount> m_freePinnedPageIDs;
 	// CPU-side mirror of the page table: indexed by global page ID.
 	std::vector<PageTableEntry> m_pageTableCpu;
+	std::vector<uint32_t> m_pageSlabIndex; // Slab of each page ID; guarded by m_slabMutex.
 	bool                        m_pageTableDirty = false;
 
 	// GPU-side StructuredBuffer<PageTableEntry>.

@@ -144,6 +144,15 @@ ArtifactBuildResult BuildTextureProcessed(const ArtifactBuildContext& context) {
             return ProcessedReady(input->cacheKey, br::textures::DecodeTextureSource(*input->request), {});
         }
 
+        // A provided texture that needs no processing has no cache entry: its shape is all this step makes.
+        if (auto shape = br::textures::ProvidedPassthroughShape(*input->request)) {
+            auto published = std::make_shared<PublishedTextureProcessed>();
+            published->cacheKey = input->cacheKey;
+            published->fullDesc = std::move(shape->desc);
+            published->provider = br::textures::ProvidedTextureMipProvider(*input->request);
+            return ArtifactBuildResult::Ready(ArtifactPayload::Make<PublishedTextureProcessed>(std::move(published)));
+        }
+
         // A hit needs only the cache file's header.
         const auto cachePath = TextureProcessingManager::ConditionedCachePath(input->cacheKey);
         if (auto desc = br::textures::ReadConditionedCacheDescription(cachePath)) {
@@ -285,6 +294,10 @@ ArtifactBuildResult BuildTextureResidency(const ArtifactBuildContext& context) {
             return result;
         }
         if (data) return adopt(UploadWindow(*factory, *texture, request, br::textures::ShapeSourceForTopMip(data, topMip)));
+        if (processed->provider) {
+            return adopt(UploadWindow(*factory, *texture, request,
+                br::textures::ShapeSourceForTopMip(br::textures::ReadProvidedTextureMips(request, topMip), topMip)));
+        }
         if (cachePath.empty()) return ArtifactBuildResult::Failure("texture residency has nothing to load");
 
         const auto checkpoint = context.checkpoint.Get<ResidencyCheckpoint>();

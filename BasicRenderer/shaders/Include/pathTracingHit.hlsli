@@ -11,6 +11,11 @@
 #endif
 
 #define CLOD_RESOLVE_PATH_HIT 1
+// Diagnostic cost breakdowns, set only through a live PSO recompile: 1 constant material, 2 no shadow rays, 3 no alpha tests,
+// 4 primary rays only, 5 no alpha tests on hierarchy roots' instances. 0 is the real path tracer.
+#ifndef PATH_TRACE_EXPERIMENT
+#define PATH_TRACE_EXPERIMENT 0
+#endif
 #define CLOD_RESOLVE_RAY_HIT 1
 #define VISUTIL_COLOR_ONLY_GBUFFER_EVAL 1
 #define PSO_NORMAL_MAP 1
@@ -24,6 +29,10 @@
 static uint4 g_clodRtPackedCluster;
 // The hit's assembly transform (a part portal occurrence), from its TLAS row; sentinel for a root's own clusters.
 static uint g_clodRtHitTransformIndex = 0xFFFFFFFFu;
+// Why CLodResolvePathHit last returned false, for the pixel watch: 1 primitive past the meshlet's triangles (count and
+// material in g_clodPathHitFailureDetail), 2 terrain kind mismatch (the material there).
+static uint g_clodPathHitFailure = 0u;
+static uint g_clodPathHitFailureDetail = 0u;
 
 #include "include/cbuffers.hlsli"
 #include "include/structs.hlsli"
@@ -108,6 +117,8 @@ bool CLodResolvePathHit(
     const MeshletResolveData md = LoadMeshletResolveData(0u);
     if (primitive >= md.triangleCount)
     {
+        g_clodPathHitFailure = 1u;
+        g_clodPathHitFailureDetail = md.triangleCount | (md.materialDataIndex << 8u);
         return false;
     }
 
@@ -115,6 +126,8 @@ bool CLodResolvePathHit(
     MaterialInfo materialInfo = materials[md.materialDataIndex];
     if (isTerrain != ((materialInfo.materialFlags & MATERIAL_TERRAIN) != 0u))
     {
+        g_clodPathHitFailure = 2u;
+        g_clodPathHitFailureDetail = md.materialDataIndex;
         return false;
     }
     if (!isPrimaryHit)
@@ -169,6 +182,15 @@ bool CLodResolvePathHit(
     float2 unusedDebugUv;
     float unusedDebugUvValid;
     float2 unusedDebugUvDerivative;
+#if PATH_TRACE_EXPERIMENT == 1 // Cost breakdown only: a constant material instead of evaluating it.
+    hit.materialInputs = (MaterialInputs)0;
+    hit.materialInputs.albedo = 0.5f.xxx;
+    hit.materialInputs.normalWS = surface.worldNormal;
+    hit.materialInputs.roughness = 0.8f;
+    hit.materialInputs.opacity = 1.0f;
+    hit.materialInputs.ambientOcclusion = 1.0f;
+    if (false)
+#endif
     hit.materialInputs = CLodResolveEvaluateMaterial(
         materialInfo,
         materialFlags,

@@ -152,7 +152,8 @@ void TextureJobGraph::StartSelfTestIfRequested() {
 
 void TextureJobGraph::Execute() {
     BT_ZONE_SCOPE("BR.TextureJobs.Execute");
-    if (!m_textures->HasPendingGpuJobs()) {
+    // Also until a new declaration's build is installed: the graph lets go of finished jobs' resources only then.
+    if (!m_textures->HasPendingGpuJobs() && !(m_instance->Graph() && m_instance->Graph()->HasPendingStructuralBuild())) {
         m_instance->Retire();
         return;
     }

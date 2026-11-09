@@ -177,6 +177,43 @@ namespace br::staticimport::recipe
 			std::span<const std::byte> _remaining;
 		};
 
+		void AppendMaterialOverrides(std::vector<std::byte>& bytes, std::span<const MaterialOverride> overrides)
+		{
+			const auto overrideCount = static_cast<std::uint64_t>(overrides.size());
+			AppendPod(bytes, overrideCount);
+			for (const auto& overrideInfo : overrides) {
+				AppendString(bytes, overrideInfo.name3D);
+				AppendString(bytes, overrideInfo.normalizedName3D);
+				AppendString(bytes, overrideInfo.textureSetEditorID);
+				AppendPod(bytes, overrideInfo.index3D);
+				AppendPod(bytes, overrideInfo.flags);
+				for (const auto& path : overrideInfo.texturePaths) AppendString(bytes, path);
+			}
+		}
+
+		bool ReadCount(Reader& reader, std::uint64_t& count)
+		{
+			return reader.Pod(count) && count <= kMaxCollectionCount;
+		}
+
+		bool ReadMaterialOverrides(Reader& reader, std::vector<MaterialOverride>& overrides, std::string& reason)
+		{
+			std::uint64_t count = 0;
+			if (!ReadCount(reader, count)) { reason = "invalid override count"; return false; }
+			overrides.resize(static_cast<std::size_t>(count));
+			for (auto& overrideInfo : overrides) {
+				if (!reader.String(overrideInfo.name3D) || !reader.String(overrideInfo.normalizedName3D) ||
+					!reader.String(overrideInfo.textureSetEditorID) || !reader.Pod(overrideInfo.index3D) || !reader.Pod(overrideInfo.flags)) {
+					reason = "truncated material override";
+					return false;
+				}
+				for (auto& path : overrideInfo.texturePaths) {
+					if (!reader.String(path)) { reason = "truncated texture path"; return false; }
+				}
+			}
+			return true;
+		}
+
 		std::vector<std::byte> SerializeBatch(const BatchRecipe& recipe)
 		{
 			std::vector<std::byte> bytes;
@@ -194,16 +231,7 @@ namespace br::staticimport::recipe
 				AppendPod(bytes, preparedAuthoritative);
 				AppendString(bytes, group.modelPath);
 				AppendString(bytes, group.name);
-				const auto overrideCount = static_cast<std::uint64_t>(group.materialOverrides.size());
-				AppendPod(bytes, overrideCount);
-				for (const auto& overrideInfo : group.materialOverrides) {
-					AppendString(bytes, overrideInfo.name3D);
-					AppendString(bytes, overrideInfo.normalizedName3D);
-					AppendString(bytes, overrideInfo.textureSetEditorID);
-					AppendPod(bytes, overrideInfo.index3D);
-					AppendPod(bytes, overrideInfo.flags);
-					for (const auto& path : overrideInfo.texturePaths) AppendString(bytes, path);
-				}
+				AppendMaterialOverrides(bytes, group.materialOverrides);
 				const auto matrixCount = static_cast<std::uint64_t>(group.instanceWorldMatrices.size());
 				AppendPod(bytes, matrixCount);
 				AppendPods(bytes, std::span<const Matrix4x4>{ group.instanceWorldMatrices });
@@ -242,11 +270,6 @@ namespace br::staticimport::recipe
 			return bytes;
 		}
 
-		bool ReadCount(Reader& reader, std::uint64_t& count)
-		{
-			return reader.Pod(count) && count <= kMaxCollectionCount;
-		}
-
 		std::optional<BatchRecipe> DeserializeBatch(std::span<const std::byte> bytes, std::string& reason)
 		{
 			Reader reader(bytes);
@@ -270,18 +293,7 @@ namespace br::staticimport::recipe
 				}
 				group.preparedAuthoritative = preparedAuthoritative != 0;
 				std::uint64_t count = 0;
-				if (!ReadCount(reader, count)) { reason = "invalid override count"; return std::nullopt; }
-				group.materialOverrides.resize(static_cast<std::size_t>(count));
-				for (auto& overrideInfo : group.materialOverrides) {
-					if (!reader.String(overrideInfo.name3D) || !reader.String(overrideInfo.normalizedName3D) ||
-						!reader.String(overrideInfo.textureSetEditorID) || !reader.Pod(overrideInfo.index3D) || !reader.Pod(overrideInfo.flags)) {
-						reason = "truncated material override";
-						return std::nullopt;
-					}
-					for (auto& path : overrideInfo.texturePaths) {
-						if (!reader.String(path)) { reason = "truncated texture path"; return std::nullopt; }
-					}
-				}
+				if (!ReadMaterialOverrides(reader, group.materialOverrides, reason)) return std::nullopt;
 				if (!ReadCount(reader, count)) { reason = "invalid matrix count"; return std::nullopt; }
 				group.instanceWorldMatrices.resize(static_cast<std::size_t>(count));
 				if (!reader.Pods(std::span<Matrix4x4>{ group.instanceWorldMatrices })) { reason = "truncated matrix rows"; return std::nullopt; }
@@ -1226,5 +1238,21 @@ namespace br::staticimport::recipe
 	{
 		const BatchRecipe* view = std::addressof(recipe);
 		return PublishBatches(std::span{ &view, 1 });
+	}
+
+	std::vector<std::byte> EncodeMaterialOverrides(std::span<const MaterialOverride> overrides)
+	{
+		std::vector<std::byte> bytes;
+		if (!overrides.empty()) AppendMaterialOverrides(bytes, overrides);
+		return bytes;
+	}
+
+	bool DecodeMaterialOverrides(std::span<const std::byte> bytes, std::vector<MaterialOverride>& outOverrides)
+	{
+		outOverrides.clear();
+		if (bytes.empty()) return true;
+		Reader reader(bytes);
+		std::string reason;
+		return ReadMaterialOverrides(reader, outOverrides, reason) && reader.Empty();
 	}
 }

@@ -148,6 +148,7 @@ MaterialInputs BuildVoxelMaterialInputs(
     float opacity)
 {
     MaterialUvCache uvCache = BuildSingleUvCache(uv, dUVdx, dUVdy);
+    ApplyMaterialUvTransformToCache(uvCache, materialInfo);
     const uint voxelMaterialFlags = materialFlags & ~(MATERIAL_NORMAL_MAP | MATERIAL_PARALLAX | MATERIAL_GEOMETRIC_DISPLACEMENT);
     MaterialUvBindings uvBindings = BuildMaterialUvBindings(materialInfo, voxelMaterialFlags, uvCache);
 

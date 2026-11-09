@@ -130,6 +130,8 @@ bool PagePool::AllocateNewSlab(
 		std::unique_lock lock(m_slabMutex);
 		m_slabs.push_back(std::move(slab));
 		m_totalPageCapacity += pageIdCapacity;
+		m_pageSlabIndex.resize(static_cast<size_t>(firstGlobal) + pageIdCapacity, UINT32_MAX);
+		std::fill(m_pageSlabIndex.begin() + firstGlobal, m_pageSlabIndex.end(), static_cast<uint32_t>(m_slabs.size() - 1u));
 	}
 	if (role == SlabRole::General) {
 		m_generalSlabCount++;
@@ -243,14 +245,13 @@ uint32_t PagePool::PageToSlabIndex(uint32_t globalPageID) const {
 }
 
 uint32_t PagePool::PageToSlabIndexLocked(uint32_t globalPageID) const {
-	for (uint32_t slabIndex = 0; slabIndex < static_cast<uint32_t>(m_slabs.size()); ++slabIndex) {
-		const Slab& slab = m_slabs[slabIndex];
-		if (globalPageID >= slab.firstPageID &&
-			globalPageID - slab.firstPageID < slab.pageCount) {
-			return slabIndex;
-		}
-	}
-	return UINT32_MAX;
+	// A dense lookup: this runs for every page the streaming pass touches, and pinned slabs alone number in the hundreds.
+	if (globalPageID >= m_pageSlabIndex.size()) return UINT32_MAX;
+	const uint32_t slabIndex = m_pageSlabIndex[globalPageID];
+	if (slabIndex >= m_slabs.size()) return UINT32_MAX;
+	const Slab& slab = m_slabs[slabIndex];
+	// A converted general slab may use fewer page IDs than it reserves.
+	return globalPageID - slab.firstPageID < slab.pageCount ? slabIndex : UINT32_MAX;
 }
 
 uint64_t PagePool::PageToSlabByteOffset(uint32_t globalPageID) const {

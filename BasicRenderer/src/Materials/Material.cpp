@@ -234,6 +234,15 @@ Material::Material(const std::string& name,
 Material::~Material() {
 }
 
+void Material::SetUvTransform(const MaterialUvTransform& transform)
+{
+    m_uvTransform = transform;
+    BuildMaterialUvTransformGpu(transform, m_materialData.uvTransformLinearDelta, m_materialData.uvTransformOffset);
+    if (!transform.IsIdentity()) {
+        m_materialData.ommIdentity = 0u;
+    }
+}
+
 void Material::SetLogicalTextureSourcePaths(const MaterialDescription& desc)
 {
     m_baseColorSourcePath = desc.baseColor.sourcePath;
@@ -350,6 +359,7 @@ MaterialDescription Material::ToCacheDescription() const
     desc.objectSurfaceUseTripleTapStochastic = desc.objectSurfaceUseTriplanarProjection;
     desc.objectSurfaceTexelDensity = m_materialData.objectSurfaceTexelDensity;
     desc.staticTextureOverrideSourceName = m_staticTextureOverrideSourceName;
+    desc.uvTransform = m_uvTransform;
     desc.brniflyVertexAlpha = m_brniflyVertexAlpha;
     desc.brniflyZBufferWrite = m_brniflyZBufferWrite;
     desc.brniflyDecal = m_brniflyDecal;

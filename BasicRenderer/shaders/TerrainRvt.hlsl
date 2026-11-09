@@ -1074,6 +1074,18 @@ void TerrainRvtBuildGenerateDispatchArgsCS(uint3 tid : SV_DispatchThreadID)
     args.dispatchY = max(1u, (groupCount + dispatchX - 1u) / dispatchX);
     args.dispatchZ = 1u;
     argsOut[0] = args;
+#if defined(TERRAIN_RVT_COMPRESSED)
+    // TerrainRvtEncodePagesCS: one thread per 4x4 block per compressed atlas (albedo, normal, material).
+    RWStructuredBuffer<DispatchIndirectArgs> encodeArgsOut = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtEncodeDispatchArgs)];
+    const uint blocksPerSide = info.physicalTileTexelSide / 4u;
+    const uint encodeGroupCount = (generationCount * blocksPerSide * blocksPerSide * 3u + 63u) / 64u;
+    const uint encodeDispatchX = min(max(encodeGroupCount, 1u), TERRAIN_RVT_MAX_DISPATCH_GROUPS_X);
+    DispatchIndirectArgs encodeArgs;
+    encodeArgs.dispatchX = encodeDispatchX;
+    encodeArgs.dispatchY = max(1u, (encodeGroupCount + encodeDispatchX - 1u) / encodeDispatchX);
+    encodeArgs.dispatchZ = 1u;
+    encodeArgsOut[0] = encodeArgs;
+#endif
 }
 
 [shader("compute")]
@@ -1103,24 +1115,17 @@ void TerrainRvtGeneratePagesCS(uint3 tid : SV_DispatchThreadID)
     const uint texelInPage = linearIndex - generationIndex * texelsPerPage;
     const uint2 tileTexel = uint2(texelInPage % tileSide, texelInPage / tileSide);
     const TerrainRvtGenerationRequest generation = generationList[generationIndex];
-    const uint physicalPageIndex = generation.physicalPageIndex;
-    if (physicalPageIndex >= info.maxPhysicalPages)
+    uint2 tileOrigin;
+    uint atlasPoolIndex;
+    if (!TerrainRvtGenerationTile(info, generation, clipInfos, tileOrigin, atlasPoolIndex))
     {
         return;
     }
     const uint mip = generation.clipLevel;
     const uint2 pageCoord = uint2(generation.pageX, generation.pageY);
     const uint terrainSetIndex = generation.terrainSetIndex;
-    if (terrainSetIndex >= info.maxTerrainSets || mip >= info.maxClipLevels)
-    {
-        return;
-    }
     TerrainSetInfo terrain = terrainSets[terrainSetIndex];
     const TerrainRvtClipInfo clipInfo = clipInfos[TerrainRvtClipInfoIndex(info, terrainSetIndex, mip)];
-    if (clipInfo.valid == 0u)
-    {
-        return;
-    }
     if (TERRAIN_RVT_TELEMETRY_ENABLED(perFrame) && texelInPage == 0u)
     {
         RWStructuredBuffer<TerrainRvtStats> stats = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtStats)];
@@ -1141,13 +1146,7 @@ void TerrainRvtGeneratePagesCS(uint3 tid : SV_DispatchThreadID)
     const float3 dpdxWS = float3(texelWorldSize, 0.0f, 0.0f);
     const float3 dpdyWS = float3(0.0f, 0.0f, -texelWorldSize);
 
-    const uint pagesPerPool = max(info.physicalAtlasPagesWide * info.physicalAtlasPagesHigh, 1u);
-    const uint atlasPoolIndex = min(physicalPageIndex / pagesPerPool, max(info.physicalAtlasPoolCount, 1u) - 1u);
-    const uint localPhysicalPageIndex = physicalPageIndex - atlasPoolIndex * pagesPerPool;
-    const uint2 physicalPage = uint2(
-        localPhysicalPageIndex % max(info.physicalAtlasPagesWide, 1u),
-        localPhysicalPageIndex / max(info.physicalAtlasPagesWide, 1u));
-    const uint3 atlasTexel = uint3(physicalPage * tileSide + tileTexel, atlasPoolIndex);
+    const uint3 atlasTexel = uint3(tileOrigin + tileTexel, atlasPoolIndex);
 
     const bool generateHeight = (generation.contentMask & TERRAIN_RVT_CONTENT_HEIGHT) != 0u;
     const bool generateMaterial = (generation.contentMask & TERRAIN_RVT_CONTENT_MATERIAL) != 0u;
@@ -1175,17 +1174,31 @@ void TerrainRvtGeneratePagesCS(uint3 tid : SV_DispatchThreadID)
 
     if (generateMaterial)
     {
-        RWTexture2DArray<float4> albedoAtlas = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtAlbedoAtlas)];
-        RWTexture2DArray<float4> normalAtlas = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtNormalAtlas)];
-        RWTexture2DArray<float4> materialAtlas = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtMaterialAtlas)];
         const float3 normalTS = TerrainRvtWorldToTangentNormal(inputs.normalWS, float3(0.0f, 1.0f, 0.0f));
-        albedoAtlas[atlasTexel] = float4(saturate(inputs.albedo), 1.0f);
-        normalAtlas[atlasTexel] = float4(saturate(normalTS * 0.5f + 0.5f), 1.0f);
-        materialAtlas[atlasTexel] = float4(
+        const float4 albedo = float4(saturate(inputs.albedo), 1.0f);
+        const float3 normalPacked = saturate(normalTS * 0.5f + 0.5f);
+        const float4 material = float4(
             saturate(inputs.roughness),
             saturate(inputs.metallic),
             saturate(inputs.ambientOcclusion),
             saturate(inputs.terrainRvtHeightScale));
+#if defined(TERRAIN_RVT_COMPRESSED)
+        // Block-compressed atlases: the tile goes to this generation's scratch slice; TerrainRvtEncodePagesCS encodes it.
+        const uint scratchIndex = TerrainRvtScratchIndex(info, generationIndex, tileTexel);
+        RWStructuredBuffer<uint> albedoScratch = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtScratchAlbedo)];
+        RWStructuredBuffer<uint> normalScratch = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtScratchNormal)];
+        RWStructuredBuffer<uint> materialScratch = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtScratchMaterial)];
+        albedoScratch[scratchIndex] = TerrainRvtPackUnorm4x8(albedo);
+        normalScratch[scratchIndex] = TerrainRvtPackUnorm2x16(normalPacked.xy);
+        materialScratch[scratchIndex] = TerrainRvtPackUnorm4x8(material);
+#else
+        RWTexture2DArray<float4> albedoAtlas = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtAlbedoAtlas)];
+        RWTexture2DArray<float4> normalAtlas = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtNormalAtlas)];
+        RWTexture2DArray<float4> materialAtlas = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Terrain::RvtMaterialAtlas)];
+        albedoAtlas[atlasTexel] = albedo;
+        normalAtlas[atlasTexel] = float4(normalPacked, 1.0f);
+        materialAtlas[atlasTexel] = material;
+#endif
     }
 
     // The source texture this page is most short of, set while sampling (RecordTextureStreamingFeedbackRequestedTopMip).

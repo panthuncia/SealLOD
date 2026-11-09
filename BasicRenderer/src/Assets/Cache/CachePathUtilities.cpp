@@ -138,12 +138,23 @@ std::filesystem::path RemapBuildOutputAssetPath(const std::filesystem::path& can
 }
 }
 
+namespace {
+	std::mutex g_cacheRootMutex;
+	std::optional<std::filesystem::path> g_cacheRootOverride;
+	bool g_cacheRootResolved = false;
+}
+
 std::filesystem::path GetCacheRootPath()
 {
 	// Cache root selection is process-wide configuration. Resolving the module
 	// path and querying the environment for every artifact was a substantial
 	// source of contention during parallel scene preparation.
 	static const std::filesystem::path cacheRoot = [] {
+		std::lock_guard lock(g_cacheRootMutex);
+		g_cacheRootResolved = true;
+		if (g_cacheRootOverride) {
+			return *g_cacheRootOverride;
+		}
 		const DWORD envLength = ::GetEnvironmentVariableA("SARP_CACHE_ROOT", nullptr, 0);
 		if (envLength > 1) {
 			std::vector<char> envRoot(envLength);
@@ -161,6 +172,23 @@ std::filesystem::path GetCacheRootPath()
 	return cacheRoot;
 }
 
+bool SetCacheRootPath(const std::filesystem::path& root)
+{
+	{
+		std::lock_guard lock(g_cacheRootMutex);
+		if (!g_cacheRootResolved) {
+			g_cacheRootOverride = std::filesystem::absolute(root);
+			return true;
+		}
+	}
+	std::error_code error;
+	if (std::filesystem::equivalent(GetCacheRootPath(), root, error)) {
+		return true;
+	}
+	return std::filesystem::weakly_canonical(GetCacheRootPath(), error).generic_string() ==
+		std::filesystem::weakly_canonical(root, error).generic_string();
+}
+
 std::wstring BuildCacheFilePath(const std::wstring& fileName, const std::wstring& directory) {
 	return (GetCacheRootPath() / directory / fileName).wstring();
 }
@@ -170,16 +198,22 @@ std::wstring GetCacheFilePath(const std::wstring& fileName, const std::wstring& 
 	std::filesystem::path cacheDir = cacheRoot / directory;
 
 	// Avoid repeated OS syscalls: only call create_directories once per unique
-	// directory path.  The set persists for the lifetime of the process.
+	// directory path.  The set persists for the lifetime of the process. The
+	// call itself runs outside the lock: under a virtual filesystem one takes
+	// milliseconds, and holding the lock queued every other caller behind it.
 	{
 		static std::mutex s_ensuredMutex;
 		static std::unordered_set<std::wstring> s_ensuredDirs;
 		std::wstring cacheDirStr = cacheDir.wstring();
-		std::lock_guard<std::mutex> lock(s_ensuredMutex);
-		if (s_ensuredDirs.find(cacheDirStr) == s_ensuredDirs.end()) {
-			std::filesystem::create_directories(cacheDir);
-			s_ensuredDirs.insert(std::move(cacheDirStr));
+		{
+			std::lock_guard<std::mutex> lock(s_ensuredMutex);
+			if (s_ensuredDirs.contains(cacheDirStr)) {
+				return (cacheDir / fileName).wstring();
+			}
 		}
+		std::filesystem::create_directories(cacheDir);
+		std::lock_guard<std::mutex> lock(s_ensuredMutex);
+		s_ensuredDirs.insert(std::move(cacheDirStr));
 	}
 
 	return (cacheDir / fileName).wstring();

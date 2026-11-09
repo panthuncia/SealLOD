@@ -6,6 +6,9 @@
 #include "BasicRenderer/Extensions/EnvironmentWorkService.h"
 
 namespace org { class JobGraph; class Resource; class Runtime; }
+class EnvironmentConversionPass;
+class EnvironmentSHPass;
+class EnvironmentFilterPass;
 
 namespace br::render {
 
@@ -23,12 +26,16 @@ public:
     EnvironmentJobGraph(const EnvironmentJobGraph&) = delete;
     EnvironmentJobGraph& operator=(const EnvironmentJobGraph&) = delete;
 
-    // One execution while a queue has work (a new declaration builds on a worker, so work can wait a few executions).
-    // Otherwise only the finished executions retire.
+    // One execution while a queue has work (a new declaration builds on a worker, so work can wait a few executions), and
+    // after, until every pass has declared without the finished work and that build is installed: the graph lets go of
+    // the work's resources (its working cubemaps) only then. Otherwise only the finished executions retire.
     void Execute();
 
 private:
     EnvironmentWorkServices m_work;
+    std::shared_ptr<EnvironmentConversionPass> m_conversion;
+    std::shared_ptr<EnvironmentSHPass> m_sphericalHarmonics;
+    std::shared_ptr<EnvironmentFilterPass> m_filter;
     std::shared_ptr<org::JobGraph> m_graph;
     uint64_t m_executions = 0;  // logged when it goes
 };

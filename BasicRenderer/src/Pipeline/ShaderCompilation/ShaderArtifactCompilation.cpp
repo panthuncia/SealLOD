@@ -40,6 +40,11 @@ void br::assets::PrecompileShaderBundleArtifact(const ShaderInfoBundle& shaderIn
 	PSOManager::GetInstance().PrecompileShaderBundleArtifact(shaderInfoBundle);
 }
 
+std::size_t br::assets::PrecompileRecordedShaderArtifacts()
+{
+	return PSOManager::GetInstance().PrecompileRecordedShaderBundles();
+}
+
 br::assets::ShaderArtifactPruneSummary br::assets::PruneUnusedShaderArtifacts(std::chrono::hours maxAge)
 {
 	const auto result = shadercache::PruneUnused(maxAge);

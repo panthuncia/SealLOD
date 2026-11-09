@@ -323,8 +323,8 @@ void CLodRtCacheEvictCS(uint3 id : SV_DispatchThreadID)
     bool evict = mark > frame || frame - mark > keepAge;
     if (!evict) {
         uint slab = 0u;
-        uint offset = 0u;
-        const bool current = CLodRtGroupLocation(groups[groupGlobal], slab, offset) && slab == groupState.y && offset == groupState.z;
+        uint signature = 0u;
+        const bool current = CLodRtGroupLocation(groups[groupGlobal], slab, signature) && slab == groupState.y && signature == groupState.z;
         evict = !current || !CLodRtGroupResident(groupGlobal);
         if (evict && !current) CLodRtCacheCount(CLOD_RT_CTRL_STALE, 1u);
     }
@@ -484,12 +484,12 @@ void CLodRtCacheAdmitCS(uint tid : SV_GroupIndex)
             }
             uint clusters = 0u;
             uint slab = 0u;
-            uint offset = 0u;
+            uint signature = 0u;
             if (valid) {
                 const ClusterLODGroup group = groups[groupGlobal];
                 clusters = CLodRtGroupClusterCount(group);
-                valid = CLodRtGroupBuildable(group, clusters, slab, offset);
-                if (valid && pass == 2u) valid = slab == groupState.y && offset == groupState.z;
+                valid = CLodRtGroupBuildable(group, clusters, slab, signature);
+                if (valid && pass == 2u) valid = slab == groupState.y && signature == groupState.z;
                 if (!valid) clusters = 0u;
             }
             uint totalClusters = 0u;
@@ -516,7 +516,7 @@ void CLodRtCacheAdmitCS(uint tid : SV_GroupIndex)
                 const uint first = gsAdmitClusters + clustersBefore;
                 const uint kind = pass < 2u ? CLOD_RT_RANGE_REQUEST : CLOD_RT_RANGE_REBUILD;
                 ranges.Store4(range * CLOD_RT_CACHE_RANGE_BYTES, uint4(groupGlobal, kind, first, clusters));
-                ranges.Store4(range * CLOD_RT_CACHE_RANGE_BYTES + 16u, uint4(CLOD_RT_CACHE_INVALID, slab, offset, ommSlotPlusOne));
+                ranges.Store4(range * CLOD_RT_CACHE_RANGE_BYTES + 16u, uint4(CLOD_RT_CACHE_INVALID, slab, signature, ommSlotPlusOne));
                 ranges.Store4(range * CLOD_RT_CACHE_RANGE_BYTES + 32u, uint4(replacedPlusOne, pass == 0u ? 1u : 0u, 0u, 0u));
                 [loop]
                 for (uint i = 0u; i < clusters; ++i) pending[first + i] = range;
@@ -692,7 +692,7 @@ void CLodRtCacheArgsCS(uint3 id : SV_DispatchThreadID)
     RWStructuredBuffer<uint> pendingRanges = ResourceDescriptorHeap[CLOD_RT_CACHE_PENDING_UAV];
     const uint pendingRange = pendingRanges[id.x];
     const uint4 extra = pendingRange == CLOD_RT_CACHE_INVALID ? uint4(CLOD_RT_CACHE_INVALID, 0u, 0u, 0u)
-        : ranges.Load4(pendingRange * CLOD_RT_CACHE_RANGE_BYTES + 16u); // entry, slab, offset, micromap slot + 1
+        : ranges.Load4(pendingRange * CLOD_RT_CACHE_RANGE_BYTES + 16u); // entry, slab, page signature, micromap slot + 1
     const uint slot = CLodRtCacheBuiltId(id.x, range.y, extra.x, ordinal);
 
     // An empty cluster is a valid CLAS, which is what anything unexpected builds.
@@ -1132,11 +1132,65 @@ uint CLodRtSceneFrame()
     return ctrl.Load(CLOD_RT_CTRL_FRAME * 4u);
 }
 
+// Whether the group's CLAS are current, marking it used if so; otherwise marks it requested and sets its demand bits.
+bool CLodRtRecordDemandCurrent(uint groupGlobal, uint frame, uint4 groupState, uint stateOffset)
+{
+    RWByteAddressBuffer state = ResourceDescriptorHeap[CLOD_RT_SCENE_GROUP_STATE_UAV];
+    ByteAddressBuffer entries = ResourceDescriptorHeap[CLOD_RT_SCENE_CACHE_ENTRIES_SRV];
+    uint entryBytes = 0u;
+    entries.GetDimensions(entryBytes);
+    uint entry = 0u;
+    if (CLodRtCacheStateEntry(groupState.x, entryBytes / CLOD_RT_CACHE_ENTRY_BYTES, entry) && entries.Load(entry * CLOD_RT_CACHE_ENTRY_BYTES) == groupGlobal) {
+        StructuredBuffer<ClusterLODGroup> groups = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
+        uint slab = 0u;
+        uint signature = 0u;
+        if (CLodRtGroupLocation(groups[groupGlobal], slab, signature) && slab == groupState.y && signature == groupState.z) {
+            state.Store(stateOffset + 12u, frame);
+            return true;
+        }
+    }
+    state.Store(stateOffset + 12u, frame | CLOD_RT_CACHE_REQUESTED);
+    RWByteAddressBuffer demand = ResourceDescriptorHeap[CLOD_RT_SCENE_DEMAND_UAV];
+    const uint wordIndex = groupGlobal >> 5u;
+    demand.InterlockedOr(CLOD_RT_DEMAND_BITS_OFFSET + wordIndex * 4u, 1u << (groupGlobal & 31u));
+    demand.InterlockedOr((wordIndex >> 5u) * 4u, 1u << (wordIndex & 31u));
+    return false;
+}
+
+void CLodRtRecordDemandIdentity(uint4 packed, uint groupGlobal, uint draw, uint transformIndex)
+{
+    RWByteAddressBuffer demand = ResourceDescriptorHeap[CLOD_RT_SCENE_DEMAND_UAV];
+
+    // The micromaps an alpha-tested material of this cluster can use: their identity (CLodOpacityMicromapCache.h), else 0.
+    // The cluster's own material, through its palette index, as its hits and alpha tests take it. A hierarchy root's draw
+    // has one PerMeshBuffer material of the many in its palette: asked for with that one, a part's group named micromaps
+    // of a material it doesn't draw with, which were baked for another model's container if at all.
+    StructuredBuffer<PerMeshBuffer> perMeshBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
+    StructuredBuffer<MaterialInfo> materials = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
+    const PerMeshInstanceBuffer meshTemplate = LoadMeshTemplateForDrawRecord(LoadInstanceDrawRecord(draw));
+    uint paletteIndex = 0u;
+    if (CLodTemplateHasPalette(meshTemplate)) {
+        // The meshlet's material slot from its page, as CLodLoadRasterCluster finds it for hits.
+        const uint slab = CLodVisibleClusterPageSlabDescriptorIndex(packed);
+        const uint pageOffset = CLodVisibleClusterPageSlabByteOffset(packed);
+        const uint localMeshlet = CLodVisibleClusterLocalMeshletIndex(packed);
+        const CLodPageHeader header = LoadPageHeader(slab, pageOffset);
+        if (slab == 0u || header.formatAndKind != CLOD_TRIANGLE_PAGE_MAGIC || header.descriptorOffset == 0u || localMeshlet >= header.meshletCount) return;
+        const CLodMeshletDescriptor descriptor = LoadMeshletDescriptor(slab, pageOffset, header.descriptorOffset, localMeshlet);
+        paletteIndex = CLodPaletteIndexFromDescriptor(meshTemplate, groupGlobal, transformIndex, asuint(descriptor.terrainRvtLocalSkyrimXYRadius));
+    }
+    const uint materialIndex = CLodResolveMaterial(meshTemplate, perMeshBuffer[meshTemplate.perMeshBufferIndex], paletteIndex).materialDataIndex;
+    const MaterialInfo material = materials[materialIndex];
+    if ((material.materialFlags & MATERIAL_ALPHA_TEST) != 0u && material.ommIdentity != 0u) {
+        demand.InterlockedMax(CLOD_RT_DEMAND_IDENTITY_OFFSET + groupGlobal * 4u, material.ommIdentity);
+    }
+}
+
 // What the list needs from the CLAS cache, per listed cluster: a group whose CLAS are current (its entry holds it and
-// was built from where its first page is now) is marked used this frame, which keeps it from eviction; any other sets
-// its bit in the demand bitset, which Collect turns into this frame's requests, with the largest micromap identity the
-// drawing materials ask for. Every step is idempotent, so the outcome doesn't depend on which cluster comes first.
-void CLodRtRecordDemand(uint groupGlobal, uint draw)
+// was built from where all its pages are now) is marked used this frame, which keeps it from eviction; any other sets
+// its bit in the demand bitset, which Collect turns into this frame's requests, with the largest micromap identity its
+// clusters' materials ask for. Every step is idempotent, so the outcome doesn't depend on which cluster comes first.
+void CLodRtRecordDemand(uint4 packed, uint groupGlobal, uint draw, uint transformIndex)
 {
     RWByteAddressBuffer state = ResourceDescriptorHeap[CLOD_RT_SCENE_GROUP_STATE_UAV];
     uint stateBytes = 0u;
@@ -1145,35 +1199,13 @@ void CLodRtRecordDemand(uint groupGlobal, uint draw)
     const uint frame = CLodRtSceneFrame();
     const uint stateOffset = groupGlobal * CLOD_RT_CACHE_STATE_BYTES;
     const uint4 groupState = state.Load4(stateOffset);
-    if (groupState.w == frame || groupState.w == (frame | CLOD_RT_CACHE_REQUESTED)) return; // Decided by another cluster.
-
-    ByteAddressBuffer entries = ResourceDescriptorHeap[CLOD_RT_SCENE_CACHE_ENTRIES_SRV];
-    uint entryBytes = 0u;
-    entries.GetDimensions(entryBytes);
-    uint entry = 0u;
-    if (CLodRtCacheStateEntry(groupState.x, entryBytes / CLOD_RT_CACHE_ENTRY_BYTES, entry) && entries.Load(entry * CLOD_RT_CACHE_ENTRY_BYTES) == groupGlobal) {
-        StructuredBuffer<ClusterLODGroup> groups = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
-        uint slab = 0u;
-        uint offset = 0u;
-        if (CLodRtGroupLocation(groups[groupGlobal], slab, offset) && slab == groupState.y && offset == groupState.z) {
-            state.Store(stateOffset + 12u, frame);
-            return;
-        }
+    if (groupState.w == frame) return; // Current, as another cluster found.
+    // Requested: every cluster still adds its material below, so the identity is the largest of all of them whichever
+    // cluster came first. Clusters of one group can take different materials.
+    if (groupState.w != (frame | CLOD_RT_CACHE_REQUESTED)) {
+        if (CLodRtRecordDemandCurrent(groupGlobal, frame, groupState, stateOffset)) return;
     }
-    state.Store(stateOffset + 12u, frame | CLOD_RT_CACHE_REQUESTED);
-    RWByteAddressBuffer demand = ResourceDescriptorHeap[CLOD_RT_SCENE_DEMAND_UAV];
-    const uint wordIndex = groupGlobal >> 5u;
-    demand.InterlockedOr(CLOD_RT_DEMAND_BITS_OFFSET + wordIndex * 4u, 1u << (groupGlobal & 31u));
-    demand.InterlockedOr((wordIndex >> 5u) * 4u, 1u << (wordIndex & 31u));
-
-    // The micromaps an alpha-tested drawing material can use: their identity (CLodOpacityMicromapCache.h), else 0.
-    StructuredBuffer<PerMeshBuffer> perMeshBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
-    StructuredBuffer<MaterialInfo> materials = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
-    const PerMeshInstanceBuffer meshTemplate = LoadMeshTemplateForDrawRecord(LoadInstanceDrawRecord(draw));
-    const MaterialInfo material = materials[perMeshBuffer[meshTemplate.perMeshBufferIndex].materialDataIndex];
-    if ((material.materialFlags & MATERIAL_ALPHA_TEST) != 0u && material.ommIdentity != 0u) {
-        demand.InterlockedMax(CLOD_RT_DEMAND_IDENTITY_OFFSET + groupGlobal * 4u, material.ommIdentity);
-    }
+    CLodRtRecordDemandIdentity(packed, groupGlobal, draw, transformIndex);
 }
 
 // Puts last frame's touched entries back to zero, which is far cheaper than clearing a table this size.
@@ -1205,7 +1237,7 @@ void CLodRtCountCS(uint3 id : SV_DispatchThreadID)
         return;
     }
     RWByteAddressBuffer drawTable = ResourceDescriptorHeap[CLOD_RT_SCENE_DRAW_TABLE_UAV];
-    CLodRtRecordDemand(CLodVisibleClusterGroupID(packed), draw);
+    CLodRtRecordDemand(packed, CLodVisibleClusterGroupID(packed), draw, transformIndex);
 
     // A signature of which clusters this draw selected, independent of the order they were appended in. It is built
     // from the page location, so two draws agree exactly when they reference the same CLAS.

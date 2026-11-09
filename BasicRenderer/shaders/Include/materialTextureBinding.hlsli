@@ -3,6 +3,7 @@
 
 #include "include/structs.hlsli"
 #include "include/cbuffers.hlsli"
+#include "include/materialUvTransform.hlsli"
 
 // A material texture is bound two ways. Its streaming row (the texture image table) names the image the streaming
 // system last published; the material's own descriptor index is set when the material is built, and is a neutral

@@ -41,6 +41,7 @@
 #include "Runtime/Device/DeviceManager.h"
 #include "Runtime/Settings/SettingsManager.h"
 #include <BasicRenderer/StaticImport/ImportedAssetLibrary.h>
+#include <BasicRenderer/Assets/Import/SceneManifest.h>
 #include <BasicRenderer/StaticImport/StaticImportRuntime.h>
 #include <rhi_interop_dx12.h>
 #include <d3d12sdklayers.h>
@@ -598,8 +599,16 @@ struct DemoStaticScene {
                 group.groupID = br::staticimport::recipe::HashString(group.assetKey, model.key);
                 group.batchKey = model.key;
                 group.name = part.name.empty() ? std::filesystem::path(model.path).filename().string() : part.name;
-                XMStoreFloat4x4(&group.instanceWorldMatrices.emplace_back(),
-                    XMLoadFloat4x4(&part.localMatrix) * XMLoadFloat4x4(&model.world));
+                // A part instanced within its file (EXT_mesh_gpu_instancing) is one group of all its placements.
+                if (part.instanceMatrices.empty()) {
+                    XMStoreFloat4x4(&group.instanceWorldMatrices.emplace_back(),
+                        XMLoadFloat4x4(&part.localMatrix) * XMLoadFloat4x4(&model.world));
+                }
+                group.instanceWorldMatrices.reserve(part.instanceMatrices.size());
+                for (const auto& instance : part.instanceMatrices) {
+                    XMStoreFloat4x4(&group.instanceWorldMatrices.emplace_back(),
+                        XMLoadFloat4x4(&instance) * XMLoadFloat4x4(&model.world));
+                }
             }
             spdlog::info("Demo static scene: '{}' placed {} of {} parts", model.path, groups.size(), parts->size());
             runtime->AddOrUpdateGroups(std::move(groups));
@@ -1098,6 +1107,17 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     file_logger->flush_on(spdlog::level::info);
 
     const std::string_view commandLine = lpCmdLine ? std::string_view(lpCmdLine) : std::string_view{};
+    // A scene cache's manifest picks the cache root, which renderer startup resolves: before anything else.
+    for (const auto& model : FindDemoModels(commandLine)) {
+        if (!br::import::IsSceneManifestPath(model.path)) continue;
+        try {
+            (void)br::import::ApplySceneManifestCacheRoot(model.path);
+        }
+        catch (const std::exception& error) {
+            spdlog::error("Scene manifest {}: {}", model.path, error.what());
+        }
+        break;
+    }
     const DemoCameraState cameraState = LoadDemoCameraState();
     DemoStatisticalSamplingRun statisticalSampling;
     if (const auto samplingConfig = FindCommandLinePath(commandLine, "--sampling-config")) {

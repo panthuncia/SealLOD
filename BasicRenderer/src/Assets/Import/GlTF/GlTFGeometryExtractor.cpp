@@ -2,9 +2,16 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <exception>
+#include <iterator>
+#include <thread>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -99,7 +106,24 @@ struct ParsedDocument {
 	// Keyed by bufferView index. Protected by mutex for parallel access.
 	std::unordered_map<size_t, std::vector<uint8_t>> decompressedBufferViews;
 	std::unique_ptr<std::mutex> decompressedViewsMutex = std::make_unique<std::mutex>();
+	// Primitives still to run that read each compressed bufferView; a view is released when its count reaches zero, so a
+	// scene's decompressed geometry is never all held at once.
+	std::unordered_map<size_t, size_t> pendingViewUsers;
+
+	// The file's CLod cache identity: its name and a hash of its JSON and its buffers' sizes.
+	std::string sourceIdentifier;
 };
+
+uint64_t HashBytes(uint64_t hash, const void* data, size_t size) {
+	const auto* bytes = static_cast<const uint8_t*>(data);
+	for (size_t i = 0; i < size; ++i) {
+		hash ^= bytes[i];
+		hash *= 1099511628211ull;
+	}
+	return hash;
+}
+
+constexpr uint64_t kFnvOffsetBasis = 1469598103934665603ull;
 
 // Constants
 
@@ -613,6 +637,7 @@ ParsedDocument ParseDocument(const std::string& filePath) {
 
 	std::optional<GLBChunkSpan> glbJsonChunk;
 	std::optional<GLBChunkSpan> glbBinChunk;
+	uint64_t contentHash = kFnvOffsetBasis;
 
 	if (extension == ".glb") {
 		const uint64_t fileSize = GetFileSize(path);
@@ -637,14 +662,17 @@ ParsedDocument ParseDocument(const std::string& filePath) {
 		}
 
 		auto jsonBytes = ReadFileRange(path, glbJsonChunk->dataOffset, glbJsonChunk->length);
+		contentHash = HashBytes(contentHash, jsonBytes.data(), jsonBytes.size());
 		doc.gltf = json::parse(jsonBytes.begin(), jsonBytes.end());
 	}
 	else {
-		std::ifstream stream(path);
+		std::ifstream stream(path, std::ios::binary);
 		if (!stream) {
 			throw std::runtime_error("Failed to open glTF JSON: " + filePath);
 		}
-		stream >> doc.gltf;
+		const std::string text((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+		contentHash = HashBytes(contentHash, text.data(), text.size());
+		doc.gltf = json::parse(text);
 	}
 
 	if (!doc.gltf.contains("buffers") || doc.gltf["buffers"].empty()) {
@@ -749,6 +777,15 @@ ParsedDocument ParseDocument(const std::string& filePath) {
 
 		doc.buffers.push_back(std::move(source));
 	}
+
+	// External buffers are named by the JSON but their bytes are not hashed (30 GB for a large scene): their sizes stand
+	// in, so a buffer replaced with different content of the same size keeps the old cache.
+	for (const auto& buffer : doc.buffers) {
+		contentHash = HashBytes(contentHash, &buffer.fileLength, sizeof(buffer.fileLength));
+	}
+	char hashText[17];
+	std::snprintf(hashText, sizeof(hashText), "%016llx", static_cast<unsigned long long>(contentHash));
+	doc.sourceIdentifier = "gltf://" + path.filename().string() + "#" + hashText;
 
 	return doc;
 }
@@ -865,12 +902,14 @@ std::vector<XMFLOAT3> ComputeSmoothNormals(
 
 // Per-primitive Preprocessing
 
-MeshPreprocessResult BuildPrimitivePreprocessData(
+// nullopt: cacheOnly and the primitive is not cached.
+std::optional<MeshPreprocessResult> BuildPrimitivePreprocessData(
 	ParsedDocument& doc,
 	const json& primitive,
-	const std::string& sourceFilePath,
 	size_t meshIndex,
-	size_t primitiveIndex)
+	size_t primitiveIndex,
+	bool cacheOnly,
+	bool* outCacheHit)
 {
 	const int primitiveMode = primitive.value("mode", kTrianglesMode);
 	if (primitiveMode != kTrianglesMode) {
@@ -1013,7 +1052,7 @@ MeshPreprocessResult BuildPrimitivePreprocessData(
 		: 0u;
 
 	CLodCacheLoader::MeshCacheIdentity cacheIdentity{};
-	cacheIdentity.sourceIdentifier = NormalizeCacheSourcePath(sourceFilePath);
+	cacheIdentity.sourceIdentifier = doc.sourceIdentifier;
 	cacheIdentity.primPath = "/glTF/Mesh/" + std::to_string(meshIndex) + "/Primitive/" + std::to_string(primitiveIndex);
 	cacheIdentity.subsetName = "";
 	bool doubleSidedVoxelSourceNormals = false;
@@ -1026,12 +1065,22 @@ MeshPreprocessResult BuildPrimitivePreprocessData(
 	cacheIdentity.doubleSidedVoxelSourceNormals = doubleSidedVoxelSourceNormals;
 
 	auto prebuiltData = CLodCacheLoader::TryLoadPrebuilt(cacheIdentity);
+	if (outCacheHit) *outCacheHit = prebuiltData.has_value();
+	if (!prebuiltData.has_value() && cacheOnly) return std::nullopt;
 
 	ClusterLODBuilderSettings builderSettings = GetDefaultBuilderSettings(cacheIdentity.sourceIdentifier);
 	builderSettings.doubleSidedVoxelSourceNormals = doubleSidedVoxelSourceNormals;
 	MeshIngestBuilder ingest(vertexSize, skinningVertexSize, meshFlags, builderSettings);
     std::vector<MeshUvSetData> uvSets;
-    if (hasAnyTexcoordSet) {
+    if (hasAnyTexcoordSet && prebuiltData.has_value()) {
+        // A cached mesh's UVs are in its CLod pages. The sets are named so the mesh knows how many there are; their
+        // values only feed estimates made from source geometry, which a cached mesh does not keep.
+        uvSets.resize(static_cast<size_t>(maxTexcoordSetIndex) + 1u);
+        for (uint32_t setIndex = 0; setIndex <= maxTexcoordSetIndex; ++setIndex) {
+            uvSets[setIndex].name = "TEXCOORD_" + std::to_string(setIndex);
+        }
+    }
+    else if (hasAnyTexcoordSet) {
         uvSets.resize(static_cast<size_t>(maxTexcoordSetIndex) + 1u);
         for (uint32_t setIndex = 0; setIndex <= maxTexcoordSetIndex; ++setIndex) {
             uvSets[setIndex].name = "TEXCOORD_" + std::to_string(setIndex);
@@ -1282,7 +1331,7 @@ MeshPreprocessResult BuildPrimitivePreprocessData(
 
 		const bool cacheSaved = CLodCacheLoader::SavePrebuiltLocked(cacheIdentity, artifacts.prebuiltData, artifacts.cacheBuildData.AsPayload(), &savedPrebuiltData);
 		if (!cacheSaved) {
-			spdlog::warn("Failed to save CLOD cache for {} (mesh {}, primitive {})", sourceFilePath, meshIndex, primitiveIndex);
+			spdlog::warn("Failed to save CLOD cache for {} (mesh {}, primitive {})", doc.sourceIdentifier, meshIndex, primitiveIndex);
 			prebuiltData = std::move(artifacts.prebuiltData);
 		}
 		else {
@@ -1291,7 +1340,7 @@ MeshPreprocessResult BuildPrimitivePreprocessData(
 				prebuiltData = std::move(diskBackedPrebuilt);
 			}
 			else {
-				spdlog::warn("Immediate CLOD cache reload missed after save for {} (mesh {}, primitive {}); using saved disk metadata directly.", sourceFilePath, meshIndex, primitiveIndex);
+				spdlog::warn("Immediate CLOD cache reload missed after save for {} (mesh {}, primitive {}); using saved disk metadata directly.", doc.sourceIdentifier, meshIndex, primitiveIndex);
 				prebuiltData = std::move(savedPrebuiltData);
 			}
 		}
@@ -1306,17 +1355,37 @@ MeshPreprocessResult BuildPrimitivePreprocessData(
 
 namespace GlTFGeometryExtractor {
 
-ExtractionResult ExtractAll(const std::string& filePath) {
+bool IsSupportedRequiredExtension(std::string_view extension) {
+	return extension == "EXT_meshopt_compression" ||
+		extension == "EXT_mesh_gpu_instancing" ||
+		extension == "KHR_mesh_quantization" ||
+		extension == "KHR_texture_basisu" ||
+		extension == "KHR_texture_transform" ||
+		extension == "KHR_materials_emissive_strength" ||
+		extension == "KHR_materials_unlit";
+}
+
+ExtractionResult ExtractAll(const std::string& filePath, const ExtractOptions& options) {
 	ParsedDocument doc = ParseDocument(filePath);
 	LogDeclaredExtensions(doc.gltf, filePath);
+	if (doc.gltf.contains("extensionsRequired") && doc.gltf["extensionsRequired"].is_array()) {
+		for (const auto& extension : doc.gltf["extensionsRequired"]) {
+			if (extension.is_string() && !IsSupportedRequiredExtension(extension.get<std::string>())) {
+				throw std::runtime_error("glTF requires extension " + extension.get<std::string>() + ", which this importer does not read: " + filePath);
+			}
+		}
+	}
+
+	if (!options.expectedSourceIdentifier.empty() && options.expectedSourceIdentifier != doc.sourceIdentifier) {
+		spdlog::warn("glTF {} is {} but its scene cache was built from {}: the file changed, and every primitive will be rebuilt. "
+			"Rerun CLodCacheTool for this scene.", filePath, doc.sourceIdentifier, options.expectedSourceIdentifier);
+	}
 
 	ExtractionResult result;
-	result.gltf = std::move(doc.gltf);
+	result.sourceIdentifier = doc.sourceIdentifier;
+	result.gltf = doc.gltf;
 
-	// Re-attach a const reference so helpers still work with the doc
-	doc.gltf = result.gltf; // shallow copy of the json; buffers stay in doc
-
-	if (!result.gltf.contains("meshes")) {
+	if (!doc.gltf.contains("meshes")) {
 		return result;
 	}
 
@@ -1324,16 +1393,31 @@ ExtractionResult ExtractAll(const std::string& filePath) {
 		size_t meshIndex = 0;
 		size_t primitiveIndex = 0;
 		const json* primitive = nullptr;
+		uint64_t triangles = 0;
+		std::vector<size_t> compressedViews;
 	};
 
-	const auto& meshArray = result.gltf["meshes"];
+	const auto& meshArray = doc.gltf["meshes"];
+	const json noAccessors = json::array();
+	const json& accessors = doc.gltf.contains("accessors") ? doc.gltf["accessors"] : noAccessors;
 	std::vector<PrimitiveWorkItem> workItems;
 	std::vector<std::vector<std::optional<MeshPreprocessResult>>> preprocessed;
 	preprocessed.resize(meshArray.size());
 
+	auto accessorView = [&](size_t accessorIndex) -> std::optional<size_t> {
+		if (accessorIndex >= accessors.size() || !accessors[accessorIndex].contains("bufferView")) return std::nullopt;
+		return accessors[accessorIndex]["bufferView"].get<size_t>();
+	};
+	auto accessorCount = [&](size_t accessorIndex) -> uint64_t {
+		return accessorIndex < accessors.size() ? accessors[accessorIndex].value<uint64_t>("count", 0) : 0;
+	};
+
 	for (size_t meshIndex = 0; meshIndex < meshArray.size(); ++meshIndex) {
 		const auto& mesh = meshArray[meshIndex];
 		if (!mesh.contains("primitives")) {
+			continue;
+		}
+		if (options.skipMesh && options.skipMesh(meshIndex, mesh.value("name", std::string()))) {
 			continue;
 		}
 
@@ -1341,27 +1425,146 @@ ExtractionResult ExtractAll(const std::string& filePath) {
 		preprocessed[meshIndex].resize(primitiveArray.size());
 
 		for (size_t primitiveIndex = 0; primitiveIndex < primitiveArray.size(); ++primitiveIndex) {
-			workItems.push_back(PrimitiveWorkItem{
-				.meshIndex = meshIndex,
-				.primitiveIndex = primitiveIndex,
-				.primitive = &primitiveArray[primitiveIndex]
-				});
+			const json& primitive = primitiveArray[primitiveIndex];
+			PrimitiveWorkItem item;
+			item.meshIndex = meshIndex;
+			item.primitiveIndex = primitiveIndex;
+			item.primitive = &primitive;
+			std::vector<size_t> accessorIndices;
+			if (primitive.contains("attributes")) {
+				for (const auto& attribute : primitive["attributes"].items()) accessorIndices.push_back(attribute.value().get<size_t>());
+			}
+			if (primitive.contains("indices")) {
+				const size_t indices = primitive["indices"].get<size_t>();
+				accessorIndices.push_back(indices);
+				item.triangles = accessorCount(indices) / 3u;
+			}
+			else if (primitive.contains("attributes") && primitive["attributes"].contains("POSITION")) {
+				item.triangles = accessorCount(primitive["attributes"]["POSITION"].get<size_t>()) / 3u;
+			}
+			if (doc.hasMeshoptCompression) {
+				for (const size_t accessorIndex : accessorIndices) {
+					const auto view = accessorView(accessorIndex);
+					if (view && IsMeshoptCompressedView(doc.gltf, *view) &&
+						std::find(item.compressedViews.begin(), item.compressedViews.end(), *view) == item.compressedViews.end()) {
+						item.compressedViews.push_back(*view);
+						++doc.pendingViewUsers[*view];
+					}
+				}
+			}
+			workItems.push_back(std::move(item));
 		}
 	}
 
-	TaskSchedulerManager::GetInstance().ParallelFor("GlTFGeometryExtractor::PreprocessPrimitives", workItems.size(), [&](size_t workIndex) {
+	std::mutex failureMutex;
+	std::exception_ptr firstFailure;
+	auto runItem = [&](size_t workIndex) {
 		const PrimitiveWorkItem& workItem = workItems[workIndex];
-		preprocessed[workItem.meshIndex][workItem.primitiveIndex] = BuildPrimitivePreprocessData(
-			doc,
-			*workItem.primitive,
-			filePath,
-			workItem.meshIndex,
-			workItem.primitiveIndex);
-		});
+		PrimitiveOutcome outcome;
+		outcome.meshIndex = workItem.meshIndex;
+		outcome.primitiveIndex = workItem.primitiveIndex;
+		outcome.triangles = workItem.triangles;
+		const auto begin = std::chrono::steady_clock::now();
+		try {
+			bool hit = false;
+			auto built = BuildPrimitivePreprocessData(doc, *workItem.primitive, workItem.meshIndex, workItem.primitiveIndex, options.cacheOnly, &hit);
+			if (!built) {
+				outcome.kind = PrimitiveOutcome::Kind::Missing;
+			}
+			else {
+				outcome.kind = hit ? PrimitiveOutcome::Kind::Hit : PrimitiveOutcome::Kind::Built;
+				if (options.onPrimitive) {
+					options.onPrimitive(ExtractedPrimitive(workItem.meshIndex, workItem.primitiveIndex, std::move(*built)));
+				}
+				else {
+					preprocessed[workItem.meshIndex][workItem.primitiveIndex] = std::move(built);
+				}
+			}
+		}
+		catch (const std::exception& error) {
+			outcome.kind = PrimitiveOutcome::Kind::Failed;
+			outcome.error = error.what();
+			if (!options.continueOnError) {
+				std::lock_guard lock(failureMutex);
+				if (!firstFailure) firstFailure = std::current_exception();
+			}
+		}
+		outcome.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
+		if (!workItem.compressedViews.empty()) {
+			std::lock_guard lock(*doc.decompressedViewsMutex);
+			for (const size_t view : workItem.compressedViews) {
+				if (--doc.pendingViewUsers[view] == 0) doc.decompressedBufferViews.erase(view);
+			}
+		}
+		if (options.onOutcome) options.onOutcome(outcome);
+	};
 
+	if (options.memoryBudgetBytes == 0) {
+		TaskSchedulerManager::GetInstance().ParallelFor("GlTFGeometryExtractor::PreprocessPrimitives", workItems.size(), runItem);
+	}
+	else {
+		// Largest first, so the biggest builds do not end up alone at the tail; each is admitted while the primitives
+		// building fit the budget, and the first one in any case. Builds still parallelize inside through the scheduler.
+		std::vector<size_t> order(workItems.size());
+		for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+		std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return workItems[a].triangles > workItems[b].triangles; });
+		std::vector<bool> taken(order.size(), false);
+		size_t remaining = order.size();
+		size_t firstUntaken = 0;
+		uint64_t admittedBytes = 0;
+		size_t running = 0;
+		std::mutex mutex;
+		std::condition_variable admitted;
+		auto cost = [&](size_t workIndex) { return workItems[workIndex].triangles * options.bytesPerTriangle; };
+
+		auto worker = [&] {
+			for (;;) {
+				size_t workIndex = 0;
+				{
+					std::unique_lock lock(mutex);
+					size_t slot = order.size();
+					admitted.wait(lock, [&] {
+						if (remaining == 0) return true;
+						while (firstUntaken < order.size() && taken[firstUntaken]) ++firstUntaken;
+						for (size_t i = firstUntaken; i < order.size(); ++i) {
+							if (taken[i]) continue;
+							if (running == 0 || admittedBytes + cost(order[i]) <= options.memoryBudgetBytes) {
+								slot = i;
+								return true;
+							}
+						}
+						return false;
+					});
+					if (remaining == 0) return;
+					taken[slot] = true;
+					--remaining;
+					++running;
+					workIndex = order[slot];
+					admittedBytes += cost(workIndex);
+				}
+				runItem(workIndex);
+				{
+					std::lock_guard lock(mutex);
+					admittedBytes -= cost(workIndex);
+					--running;
+				}
+				admitted.notify_all();
+			}
+		};
+		const unsigned workerCount = (std::max)(1u, options.jobs != 0u ? options.jobs : std::thread::hardware_concurrency());
+		std::vector<std::thread> workers;
+		workers.reserve(workerCount);
+		for (unsigned i = 0; i < workerCount; ++i) workers.emplace_back(worker);
+		for (auto& thread : workers) thread.join();
+	}
+
+	if (firstFailure) std::rethrow_exception(firstFailure);
+
+	if (options.onPrimitive) return result;
 	for (const PrimitiveWorkItem& workItem : workItems) {
 		auto& preprocessSlot = preprocessed[workItem.meshIndex][workItem.primitiveIndex];
 		if (!preprocessSlot.has_value()) {
+			if (options.cacheOnly || options.continueOnError) continue;
 			throw std::runtime_error("Missing preprocessed primitive data");
 		}
 

@@ -16,6 +16,8 @@ find_package(assimp REQUIRED CONFIG)
 find_package(spdlog REQUIRED CONFIG)
 add_executable(CLodCacheTool
     "main.cpp"
+    "GltfSceneBuild.cpp"
+    "GltfSceneBuild.h"
     "${CLOD_CACHE_TOOL_BR_ROOT}/src/Assets/Import/Assimp/AssimpGeometryExtractor.cpp"
 )
 target_link_libraries(CLodCacheTool PRIVATE

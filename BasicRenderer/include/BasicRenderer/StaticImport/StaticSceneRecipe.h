@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -363,6 +364,11 @@ namespace br::staticimport::recipe
 		return fingerprint;
 	}
 	[[nodiscard]] std::string EnvironmentDirectoryName(const EnvironmentIdentity& identity);
+
+	// A material variant's overrides as bytes, in the recipe pack's encoding: how a merged mesh's external parts name
+	// their variants (ClusterLODExternalPart::variant). No overrides encode as no bytes.
+	[[nodiscard]] std::vector<std::byte> EncodeMaterialOverrides(std::span<const MaterialOverride> overrides);
+	[[nodiscard]] bool DecodeMaterialOverrides(std::span<const std::byte> bytes, std::vector<MaterialOverride>& outOverrides);
 
 	class Store
 	{

@@ -85,7 +85,7 @@ void WriteMaterial(Writer& out, MaterialDescription value) {
 	out.Pod(value.objectSurfaceSamplingMode); out.Pod(value.objectSurfaceUseTriplanarProjection); out.Pod(value.objectSurfaceUseTripleTapStochastic);
 	out.Pod(value.objectSurfaceTexelDensity); out.String(value.staticTextureOverrideSourceName); out.Pod(value.forceVoxelMaterial); out.Pod(value.blendState);
 	ForBindings(value, [&](TextureAndConstant& binding) { WriteBinding(out, binding); });
-	out.Pod(value.openPBR); out.Pod(value.glintEnabled); out.Pod(value.glintParameters);
+	out.Pod(value.openPBR); out.Pod(value.glintEnabled); out.Pod(value.glintParameters); out.Pod(value.uvTransform);
 }
 
 bool ReadMaterial(Reader& in, MaterialDescription& value) {
@@ -97,7 +97,7 @@ bool ReadMaterial(Reader& in, MaterialDescription& value) {
 		!in.Pod(value.objectSurfaceSamplingMode) || !in.Pod(value.objectSurfaceUseTriplanarProjection) || !in.Pod(value.objectSurfaceUseTripleTapStochastic) ||
 		!in.Pod(value.objectSurfaceTexelDensity) || !in.String(value.staticTextureOverrideSourceName) || !in.Pod(value.forceVoxelMaterial) || !in.Pod(value.blendState)) return false;
 	bool ok = true; ForBindings(value, [&](TextureAndConstant& binding) { ok = ok && ReadBinding(in, binding); });
-	return ok && in.Pod(value.openPBR) && in.Pod(value.glintEnabled) && in.Pod(value.glintParameters);
+	return ok && in.Pod(value.openPBR) && in.Pod(value.glintEnabled) && in.Pod(value.glintParameters) && in.Pod(value.uvTransform);
 }
 
 std::filesystem::path ManifestPath(const std::string& sourceIdentifier) {

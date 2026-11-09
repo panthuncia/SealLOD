@@ -382,6 +382,15 @@ namespace CLodCache {
 			return BuildCacheFilePath(fileName, BuildSceneCacheSubdirectory(sourceIdentifier));
 		}
 
+		// Merged meshes share one directory, so they can be listed without knowing their keys (ListMergedMeshes).
+		constexpr const wchar_t* kMergedMeshSubdirectory = L"clod\\merged";
+
+		std::wstring BuildCacheFilePathByKey(const std::wstring& fileName, const std::string& sourceIdentifier, std::string_view primPath)
+		{
+			if (primPath == kMergedMeshPrimPath) return BuildCacheFilePath(fileName, kMergedMeshSubdirectory);
+			return BuildCacheFilePathBySource(fileName, sourceIdentifier);
+		}
+
 		template<typename T>
 		void WritePod(std::vector<std::byte>& out, const T& value)
 		{
@@ -464,6 +473,47 @@ namespace CLodCache {
 		}
 
 		static constexpr uint32_t kMaterialSlotSectionTag = 0x4C4F534Du; // MSOL
+		static constexpr uint32_t kExternalPartSectionTag = 0x5450584Du; // MXPT
+
+		void WriteExternalParts(std::vector<std::byte>& out, const ClusterLODPrebuiltData& data)
+		{
+			WritePod(out, static_cast<uint64_t>(data.externalParts.size()));
+			for (const ClusterLODExternalPart& part : data.externalParts) {
+				WriteString(out, part.sourceIdentifier);
+				WriteString(out, part.primPath);
+				WriteString(out, part.subsetName);
+				WritePod(out, part.buildConfigHash);
+				WriteString(out, part.assetKey);
+				WritePod(out, part.variantHash);
+				WriteVectorPod(out, part.variant);
+				WritePod(out, part.partIndex);
+				WritePod(out, part.meshIndex);
+				WritePod(out, part.nodeCount);
+				WritePod(out, part.flags);
+			}
+			WriteVectorPod(out, data.paletteParts);
+		}
+
+		bool ReadExternalParts(const std::vector<std::byte>& in, size_t& offset, ClusterLODPrebuiltData& data)
+		{
+			uint64_t count = 0;
+			if (!ReadPod(in, offset, count) || count > in.size()) return false;
+			data.externalParts.resize(static_cast<size_t>(count));
+			for (ClusterLODExternalPart& part : data.externalParts) {
+				if (!ReadString(in, offset, part.sourceIdentifier) || !ReadString(in, offset, part.primPath) ||
+					!ReadString(in, offset, part.subsetName) || !ReadPod(in, offset, part.buildConfigHash) ||
+					!ReadString(in, offset, part.assetKey) || !ReadPod(in, offset, part.variantHash) ||
+					!ReadVectorPod(in, offset, part.variant) || !ReadPod(in, offset, part.partIndex) ||
+					!ReadPod(in, offset, part.meshIndex) || !ReadPod(in, offset, part.nodeCount) || !ReadPod(in, offset, part.flags)) {
+					return false;
+				}
+			}
+			if (!ReadVectorPod(in, offset, data.paletteParts)) return false;
+			for (const uint32_t part : data.paletteParts) {
+				if (part >= data.externalParts.size()) return false;
+			}
+			return true;
+		}
 
 		std::vector<std::byte> SerializeMetadata(
 			uint64_t buildConfigHash,
@@ -519,6 +569,11 @@ namespace CLodCache {
 				WritePod(out, kMaterialSlotSectionTag);
 				WritePod(out, prebuiltData.materialSlotCount);
 				WriteVectorPod(out, prebuiltData.assemblyTransformMaterialBases);
+			}
+			// Optional trailing section: a merged mesh's external parts and palette.
+			if (!prebuiltData.externalParts.empty()) {
+				WritePod(out, kExternalPartSectionTag);
+				WriteExternalParts(out, prebuiltData);
 			}
 
 			return out;
@@ -577,11 +632,25 @@ namespace CLodCache {
 			if (!ReadPod(blob, offset, out.prebuiltData.maxTraversalDepth)) return false;
 			out.prebuiltData.materialSlotCount = 1u;
 			out.prebuiltData.assemblyTransformMaterialBases.clear();
-			if (offset < blob.size()) {
+			out.prebuiltData.externalParts.clear();
+			out.prebuiltData.paletteParts.clear();
+			// Optional trailing sections, each at most once.
+			bool haveSlots = false, haveExternalParts = false;
+			while (offset < blob.size()) {
 				uint32_t tag = 0u;
-				if (!ReadPod(blob, offset, tag) || tag != kMaterialSlotSectionTag) return false;
-				if (!ReadPod(blob, offset, out.prebuiltData.materialSlotCount)) return false;
-				if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblyTransformMaterialBases)) return false;
+				if (!ReadPod(blob, offset, tag)) return false;
+				if (tag == kMaterialSlotSectionTag && !haveSlots) {
+					haveSlots = true;
+					if (!ReadPod(blob, offset, out.prebuiltData.materialSlotCount)) return false;
+					if (!ReadVectorPod(blob, offset, out.prebuiltData.assemblyTransformMaterialBases)) return false;
+				}
+				else if (tag == kExternalPartSectionTag && !haveExternalParts) {
+					haveExternalParts = true;
+					if (!ReadExternalParts(blob, offset, out.prebuiltData)) return false;
+				}
+				else {
+					return false;
+				}
 			}
 
 			return offset == blob.size();
@@ -617,6 +686,23 @@ namespace CLodCache {
 				filePath = path;
 				if (filePath.empty()) {
 					return false;
+				}
+				// Served from the cache pack's view, which stays mapped for the process: nothing to open or unmap.
+				if (CachePack::Entry packed{}; CachePack::Find(filePath, packed)) {
+					ContainerHeader header{};
+					if (packed.size < sizeof(header)) {
+						return false;
+					}
+					std::memcpy(&header, packed.data, sizeof(header));
+					if (header.magic != kContainerMagic || header.version != 4u) {
+						return false;
+					}
+					data = packed.data;
+					inCachePack = true;
+					fileSize = packed.size;
+					pageCount = header.pageCount;
+					valid = true;
+					return true;
 				}
 
 				fileHandle = CreateFileW(
@@ -665,10 +751,11 @@ namespace CLodCache {
 
 			void Close()
 			{
-				if (data != nullptr) {
+				if (data != nullptr && !inCachePack) {
 					UnmapViewOfFile(data);
-					data = nullptr;
 				}
+				data = nullptr;
+				inCachePack = false;
 				if (mappingHandle != nullptr) {
 					CloseHandle(mappingHandle);
 					mappingHandle = nullptr;
@@ -709,6 +796,7 @@ namespace CLodCache {
 			HANDLE fileHandle = INVALID_HANDLE_VALUE;
 			HANDLE mappingHandle = nullptr;
 			const std::byte* data = nullptr;
+			bool inCachePack = false;
 			uint64_t fileSize = 0;
 			uint32_t pageCount = 0;
 			bool valid = false;
@@ -835,24 +923,30 @@ namespace CLodCache {
 			return true;
 		}
 
+		// A metadata file's bytes held in memory (the cache pack): its prefix, then the blob.
+		bool ParseMetadataFileBytes(std::span<const std::byte> file, std::vector<std::byte>& blob)
+		{
+			constexpr std::size_t kPrefixBytes = sizeof(uint32_t) * 2u + sizeof(uint64_t);
+			uint32_t magic = 0;
+			uint32_t version = 0;
+			uint64_t blobSize = 0;
+			if (file.size() < kPrefixBytes) {
+				return false;
+			}
+			std::memcpy(&magic, file.data(), sizeof(magic));
+			std::memcpy(&version, file.data() + sizeof(magic), sizeof(version));
+			std::memcpy(&blobSize, file.data() + sizeof(magic) + sizeof(version), sizeof(blobSize));
+			if (magic != kMetadataMagic || version != kMetadataVersion || blobSize > file.size() - kPrefixBytes) {
+				return false;
+			}
+			blob.assign(file.data() + kPrefixBytes, file.data() + kPrefixBytes + blobSize);
+			return true;
+		}
+
 		bool ReadMetadataBlob(const std::wstring& cachePath, std::vector<std::byte>& blob)
 		{
 			if (CachePack::Entry packed{}; CachePack::Find(cachePath, packed)) {
-				constexpr std::size_t kPrefixBytes = sizeof(uint32_t) * 2u + sizeof(uint64_t);
-				uint32_t packedMagic = 0;
-				uint32_t packedVersion = 0;
-				uint64_t packedBlobSize = 0;
-				if (packed.size < kPrefixBytes) {
-					return false;
-				}
-				std::memcpy(&packedMagic, packed.data, sizeof(packedMagic));
-				std::memcpy(&packedVersion, packed.data + sizeof(packedMagic), sizeof(packedVersion));
-				std::memcpy(&packedBlobSize, packed.data + sizeof(packedMagic) + sizeof(packedVersion), sizeof(packedBlobSize));
-				if (packedMagic != kMetadataMagic || packedVersion != kMetadataVersion || packedBlobSize > packed.size - kPrefixBytes) {
-					return false;
-				}
-				blob.assign(packed.data + kPrefixBytes, packed.data + kPrefixBytes + packedBlobSize);
-				return true;
+				return ParseMetadataFileBytes({ packed.data, static_cast<std::size_t>(packed.size) }, blob);
 			}
 			std::ifstream file(cachePath, std::ios::binary);
 			if (!file.is_open()) {
@@ -1002,6 +1096,12 @@ namespace CLodCache {
 			MetadataMemoryCache().insert_or_assign(cachePath, std::move(cached));
 		}
 
+		void EraseMetadataFromMemoryCache(const std::wstring& cachePath)
+		{
+			std::lock_guard lock(MetadataMemoryCacheMutex());
+			MetadataMemoryCache().erase(cachePath);
+		}
+
 	}
 
 	namespace {
@@ -1019,6 +1119,10 @@ namespace CLodCache {
 			spdlog::debug("CLodCache::SaveImpl  metadata='{}' container='{}'",
 				ws2s(lookup.metadataPath), ws2s(lookup.containerPath));
 
+			{
+				std::error_code ec; // BuildCacheLookup does not create the entry's directory.
+				std::filesystem::create_directories(std::filesystem::path(lookup.containerPath).parent_path(), ec);
+			}
 			std::vector<ClusterLODGroupDiskLocator> pageDiskLocators;
 			if (!SaveContainerPayload(lookup.containerPath, prebuiltData, payload, pageDiskLocators)) {
 				spdlog::warn("Failed to write CLod container payload: {}", ws2s(lookup.containerPath));
@@ -1156,15 +1260,24 @@ namespace CLodCache {
 		lookup.key = key;
 		lookup.buildConfigHash = buildConfigHash;
 		lookup.metadataFileName = BuildCacheArtifactFileName(key, buildConfigHash, ".clodmeta");
-		lookup.metadataPath = GetCacheFilePathBySource(lookup.metadataFileName, key.sourceIdentifier);
+		// Paths only: a lookup is mostly a read, and creating each entry's directory here put a filesystem call under
+		// GetCacheFilePath's process-wide mutex into every first load of a mesh (14 ms a merged root on a cold
+		// directory, with every scene-preparation thread queued behind it). Writers create the directory (SaveImpl).
+		lookup.metadataPath = BuildCacheFilePathByKey(lookup.metadataFileName, key.sourceIdentifier, key.primPath);
 		lookup.containerFileName = BuildCacheArtifactFileName(key, buildConfigHash, ".clodbin");
-		lookup.containerPath = GetCacheFilePathBySource(lookup.containerFileName, key.sourceIdentifier);
+		lookup.containerPath = BuildCacheFilePathByKey(lookup.containerFileName, key.sourceIdentifier, key.primPath);
 		return lookup;
 	}
 
 	std::wstring GetCacheFilePathForSource(const std::wstring& fileName, const std::string& sourceIdentifier)
 	{
 		return GetCacheFilePathBySource(fileName, sourceIdentifier);
+	}
+
+	std::filesystem::path RelativeMetadataPath(const CacheKey& key, uint64_t buildConfigHash)
+	{
+		const std::wstring directory = key.primPath == kMergedMeshPrimPath ? std::wstring(kMergedMeshSubdirectory) : BuildSceneCacheSubdirectory(key.sourceIdentifier);
+		return std::filesystem::path(directory) / BuildCacheFileName(key, buildConfigHash);
 	}
 
 	std::optional<CacheData> TryLoad(const CacheKey& key, uint64_t expectedBuildConfigHash)
@@ -1177,7 +1290,8 @@ namespace CLodCache {
 				return memoryCached;
 			}
 		}
-		if (!std::filesystem::exists(lookup.metadataPath)) {
+		// ReadMetadataBlob reads the pack first: only a loose file needs the existence check, which is a filesystem call.
+		if (CachePack::Entry packed{}; !CachePack::Find(lookup.metadataPath, packed) && !std::filesystem::exists(lookup.metadataPath)) {
 			return std::nullopt;
 		}
 
@@ -1233,6 +1347,45 @@ namespace CLodCache {
 		return std::nullopt;
 	}
 
+	namespace {
+		bool IsCurrentMetadataBlob(const std::vector<std::byte>& bytes, const std::wstring& fileName)
+		{
+			CacheData data;
+			if (!DeserializeMetadata(bytes, data)) {
+				return false; // another schema
+			}
+			const ClusterLODCacheSource& source = data.prebuiltData.cacheSource;
+			if (source.sourceIdentifier.empty()) {
+				return false;
+			}
+			const uint64_t buildConfigHash = ComputeBuildConfigHash(source.sourceIdentifier);
+			if (data.buildConfigHash != buildConfigHash) {
+				return false;
+			}
+			const CacheKey key{ source.sourceIdentifier, source.primPath, source.subsetName };
+			return BuildCacheFileName(key, buildConfigHash) == fileName;
+		}
+	}
+
+	bool IsCurrentMetadataFile(const std::filesystem::path& metadataPath)
+	{
+		std::vector<std::byte> bytes;
+		return ReadMetadataBlob(metadataPath.wstring(), bytes) && IsCurrentMetadataBlob(bytes, metadataPath.filename().wstring());
+	}
+
+	bool IsCurrentMetadata(std::span<const std::byte> fileBytes, const std::wstring& fileName)
+	{
+		std::vector<std::byte> bytes;
+		return ParseMetadataFileBytes(fileBytes, bytes) && IsCurrentMetadataBlob(bytes, fileName);
+	}
+
+	uint64_t CurrentSettingsFingerprint()
+	{
+		size_t seed = static_cast<size_t>(ComputeBuildConfigHash({}));
+		boost::hash_combine(seed, GetCLodAssetSettingsConfigHash());
+		return static_cast<uint64_t>(seed);
+	}
+
 	bool Save(const CacheKey& key, const CacheData& data)
 	{
 		if (data.schemaVersion != kSchemaVersion) {
@@ -1258,10 +1411,9 @@ namespace CLodCache {
 		if (groupLocalIndex >= prebuilt.groups.size()) {
 			return false;
 		}
-		std::ifstream file;
 		uint32_t pageCount = 0u;
-		if (!OpenContainerFile(prebuilt.cacheSource, file, pageCount) ||
-			pageCount != prebuilt.pageDiskLocators.size()) {
+		const std::wstring containerPath = ResolveContainerPath(prebuilt.cacheSource);
+		if (!ReadContainerPageCount(prebuilt.cacheSource, pageCount) || pageCount != prebuilt.pageDiskLocators.size()) {
 			return false;
 		}
 		const ClusterLODGroup& group = prebuilt.groups[groupLocalIndex];
@@ -1281,8 +1433,8 @@ namespace CLodCache {
 				std::any_of(meshPageIndices.begin(), meshPageIndices.end(), [&](uint32_t pageIndex) { return pageIndex >= prebuilt.pageDiskLocators.size(); })) {
 				return false;
 			}
-			return LoadMeshPagesSelective(
-				file,
+			return LoadMeshPagesSelectiveMapped(
+				containerPath,
 				std::span<const ClusterLODGroupDiskLocator>(prebuilt.pageDiskLocators.data(), prebuilt.pageDiskLocators.size()),
 				std::span<const uint32_t>(meshPageIndices.data(), meshPageIndices.size()),
 				{},
@@ -1292,8 +1444,8 @@ namespace CLodCache {
 		if (groupPageEnd > prebuilt.pageDiskLocators.size()) {
 			return false;
 		}
-		return LoadMeshPagesSelective(
-			file,
+		return LoadMeshPagesSelectiveMapped(
+			containerPath,
 			std::span<const ClusterLODGroupDiskLocator>(prebuilt.pageDiskLocators.data(), prebuilt.pageDiskLocators.size()),
 			group.pageMapBase,
 			group.pageCount,
@@ -1310,7 +1462,67 @@ namespace CLodCache {
 		// The serialized filename is the authoritative locator. Rebuilding the
 		// metadata and container identities here duplicated hashing/formatting and
 		// entered the write-side directory creation lock for every mesh.
-		return BuildCacheFilePathBySource(cacheSource.containerFileName, cacheSource.sourceIdentifier);
+		return BuildCacheFilePathByKey(cacheSource.containerFileName, cacheSource.sourceIdentifier, cacheSource.primPath);
+	}
+
+	CacheKey MergedMeshCacheKey(std::string_view assetKey)
+	{
+		return CacheKey{ std::string(assetKey), std::string(kMergedMeshPrimPath), "" };
+	}
+
+	uint64_t MergedMeshBuildConfigHash(std::string_view assetKey)
+	{
+		return ComputeBuildConfigHash(assetKey);
+	}
+
+	std::optional<CacheData> TryLoadMergedMesh(std::string_view assetKey)
+	{
+		return TryLoad(MergedMeshCacheKey(assetKey), MergedMeshBuildConfigHash(assetKey));
+	}
+
+	void RemoveMergedMesh(std::string_view assetKey)
+	{
+		const CacheLookup lookup = BuildCacheLookup(MergedMeshCacheKey(assetKey), MergedMeshBuildConfigHash(assetKey));
+		// The pack may hold it alone (its build deletes loose files): the note drops it there, and stops it being served.
+		CachePack::NoteFileChanged(lookup.metadataPath);
+		CachePack::NoteFileChanged(lookup.containerPath);
+		EraseMetadataFromMemoryCache(lookup.metadataPath);
+		std::error_code ec;
+		std::filesystem::remove(lookup.metadataPath, ec);
+		std::filesystem::remove(lookup.containerPath, ec);
+	}
+
+	bool SaveMergedMesh(std::string_view assetKey, const ClusterLODPrebuiltData& prebuiltData, const ClusterLODCacheBuildPayload& payload)
+	{
+		// Merged meshes are rebuilt on every preprocess, and Save never overwrites an entry: remove the previous one.
+		RemoveMergedMesh(assetKey);
+		return Save(MergedMeshCacheKey(assetKey), MergedMeshBuildConfigHash(assetKey), prebuiltData, payload);
+	}
+
+	std::vector<std::string> ListMergedMeshes(std::string_view assetKeyPrefix)
+	{
+		std::unordered_set<std::string> keys;
+		const auto consider = [&](std::span<const std::byte> fileBytes) {
+			std::vector<std::byte> blob;
+			CacheData data;
+			if (!ParseMetadataFileBytes(fileBytes, blob) || !DeserializeMetadata(blob, data)) return;
+			const ClusterLODCacheSource& source = data.prebuiltData.cacheSource;
+			if (source.primPath == kMergedMeshPrimPath && source.sourceIdentifier.starts_with(assetKeyPrefix)) keys.insert(source.sourceIdentifier);
+		};
+		const std::filesystem::path directory = GetCacheRootPath() / kMergedMeshSubdirectory;
+		CachePack::ForEachEntryUnder(directory, [&](const std::filesystem::path& path, const CachePack::Entry& entry) {
+			if (path.extension() == L".clodmeta") consider({ entry.data, static_cast<size_t>(entry.size) });
+		});
+		std::error_code ec;
+		for (std::filesystem::directory_iterator it(directory, ec), end; !ec && it != end; it.increment(ec)) {
+			if (it->path().extension() != L".clodmeta") continue;
+			std::ifstream in(it->path(), std::ios::binary);
+			const std::vector<char> bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+			consider({ reinterpret_cast<const std::byte*>(bytes.data()), bytes.size() });
+		}
+		std::vector<std::string> out(keys.begin(), keys.end());
+		std::sort(out.begin(), out.end());
+		return out;
 	}
 
 	bool LoadMeshPagesSelective(std::ifstream& file,
@@ -1489,6 +1701,29 @@ namespace CLodCache {
 		return OpenContainerFile(std::filesystem::path(ResolveContainerPath(cacheSource)), outFile, outPageCount);
 	}
 
+	bool ReadContainerPageCount(const ClusterLODCacheSource& cacheSource, uint32_t& outPageCount)
+	{
+		outPageCount = 0u;
+		if (cacheSource.containerFileName.empty()) {
+			return false;
+		}
+		const std::wstring containerPath = ResolveContainerPath(cacheSource);
+		if (CachePack::Entry packed{}; CachePack::Find(containerPath, packed)) {
+			ContainerHeader header{};
+			if (packed.size < sizeof(header)) {
+				return false;
+			}
+			std::memcpy(&header, packed.data, sizeof(header));
+			if (header.magic != kContainerMagic || header.version != 4u) {
+				return false;
+			}
+			outPageCount = header.pageCount;
+			return true;
+		}
+		std::ifstream file;
+		return OpenContainerFile(std::filesystem::path(containerPath), file, outPageCount);
+	}
+
 	bool OpenContainerFile(const std::filesystem::path& containerPath,
 		std::ifstream& outFile,
 		uint32_t& outPageCount)
@@ -1514,7 +1749,7 @@ namespace CLodCache {
 	{
 		OpenedMetadata result;
 		std::error_code existsError;
-		if (!std::filesystem::exists(metadataPath, existsError)) {
+		if (CachePack::Entry packed{}; !CachePack::Find(metadataPath, packed) && !std::filesystem::exists(metadataPath, existsError)) {
 			return result;
 		}
 

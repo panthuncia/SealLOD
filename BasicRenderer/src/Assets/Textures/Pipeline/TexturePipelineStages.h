@@ -32,4 +32,13 @@ namespace br::textures
 	// The mip window from topMip down of source data holding the full chain.
 	std::shared_ptr<TextureSourceData> ShapeSourceForTopMip(
 		const std::shared_ptr<TextureSourceData>& data, std::uint32_t topMip);
+
+	// A request's ITextureMipProvider, or null for any other source.
+	std::shared_ptr<ITextureMipProvider> ProvidedTextureMipProvider(const TextureRequest& request);
+	// The full shape of a provided Processed texture its processing would leave as it is, its format as the request
+	// samples it (preferSRGB applied); nullopt when it must be processed, or isn't provided.
+	std::optional<TextureShape> ProvidedPassthroughShape(const TextureRequest& request);
+	// A provider's mips from topMip down, in the full texture's layout, its format as the request samples it. Throws when
+	// the provider fails or leaves out a mip it was asked for.
+	std::shared_ptr<TextureSourceData> ReadProvidedTextureMips(const TextureRequest& request, std::uint32_t topMip);
 }

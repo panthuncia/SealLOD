@@ -43,8 +43,23 @@ namespace br::textures
 
 		// DirectXTex filters mips and converts formats through WIC, which needs COM on the calling thread. The renderer's
 		// workers run in the process's implicit MTA; an offline tool's own threads may have no COM at all.
+		// DirectXTex keeps one WIC factory for the process. Should every thread in the MTA leave it, COM tears the apartment
+		// down and unloads the codecs that factory lives in, and the next mip generation calls through a dangling vtable: hold
+		// the MTA for the process's lifetime.
+		void HoldMultithreadedApartment()
+		{
+			static std::once_flag once;
+			std::call_once(once, [] {
+				CO_MTA_USAGE_COOKIE cookie{};
+				(void)CoIncrementMTAUsage(&cookie);
+			});
+		}
+
 		struct ScopedCom {
-			HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+			HRESULT hr = [] {
+				HoldMultithreadedApartment();
+				return CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+			}();
 			~ScopedCom() { if (SUCCEEDED(hr)) CoUninitialize(); }
 		};
 
@@ -151,6 +166,8 @@ namespace br::textures
 		if (!texture || !texture->IsPipelineTexture()) throw std::runtime_error("ConditionTextureOnCpu: not a pipeline texture");
 		const TextureRequest& request = *texture->PipelineRequest();
 		if (request.preparation == TexturePreparation::LoadOnly) return TextureConditionResult::NotProcessed;
+		// Streamed from its provider as it is: nothing to cache.
+		if (ProvidedPassthroughShape(request)) return TextureConditionResult::NotProcessed;
 
 		const std::string& cacheKey = texture->PipelineCacheKey();
 		if (ReadConditionedCacheDescription(TextureProcessingManager::ConditionedCachePath(cacheKey))) {
@@ -198,6 +215,7 @@ namespace br::textures
 		if (!texture || !texture->IsPipelineTexture()) throw std::runtime_error("LoadPreparedTextureOnCpu: not a pipeline texture");
 		const TextureRequest& request = *texture->PipelineRequest();
 		if (request.preparation == TexturePreparation::LoadOnly) return DecodeTextureSource(request);
+		if (ProvidedPassthroughShape(request)) return ReadProvidedTextureMips(request, 0);
 		ConditionTextureOnCpu(texture);
 		const auto path = std::filesystem::path(TextureProcessingManager::ConditionedCachePath(texture->PipelineCacheKey()));
 		auto data = LoadTextureSourceDataFromConditionedCacheFilePath(path.string(), "prepared on the CPU");
@@ -221,6 +239,10 @@ namespace br::textures
 		if (const auto* memory = std::get_if<MemoryTextureSource>(&source.data)) {
 			if (!memory->bytes) throw std::runtime_error("texture source '" + source.identity + "' has no bytes");
 			return LoadTextureSourceDataFromImageBytes(memory->bytes->data(), memory->bytes->size(), request.preferSRGB, source.formatHint, source.identity);
+		}
+		if (std::holds_alternative<ProvidedTextureSource>(source.data)) {
+			// Every mip, for processing or a LoadOnly upload.
+			return ReadProvidedTextureMips(request, 0);
 		}
 		const auto& decoded = std::get<DecodedTextureSource>(source.data);
 		if (!decoded.data) throw std::runtime_error("texture source '" + source.identity + "' has no pixels");

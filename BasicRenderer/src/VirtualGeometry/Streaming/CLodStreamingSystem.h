@@ -217,6 +217,8 @@ private:
     void ReconcileStaleDiskIoRequests(ICLodGeometryStorage* meshManager);
     bool PromoteGroupPagesAfterUploadDrain(uint32_t groupIndex);
     void EnsureStreamingDiagnosticsCapacity(uint32_t requiredGroupCount);
+    // Lists a group whose diagnostics just became active, so the per-pass stats visit active groups only.
+    void TrackActiveStreamingDiagnostic(uint32_t groupIndex);
     void RecordStreamingRequestObserved(
         uint32_t groupIndex,
         uint32_t priority,
@@ -530,6 +532,10 @@ private:
         StreamingDiagnosticsRecord diagnostics{};
     };
     std::vector<StreamingDiagnosticsRecord> m_streamingDiagnosticsByGroup;
+    // Groups whose diagnostics were activated, possibly since cleared (pruned by AccumulateStreamingDiagnostics), and
+    // whether each group is in that list. Scanning every group slot per service pass cost about 2 ms at 40k groups.
+    std::vector<uint32_t> m_activeStreamingDiagnosticGroups;
+    std::vector<uint8_t> m_activeStreamingDiagnosticListed;
     std::vector<CompletedStreamingRequestTrace>
         m_completedStreamingRequestTraces;
     uint64_t m_nextStreamingRequestTraceId = 1u;

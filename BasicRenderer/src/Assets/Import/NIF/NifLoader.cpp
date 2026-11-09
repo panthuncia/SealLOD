@@ -911,6 +911,12 @@ std::uint64_t ComputeMaterialHash(const MaterialDescription& desc)
     HashBinding(hash, desc.openPBRTextures.fuzzColor);
     HashBinding(hash, desc.openPBRTextures.fuzzWeight);
     HashBinding(hash, desc.openPBRTextures.fuzzRoughness);
+    // Hashed only when set, so identity-transform materials keep the hashes their caches were written with.
+    if (!desc.uvTransform.IsIdentity()) {
+        HashPod(hash, desc.uvTransform.offset);
+        HashPod(hash, desc.uvTransform.scale);
+        HashPod(hash, desc.uvTransform.rotation);
+    }
     return hash;
 }
 
@@ -1848,6 +1854,8 @@ bool ReadTextureBinding(
     return true;
 }
 
+// MaterialDescription::uvTransform is not serialized: NIF materials never set it (only glTF does), and adding it would
+// invalidate every payload cache. Add it here with a kPayloadCacheVersion bump once a NIF path produces one.
 void WriteMaterialDescription(BinaryWriter& writer, const MaterialDescription& desc)
 {
     ZoneScopedN("NifLoader::WriteMaterialDescription");

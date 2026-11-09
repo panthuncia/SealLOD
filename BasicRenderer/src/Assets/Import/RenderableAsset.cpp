@@ -33,6 +33,7 @@ RenderableAsset RenderableAssetFromPayload(ImportedAssetPayload&& payload)
 		part.meshes = std::move(payloadPart.meshes);
 		part.prototypeGeometries = std::move(payloadPart.prototypeGeometries);
 		part.localMatrix = payloadPart.localMatrix;
+		part.instanceMatrices = payloadPart.instanceMatrices;
 		part.name = std::move(payloadPart.name);
 		part.skinnedShapeIndex = payloadPart.skinnedShapeIndex;
 		asset.parts.push_back(std::move(part));

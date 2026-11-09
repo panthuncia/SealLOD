@@ -22,6 +22,16 @@ void CLodStreamingSystem::EnsureStreamingDiagnosticsCapacity(uint32_t requiredGr
     }
 }
 
+void CLodStreamingSystem::TrackActiveStreamingDiagnostic(uint32_t groupIndex) {
+    if (groupIndex >= m_activeStreamingDiagnosticListed.size()) {
+        m_activeStreamingDiagnosticListed.resize(std::max<size_t>(groupIndex + 1u, m_streamingDiagnosticsByGroup.size()), 0u);
+    }
+    if (m_activeStreamingDiagnosticListed[groupIndex] == 0u) {
+        m_activeStreamingDiagnosticListed[groupIndex] = 1u;
+        m_activeStreamingDiagnosticGroups.push_back(groupIndex);
+    }
+}
+
 void CLodStreamingSystem::RecordStreamingRequestObserved(
     uint32_t groupIndex,
     uint32_t priority,
@@ -38,6 +48,7 @@ void CLodStreamingSystem::RecordStreamingRequestObserved(
                 : CLodRequestTraceNowNs();
         }
         diag.active = true;
+        TrackActiveStreamingDiagnostic(groupIndex);
     }
     diag.priority = std::max(diag.priority, priority);
     diag.lastRequestTick = m_streamingDiagnosticTick;
@@ -49,6 +60,7 @@ void CLodStreamingSystem::RecordStreamingRequestQueued(uint32_t groupIndex) {
     if (!diag.active) {
         diag.firstRequestTick = m_streamingDiagnosticTick;
         diag.active = true;
+        TrackActiveStreamingDiagnostic(groupIndex);
     }
     if (diag.cpuQueuedTick == 0u) {
         diag.cpuQueuedTick = m_streamingDiagnosticTick;
@@ -64,6 +76,7 @@ void CLodStreamingSystem::RecordStreamingDuplicateRequest(uint32_t groupIndex) {
     if (!diag.active) {
         diag.firstRequestTick = m_streamingDiagnosticTick;
         diag.active = true;
+        TrackActiveStreamingDiagnostic(groupIndex);
     }
     ++diag.duplicateRequests;
     ++m_streamingDiagnosticsDuplicateRequestsThisFrame;
@@ -75,6 +88,7 @@ void CLodStreamingSystem::RecordStreamingDiskQueued(uint32_t groupIndex) {
     if (!diag.active) {
         diag.firstRequestTick = m_streamingDiagnosticTick;
         diag.active = true;
+        TrackActiveStreamingDiagnostic(groupIndex);
     }
     if (diag.diskQueuedTick == 0u) {
         diag.diskQueuedTick = m_streamingDiagnosticTick;
@@ -92,6 +106,7 @@ void CLodStreamingSystem::RecordStreamingCompletion(
     if (!diag.active) {
         diag.firstRequestTick = m_streamingDiagnosticTick;
         diag.active = true;
+        TrackActiveStreamingDiagnostic(groupIndex);
     }
     diag.uploadedBytes = completion.totalStreamedBytes;
     if (diag.ioTaskQueuedNs == 0u) {
@@ -131,6 +146,7 @@ void CLodStreamingSystem::RecordStreamingUploadQueued(uint32_t groupIndex, uint6
     if (!diag.active) {
         diag.firstRequestTick = m_streamingDiagnosticTick;
         diag.active = true;
+        TrackActiveStreamingDiagnostic(groupIndex);
     }
     if (diag.uploadQueuedTick == 0u) {
         diag.uploadQueuedTick = m_streamingDiagnosticTick;
@@ -158,6 +174,7 @@ void CLodStreamingSystem::RecordStreamingCommitQueued(uint32_t groupIndex) {
     if (!diag.active) {
         diag.firstRequestTick = m_streamingDiagnosticTick;
         diag.active = true;
+        TrackActiveStreamingDiagnostic(groupIndex);
     }
     if (diag.commitQueuedTick == 0u) {
         diag.commitQueuedTick = m_streamingDiagnosticTick;

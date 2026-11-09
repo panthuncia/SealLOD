@@ -1,0 +1,12 @@
+{
+  "name": "zorah_textured_public.v1",
+  "skipMeshes": "SM_Courtyard_Kite_Frame_A01_01.*|SM_Kite_VAT.*",
+  "materialChannels": [
+    {
+      "texture": "metallicRoughness",
+      "channels": 2,
+      "metallic": 1,
+      "roughness": 0
+    }
+  ]
+}

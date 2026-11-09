@@ -18,6 +18,7 @@
 #include "Pipeline/PipelineState/PSOManager.h"
 #include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "Runtime/Settings/SettingsManager.h"
+#include "Runtime/Device/DeviceManager.h"
 #include "BasicRenderer/Assets/TechniqueDescriptor.h"
 #include "VirtualGeometry/GraphIntegration/CLodExtensionComponents.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
@@ -166,8 +167,47 @@ namespace TerrainRvt
 
     inline uint32_t MaxGeneratedPagesPerFrame()
     {
-        return std::clamp(SettingU32("terrainRvtMaxGeneratedPagesPerFrame", 64u), 1u, MaxPhysicalPages());
+        // At most 2048: with compression, each page of the budget is a slice of the scratch texture arrays.
+        return std::clamp(SettingU32("terrainRvtMaxGeneratedPagesPerFrame", 64u), 1u, std::min(MaxPhysicalPages(), 2048u));
     }
+
+    // Block-compressed albedo (BC7), normal (BC5) and material (BC7) atlases. Generation writes uncompressed tiles to a
+    // scratch sized for the per-frame budget, and TerrainRvtEncodePagesPass writes their blocks straight into the atlases'
+    // pages through a UAV of one R32G32B32A32_UINT texel per block, which needs relaxed format casting (D3D12; Vulkan
+    // reports it unsupported). Height stays R16F. Where it can't be done, the atlases stay uncompressed.
+    inline constexpr const char* CompressionSettingName = "terrainRvtCompression";
+    inline bool CompressionSupported()
+    {
+        static const bool supported = [] {
+            ::EnhancedBarriersFeatureInfo info{};
+            const bool queried = rhi::IsOk(DeviceManager::GetInstance().GetDevice().QueryFeatureInfo(&info.header));
+            return queried && info.relaxedFormatCasting;
+        }();
+        return supported;
+    }
+    inline bool CompressionRequested()
+    {
+        try {
+            return SettingsManager::GetInstance().getSettingGetter<bool>(CompressionSettingName)();
+        }
+        catch (...) {
+            return true;
+        }
+    }
+    inline bool CompressionEnabled()
+    {
+        const uint32_t tileSide = PageSize() + BorderTexels() * 2u;
+        const bool enabled = CompressionRequested() && CompressionSupported() && tileSide % 4u == 0u;
+        static bool reported = false;
+        if (CompressionRequested() && !enabled && !reported) {
+            reported = true;
+            spdlog::warn("Terrain RVT compression is off: {}", !CompressionSupported()
+                ? "the device cannot write block-compressed textures through a UINT view (relaxed format casting)"
+                : "the tile side (page size plus both borders) is not a multiple of 4");
+        }
+        return enabled;
+    }
+    inline constexpr uint32_t CompressionBlocksPerTileSide(uint32_t tileSide) { return tileSide / 4u; }
 
     inline float BasePageWorldSize()
     {
@@ -199,10 +239,10 @@ namespace TerrainRvt
 
     inline std::vector<org::PipelineShaderDefine> ShaderDefines()
     {
-        if (!IsTerrainRvtTelemetryDebugEnabled()) {
-            return {};
-        }
-        return { org::PipelineShaderDefine{ L"TERRAIN_RVT_TELEMETRY", L"1" } };
+        std::vector<org::PipelineShaderDefine> defines;
+        if (IsTerrainRvtTelemetryDebugEnabled()) defines.push_back({ L"TERRAIN_RVT_TELEMETRY", L"1" });
+        if (CompressionEnabled()) defines.push_back({ L"TERRAIN_RVT_COMPRESSED", L"1" });
+        return defines;
     }
 
     struct PipelineBindings {
@@ -455,6 +495,7 @@ public:
         b.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         b.ShaderResource(Builtin::Terrain::RvtInfo, Builtin::Terrain::RvtCounters);
         b.UnorderedAccess(Builtin::Terrain::RvtGenerateDispatchArgs);
+        if (TerrainRvt::CompressionEnabled()) b.UnorderedAccess(Builtin::Terrain::RvtEncodeDispatchArgs);
         return { b.Pipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtBuildGenerateDispatchArgsCS",
             "TerrainRvt.BuildGenerateDispatchArgs.PSO", TerrainRvt::ShaderDefines())) };
     }
@@ -491,15 +532,57 @@ public:
         b.UnorderedAccess(
                 Builtin::Terrain::RvtGenerationList,
                 Builtin::Terrain::RvtHeightAtlas,
-                Builtin::Terrain::RvtAlbedoAtlas,
-                Builtin::Terrain::RvtNormalAtlas,
-                Builtin::Terrain::RvtMaterialAtlas,
                 Builtin::Terrain::RvtStats,
                 Builtin::Material::TextureStreamingFeedbackBuffer);
+        // Compressed, the material tiles go to the scratch, and TerrainRvtEncodePagesPass writes the atlases.
+        if (TerrainRvt::CompressionEnabled()) {
+            b.UnorderedAccess(
+                Builtin::Terrain::RvtScratchAlbedo,
+                Builtin::Terrain::RvtScratchNormal,
+                Builtin::Terrain::RvtScratchMaterial);
+        }
+        else {
+            b.UnorderedAccess(
+                Builtin::Terrain::RvtAlbedoAtlas,
+                Builtin::Terrain::RvtNormalAtlas,
+                Builtin::Terrain::RvtMaterialAtlas);
+        }
         const auto arguments = b.IndirectArguments(Builtin::Terrain::RvtGenerateDispatchArgs);
         b.ConstantBuffer(Builtin::PerFrameBuffer);
         return { b.Pipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtGeneratePagesCS",
             "TerrainRvt.GeneratePages.PSO", TerrainRvt::ShaderDefines())), arguments,
+            b.CommandSignature(br::render::RawDispatchCommandSignature()) };
+    }
+
+    static void Record(const TerrainRvtGeneratePagesBindings& bindings, org::PassRecordContext& context) {
+        br::render::DispatchComputeIndirect(context, bindings.pipeline, {}, bindings.signature, bindings.arguments);
+    }
+};
+
+// Compressed atlases (TerrainRvt::CompressionEnabled): encodes the tiles TerrainRvtGeneratePagesPass left in the scratch and
+// writes their blocks into the atlases' pages (TerrainRvtEncode.hlsl). Before finalization publishes the pages; readers
+// sample the atlases after these writes.
+class TerrainRvtEncodePagesPass final : public org::TypedRenderGraphPass<TerrainRvtEncodePagesPass,
+    org::EmptyPassFrameData, TerrainRvtGeneratePagesBindings> {
+public:
+    TerrainRvtGeneratePagesBindings Declare(org::PassBuilder& b)
+    {
+        b.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
+        b.ShaderResource(
+            Builtin::Terrain::RvtInfo,
+            Builtin::Terrain::RvtClipInfos,
+            Builtin::Terrain::RvtCounters,
+            Builtin::Terrain::RvtGenerationList,
+            Builtin::Terrain::RvtScratchAlbedo,
+            Builtin::Terrain::RvtScratchNormal,
+            Builtin::Terrain::RvtScratchMaterial);
+        b.UnorderedAccess(
+            Builtin::Terrain::RvtAlbedoAtlas,
+            Builtin::Terrain::RvtNormalAtlas,
+            Builtin::Terrain::RvtMaterialAtlas);
+        const auto arguments = b.IndirectArguments(Builtin::Terrain::RvtEncodeDispatchArgs);
+        return { b.Pipeline(br::render::ComputePipeline(L"shaders/TerrainRvtEncode.hlsl", L"TerrainRvtEncodePagesCS",
+            "TerrainRvt.EncodePages.PSO", TerrainRvt::ShaderDefines())), arguments,
             b.CommandSignature(br::render::RawDispatchCommandSignature()) };
     }
 

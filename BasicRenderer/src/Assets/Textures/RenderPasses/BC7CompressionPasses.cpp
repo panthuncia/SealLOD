@@ -229,6 +229,8 @@ TextureBC7CompressionFrame TextureFactory::BC7CompressionPass::Prepare(
             waiting.push_back(job);
             continue;
         }
+        // Compressed: the copy pass has it. Listed on, it would keep the graph executing and its textures alive.
+        if (stage >= BC7CompressionJob::Stage::CompressionRecorded) continue;
         if (stage != BC7CompressionJob::Stage::ReadyForCompression ||
             job->stageFrameIndex.load(std::memory_order_acquire) == preparation.frameIndex) {
             waiting.push_back(job);
@@ -328,6 +330,8 @@ TextureFactory::BC7CompressionCopyFrameData TextureFactory::BC7CompressionCopyPa
     waiting.reserve(m_pending.size());
     for (const auto& job : m_pending) {
         if (!job || !job->blockBuffer || !job->compressedTexture) continue;
+        // Copied: the readback pass has it.
+        if (job->stage.load(std::memory_order_acquire) >= BC7CompressionJob::Stage::CopyRecorded) continue;
         if (job->stage.load(std::memory_order_acquire) != BC7CompressionJob::Stage::CompressionRecorded ||
             job->stageFrameIndex.load(std::memory_order_acquire) == preparation.frameIndex) {
             waiting.push_back(job);

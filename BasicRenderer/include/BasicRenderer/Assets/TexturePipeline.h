@@ -49,6 +49,68 @@ namespace br::textures
 		std::shared_ptr<const TextureSourceData> data;
 	};
 
+	// A texture's shape without its pixels: format, size, and every mip's dimensions, slice-major as TextureSourceData
+	// lays them out.
+	struct TextureShape
+	{
+		org::TextureDescription desc;
+		bool hasFullMipChain = false;
+		bool isBlockCompressed = false;
+	};
+
+	// An application that has the texture's mips itself (game data in its own files and archives) hands them to the
+	// pipeline on demand instead of the pipeline keeping a processed copy. When the request's processing would leave the
+	// texture as it is (block-compressed, a full mip chain, nothing to convert), it is never processed or cached: its shape
+	// comes from DescribeTexture and every mip window the streaming system asks for from ReadTextureMips. Otherwise it is
+	// read once whole (ReadTextureMips(0)), processed, and cached like any other source. Called from worker threads, any
+	// number at once; both may block on I/O.
+	class ITextureMipProvider
+	{
+	public:
+		virtual ~ITextureMipProvider() = default;
+		// The whole texture's shape. Formats as stored; the pipeline applies the request's preferSRGB. nullopt: unreadable.
+		[[nodiscard]] virtual std::optional<TextureShape> DescribeTexture() = 0;
+		// Every slice's mips from topMip to the smallest, in the whole texture's layout: desc and subresources cover every
+		// mip, and subresources above topMip may be null. Tightly packed rows (rowPitch, slicePitch as for a DDS). Throws or
+		// returns null on failure.
+		[[nodiscard]] virtual std::shared_ptr<TextureSourceData> ReadTextureMips(std::uint32_t topMip) = 0;
+	};
+
+	struct ProvidedTextureSource
+	{
+		std::shared_ptr<ITextureMipProvider> provider;
+	};
+
+	// Reads part of a file the application resolves itself (a loose file, an archive entry).
+	class ITextureByteSource
+	{
+	public:
+		virtual ~ITextureByteSource() = default;
+		[[nodiscard]] virtual std::uint64_t Size() = 0;
+		// length bytes from offset (fewer at the end of the file). Throws on failure.
+		[[nodiscard]] virtual std::vector<std::uint8_t> Read(std::uint64_t offset, std::uint64_t length) = 0;
+	};
+
+	// A provider for a DDS file read through bytes: its header for the shape, then only the byte range of the mips asked
+	// for. A DDS the GPU can't take as stored (legacy 24-bit, luminance) is decoded whole, which also routes it to
+	// processing.
+	[[nodiscard]] std::shared_ptr<ITextureMipProvider> MakeDdsTextureMipProvider(std::shared_ptr<ITextureByteSource> bytes, std::string debugName);
+
+	// A provider for a KTX2 file read through bytes. Its header and level index give the shape; a mip window reads only its
+	// levels' byte ranges, inflating zstd-supercompressed levels one by one. A block-compressed KTX2 with a full chain is
+	// therefore streamed straight from the file, never processed or cached. Basis Universal payloads (ETC1S, UASTC) are
+	// transcoded whole with libktx to BC4/BC5/BC7 by channel count, once, and kept by the provider.
+	[[nodiscard]] std::shared_ptr<ITextureMipProvider> MakeKtx2TextureMipProvider(std::shared_ptr<ITextureByteSource> bytes, std::string debugName);
+	// Whether bytes start with the KTX2 file identifier. Needs at least 12 bytes; fewer is false.
+	[[nodiscard]] bool LooksLikeKtx2(std::span<const std::uint8_t> leadingBytes);
+	// Whether a file starts with the KTX2 file identifier.
+	[[nodiscard]] bool FileLooksLikeKtx2(const std::filesystem::path& path, std::uint64_t offset = 0);
+
+	// Byte sources over a file range (size 0: to the end of the file) and over bytes in memory. Reads are positional, so any
+	// number of threads may read at once.
+	[[nodiscard]] std::shared_ptr<ITextureByteSource> MakeFileTextureByteSource(std::filesystem::path path, std::uint64_t offset = 0, std::uint64_t size = 0);
+	[[nodiscard]] std::shared_ptr<ITextureByteSource> MakeMemoryTextureByteSource(std::shared_ptr<const std::vector<std::uint8_t>> bytes);
+
 	struct TextureSource
 	{
 		// Stable identity of the image: the normalized file path, or "<container>#<part>"
@@ -60,7 +122,7 @@ namespace br::textures
 		// Container hint for encoded bytes without a telling extension: a MIME type or an
 		// extension ("image/png", ".tga").
 		std::string formatHint;
-		std::variant<FileTextureSource, MemoryTextureSource, DecodedTextureSource> data;
+		std::variant<FileTextureSource, MemoryTextureSource, DecodedTextureSource, ProvidedTextureSource> data;
 	};
 
 	// How a texture is prepared between its source and the GPU.
@@ -112,7 +174,13 @@ namespace br::textures
 	// initialization only.
 	bool WaitForTexture(const std::shared_ptr<TextureAsset>& texture, std::chrono::milliseconds timeout);
 
+	// NotProcessed: a LoadOnly texture, or a provided one its processing would leave as it is (it streams from its
+	// provider and has no cache entry).
 	enum class TextureConditionResult { AlreadyCached, Built, NotProcessed };
+
+	// Whether a Processed request's texture streams straight from its ITextureMipProvider: its processing would leave it as
+	// it is. Reads the provider's shape (DescribeTexture). False for any other source.
+	[[nodiscard]] bool IsProvidedPassthrough(const TextureRequest& request);
 
 	// Writes a pipeline texture's processed cache entry on the calling thread, with no GPU and no running
 	// pipeline, so offline tools can finish a cache the renderer then reads as a hit. Throws on failure.
@@ -123,21 +191,24 @@ namespace br::textures
 	// on failure.
 	[[nodiscard]] std::shared_ptr<TextureSourceData> LoadPreparedTextureOnCpu(const std::shared_ptr<TextureAsset>& texture);
 
-	// One level of an RGBA8 mip chain (sRGB or not, as the BC7 it encodes to), rows rowPitch apart.
-	struct Bc7EncodeLevel
+	// One level of an RGBA8 mip chain (sRGB or not, as the BC7 it encodes to; BC4 reads red, BC5 red and green), rows
+	// rowPitch apart.
+	struct BlockEncodeLevel
 	{
 		std::uint32_t width = 0;
 		std::uint32_t height = 0;
 		std::uint32_t rowPitch = 0;
 		std::span<const std::byte> pixels;
 	};
-	// Encodes a chain to BC7: each level's rows of 4x4 blocks in turn, at least one block a side, as a BC7 texture lays
-	// them out. Called from any thread, and may block. Nothing to leave that chain to DirectXTex.
-	using Bc7BlockEncoder = std::function<std::optional<std::vector<std::byte>>(std::span<const Bc7EncodeLevel> levels)>;
+	enum class BlockEncodeFormat : std::uint8_t { BC4, BC5, BC7 };
+	// Encodes a chain (one array slice or cube face) to a block format: each level's rows of 4x4 blocks in turn, at least
+	// one block a side, as the format lays them out. Called from any thread, and may block. Nothing to leave that chain
+	// to DirectXTex.
+	using BlockEncoder = std::function<std::optional<std::vector<std::byte>>(BlockEncodeFormat format, std::span<const BlockEncodeLevel> levels)>;
 	// For offline tools with a GPU encoder of their own: CPU processing (ConditionTextureOnCpu, and the CPU taking a
-	// texture the GPU BC7 job can't) encodes BC7 through it instead of DirectXTex's CPU search, which takes minutes for
-	// a large texture. Process-wide; an empty one restores DirectXTex.
-	void SetBc7BlockEncoder(Bc7BlockEncoder encoder);
+	// texture the GPU BC7 job can't) encodes BC7, BC5 (normals) and BC4 (scalars) through it instead of DirectXTex's CPU
+	// search, which takes minutes for a large texture. Process-wide; an empty one restores DirectXTex.
+	void SetBlockEncoder(BlockEncoder encoder);
 
 	// Decodes a request's source to pixels, unprocessed, on the calling thread: for CPU
 	// consumers of texture data (preprocessing tools). Throws on failure.

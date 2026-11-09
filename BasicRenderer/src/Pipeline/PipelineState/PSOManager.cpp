@@ -8,7 +8,9 @@
 
 #include <condition_variable>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
+#include <iterator>
 #include <filesystem>
 #include <iomanip>
 #include <sstream>
@@ -2613,6 +2615,178 @@ ShaderLibraryBundle PSOManager::CompileShaderLibrary(const ShaderLibraryInfo& li
 
 }
 
+
+// ---------------------------------------------------------------------------
+// The compile manifest: every shader bundle a run compiles for D3D12, one line each, so an offline tool can compile the
+// same bundles again after the sources change (PSOManager::PrecompileRecordedShaderBundles). Artifact keys carry the
+// whole shader tree's digest, so an edit to any shader leaves every runtime-only variant (terrain material evaluation, the
+// graph's pass pipelines) to compile at runtime otherwise, for seconds. A line is the recipe, not the sources: it names
+// files, entries, targets, defines and flags.
+namespace {
+
+constexpr wchar_t kShaderBundleManifestFile[] = L"compiled_bundles.txt";
+constexpr char kManifestField = '\t';
+constexpr char kManifestPart = '\x1f';
+constexpr char kManifestDefine = '\x1e';
+
+std::string SerializeShaderBundle(const ShaderInfoBundle& info)
+{
+    std::string line;
+    const auto slot = [&](const std::optional<ShaderInfo>& shader) {
+        if (shader) line += ws2s(shader->filename) + kManifestPart + ws2s(shader->entryPoint) + kManifestPart + ws2s(shader->target);
+        line += kManifestField;
+    };
+    slot(info.vertexShader);
+    slot(info.pixelShader);
+    slot(info.amplificationShader);
+    slot(info.meshShader);
+    slot(info.computeShader);
+    line += info.enableDebugInfo ? '1' : '0';
+    line += kManifestField;
+    line += info.warningsAsErrors ? '1' : '0';
+    line += kManifestField;
+    for (const auto& define : info.defines) {
+        line += ws2s(define.Name ? define.Name : L"") + kManifestPart + ws2s(define.Value ? define.Value : L"") + kManifestDefine;
+    }
+    return line;
+}
+
+std::vector<std::string> SplitManifest(const std::string& text, char separator)
+{
+    std::vector<std::string> parts;
+    std::size_t start = 0;
+    for (;;) {
+        const auto end = text.find(separator, start);
+        parts.push_back(text.substr(start, end == std::string::npos ? std::string::npos : end - start));
+        if (end == std::string::npos) return parts;
+        start = end + 1;
+    }
+}
+
+// A parsed line. The bundle's define pointers point into `strings`, which never reallocates after parsing.
+struct RecordedShaderBundle {
+    ShaderInfoBundle bundle;
+    std::vector<std::wstring> strings;
+};
+
+std::unique_ptr<RecordedShaderBundle> ParseShaderBundle(const std::string& line)
+{
+    const auto fields = SplitManifest(line, kManifestField);
+    if (fields.size() != 8) return nullptr;
+    auto recorded = std::make_unique<RecordedShaderBundle>();
+    auto& bundle = recorded->bundle;
+    std::optional<ShaderInfo>* slots[] = {
+        &bundle.vertexShader, &bundle.pixelShader, &bundle.amplificationShader, &bundle.meshShader, &bundle.computeShader };
+    for (std::size_t index = 0; index < 5; ++index) {
+        if (fields[index].empty()) continue;
+        const auto parts = SplitManifest(fields[index], kManifestPart);
+        if (parts.size() != 3) return nullptr;
+        *slots[index] = ShaderInfo(s2ws(parts[0]), s2ws(parts[1]), s2ws(parts[2]));
+    }
+    bundle.enableDebugInfo = fields[5] == "1";
+    bundle.warningsAsErrors = fields[6] == "1";
+    std::vector<std::pair<std::string, std::string>> defines;
+    for (const auto& entry : SplitManifest(fields[7], kManifestDefine)) {
+        if (entry.empty()) continue;
+        const auto parts = SplitManifest(entry, kManifestPart);
+        if (parts.size() != 2) return nullptr;
+        defines.emplace_back(parts[0], parts[1]);
+    }
+    recorded->strings.reserve(defines.size() * 2);
+    for (const auto& [name, value] : defines) {
+        recorded->strings.push_back(s2ws(name));
+        recorded->strings.push_back(s2ws(value));
+    }
+    for (std::size_t index = 0; index < defines.size(); ++index) {
+        bundle.defines.push_back({ recorded->strings[index * 2].c_str(), recorded->strings[index * 2 + 1].c_str() });
+    }
+    return recorded;
+}
+
+std::filesystem::path ShaderBundleManifestPath()
+{
+    // Beside the DXIL artifacts (shadercache::GetCacheDirectory).
+    return std::filesystem::path(GetCacheFilePath(kShaderBundleManifestFile, L"shaders/dxil"));
+}
+
+struct ShaderBundleManifest {
+    std::mutex mutex;
+    bool loaded = false;
+    std::unordered_set<std::string> lines;
+};
+
+ShaderBundleManifest& GetShaderBundleManifest()
+{
+    static ShaderBundleManifest manifest;
+    return manifest;
+}
+
+// Appends the bundle's line the first time a process compiles it. Lines another run wrote are read first, so a line is
+// written once per manifest.
+void RecordShaderBundle(const ShaderInfoBundle& info)
+{
+    auto line = SerializeShaderBundle(info);
+    auto& manifest = GetShaderBundleManifest();
+    std::scoped_lock lock(manifest.mutex);
+    const auto path = ShaderBundleManifestPath();
+    if (!manifest.loaded) {
+        manifest.loaded = true;
+        std::ifstream in(path, std::ios::binary);
+        for (std::string existing; std::getline(in, existing);) {
+            if (!existing.empty()) manifest.lines.insert(std::move(existing));
+        }
+    }
+    if (!manifest.lines.insert(line).second) return;
+    std::ofstream out(path, std::ios::binary | std::ios::app);
+    if (out) out << line << '\n';
+}
+
+} // namespace
+
+std::size_t PSOManager::PrecompileRecordedShaderBundles(const std::function<void(std::size_t, std::size_t)>& progress)
+{
+    std::vector<std::string> lines;
+    {
+        std::ifstream in(ShaderBundleManifestPath(), std::ios::binary);
+        for (std::string line; std::getline(in, line);) {
+            if (!line.empty()) lines.push_back(std::move(line));
+        }
+    }
+    std::ranges::sort(lines);
+    lines.erase(std::ranges::unique(lines).begin(), lines.end());
+    std::atomic<std::size_t> completed{ 0 };
+    std::atomic<std::size_t> failed{ 0 };
+    std::vector<uint8_t> keep(lines.size(), 0);
+    TaskSchedulerManager::GetInstance().ParallelFor("PSOManager::PrecompileRecordedShaderBundles", lines.size(), [&](std::size_t index) {
+        const auto recorded = ParseShaderBundle(lines[index]);
+        if (recorded) {
+            try {
+                CompileShadersForBackend(recorded->bundle, rhi::Backend::D3D12);
+                keep[index] = 1;
+            }
+            catch (const std::exception& error) {
+                // A shader since renamed or removed, or a recipe that no longer compiles: dropped from the manifest.
+                failed.fetch_add(1, std::memory_order_relaxed);
+                spdlog::warn("Recorded shader bundle no longer compiles, dropped: {}", error.what());
+            }
+        }
+        const auto done = completed.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (progress) progress(done, lines.size());
+    });
+    // Keeps what compiled, and whatever the runtime recorded meanwhile.
+    auto& manifest = GetShaderBundleManifest();
+    std::scoped_lock lock(manifest.mutex);
+    manifest.loaded = true;
+    manifest.lines.clear();
+    std::ofstream out(ShaderBundleManifestPath(), std::ios::binary | std::ios::trunc);
+    for (std::size_t index = 0; index < lines.size(); ++index) {
+        if (!keep[index]) continue;
+        out << lines[index] << '\n';
+        manifest.lines.insert(lines[index]);
+    }
+    return lines.size() - failed.load();
+}
+
 ShaderBundle PSOManager::CompileShaders(const ShaderInfoBundle& info) {
 	return CompileShadersForBackend(info, DeviceManager::GetInstance().GetBackend());
 }
@@ -2626,6 +2800,7 @@ ShaderBundle PSOManager::CompileShadersForBackend(const ShaderInfoBundle& info, 
 		throw std::runtime_error("Cannot compile both vertex and mesh shaders in the same bundle");
 	if (info.computeShader && (info.meshShader || info.amplificationShader || info.vertexShader || info.pixelShader))
 		throw std::runtime_error("Cannot compile compute shader with other shader types in the same bundle");
+	if (backend == rhi::Backend::D3D12) RecordShaderBundle(info);
 
     const uint64_t buildConfigHash = ComputeShaderCacheBuildConfigHash(binaryFormat);
     const shadercache::CacheKey cacheKey{
@@ -2943,17 +3118,17 @@ void PSOManager::LoadSource(const std::filesystem::path& path, PSOManager::Sourc
     if (!std::filesystem::exists(path)) {
         throw std::runtime_error("Shader source file not found: " + path.string());
     }
-        bool emitSpirv = false;
-    UINT32 codePage = CP_UTF8;
-    ThrowIfFailed(pUtils->LoadFile(
-        path.c_str(), &codePage, &sd.blob
-    ));
-
-    ValidateUtf8OrThrow(
-        std::string_view(
-            static_cast<const char*>(sd.blob->GetBufferPointer()),
-            sd.blob->GetBufferSize()),
-        "Shader source file");
+    // Read here and copied into a blob, not IDxcUtils::LoadFile: for a file that starts with a UTF-8 byte order mark (an
+    // editor's or PowerShell's), releasing the blob LoadFile returned corrupted the heap. The mark is dropped.
+    std::ifstream input(path, std::ios::binary);
+    std::string bytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    if (!input && !input.eof()) {
+        throw std::runtime_error("Shader source file could not be read: " + path.string());
+    }
+    std::string_view text(bytes);
+    if (text.size() >= 3 && std::memcmp(text.data(), "\xEF\xBB\xBF", 3) == 0) text.remove_prefix(3);
+    ValidateUtf8OrThrow(text, "Shader source file");
+    ThrowIfFailed(pUtils->CreateBlob(text.data(), static_cast<UINT32>(text.size()), CP_UTF8, &sd.blob));
 
     sd.buffer.Ptr = sd.blob->GetBufferPointer();
     sd.buffer.Size = sd.blob->GetBufferSize();

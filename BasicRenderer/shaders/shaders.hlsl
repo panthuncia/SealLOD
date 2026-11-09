@@ -193,7 +193,7 @@ PSMain(PSInput input, bool isFrontFace : SV_IsFrontFace) : SV_TARGET
     if (materialFlags & MATERIAL_BASE_COLOR_TEXTURE && !(materialFlags & MATERIAL_OPACITY_TEXTURE)) { // Opacity texture overrides base color alpha for shadow
         Texture2D<float4> baseColorTexture = ResourceDescriptorHeap[materialInfo.baseColorTextureIndex];
         SamplerState baseColorSamplerState = SamplerDescriptorHeap[materialInfo.baseColorSamplerIndex];
-        float2 uv = input.texcoord;
+        float2 uv = TransformMaterialUv(materialInfo, input.texcoord);
         float4 baseColor = baseColorTexture.Sample(baseColorSamplerState, uv);
         if (baseColor.a*materialInfo.baseColorFactor.a < 0.5){
             discard;
@@ -203,7 +203,7 @@ PSMain(PSInput input, bool isFrontFace : SV_IsFrontFace) : SV_TARGET
     { 
         Texture2D<float4> opacityTexture = ResourceDescriptorHeap[materialInfo.opacityTextureIndex];
         SamplerState opacitySamplerState = SamplerDescriptorHeap[materialInfo.opacitySamplerIndex];
-        float2 uv = input.texcoord;
+        float2 uv = TransformMaterialUv(materialInfo, input.texcoord);
         float4 opacitySample = opacityTexture.Sample(opacitySamplerState, uv);
         float opacity = opacitySample.a;
         if (opacity < materialInfo.alphaCutoff) {

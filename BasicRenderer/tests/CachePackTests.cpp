@@ -1,17 +1,19 @@
 #include <BasicRenderer/Assets/CachePack.h>
+#include <BasicRenderer/Assets/Import/CLodCache.h>
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <string_view>
 
 #include <windows.h>
 
 // A process opens the pack once and holds it mapped, which is itself part of what is tested.
-// So every step runs in its own process and the parent never touches the pack.
+// So every step runs in its own process and the parent never reads the pack.
 namespace {
 namespace fs = std::filesystem;
 
@@ -29,10 +31,21 @@ void WriteFile(const fs::path& path, std::string_view text) {
     std::ofstream(path, std::ios::binary) << text;
 }
 
+std::string ReadFile(const fs::path& path) {
+    std::ifstream file(path, std::ios::binary);
+    return std::string(std::istreambuf_iterator<char>(file), {});
+}
+
 bool Holds(const fs::path& path, std::string_view text) {
     CachePack::Entry entry{};
     return CachePack::Find(path, entry) && entry.size == text.size() &&
         std::memcmp(entry.data, text.data(), text.size()) == 0;
+}
+
+// A CLod entry the build judges current: real metadata, under the name the current settings give its key.
+CLodCache::CacheLookup MeshLookup() {
+    const CLodCache::CacheKey key{ "cache_pack_test.source", "/mesh", "" };
+    return CLodCache::BuildCacheLookup(key, CLodCache::ComputeBuildConfigHash(key.sourceIdentifier));
 }
 
 void RunStep(const wchar_t* step) {
@@ -58,22 +71,38 @@ void RunStep(const wchar_t* step) {
 int main(int argc, char** argv) {
     const fs::path root = fs::temp_directory_path() / L"sarp_cache_pack_tests";
     const fs::path clod = root / L"clod";
-    const fs::path mesh = clod / L"scene" / L"Mesh_A.clodbin";
-    const fs::path meta = clod / L"scene" / L"Mesh_A.clodmeta";
-    const fs::path nif = clod / L"nif" / L"tree.nifmeta";
-    const fs::path mesh_b = clod / L"scene" / L"Mesh_B.clodbin";
-    const fs::path changes = fs::path(clod / L"world.sarppack.changes");
-    const fs::path pack = clod / L"world.sarppack";
     const std::string_view step = argc > 1 ? std::string_view(argv[1]) : std::string_view{};
-    std::string summary;
-    CachePack::Entry entry{};
-
     if (step.empty()) {
         std::error_code ec;
         fs::remove_all(root, ec);
         _putenv_s("SARP_CACHE_ROOT", root.string().c_str());
+    }
+    const CLodCache::CacheLookup lookup = MeshLookup();
+    const fs::path meta = lookup.metadataPath;
+    const fs::path mesh = lookup.containerPath;
+    const fs::path oldMeta = meta.parent_path() / L"older_build.clodmeta";
+    const fs::path oldMesh = meta.parent_path() / L"older_build.clodbin";
+    const fs::path nif = clod / L"nif" / L"tree.nifmeta";
+    const fs::path nif_b = clod / L"nif" / L"rock.nifmeta";
+    const fs::path changes = fs::path(clod / L"world.sarppack.changes");
+    const fs::path pack = clod / L"world.sarppack";
+    const fs::path metaCopy = root / L"metadata.copy";
+    std::string summary;
+    CachePack::Entry entry{};
+    CachePack::BuildOptions removeLoose;
+    removeLoose.removeLooseFiles = true;
+
+    if (step.empty()) {
+        std::error_code ec;
+        CLodCache::CacheData data;
+        data.buildConfigHash = lookup.buildConfigHash;
+        Check(CLodCache::Save(lookup.key, data), "saves a CLod entry");
+        Check(CLodCache::IsCurrentMetadataFile(meta), "the saved entry is current");
         WriteFile(mesh, "container");
-        WriteFile(meta, "metadata");
+        fs::copy_file(meta, metaCopy, ec);
+        // An older build: valid metadata under a name today's settings don't give it.
+        fs::copy_file(meta, oldMeta, ec);
+        WriteFile(oldMesh, "old container");
         WriteFile(nif, "nif data");
         WriteFile(clod / L"manifest.tsv", "not an artifact");
         RunStep(L"build");
@@ -87,15 +116,24 @@ int main(int argc, char** argv) {
         RunStep(L"after-rebuild");
         // Builds after the first update the pack where it lies.
         RunStep(L"unchanged");
-        WriteFile(mesh_b, "second mesh");
-        RunStep(L"rewrite-meta");
+        WriteFile(nif_b, "second nif");
+        RunStep(L"rewrite-nif");
         RunStep(L"update");
         RunStep(L"after-update");
-        fs::remove(nif, ec);
-        RunStep(L"update");
-        RunStep(L"after-removal");
+        RunStep(L"remove-loose");
+        Check(!fs::exists(meta) && !fs::exists(mesh) && !fs::exists(nif) && !fs::exists(oldMeta) && !fs::exists(oldMesh),
+            "removing loose files deletes packed ones and older builds");
+        Check(fs::exists(clod / L"manifest.tsv"), "removing loose files keeps other files");
+        RunStep(L"after-remove-loose");
+        RunStep(L"unchanged");
         RunStep(L"full-rewrite");
-        RunStep(L"after-removal");
+        RunStep(L"after-remove-loose");
+        WriteFile(nif_b, "second nif v2");
+        RunStep(L"update");
+        RunStep(L"after-loose-replaces");
+        RunStep(L"note-deletion");
+        RunStep(L"update");
+        RunStep(L"after-deletion");
         fs::remove_all(root, ec);
         if (g_failures == 0) {
             std::puts("CachePackTests: all passed");
@@ -104,7 +142,7 @@ int main(int argc, char** argv) {
         Check(CachePack::Build(summary), "build");
     } else if (step == "lookups") {
         Check(Holds(mesh, "container"), "finds a container");
-        Check(Holds(meta, "metadata"), "finds metadata");
+        Check(Holds(meta, ReadFile(metaCopy)), "finds metadata");
         Check(Holds(nif, "nif data"), "finds NIF metadata");
         std::wstring differentSpelling = mesh.wstring();
         for (auto& ch : differentSpelling) {
@@ -112,20 +150,21 @@ int main(int argc, char** argv) {
         }
         Check(CachePack::Find(differentSpelling, entry), "ignores case and slash direction, as the filesystem does");
         Check(!CachePack::Find(clod / L"manifest.tsv", entry), "does not pack other files");
-        Check(!CachePack::Find(clod / L"scene" / L"Mesh_B.clodbin", entry), "misses an unknown file");
-        Check(!CachePack::Find(fs::temp_directory_path() / L"elsewhere" / L"clod" / L"scene" / L"Mesh_A.clodbin", entry), "misses a path outside the cache");
+        Check(!CachePack::Find(oldMeta, entry) && !CachePack::Find(oldMesh, entry), "leaves out an older build");
+        Check(!CachePack::Find(nif_b, entry), "misses an unknown file");
+        Check(!CachePack::Find(fs::temp_directory_path() / L"elsewhere" / L"clod" / L"nif" / L"tree.nifmeta", entry), "misses a path outside the cache");
     } else if (step == "note-change") {
         Check(Holds(mesh, "container"), "served before the change");
         CachePack::NoteFileChanged(mesh);
         Check(!CachePack::Find(mesh, entry), "a rewritten file leaves the pack at once");
-        Check(Holds(meta, "metadata"), "other files are unaffected");
+        Check(Holds(nif, "nif data"), "other files are unaffected");
     } else if (step == "change-persists") {
         Check(!CachePack::Find(mesh, entry), "a later process ignores the stale entry");
-        Check(Holds(meta, "metadata"), "a later process still serves other files");
+        Check(Holds(nif, "nif data"), "a later process still serves other files");
     } else if (step == "failed-replace") {
         // A running renderer holds the pack mapped, so the new one cannot land and the old one stays in use.
-        Check(Holds(meta, "metadata"), "the pack is mapped");
-        Check(!CachePack::Build(summary), "replacing a mapped pack fails");
+        Check(Holds(nif, "nif data"), "the pack is mapped");
+        Check(!CachePack::Build(summary, true), "replacing a mapped pack fails");
         Check(fs::exists(changes), "a failed build keeps the record of stale entries");
     } else if (step == "rebuild") {
         Check(CachePack::Build(summary), "a rebuild succeeds");
@@ -137,25 +176,37 @@ int main(int argc, char** argv) {
         Check(CachePack::Build(summary), "a build with nothing changed succeeds");
         Check(summary.find("up to date") != std::string::npos, "a build with nothing changed says so");
         Check(fs::last_write_time(pack) == before, "a build with nothing changed writes nothing");
-    } else if (step == "rewrite-meta") {
+    } else if (step == "rewrite-nif") {
         // The same size, so only the noted change tells the build it's stale.
-        WriteFile(meta, "METADATA");
-        CachePack::NoteFileChanged(meta);
+        CachePack::NoteFileChanged(nif);
+        WriteFile(nif, "NIF DATA");
     } else if (step == "update") {
         Check(CachePack::Build(summary), "an update succeeds");
         Check(summary.find("in place") != std::string::npos, "a small change updates the pack in place");
         Check(!fs::exists(changes), "an update forgets stale entries");
     } else if (step == "after-update") {
-        Check(Holds(mesh_b, "second mesh"), "an update adds a new file");
-        Check(Holds(meta, "METADATA"), "an update replaces a rewritten file of the same size");
+        Check(Holds(nif_b, "second nif"), "an update adds a new file");
+        Check(Holds(nif, "NIF DATA"), "an update replaces a rewritten file of the same size");
         Check(Holds(mesh, "container v2"), "an update keeps the files it didn't touch");
-        Check(Holds(nif, "nif data"), "an update keeps every other file");
-    } else if (step == "after-removal") {
-        Check(!CachePack::Find(nif, entry), "a deleted file leaves the pack");
-        Check(Holds(mesh, "container v2") && Holds(mesh_b, "second mesh") && Holds(meta, "METADATA"), "the rest stay");
+        Check(Holds(meta, ReadFile(metaCopy)), "an update keeps every other file");
+    } else if (step == "remove-loose") {
+        Check(CachePack::Build(summary, removeLoose), "a build that removes loose files succeeds");
+    } else if (step == "after-remove-loose") {
+        Check(Holds(mesh, "container v2") && Holds(meta, ReadFile(metaCopy)) && Holds(nif, "NIF DATA") && Holds(nif_b, "second nif"),
+            "the pack serves every entry with no loose file");
     } else if (step == "full-rewrite") {
         Check(CachePack::Build(summary, true), "a full rewrite succeeds");
         Check(summary.find("in place") == std::string::npos, "a full rewrite rewrites");
+        Check(summary.find("4 carried over") != std::string::npos, "a full rewrite carries over entries with no loose file");
+    } else if (step == "after-loose-replaces") {
+        Check(Holds(nif_b, "second nif v2"), "a new loose file replaces its packed entry");
+        Check(Holds(nif, "NIF DATA"), "entries with no loose file stay");
+    } else if (step == "note-deletion") {
+        // A deleted cache file with no loose copy: only the note says it's gone.
+        CachePack::NoteFileChanged(nif);
+    } else if (step == "after-deletion") {
+        Check(!CachePack::Find(nif, entry), "a noted deletion leaves the pack");
+        Check(Holds(mesh, "container v2") && Holds(meta, ReadFile(metaCopy)), "the rest stay");
     } else {
         Check(false, "unknown step");
     }

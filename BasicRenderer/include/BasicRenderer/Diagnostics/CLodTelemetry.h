@@ -11,6 +11,8 @@
 #include <utility>
 #include <vector>
 
+class Mesh;
+
 enum class CLodWorkGraphCounterIndex : uint32_t {
     ObjectCullThreads = 0,
     ObjectCullInRangeThreads,
@@ -471,6 +473,8 @@ struct CLodMeshSource {
     std::string cacheSourceIdentifier;
     std::string cachePrimPath;
     std::string cacheSubsetName;
+    // The mesh itself, so a pick can name its materials and palette. Weak: the registry must not keep templates alive.
+    std::weak_ptr<Mesh> mesh;
 };
 
 struct CLodMeshSourceRegistry {
@@ -481,10 +485,12 @@ struct CLodMeshSourceRegistry {
 inline CLodMeshSourceRegistry g_clodMeshSources;
 
 inline void RecordCLodMeshSource(uint64_t meshIdentity, std::string_view modelPath, std::string_view partName, uint32_t rasterFlags,
-    std::string_view cacheSourceIdentifier = {}, std::string_view cachePrimPath = {}, std::string_view cacheSubsetName = {}) {
+    std::string_view cacheSourceIdentifier = {}, std::string_view cachePrimPath = {}, std::string_view cacheSubsetName = {},
+    const std::shared_ptr<Mesh>& meshObject = {}) {
     std::lock_guard lock(g_clodMeshSources.mutex);
     auto& mesh = g_clodMeshSources.meshes[meshIdentity];
     mesh.rasterFlags |= rasterFlags;
+    if (meshObject) mesh.mesh = meshObject;
     if (!mesh.name.empty()) return;
     mesh.cacheSourceIdentifier = cacheSourceIdentifier;
     mesh.cachePrimPath = cachePrimPath;

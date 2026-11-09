@@ -28,7 +28,12 @@
     "shader-slang",
     "tbb",
     "embree",
-    "eigen3"
+    "eigen3",
+    {
+      "name": "ktx",
+      "features": [ "tools" ]
+    },
+    "zstd"
   ],
   "builtin-baseline": "82b6bc886d7b0f8342e34babc2e0b8943f79b0e1"
 }

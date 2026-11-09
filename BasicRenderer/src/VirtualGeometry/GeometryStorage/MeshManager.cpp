@@ -63,12 +63,12 @@ uint64_t CLodIoNowNs() {
 uint32_t CLodIoAdmissionTarget() {
 	static const uint32_t target = [] {
 		// A group counts against this until its GPU copy completes, not just
-		// until its read does. A DirectStorage launch holds a whole batch for
-		// several service ticks, so the burst must cover that round trip or
-		// throughput is set by this number rather than by the I/O workers.
-		uint32_t result = std::max<uint32_t>(
-			TaskSchedulerManager::GetInstance().BlockingThreadCount() * 192u,
-			384u);
+		// until its read does: about 150 ms on SaveLab (a 23 ms read, then
+		// about 3.6 frames to residency). Throughput is this depth over that
+		// latency, so it was the limit: the old max(blocking threads x 192, 384)
+		// = 768 left requests a median 0.96 s in the CPU queue, and 1536 or 2048
+		// cut r100 visual stability by 0.6 s (2048 is where it levels off).
+		uint32_t result = 2048u;
 		char* value = nullptr;
 		size_t length = 0u;
 		if (_dupenv_s(&value, &length, "SARP_CLOD_IO_ADMISSION_DEPTH") == 0 &&
@@ -84,6 +84,26 @@ uint32_t CLodIoAdmissionTarget() {
 		return result;
 	}();
 	return target;
+}
+
+// The most requests one dispatch hands to I/O tasks; the admission depth still bounds what is in flight. It was a fixed
+// 128 (twice a pass), which held dispatch near 256 groups a pass whatever the request budget.
+uint32_t CLodIoDispatchLimit() {
+	static const uint32_t limit = [] {
+		uint32_t result = 2048u;
+		char* value = nullptr;
+		size_t length = 0u;
+		if (_dupenv_s(&value, &length, "SARP_CLOD_IO_DISPATCH_LIMIT") == 0 && value != nullptr) {
+			char* end = nullptr;
+			const unsigned long parsed = std::strtoul(value, &end, 10);
+			if (end != value && parsed > 0u) {
+				result = std::clamp<uint32_t>(static_cast<uint32_t>(parsed), 1u, 2048u);
+			}
+		}
+		std::free(value);
+		return result;
+	}();
+	return limit;
 }
 
 uint32_t CLodIoTaskBatchSize() {
@@ -273,7 +293,7 @@ void MeshManager::InvalidateCLodDiskStreamingPipeline() {
 }
 
 void MeshManager::DispatchCLodDiskStreamingBatch() {
-	// Drain up to kMaxIoBatchSize highest-priority requests from the pending queue.
+	// Drain up to CLodIoDispatchLimit() highest-priority requests from the pending queue.
 	std::vector<CLodDiskStreamingRequest> batch;
 	{
 		std::lock_guard<std::mutex> lock(m_clodDiskStreamingMutex);
@@ -298,7 +318,7 @@ void MeshManager::DispatchCLodDiskStreamingBatch() {
 
 		const uint32_t dispatchHeadroom = adaptiveDispatchedTarget - dispatchedOrInFlightCount;
 		const uint32_t toDrain = std::min<uint32_t>(
-			std::min<uint32_t>(kMaxIoBatchSize, dispatchHeadroom),
+			std::min<uint32_t>(CLodIoDispatchLimit(), dispatchHeadroom),
 			static_cast<uint32_t>(m_clodDiskStreamingRequests.size()));
 		if (toDrain == 0u) {
 			return;
@@ -1186,6 +1206,13 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 						const Mesh* part = instance.stackDepth < portalParts.size() ? portalParts[instance.stackDepth].get() : nullptr;
 						if (part == nullptr || part->GetCLodNodesView() == nullptr) {
 							spdlog::error("MeshManager::AddMesh: hierarchy root globalID={} names part {} before it is registered",
+								mesh->GetGlobalID(), instance.stackDepth);
+							return false;
+						}
+						// A portal replaces the traversal's assembly transform instead of composing with it, so a part's own
+						// portals would draw in the wrong place: merging embeds merged meshes instead (ClusterLODMergeHierarchy.h).
+						if (!part->GetPortalParts().empty()) {
+							spdlog::error("MeshManager::AddMesh: hierarchy root globalID={} opens part {}, which has portals of its own",
 								mesh->GetGlobalID(), instance.stackDepth);
 							return false;
 						}
@@ -3538,12 +3565,17 @@ uint32_t MeshManager::QueueCLodGroupDiskIOBatch(const std::vector<br::render::CL
 		std::lock_guard<std::mutex> lock(m_clodDiskStreamingMutex);
 		for (auto& preparedRequest : prepared) {
 			const uint32_t groupGlobalIndex = preparedRequest.request.groupGlobalIndex;
-			auto queuedIt = std::find_if(
-				m_clodDiskStreamingRequests.begin(),
-				m_clodDiskStreamingRequests.end(),
-				[groupGlobalIndex](const CLodDiskStreamingRequest& request) {
-					return request.groupGlobalIndex == groupGlobalIndex;
-				});
+			// The set holds every queued or in-flight group: only a group in it can be in the pending queue, so a new
+			// group skips the scan of that queue.
+			auto queuedIt = m_clodDiskStreamingRequests.end();
+			if (m_clodDiskStreamingQueuedGroups.contains(groupGlobalIndex)) {
+				queuedIt = std::find_if(
+					m_clodDiskStreamingRequests.begin(),
+					m_clodDiskStreamingRequests.end(),
+					[groupGlobalIndex](const CLodDiskStreamingRequest& request) {
+						return request.groupGlobalIndex == groupGlobalIndex;
+					});
+			}
 			if (queuedIt != m_clodDiskStreamingRequests.end()) {
 				if (preparedRequest.request.priority >= queuedIt->priority) {
 					*queuedIt = std::move(preparedRequest.request);
@@ -3608,9 +3640,8 @@ bool MeshManager::TryGetCLodGroupPayloadLayout(uint32_t groupGlobalIndex, CLodCa
 		return false;
 	}
 
-	std::ifstream file;
 	uint32_t pageCount = 0u;
-	if (!CLodCache::OpenContainerFile(sharedState->cacheSource, file, pageCount)) {
+	if (!CLodCache::ReadContainerPageCount(sharedState->cacheSource, pageCount)) {
 		if (outMessage) {
 			*outMessage = "failed to open CLod container";
 		}

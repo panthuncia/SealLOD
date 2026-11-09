@@ -101,6 +101,9 @@ public:
         }
     }
 
+    // The queue differs from what the pass last declared: until it declares again, the graph keeps the finished work's
+    // resources (EnvironmentJobGraph runs on until it has).
+    bool DeclarationStale() const { return m_declaredResourcesChanged || m_work.Pending() != m_pending; }
     bool DeclaredResourcesChanged() const override {
         return m_declaredResourcesChanged;
     }

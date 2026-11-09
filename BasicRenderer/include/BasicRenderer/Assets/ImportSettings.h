@@ -2,10 +2,13 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
+
+namespace br::import { struct ImportProfile; }
 
 namespace USDLoader {
 
@@ -29,6 +32,11 @@ struct ImportSettings {
 	// uses the CLod data, so an import nothing inspects can leave them out. Cached NIFs
 	// only: a fresh import has to build this data to cache it.
 	bool loadPrototypeGeometry = true;
+	// What the scene's files do not say about themselves (br/Assets/Import/ImportProfile.h). glTF only, for now.
+	std::shared_ptr<const br::import::ImportProfile> profile;
+	// The source's CLod cache identity a scene cache was built from. A different one means the scene changed since, and
+	// its primitives would all be rebuilt at load: the importer says so.
+	std::string expectedSourceIdentifier;
 };
 
 } // namespace USDLoader

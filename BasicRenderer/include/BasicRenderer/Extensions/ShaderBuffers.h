@@ -312,7 +312,16 @@ struct PerMaterialCB {
     // cluster BVH uses micromaps baked for this identity only.
     unsigned int ommIdentity = 0u;
     unsigned int padOmm = 0u;
+    // KHR_texture_transform, encoded so zero is the identity (BuildMaterialUvTransformGpu in MaterialDescription.h).
+    DirectX::XMFLOAT4 uvTransformLinearDelta = { 0.0f, 0.0f, 0.0f, 0.0f };
+    DirectX::XMFLOAT2 uvTransformOffset = { 0.0f, 0.0f };
+    DirectX::XMUINT2 padUvTransform = {};
 };
+
+static_assert(sizeof(PerMaterialCB) == 372, "PerMaterialCB must match HLSL MaterialInfo stride.");
+static_assert(offsetof(PerMaterialCB, ommIdentity) == 332, "PerMaterialCB layout mismatch.");
+static_assert(offsetof(PerMaterialCB, uvTransformLinearDelta) == 340, "PerMaterialCB layout mismatch.");
+static_assert(offsetof(PerMaterialCB, uvTransformOffset) == 356, "PerMaterialCB layout mismatch.");
 
 struct PerMaterialEvalCB {
     unsigned int materialFlags;
@@ -387,15 +396,21 @@ struct PerMaterialEvalCB {
     unsigned int glintEnabled = 0u;
     unsigned int diagnosticReason = 0u;
     DirectX::XMUINT2 padGlint = {};
+    // KHR_texture_transform, encoded so zero is the identity (BuildMaterialUvTransformGpu in MaterialDescription.h).
+    DirectX::XMFLOAT4 uvTransformLinearDelta = { 0.0f, 0.0f, 0.0f, 0.0f };
+    DirectX::XMFLOAT2 uvTransformOffset = { 0.0f, 0.0f };
+    DirectX::XMUINT2 padUvTransform = {};
 };
 
-static_assert(sizeof(PerMaterialEvalCB) == 320, "PerMaterialEvalCB must match HLSL MaterialEvalInfo stride.");
+static_assert(sizeof(PerMaterialEvalCB) == 352, "PerMaterialEvalCB must match HLSL MaterialEvalInfo stride.");
 static_assert(offsetof(PerMaterialEvalCB, geometricDisplacementEnabled) == 92, "PerMaterialEvalCB layout mismatch.");
 static_assert(offsetof(PerMaterialEvalCB, baseColorFactor) == 96, "PerMaterialEvalCB layout mismatch.");
 static_assert(offsetof(PerMaterialEvalCB, emissiveStreamingTextureID) == 240, "PerMaterialEvalCB layout mismatch.");
 static_assert(offsetof(PerMaterialEvalCB, reyesUvDensity) == 256, "PerMaterialEvalCB layout mismatch.");
 static_assert(offsetof(PerMaterialEvalCB, glintParameters) == 288, "PerMaterialEvalCB layout mismatch.");
 static_assert(offsetof(PerMaterialEvalCB, glintEnabled) == 304, "PerMaterialEvalCB layout mismatch.");
+static_assert(offsetof(PerMaterialEvalCB, uvTransformLinearDelta) == 320, "PerMaterialEvalCB layout mismatch.");
+static_assert(offsetof(PerMaterialEvalCB, uvTransformOffset) == 336, "PerMaterialEvalCB layout mismatch.");
 
 struct TerrainLayerGPU {
     unsigned int diffuseTextureIndex;

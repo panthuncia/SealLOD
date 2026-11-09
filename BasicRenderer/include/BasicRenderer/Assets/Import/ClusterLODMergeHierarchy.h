@@ -12,7 +12,15 @@
 // voxel output. The hierarchy is then built twice, into one root: a triangle branch from every item's triangles, and a
 // voxel branch in which such items are voxels. A voxel-branch node voxelizes its voxel children together (beside its
 // triangle group for the others), so a stand of foliage becomes one voxel group at distance.
+//
+// Nesting: an item may be a merged mesh (one this builder made). A portal cannot open it, because a portal replaces the
+// traversal's assembly transform instead of composing with it, so the root embeds it instead (flattens it): its groups,
+// nodes and pages are copied into the root and reached through a non-portal instance under the item's transform, its
+// portals' transforms are composed with that transform, its palette is appended to the root's, and the parts it opens
+// join the root's external parts. Every portal still opens a leaf part, one level deep, and the forked branches of the
+// embedded mesh are copied as they are.
 
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <span>
@@ -48,6 +56,17 @@ struct ClusterLODMergeItem
 	// which the part switches from them to voxels, in part space. UINT32_MAX: the part has no voxel branch.
 	uint32_t voxelGeometry = UINT32_MAX;
 	float voxelError = 0.0f;
+	// Into ClusterLODMergeSettings::embeddedMeshes: the item is that merged mesh, embedded rather than opened. Its
+	// geometry is the merged mesh's coarsest (ExtractClusterLODMergePartGeometry); `part` is unused, and the builder
+	// assigns materialBase (where the merged mesh's palette lands in the root's).
+	uint32_t embeddedMesh = UINT32_MAX;
+};
+
+// A merged mesh items embed: its cache data, with its external parts and palette, and every one of its pages.
+struct ClusterLODMergeEmbeddedMesh
+{
+	ClusterLODPrebuiltData data;
+	std::vector<std::vector<std::byte>> meshPageBlobs; // in mesh page order
 };
 
 struct ClusterLODMergeSettings
@@ -59,6 +78,14 @@ struct ClusterLODMergeSettings
 	float errorGrowth = 2.0f;         // a level merges what is within this factor of its smallest error
 	float weldRelativeTolerance = 0.25f; // weld positions within this fraction of a node's target error
 	uint32_t materialSlotCount = 1;   // the root palette's size
+	// What the merged mesh references, copied into its metadata (ClusterLODPrebuiltData::externalParts, paletteParts):
+	// the part each item ordinal names, and the part whose material each palette slot takes. When given, every item's
+	// part must be in range and the palette must have materialSlotCount slots. Embedded meshes append to both, so the
+	// root's tables (and its materialSlotCount) can be larger than these; with only embedded items, both may be empty.
+	std::vector<ClusterLODExternalPart> externalParts;
+	std::vector<uint32_t> paletteParts;
+	// The merged meshes items embed (ClusterLODMergeItem::embeddedMesh). Not copied: they must outlive the build.
+	std::span<const ClusterLODMergeEmbeddedMesh> embeddedMeshes;
 	uint32_t traversalNodeWidth = 8;
 	// No node is built with an error over this: the coarsest cut a renderer will ask of the hierarchy. What cannot merge
 	// under it stays at the top: nodes that draw from afar, and portals that are open at every distance. Infinity
@@ -102,6 +129,10 @@ struct ClusterLODMergeStats
 	uint64_t voxelCubes = 0;
 	uint64_t voxelBranchNodeTriangles = 0;
 	uint32_t voxelBranchTopPortals = 0;
+	// Nesting: items that embed a merged mesh (and still draw through it: an embedded item inside a folded node is not
+	// copied), and the groups those copies added.
+	uint32_t embeddedItems = 0;
+	uint32_t embeddedGroups = 0;
 };
 
 // An item whose part has no coarser representation than its own triangles (error 0) needs no portal when it merges

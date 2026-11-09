@@ -790,7 +790,11 @@ bool TextureFactory::HasPendingGpuJobs() const {
         || std::static_pointer_cast<MipHandoffPass>(m_mipHandoffPass)->DeclaredResourcesChanged()
         || std::static_pointer_cast<BC7CompressionPass>(m_bc7CompressionPass)->HasPendingJobs()
         || std::static_pointer_cast<BC7CompressionCopyPass>(m_bc7CompressionCopyPass)->HasPendingJobs()
-        || std::static_pointer_cast<BC7CompressionReadbackPass>(m_bc7CompressionReadbackPass)->HasPendingJobs();
+        || std::static_pointer_cast<BC7CompressionReadbackPass>(m_bc7CompressionReadbackPass)->HasPendingJobs()
+        // A declaration that still names finished jobs keeps their textures until the graph declares again.
+        || std::static_pointer_cast<BC7CompressionPass>(m_bc7CompressionPass)->DeclaredResourcesChanged()
+        || std::static_pointer_cast<BC7CompressionCopyPass>(m_bc7CompressionCopyPass)->DeclaredResourcesChanged()
+        || std::static_pointer_cast<BC7CompressionReadbackPass>(m_bc7CompressionReadbackPass)->DeclaredResourcesChanged();
 }
 
 void TextureFactory::SetReadbackService(

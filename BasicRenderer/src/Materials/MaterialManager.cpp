@@ -342,6 +342,8 @@ namespace {
 		result.glintParameters = base.glintParameters;
 		result.glintEnabled = base.glintEnabled;
 		result.diagnosticReason = base.diagnosticReason;
+		result.uvTransformLinearDelta = base.uvTransformLinearDelta;
+		result.uvTransformOffset = base.uvTransformOffset;
 		return result;
 	}
 

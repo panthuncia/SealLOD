@@ -346,6 +346,8 @@ struct SWAlphaMaterial
     uint baseColorSamplerIndex;
     uint opacityTextureIndex;
     uint opacitySamplerIndex;
+    float4 uvTransformLinearDelta; // The material's KHR_texture_transform (materialUvTransform.hlsli).
+    float2 uvTransformOffset;
 };
 
 SWAlphaMaterial SWLoadAlphaMaterial(uint materialDataIndex)
@@ -365,6 +367,8 @@ SWAlphaMaterial SWLoadAlphaMaterial(uint materialDataIndex)
     material.opacityTextureIndex = ResolveMaterialTextureDescriptor(
         materialInfo.opacityTextureIndex, materialInfo.opacityStreamingTextureID);
     material.opacitySamplerIndex = materialInfo.opacitySamplerIndex;
+    material.uvTransformLinearDelta = materialInfo.uvTransformLinearDelta;
+    material.uvTransformOffset = materialInfo.uvTransformOffset;
     return material;
 }
 
@@ -373,6 +377,9 @@ SWAlphaMaterial SWLoadAlphaMaterial(uint materialDataIndex)
 bool SWAlphaTestFailed(SWAlphaMaterial material, float2 texcoords, float2 texcoordsDx, float2 texcoordsDy)
 {
     float alpha = material.baseAlpha;
+    texcoords = ApplyMaterialUvTransformToUv(material.uvTransformLinearDelta, material.uvTransformOffset, texcoords);
+    texcoordsDx = ApplyMaterialUvTransformToGradient(material.uvTransformLinearDelta, texcoordsDx);
+    texcoordsDy = ApplyMaterialUvTransformToGradient(material.uvTransformLinearDelta, texcoordsDy);
 
     if ((material.materialFlags & MATERIAL_BASE_COLOR_TEXTURE) != 0u)
     {

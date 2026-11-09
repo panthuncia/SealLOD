@@ -60,6 +60,9 @@ find_package(flecs CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 find_package(unofficial-sqlite3 CONFIG REQUIRED)
 find_package(lz4 CONFIG REQUIRED)
+# KTX-Software (official KTX2 reader) and zstd for per-level inflation of KTX2 textures.
+find_package(Ktx CONFIG REQUIRED)
+find_package(zstd CONFIG REQUIRED)
 find_package(fmt CONFIG REQUIRED)
 find_package(unofficial-tree-sitter CONFIG REQUIRED)
 find_package(pxr CONFIG REQUIRED)
@@ -270,6 +273,7 @@ set(SOURCES
     "src/Diagnostics/Renderer/RendererTelemetryRequests.cpp"
     "src/Diagnostics/Menu/ExternalUi.cpp"
     "src/Diagnostics/Renderer/RendererCLodInspection.cpp"
+    "src/Diagnostics/Renderer/CLodPixelPick.cpp"
     "src/Diagnostics/Renderer/RendererCLodTelemetryRequests.cpp"
     # src/Factories
     "src/Assets/Textures/TextureFactory.cpp"
@@ -286,6 +290,8 @@ set(SOURCES
     "src/Assets/Import/GlTF/GlTFGeometryExtractor.cpp"
     "src/Assets/Import/GlTF/GlTFLoader.cpp"
     "src/Assets/Import/ModelLoader.cpp"
+    "src/Assets/Import/ImportProfile.cpp"
+    "src/Assets/Import/SceneManifest.cpp"
     "src/Assets/Import/NIF/NifLoader.cpp"
     "src/Assets/GeometryProcessing/Reyes/ObjectReyesAtlasBaker.cpp"
     "src/Assets/Import/RenderableAsset.cpp"
@@ -348,6 +354,7 @@ set(SOURCES
     "src/Runtime/Scheduling/GraphSchedulerAdapter.cpp"
     # src/Mesh
     "src/Assets/Geometry/Mesh.cpp"
+    "src/Assets/GeometryProcessing/ClusterLOD/ClusterLODMergedMesh.cpp"
     "src/Assets/Geometry/MeshInstance.cpp"
     "src/Assets/Geometry/MeshInstanceFactory.cpp"
     "src/VirtualGeometry/GeometryStorage/MeshManager.cpp"
@@ -448,9 +455,12 @@ set(SOURCES
     # src/StaticImport
     "src/Assets/Textures/Pipeline/TexturePipeline.cpp"
     "src/Assets/Textures/Pipeline/TexturePipelineArtifacts.cpp"
+    "src/Assets/Textures/Pipeline/ProvidedTextures.cpp"
+    "src/Assets/Textures/Pipeline/Ktx2Textures.cpp"
     "src/StaticImport/ImportedAssetLibrary.cpp"
     "src/StaticImport/StaticImportCoordinator.cpp"
     "src/StaticImport/StaticImportRuntime.cpp"
+    "src/StaticImport/MergedMeshAssetSource.cpp"
     "src/StaticImport/StaticImportStreamingPump.cpp"
     "src/StaticImport/StaticSceneRecipe.cpp"
     # src/Telemetry
@@ -600,6 +610,8 @@ endforeach()
 add_library(BasicRendererPublicHeaderSmoke OBJECT
     "tests/PublicHeaders/Assets_ClusterLODShaderTypes.cpp"
     "tests/PublicHeaders/Assets_Import_Filetypes.cpp"
+    "tests/PublicHeaders/Assets_Import_ImportProfile.cpp"
+    "tests/PublicHeaders/Assets_Import_SceneManifest.cpp"
     "tests/PublicHeaders/Assets_MaterialBlendState.cpp"
     "tests/PublicHeaders/Assets_MaterialTextureStreaming.cpp"
     "tests/PublicHeaders/Assets_TechniqueDescriptor.cpp"
@@ -646,7 +658,8 @@ add_library(BasicRendererPublicHeaderSmoke OBJECT
     "tests/PublicHeaders/Assets_Import_BRNiflyClient.cpp"
     "tests/PublicHeaders/Assets_Import_CLodCache.cpp"
     "tests/PublicHeaders/Assets_Import_CLodOpacityMicromapCache.cpp"
-    "tests/PublicHeaders/Assets_Import_CLodPortalParts.cpp"
+    "tests/PublicHeaders/Assets_Import_ClusterLODMergedMesh.cpp"
+    "tests/PublicHeaders/StaticImport_MergedMeshAssetSource.cpp"
     "tests/PublicHeaders/Assets_Import_GlTFGeometryExtractor.cpp"
     "tests/PublicHeaders/Assets_Import_USDGeometryExtractor.cpp"
     "tests/PublicHeaders/Assets_Import_USDMaterialCache.cpp"
@@ -783,6 +796,10 @@ add_executable(BoundedSpscQueueTests "tests/BoundedSpscQueueTests.cpp")
 add_executable(TaskSchedulerManagerTests "tests/TaskSchedulerManagerTests.cpp")
 target_link_libraries(TaskSchedulerManagerTests PRIVATE ${PROJECT_NAME})
 target_compile_features(TaskSchedulerManagerTests PRIVATE cxx_std_23)
+
+add_executable(Ktx2TextureTests "tests/Ktx2TextureTests.cpp")
+target_link_libraries(Ktx2TextureTests PRIVATE ${PROJECT_NAME} KTX::ktx)
+target_compile_features(Ktx2TextureTests PRIVATE cxx_std_23)
 
 add_executable(CachePackTests "tests/CachePackTests.cpp")
 target_link_libraries(CachePackTests PRIVATE ${PROJECT_NAME})
@@ -1602,6 +1619,8 @@ PRIVATE
     dxgi.lib 
     bcrypt.lib
     lz4::lz4
+    KTX::ktx
+    zstd::libzstd
     xatlas
     geometry-central
     ${BASICRENDERER_SPDLOG_TARGET} 
@@ -1873,6 +1892,7 @@ add_test(NAME VirtualShadowBudgetTests COMMAND VirtualShadowBudgetTests)
 add_test(NAME BoundedSpscQueueTests COMMAND BoundedSpscQueueTests)
 add_test(NAME TaskSchedulerManagerTests COMMAND TaskSchedulerManagerTests)
 add_test(NAME CachePackTests COMMAND CachePackTests)
+add_test(NAME Ktx2TextureTests COMMAND Ktx2TextureTests)
 add_test(NAME CLodCacheFormatTests COMMAND CLodCacheFormatTests)
 add_test(NAME MergeHierarchyTests COMMAND MergeHierarchyTests)
 add_test(NAME AsyncStateGraphTests COMMAND AsyncStateGraphTests)

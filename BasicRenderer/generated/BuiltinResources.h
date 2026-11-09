@@ -173,6 +173,7 @@ struct Builtin {
     inline static constexpr std::string_view RvtAlbedoAtlas = "Builtin::Terrain::RvtAlbedoAtlas";
     inline static constexpr std::string_view RvtClipInfos = "Builtin::Terrain::RvtClipInfos";
     inline static constexpr std::string_view RvtCounters = "Builtin::Terrain::RvtCounters";
+    inline static constexpr std::string_view RvtEncodeDispatchArgs = "Builtin::Terrain::RvtEncodeDispatchArgs";
     inline static constexpr std::string_view RvtGenerateDispatchArgs = "Builtin::Terrain::RvtGenerateDispatchArgs";
     inline static constexpr std::string_view RvtGenerationList = "Builtin::Terrain::RvtGenerationList";
     inline static constexpr std::string_view RvtHeightAtlas = "Builtin::Terrain::RvtHeightAtlas";
@@ -186,6 +187,9 @@ struct Builtin {
     inline static constexpr std::string_view RvtPhysicalPageOwner = "Builtin::Terrain::RvtPhysicalPageOwner";
     inline static constexpr std::string_view RvtRequestList = "Builtin::Terrain::RvtRequestList";
     inline static constexpr std::string_view RvtRequestMasks = "Builtin::Terrain::RvtRequestMasks";
+    inline static constexpr std::string_view RvtScratchAlbedo = "Builtin::Terrain::RvtScratchAlbedo";
+    inline static constexpr std::string_view RvtScratchMaterial = "Builtin::Terrain::RvtScratchMaterial";
+    inline static constexpr std::string_view RvtScratchNormal = "Builtin::Terrain::RvtScratchNormal";
     inline static constexpr std::string_view RvtStats = "Builtin::Terrain::RvtStats";
     inline static constexpr std::string_view Sets = "Builtin::Terrain::Sets";
     inline static constexpr std::string_view StochasticLayers = "Builtin::Terrain::StochasticLayers";

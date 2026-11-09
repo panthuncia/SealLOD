@@ -353,6 +353,7 @@ public:
         material->m_materialData.objectSurfaceSamplingMode = static_cast<uint32_t>(desc.objectSurfaceSamplingMode);
         material->m_materialData.objectSurfaceTexelDensity = std::max(desc.objectSurfaceTexelDensity, 1.0e-6f);
         material->m_staticTextureOverrideSourceName = desc.staticTextureOverrideSourceName;
+        material->SetUvTransform(desc.uvTransform);
         material->SetLogicalTextureSourcePaths(desc);
         return material;
     }
@@ -367,6 +368,10 @@ public:
     DirectX::XMFLOAT2 GetReyesUvDensity() const { return m_materialData.reyesUvDensity; }
     void SetTerrainSetIndex(uint32_t index, bool terrainParallaxCapable = false);
     void SetRasterBucketIndex(uint32_t index);
+    // KHR_texture_transform for every texture slot. A non-identity transform drops the material's opacity micromaps:
+    // the offline bake samples alpha by the untransformed mesh UV.
+    void SetUvTransform(const MaterialUvTransform& transform);
+    MaterialUvTransform const& GetUvTransform() const { return m_uvTransform; }
     PSOFlags GetPSOFlags() const { return m_psoFlags; }
     MaterialFlags GetMaterialFlags() const { return static_cast<MaterialFlags>(m_materialData.materialFlags); }
     static std::shared_ptr<Material> GetDefaultMaterial();
@@ -451,6 +456,7 @@ private:
     bool m_brniflyModelSpaceNormals = false;
     bool m_geometricDisplacementOptIn = false;
     std::string m_staticTextureOverrideSourceName;
+    MaterialUvTransform m_uvTransform = {};
     Material(const std::string& name,
         MaterialFlags materialFlags, PSOFlags psoFlags);
 

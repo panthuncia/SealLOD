@@ -8,7 +8,7 @@
 #include <numeric>
 #include <unordered_map>
 
-#include <BasicRenderer/Assets/Import/CLodPortalParts.h>
+#include <BasicRenderer/Assets/Import/CLodCache.h>
 
 namespace clodeval {
 
@@ -550,30 +550,35 @@ std::unique_ptr<MergeHierarchy> ReadMergeHierarchy(const CachedMesh& root, bool 
 		h->problems.push_back("no root node");
 	}
 
-	// Parts, from the portal parts file.
+	// Parts, from the merged mesh's own table (ClusterLODPrebuiltData::externalParts), in the cache tree the root is in:
+	// a merged mesh's metadata is <tree>/clod/merged/<file>.
 	uint32_t partCount = 0;
 	for (const MergePortal& portal : h->portals) {
 		partCount = std::max(partCount, portal.part + 1u);
 	}
-	std::string partsError;
-	const std::optional<CLodCache::PortalParts> file = CLodCache::LoadPortalParts(root.MetadataPath(), &partsError);
-	h->partsFile = file.has_value();
-	h->parts.resize(file ? std::max<size_t>(file->parts.size(), partCount) : partCount);
-	if (file) {
-		h->paletteParts = file->paletteParts;
-		for (size_t i = 0; i < file->parts.size(); ++i) {
-			h->parts[i].label = file->parts[i].label;
-			h->parts[i].metadataPath = file->parts[i].metadataPath;
+	const std::vector<ClusterLODExternalPart>& external = prebuilt.externalParts;
+	const bool hasTable = !external.empty();
+	h->partsFile = hasTable;
+	h->parts.resize(std::max<size_t>(external.size(), partCount));
+	if (hasTable) {
+		h->paletteParts = prebuilt.paletteParts;
+		const std::filesystem::path tree = root.MetadataPath().parent_path().parent_path().parent_path();
+		for (size_t i = 0; i < external.size(); ++i) {
+			const ClusterLODExternalPart& part = external[i];
+			h->parts[i].label = std::format("{} part {} mesh {}", part.assetKey, part.partIndex, part.meshIndex);
+			if (part.variantHash != 0u) h->parts[i].label += std::format(" variant {:016x}", part.variantHash);
+			const CLodCache::CacheKey key{ part.sourceIdentifier, part.primPath, part.subsetName };
+			h->parts[i].metadataPath = tree / CLodCache::RelativeMetadataPath(key, part.buildConfigHash);
 		}
-		if (file->parts.size() < partCount) {
-			h->problems.push_back(std::format("portals name {} parts, the parts file lists {}", partCount, file->parts.size()));
+		if (external.size() < partCount) {
+			h->problems.push_back(std::format("portals name {} parts, the table lists {}", partCount, external.size()));
 		}
 	}
 	for (const MergePortal& portal : h->portals) {
 		++h->parts[portal.part].portals;
 	}
-	if (file && loadParts) {
-		h->partsOpen = file->parts.size() >= partCount;
+	if (hasTable && loadParts) {
+		h->partsOpen = external.size() >= partCount;
 		for (MergePart& part : h->parts) {
 			if (part.metadataPath.empty()) {
 				h->partsOpen = false;
@@ -629,8 +634,8 @@ std::unique_ptr<MergeHierarchy> ReadMergeHierarchy(const CachedMesh& root, bool 
 			}
 		}
 	}
-	else if (!file) {
-		h->problems.push_back(std::format("no portal parts file, so the parts are unknown ({})", partsError));
+	else if (!hasTable) {
+		h->problems.push_back("the cache names no external parts, so the parts are unknown");
 	}
 	return h;
 }

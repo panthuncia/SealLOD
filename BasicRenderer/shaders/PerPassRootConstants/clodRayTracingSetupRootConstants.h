@@ -184,7 +184,7 @@
 #define CLOD_RT_CTRL_OVERSIZE 76u // Cumulative clusters larger than a page.
 #define CLOD_RT_CTRL_WORDS 80u
 
-// Range records, one per group built this frame: [group, kind, first cluster built, cluster count, entry, slab, offset,
+// Range records, one per group built this frame: [group, kind, first cluster built, cluster count, entry, slab, page signature,
 // micromap table slot + 1, the entry a rebuild replaces + 1, kept (usable last frame: assigned, packed and placed first), 0, 0].
 #define CLOD_RT_CACHE_RANGE_BYTES 48u
 #define CLOD_RT_RANGE_REQUEST 0u // Needed by the list, before Assign.
@@ -302,5 +302,39 @@
 #define CLOD_RT_PT_FLAG_RESTART_ACCUMULATION 64u // What rays see changed this frame.
 #define CLOD_RT_PT_FLAG_OMM_2_STATE_SECONDARY 128u // Bounce and shadow rays take unknown micro-triangles' baked guess instead of running any-hit.
 #define CLOD_RT_PT_FLAG_OMM_2_STATE_PRIMARY 256u
+
+// Pixel watch (SARP_RT_PIXEL_WATCH): path traced pixels and hits that look wrong, with what made them, for the CPU to log.
+// A header of counters, then CLOD_RT_WATCH_RECORDS records of each kind. A kind's counter is its record cursor too: only the
+// first records of a frame are kept, and the count goes on.
+#define CLOD_RT_PT_WATCH_UAV UintRootConstant14
+#define CLOD_RT_PT_WATCH_BRIGHT UintRootConstant15 // asfloat: final luminance above which a pixel that hit something is recorded.
+#define CLOD_RT_WATCH_BRIGHT_PIXEL 1u // Final radiance above the threshold. The record names the bounce that added most.
+#define CLOD_RT_WATCH_BAD_MATERIAL 2u // Material inputs or BSDF results out of range or not finite, at any bounce.
+#define CLOD_RT_WATCH_DARK_TERRAIN_PIXEL 3u // A primary terrain hit whose pixel came out black.
+#define CLOD_RT_WATCH_RESOLVE_FAILED 4u // A hit whose CLAS info didn't resolve to a triangle of the right kind: the path ends black.
+#define CLOD_RT_WATCH_DARK_TERRAIN_ALBEDO 5u // A primary terrain hit whose material came out black, with its RVT state.
+#define CLOD_RT_WATCH_PRIMARY_ENDED 6u // A primary hit with no light to trace and no BSDF sample: the pixel gets only emission.
+#define CLOD_RT_WATCH_KINDS 6u
+#define CLOD_RT_WATCH_RECORDS 16u
+#define CLOD_RT_WATCH_RECORD_WORDS 16u
+#define CLOD_RT_WATCH_HEADER_WORDS 16u
+// Header words: [kind] the count of each kind (1..6); then these.
+#define CLOD_RT_WATCH_MAX_LUMINANCE 8u // asuint of the brightest final luminance of a pixel that hit something.
+#define CLOD_RT_WATCH_NON_FINITE 9u // Pixels whose radiance wasn't finite, written black.
+#define CLOD_RT_WATCH_WORDS (CLOD_RT_WATCH_HEADER_WORDS + CLOD_RT_WATCH_KINDS * CLOD_RT_WATCH_RECORDS * CLOD_RT_WATCH_RECORD_WORDS)
+// Bad material flags (record word 0, bits 16 up).
+#define CLOD_RT_WATCH_ALBEDO_RANGE 0x1u
+#define CLOD_RT_WATCH_ALBEDO_NON_FINITE 0x2u
+#define CLOD_RT_WATCH_EMISSIVE_NON_FINITE 0x4u
+#define CLOD_RT_WATCH_EMISSIVE_HUGE 0x8u
+#define CLOD_RT_WATCH_SCALAR_NON_FINITE 0x10u // Roughness, metallic, coat or fuzz.
+#define CLOD_RT_WATCH_NORMAL_BAD 0x20u
+#define CLOD_RT_WATCH_WEIGHT_HUGE 0x40u
+#define CLOD_RT_WATCH_WEIGHT_NON_FINITE 0x80u
+#define CLOD_RT_WATCH_DIRECT_NON_FINITE 0x100u
+#define CLOD_RT_WATCH_DIRECT_HUGE 0x200u
+#define CLOD_RT_WATCH_TERRAIN 0x8000u
+#define CLOD_RT_WATCH_EMISSIVE_LIMIT 64.0f
+#define CLOD_RT_WATCH_WEIGHT_LIMIT 16.0f
 
 #endif // CLOD_RAY_TRACING_SETUP_ROOT_CONSTANTS_H

@@ -98,6 +98,31 @@ struct OpenPBRMaterialParameters {
     bool geometryThinWalled = false;
 };
 
+// KHR_texture_transform: uv' = T(offset) * R(rotation) * S(scale) * uv. One transform per material, applied to every
+// texture slot after its UV set is selected.
+struct MaterialUvTransform {
+    DirectX::XMFLOAT2 offset = { 0.0f, 0.0f };
+    DirectX::XMFLOAT2 scale = { 1.0f, 1.0f };
+    float rotation = 0.0f; // radians, KHR_texture_transform semantics
+    bool IsIdentity() const { return offset.x == 0.0f && offset.y == 0.0f && scale.x == 1.0f && scale.y == 1.0f && rotation == 0.0f; }
+};
+
+// The transform as the GPU material tables store it (PerMaterialCB / PerMaterialEvalCB uvTransform*): the 2x2 linear part
+// minus identity, (m00 - 1, m01, m10, m11 - 1), and the offset, so a zero-initialized material row is the identity.
+// Shaders apply u' = u + dot(delta.xy, uv) + offset.x, v' = v + dot(delta.zw, uv) + offset.y. The rotation follows the
+// Khronos glTF sample renderer: u' = cos * sx * u + sin * sy * v, v' = -sin * sx * u + cos * sy * v.
+inline void BuildMaterialUvTransformGpu(const MaterialUvTransform& transform, DirectX::XMFLOAT4& linearDelta, DirectX::XMFLOAT2& offset) {
+    if (transform.IsIdentity()) {
+        linearDelta = { 0.0f, 0.0f, 0.0f, 0.0f };
+        offset = { 0.0f, 0.0f };
+        return;
+    }
+    const float c = std::cos(transform.rotation);
+    const float s = std::sin(transform.rotation);
+    linearDelta = { c * transform.scale.x - 1.0f, s * transform.scale.y, -s * transform.scale.x, c * transform.scale.y - 1.0f };
+    offset = transform.offset;
+}
+
 struct MaterialDescription {
     MaterialModel materialModel = MaterialModel::LegacyPreviewSurface;
     std::uint64_t sourceMaterialIdentity = 0;
@@ -146,6 +171,7 @@ struct MaterialDescription {
     OpenPBRTextureBindings openPBRTextures = {};
     bool glintEnabled = false;
     DirectX::XMFLOAT4 glintParameters = { 1.5f, 0.0f, 0.015f, 2.0f };
+    MaterialUvTransform uvTransform = {};
 };
 
 inline OpenPBRMaterialParameters TranslateLegacyMaterialDescriptionToOpenPBR(const MaterialDescription& desc) {

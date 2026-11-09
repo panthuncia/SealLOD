@@ -1686,6 +1686,17 @@ void ApplyTerrainMaterialInternal(
         perFrameBuffer.terrainParallaxHeightScale > 0.0f;
 #if defined(CLOD_RESOLVE_PATH_HIT)
     terrainParallaxEnabled = terrainParallaxEnabled && g_clodPathHitIsPrimary;
+    // Bounce hits take each layer with one tap: stochastic tiling only hides repetition on screen, and three taps per layer
+    // measured 0.23 ms of 14.2 at the saved camera, for direct fallbacks alone.
+    if (!g_clodPathHitIsPrimary)
+    {
+        terrainStochasticSamplingEnabled = false;
+        terrainStochasticDiffuseEnabled = false;
+        terrainStochasticNormalEnabled = false;
+        terrainStochasticHeightEnabled = false;
+        terrainGaussianStochasticEnabled = false;
+        terrainStochasticDerivativeNormalsEnabled = false;
+    }
 #endif
     uint terrainParallaxMaxSteps = clamp(perFrameBuffer.terrainParallaxMaxSteps, 4u, 64u);
     if (terrain.regionSizeWorld <= 0.0f ||

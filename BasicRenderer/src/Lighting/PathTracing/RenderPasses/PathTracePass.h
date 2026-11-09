@@ -2,6 +2,7 @@
 
 #include <array>
 #include <bit>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -79,6 +80,10 @@ inline std::shared_ptr<PathTraceState> MakePathTraceState() {
     if (DeviceManager::GetInstance().GetRayTracingFeatures().opacityMicromap) {
         state->recipe.flags = static_cast<rhi::RayTracingPipelineFlags>(state->recipe.flags | rhi::RTPipeline_AllowOpacityMicromaps);
     }
+    // The pixel watch (pathTracingWatch.hlsli) costs registers even when off, so it is compiled only when asked for.
+    if (const char* watch = std::getenv("SARP_RT_PIXEL_WATCH"); watch && std::strtof(watch, nullptr) > 0.0f) {
+        state->recipe.defines.emplace_back(L"PATH_TRACE_WATCH", L"1");
+    }
     state->recipe.debugName = "PathTrace.PSO";
     state->arguments = CreateAliasedUnmaterializedRawBuffer(sizeof(rhi::RayTracingDispatchRaysArguments), true, false);
     state->arguments->SetName("Path trace dispatch arguments");
@@ -148,6 +153,7 @@ struct PathTraceFrameData {
 };
 
 struct PathTraceBindings {
+    org::PipelineState clearPipeline; // The pixel watch's.
     org::ResourceBindingToken arguments;
     org::DeclaredViewToken output, baseColor, normalRoughness, motion, projectedDepth, accumulation, specularAlbedo, specularHitDistance;
     bool hasAccumulation = false;
@@ -173,6 +179,8 @@ public:
 
     PathTraceBindings Declare(org::PassBuilder& builder) {
         PathTraceBindings bindings{};
+        bindings.clearPipeline = builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/rayTracingSceneBuild.hlsl", L"CLodRtClearCS",
+            "PathTrace.ClearWatch.PSO"));
         builder.ConstantBuffer(Builtin::PerFrameBuffer);
         builder.ShaderResource(Builtin::CameraBuffer, Builtin::PerMeshBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases, Builtin::PerMaterialDataBuffer, Builtin::InstanceDrawRecordBuffer,
             Builtin::PerMeshInstanceBuffer, Builtin::PerInstanceTransformBuffer, Builtin::PerObjectBuffer, Builtin::Material::TextureStreamingMetadataBuffer,
@@ -203,8 +211,7 @@ public:
         bindings.baseColor = builder.UnorderedAccess(Builtin::Surface::BaseColorOpacity).View();
         bindings.normalRoughness = builder.UnorderedAccess(Builtin::Surface::NormalRoughness).View();
         bindings.motion = builder.UnorderedAccess(Builtin::Surface::Motion).View();
-        bindings.projectedDepth = builder.UnorderedAccess(Builtin::PrimaryCamera::ProjectedDepthTexture).View();
-        if (m_accumulation) {
+        bindings.projectedDepth = builder.UnorderedAccess(Builtin::PrimaryCamera::ProjectedDepthTexture).View();        if (m_accumulation) {
             bindings.accumulation = builder.UnorderedAccess(m_accumulation).View();
             bindings.hasAccumulation = true;
         }
@@ -267,13 +274,16 @@ public:
         constants[CLOD_RT_PT_BASE_COLOR_UAV] = recording.Index(bindings.baseColor);
         constants[CLOD_RT_PT_NORMAL_ROUGHNESS_UAV] = recording.Index(bindings.normalRoughness);
         constants[CLOD_RT_PT_MOTION_UAV] = recording.Index(bindings.motion);
-        constants[CLOD_RT_PT_PROJECTED_DEPTH_UAV] = recording.Index(bindings.projectedDepth);
-        constants[CLOD_RT_PT_SPECULAR_ALBEDO_UAV] = bindings.hasRayReconstructionGuides ? recording.Index(bindings.specularAlbedo) : CLOD_RT_PT_NO_DESCRIPTOR;
+        constants[CLOD_RT_PT_PROJECTED_DEPTH_UAV] = recording.Index(bindings.projectedDepth);        constants[CLOD_RT_PT_SPECULAR_ALBEDO_UAV] = bindings.hasRayReconstructionGuides ? recording.Index(bindings.specularAlbedo) : CLOD_RT_PT_NO_DESCRIPTOR;
         constants[CLOD_RT_PT_SPECULAR_HIT_UAV] = bindings.hasRayReconstructionGuides ? recording.Index(bindings.specularHitDistance) : CLOD_RT_PT_NO_DESCRIPTOR;
+        constants[CLOD_RT_PT_WATCH_UAV] = frame.system->GetPixelWatchUav();
+        constants[CLOD_RT_PT_WATCH_BRIGHT] = std::bit_cast<uint32_t>(frame.system->GetPixelWatchBright());
+        frame.system->RecordPixelWatchBegin(recording, bindings.clearPipeline);
         recording.Retain(frame.table);
         recording.BindRayTracingPipeline(frame.table->Payload());
         br::render::PushMiscConstants(recording, constants);
         recording.TraceRaysIndirect(frame.table->IndirectDesc(), bindings.arguments);
+        frame.system->RecordPixelWatchEnd(recording);
     }
 
 private:

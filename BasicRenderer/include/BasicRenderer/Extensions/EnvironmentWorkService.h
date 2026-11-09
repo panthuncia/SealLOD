@@ -31,7 +31,10 @@ struct EnvironmentPrefilterWork {
     std::uint32_t baseResolution = 0, environmentIndex = 0;
     std::shared_ptr<org::ResourceGroup> sourceGroup;
     std::shared_ptr<std::mutex> publicationMutex;
+    // Runs under publicationMutex once the GPU has finished the prefilter (it caches the result as BC6H).
+    std::function<void()> then;
     void Commit() const;
+    void Complete() const;
     void Discard() const { Commit(); }
 };
 using EnvironmentSHWorkQueue = org::runtime::FrameWorkQueue<EnvironmentSHWork>;

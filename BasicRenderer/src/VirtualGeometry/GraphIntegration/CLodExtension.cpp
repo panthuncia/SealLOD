@@ -82,6 +82,13 @@ namespace {
         pass->SetVisibleClusterSideBand(std::move(sideBand));
         return pass;
     }
+
+    // A working buffer whose contents do not outlive its phase has a phase-2 copy, so the alias planner can overlap
+    // each phase's copy with what lives between them. One-phase variants have none and use the phase-1 buffer.
+    const std::shared_ptr<org::Buffer>& phaseBuffer(
+        const std::shared_ptr<org::Buffer>& phase1, const std::shared_ptr<org::Buffer>& phase2, bool isPhase1) {
+        return isPhase1 || !phase2 ? phase1 : phase2;
+    }
 }
 
 namespace {
@@ -343,6 +350,8 @@ void CLodExtension::AppendPhaseReyesStructuralPasses(
     const auto splitIndirectArgsBuffer = phaseIndex == 1u ? m_reyesSplitIndirectArgsBuffer : m_reyesSplitIndirectArgsBufferPhase2;
     const auto diceIndirectArgsBuffer = phaseIndex == 1u ? m_reyesDiceIndirectArgsBuffer : m_reyesDiceIndirectArgsBufferPhase2;
     const auto telemetryBuffer = phaseIndex == 1u ? m_reyesTelemetryBufferPhase1 : m_reyesTelemetryBufferPhase2;
+    const auto splitQueueBufferA = phaseIndex == 2u && m_reyesSplitQueueBufferAPhase2 ? m_reyesSplitQueueBufferAPhase2 : m_reyesSplitQueueBufferA;
+    const auto splitQueueBufferB = phaseIndex == 2u && m_reyesSplitQueueBufferBPhase2 ? m_reyesSplitQueueBufferBPhase2 : m_reyesSplitQueueBufferB;
     const auto currentVisibleClustersCounterBuffer = phaseIndex == 1u ? m_visibleClustersCounterBuffer : m_visibleClustersCounterBufferPhase2;
     const auto previousVisibleClustersCounterBuffer = phaseIndex == 1u ? nullptr : m_visibleClustersCounterBuffer;
     const auto diceQueuePhase1CountBuffer = phaseIndex == 1u ? nullptr : m_reyesDiceQueuePhase1CountBuffer;
@@ -455,7 +464,7 @@ void CLodExtension::AppendPhaseReyesStructuralPasses(
                 m_visibleClustersBuffer,
                 m_reyesOwnedClustersBuffer,
                 m_reyesOwnedClustersCounterBuffer,
-                m_reyesSplitQueueBufferA,
+                splitQueueBufferA,
                 m_reyesSplitQueueCounterBufferA,
                 m_reyesSplitQueueOverflowBufferA,
                 splitIndirectArgsBuffer,
@@ -481,7 +490,7 @@ void CLodExtension::AppendPhaseReyesStructuralPasses(
                     ReyesReplayMergeKind::Split,
                     m_reyesReplaySplitQueueBuffer,
                     m_reyesReplaySplitQueueCounterBuffer,
-                    m_reyesSplitQueueBufferA,
+                    splitQueueBufferA,
                     m_reyesSplitQueueCounterBufferA,
                     m_reyesSplitQueueOverflowBufferA,
                     splitIndirectArgsBuffer,
@@ -489,7 +498,7 @@ void CLodExtension::AppendPhaseReyesStructuralPasses(
                     reyesSplitQueueCapacity)));
     }
 
-    const std::shared_ptr<org::Buffer> reyesSplitBuffers[] = { m_reyesSplitQueueBufferA, m_reyesSplitQueueBufferB };
+    const std::shared_ptr<org::Buffer> reyesSplitBuffers[] = { splitQueueBufferA, splitQueueBufferB };
     const std::shared_ptr<org::Buffer> reyesSplitCounters[] = { m_reyesSplitQueueCounterBufferA, m_reyesSplitQueueCounterBufferB };
     const std::shared_ptr<org::Buffer> reyesSplitOverflows[] = { m_reyesSplitQueueOverflowBufferA, m_reyesSplitQueueOverflowBufferB };
     for (uint32_t splitPassIndex = 0; splitPassIndex < CLodReyesMaxSplitPassCount; ++splitPassIndex) {
@@ -684,6 +693,14 @@ void CLodExtension::RefreshCoreVisibleClusterCapacity()
     if (m_sortedToUnsortedMappingBufferSw) {
         m_sortedToUnsortedMappingBufferSw->ResizeStructured(m_visibleClusterCapacity);
     }
+
+    for (const auto& buffer : { m_compactedVisibleClustersBufferPhase2, m_compactedVisibleClustersBufferPhase2Sw }) {
+        if (buffer) buffer->ResizeBytes(static_cast<uint64_t>(m_visibleClusterCapacity) * PackedVisibleClusterStrideBytes);
+    }
+    for (const auto& buffer : { m_compactedVisibleClusterTransformIndicesBufferPhase2, m_compactedVisibleClusterTransformIndicesBufferPhase2Sw,
+             m_sortedToUnsortedMappingBufferPhase2, m_sortedToUnsortedMappingBufferPhase2Sw }) {
+        if (buffer) buffer->ResizeStructured(m_visibleClusterCapacity);
+    }
 }
 
 void CLodExtension::AppendRayTracingPasses(const CLodVariantTraits& traits, std::vector<org::ExternalPassDesc>& outPasses)
@@ -824,6 +841,16 @@ void CLodExtension::InitializeCoreResources()
     m_compactedVisibleClustersBufferSw->SetName(MakeVariantResourceName(traits, "Compacted Visible Clusters Buffer SW"));
     m_compactedVisibleClusterTransformIndicesBufferSw = CreateAliasedUnmaterializedStructuredBuffer(m_visibleClusterCapacity, CLodVisibleClusterSideBandStride, true, false, false, true);
     m_compactedVisibleClusterTransformIndicesBufferSw->SetName(MakeVariantResourceName(traits, "Compacted Visible Cluster Transform Indices Buffer SW"));
+    if (traits.usesPhase2OcclusionReplay) {
+        m_compactedVisibleClustersBufferPhase2 = CreateAliasedUnmaterializedRawBuffer(static_cast<uint64_t>(m_visibleClusterCapacity) * PackedVisibleClusterStrideBytes, true, false);
+        m_compactedVisibleClustersBufferPhase2->SetName(MakeVariantResourceName(traits, "Compacted Visible Clusters Buffer Phase2"));
+        m_compactedVisibleClusterTransformIndicesBufferPhase2 = CreateAliasedUnmaterializedStructuredBuffer(m_visibleClusterCapacity, CLodVisibleClusterSideBandStride, true, false, false, true);
+        m_compactedVisibleClusterTransformIndicesBufferPhase2->SetName(MakeVariantResourceName(traits, "Compacted Visible Cluster Transform Indices Buffer Phase2"));
+        m_compactedVisibleClustersBufferPhase2Sw = CreateAliasedUnmaterializedRawBuffer(static_cast<uint64_t>(m_visibleClusterCapacity) * PackedVisibleClusterStrideBytes, true, false);
+        m_compactedVisibleClustersBufferPhase2Sw->SetName(MakeVariantResourceName(traits, "Compacted Visible Clusters Buffer Phase2 SW"));
+        m_compactedVisibleClusterTransformIndicesBufferPhase2Sw = CreateAliasedUnmaterializedStructuredBuffer(m_visibleClusterCapacity, CLodVisibleClusterSideBandStride, true, false, false, true);
+        m_compactedVisibleClusterTransformIndicesBufferPhase2Sw->SetName(MakeVariantResourceName(traits, "Compacted Visible Cluster Transform Indices Buffer Phase2 SW"));
+    }
 
     if (traits.type == CLodExtensionType::VisiblityBuffer && m_options.rayTracingSystem) {
         m_options.rayTracingSystem->SetPrimaryVisibleClusters(m_visibleClustersBuffer, m_visibleClusterTransformIndicesBuffer, m_visibleClusterCapacity);
@@ -922,6 +949,12 @@ void CLodExtension::InitializeCoreResources()
 
         m_skinnedVoxelRasterWorkBuffer = CreateAliasedUnmaterializedStructuredBuffer(m_voxelRasterWorkCapacity, sizeof(CLodVoxelRasterWorkRecord), true, false, false, true);
         m_skinnedVoxelRasterWorkBuffer->SetName(MakeVariantResourceName(traits, "Voxel Raster Work Buffer Skinned"));
+        if (traits.usesPhase2OcclusionReplay) {
+            m_voxelRasterWorkBufferPhase2 = CreateAliasedUnmaterializedStructuredBuffer(m_voxelRasterWorkCapacity, sizeof(CLodVoxelRasterWorkRecord), true, false, false, true);
+            m_voxelRasterWorkBufferPhase2->SetName(MakeVariantResourceName(traits, "Voxel Raster Work Buffer Rigid Phase2"));
+            m_skinnedVoxelRasterWorkBufferPhase2 = CreateAliasedUnmaterializedStructuredBuffer(m_voxelRasterWorkCapacity, sizeof(CLodVoxelRasterWorkRecord), true, false, false, true);
+            m_skinnedVoxelRasterWorkBufferPhase2->SetName(MakeVariantResourceName(traits, "Voxel Raster Work Buffer Skinned Phase2"));
+        }
 
         m_skinnedVoxelRasterWorkCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false, false);
         m_skinnedVoxelRasterWorkCounterBuffer->SetName(MakeVariantResourceName(traits, "Voxel Raster Work Counter Buffer Skinned"));
@@ -946,6 +979,12 @@ void CLodExtension::InitializeCoreResources()
 
     m_sortedToUnsortedMappingBufferSw = CreateAliasedUnmaterializedStructuredBuffer(m_visibleClusterCapacity, sizeof(uint32_t) * 2u, true, false, false, true);
     m_sortedToUnsortedMappingBufferSw->SetName(MakeVariantResourceName(traits, "Sorted-to-Unsorted Mapping Buffer SW"));
+    if (traits.usesPhase2OcclusionReplay) {
+        m_sortedToUnsortedMappingBufferPhase2 = CreateAliasedUnmaterializedStructuredBuffer(m_visibleClusterCapacity, sizeof(uint32_t), true, false, false, true);
+        m_sortedToUnsortedMappingBufferPhase2->SetName(MakeVariantResourceName(traits, "Sorted-to-Unsorted Mapping Buffer Phase2"));
+        m_sortedToUnsortedMappingBufferPhase2Sw = CreateAliasedUnmaterializedStructuredBuffer(m_visibleClusterCapacity, sizeof(uint32_t) * 2u, true, false, false, true);
+        m_sortedToUnsortedMappingBufferPhase2Sw->SetName(MakeVariantResourceName(traits, "Sorted-to-Unsorted Mapping Buffer Phase2 SW"));
+    }
 
 }
 
@@ -1015,6 +1054,14 @@ void CLodExtension::TagCoreResourceUsages()
     tagBufferUsage(m_voxelRasterIndirectArgsBuffer, "Cluster LOD voxel rasterization");
     tagBufferUsage(m_sortedToUnsortedMappingBuffer, "Cluster LOD visibility");
     tagBufferUsage(m_sortedToUnsortedMappingBufferSw, "Cluster LOD visibility");
+    tagBufferUsage(m_compactedVisibleClustersBufferPhase2, "Cluster LOD visibility");
+    tagBufferUsage(m_compactedVisibleClustersBufferPhase2Sw, "Cluster LOD visibility");
+    tagBufferUsage(m_compactedVisibleClusterTransformIndicesBufferPhase2, "Cluster LOD visibility");
+    tagBufferUsage(m_compactedVisibleClusterTransformIndicesBufferPhase2Sw, "Cluster LOD visibility");
+    tagBufferUsage(m_sortedToUnsortedMappingBufferPhase2, "Cluster LOD visibility");
+    tagBufferUsage(m_sortedToUnsortedMappingBufferPhase2Sw, "Cluster LOD visibility");
+    tagBufferUsage(m_voxelRasterWorkBufferPhase2, "Cluster LOD voxel rasterization");
+    tagBufferUsage(m_skinnedVoxelRasterWorkBufferPhase2, "Cluster LOD voxel rasterization");
 }
 
 void CLodExtension::TagShadowResourceUsages()
@@ -1119,6 +1166,16 @@ void CLodExtension::ReleaseBufferBackings()
     releaseBufferBacking(m_skinnedVoxelRasterIndirectArgsBuffer);
     releaseBufferBacking(m_sortedToUnsortedMappingBuffer);
     releaseBufferBacking(m_sortedToUnsortedMappingBufferSw);
+    releaseBufferBacking(m_compactedVisibleClustersBufferPhase2);
+    releaseBufferBacking(m_compactedVisibleClustersBufferPhase2Sw);
+    releaseBufferBacking(m_compactedVisibleClusterTransformIndicesBufferPhase2);
+    releaseBufferBacking(m_compactedVisibleClusterTransformIndicesBufferPhase2Sw);
+    releaseBufferBacking(m_sortedToUnsortedMappingBufferPhase2);
+    releaseBufferBacking(m_sortedToUnsortedMappingBufferPhase2Sw);
+    releaseBufferBacking(m_voxelRasterWorkBufferPhase2);
+    releaseBufferBacking(m_skinnedVoxelRasterWorkBufferPhase2);
+    releaseBufferBacking(m_reyesSplitQueueBufferAPhase2);
+    releaseBufferBacking(m_reyesSplitQueueBufferBPhase2);
     releaseBufferBacking(m_shadowPageMetadataBuffer);
     releaseBufferBacking(m_shadowInvalidationInputsBuffer);
     releaseBufferBacking(m_shadowInvalidationCountBuffer);
@@ -1306,6 +1363,12 @@ void CLodExtension::EnsureReyesResourcesInitialized()
 
     m_reyesSplitQueueBufferB = CreateAliasedUnmaterializedStructuredBuffer(m_reyesSplitQueueCapacity, sizeof(CLodReyesSplitQueueEntry), true, false, true);
     m_reyesSplitQueueBufferB->SetName(MakeVariantResourceName(traits, "Reyes Split Queue Buffer B"));
+    if (usesPhase2ReyesResources) {
+        m_reyesSplitQueueBufferAPhase2 = CreateAliasedUnmaterializedStructuredBuffer(m_reyesSplitQueueCapacity, sizeof(CLodReyesSplitQueueEntry), true, false, true);
+        m_reyesSplitQueueBufferAPhase2->SetName(MakeVariantResourceName(traits, "Reyes Split Queue Buffer A Phase2"));
+        m_reyesSplitQueueBufferBPhase2 = CreateAliasedUnmaterializedStructuredBuffer(m_reyesSplitQueueCapacity, sizeof(CLodReyesSplitQueueEntry), true, false, true);
+        m_reyesSplitQueueBufferBPhase2->SetName(MakeVariantResourceName(traits, "Reyes Split Queue Buffer B Phase2"));
+    }
 
     m_reyesSplitQueueCounterBufferB = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false);
     m_reyesSplitQueueCounterBufferB->SetName(MakeVariantResourceName(traits, "Reyes Split Queue Counter Buffer B"));
@@ -1467,6 +1530,8 @@ void CLodExtension::EnsureReyesResourcesInitialized()
     tagBufferUsage(m_reyesSplitQueueCounterBufferA, "Cluster LOD Reyes");
     tagBufferUsage(m_reyesSplitQueueOverflowBufferA, "Cluster LOD Reyes");
     tagBufferUsage(m_reyesSplitQueueBufferB, "Cluster LOD Reyes");
+    tagBufferUsage(m_reyesSplitQueueBufferAPhase2, "Cluster LOD Reyes");
+    tagBufferUsage(m_reyesSplitQueueBufferBPhase2, "Cluster LOD Reyes");
     tagBufferUsage(m_reyesSplitQueueCounterBufferB, "Cluster LOD Reyes");
     tagBufferUsage(m_reyesSplitQueueOverflowBufferB, "Cluster LOD Reyes");
     tagBufferUsage(m_reyesReplaySplitQueueBuffer, "Cluster LOD Reyes");
@@ -1694,8 +1759,9 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
         resources.occlusionReplay = {m_occlusionReplayBuffer, m_occlusionReplayStateBuffer, m_occlusionNodeGpuInputsBuffer};
         resources.telemetry = m_workGraphTelemetryBuffer;
         resources.pagePoolSlabs = slabGroup;
-        resources.voxelQueues = {m_voxelRasterWorkBuffer, m_voxelRasterWorkCounterBuffer,
-            m_skinnedVoxelRasterWorkBuffer, m_skinnedVoxelRasterWorkCounterBuffer, m_voxelRasterWorkCapacity};
+        resources.voxelQueues = {phaseBuffer(m_voxelRasterWorkBuffer, m_voxelRasterWorkBufferPhase2, isPhase1), m_voxelRasterWorkCounterBuffer,
+            phaseBuffer(m_skinnedVoxelRasterWorkBuffer, m_skinnedVoxelRasterWorkBufferPhase2, isPhase1), m_skinnedVoxelRasterWorkCounterBuffer,
+            m_voxelRasterWorkCapacity};
         if (isShadow) {
             resources.virtualShadow = {
                 .dirtyPageHierarchy = m_shadowDirtyPageHierarchyTexture,
@@ -1814,10 +1880,10 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
                     histogramBuffer,
                     m_rasterBucketsOffsetsBuffer,
                     writeCursorBuffer,
-                    m_compactedVisibleClustersBuffer,
-                    m_compactedVisibleClusterTransformIndicesBuffer,
+                    phaseBuffer(m_compactedVisibleClustersBuffer, m_compactedVisibleClustersBufferPhase2, isPhase1),
+                    phaseBuffer(m_compactedVisibleClusterTransformIndicesBuffer, m_compactedVisibleClusterTransformIndicesBufferPhase2, isPhase1),
                     indirectArgsBuffer,
-                    m_sortedToUnsortedMappingBuffer,
+                    phaseBuffer(m_sortedToUnsortedMappingBuffer, m_sortedToUnsortedMappingBufferPhase2, isPhase1),
                     reyesOwnershipBitsetBuffer,
                     m_workGraphTelemetryBuffer,
                     m_visibleClusterCapacity,
@@ -1855,11 +1921,11 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
             passName,
             std::make_shared<ClusterRasterizationPass>(
                 rasterizePassInputs,
-                m_compactedVisibleClustersBuffer,
-                m_compactedVisibleClusterTransformIndicesBuffer,
+                phaseBuffer(m_compactedVisibleClustersBuffer, m_compactedVisibleClustersBufferPhase2, isPhase1),
+                phaseBuffer(m_compactedVisibleClusterTransformIndicesBuffer, m_compactedVisibleClusterTransformIndicesBufferPhase2, isPhase1),
                 rasterHistogramBuffer,
                 rasterIndirectArgsBuffer,
-                m_sortedToUnsortedMappingBuffer,
+                phaseBuffer(m_sortedToUnsortedMappingBuffer, m_sortedToUnsortedMappingBufferPhase2, isPhase1),
                 nullptr,
                 nullptr,
                 nullptr,
@@ -1918,6 +1984,12 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
         // visible-buffer read base and compacted-buffer append base.
         const std::shared_ptr<org::Buffer> swVisibleClusterReadBaseCounterBuffer =
             isPhase1 ? std::shared_ptr<org::Buffer>{} : m_swVisibleClustersCounterBuffer;
+        const std::shared_ptr<org::Buffer> swCompactedClustersBuffer =
+            phaseBuffer(m_compactedVisibleClustersBufferSw, m_compactedVisibleClustersBufferPhase2Sw, isPhase1);
+        const std::shared_ptr<org::Buffer> swCompactedTransformIndicesBuffer =
+            phaseBuffer(m_compactedVisibleClusterTransformIndicesBufferSw, m_compactedVisibleClusterTransformIndicesBufferPhase2Sw, isPhase1);
+        const std::shared_ptr<org::Buffer> swMappingBuffer =
+            phaseBuffer(m_sortedToUnsortedMappingBufferSw, m_sortedToUnsortedMappingBufferPhase2Sw, isPhase1);
 
         outPasses.push_back(
             org::ExternalPassDesc::Compute(
@@ -1977,10 +2049,10 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
                     swHistogramBuffer,
                     m_rasterBucketsOffsetsBuffer,
                     swWriteCursorBuffer,
-                    m_compactedVisibleClustersBufferSw,
-                    m_compactedVisibleClusterTransformIndicesBufferSw,
+                    swCompactedClustersBuffer,
+                    swCompactedTransformIndicesBuffer,
                     swIndirectArgsBuffer,
-                    m_sortedToUnsortedMappingBufferSw,
+                    swMappingBuffer,
                     reyesOwnershipBitsetBuffer,
                     m_workGraphTelemetryBuffer,
                     m_visibleClusterCapacity,
@@ -1989,9 +2061,9 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
                     true,
                     true)));
 
-        std::shared_ptr<org::Buffer> swRasterClustersBuffer = m_compactedVisibleClustersBufferSw;
-        std::shared_ptr<org::Buffer> swRasterClusterTransformIndicesBuffer = m_compactedVisibleClusterTransformIndicesBufferSw;
-        std::shared_ptr<org::Buffer> swRasterMappingBuffer = m_sortedToUnsortedMappingBufferSw;
+        std::shared_ptr<org::Buffer> swRasterClustersBuffer = swCompactedClustersBuffer;
+        std::shared_ptr<org::Buffer> swRasterClusterTransformIndicesBuffer = swCompactedTransformIndicesBuffer;
+        std::shared_ptr<org::Buffer> swRasterMappingBuffer = swMappingBuffer;
         std::shared_ptr<org::Buffer> swRasterHistogramBuffer = swHistogramBuffer;
         std::shared_ptr<org::Buffer> swRasterIndirectArgsBuffer = swIndirectArgsBuffer;
 
@@ -2019,8 +2091,8 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
                     MakeVariantPassName(traits, "VirtualShadowBlockHistogramPassSW" + phaseSuffix),
                     std::make_shared<VirtualShadowBlockExpandPass>(
                         VirtualShadowBlockExpandMode::Histogram,
-                        m_compactedVisibleClustersBufferSw,
-                        m_compactedVisibleClusterTransformIndicesBufferSw,
+                        swCompactedClustersBuffer,
+                        swCompactedTransformIndicesBuffer,
                         swHistogramBuffer,
                         swIndirectArgsBuffer,
                         blockHistogramBuffer,
@@ -2061,8 +2133,8 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
                     MakeVariantPassName(traits, "VirtualShadowBlockEmitPassSW" + phaseSuffix),
                     std::make_shared<VirtualShadowBlockExpandPass>(
                         VirtualShadowBlockExpandMode::Emit,
-                        m_compactedVisibleClustersBufferSw,
-                        m_compactedVisibleClusterTransformIndicesBufferSw,
+                        swCompactedClustersBuffer,
+                        swCompactedTransformIndicesBuffer,
                         swHistogramBuffer,
                         swIndirectArgsBuffer,
                         blockHistogramBuffer,
@@ -2090,7 +2162,7 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
 
             swRasterClustersBuffer = m_vsmExpandedVisibleClustersBufferSw;
             swRasterClusterTransformIndicesBuffer = m_vsmExpandedVisibleClusterTransformIndicesBufferSw;
-            swRasterMappingBuffer = m_sortedToUnsortedMappingBufferSw;
+            swRasterMappingBuffer = swMappingBuffer;
             swRasterHistogramBuffer = blockHistogramBuffer;
             swRasterIndirectArgsBuffer = blockIndirectArgsBuffer;
         }
@@ -2179,9 +2251,9 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
             std::make_shared<VoxelSoftwareRasterizationPass>(
                     m_visibleClustersBuffer,
                     m_visibleClusterTransformIndicesBuffer,
-                    m_voxelRasterWorkBuffer,
+                    phaseBuffer(m_voxelRasterWorkBuffer, m_voxelRasterWorkBufferPhase2, phaseIndex == 1u),
                     m_voxelRasterWorkCounterBuffer,
-                    m_skinnedVoxelRasterWorkBuffer,
+                    phaseBuffer(m_skinnedVoxelRasterWorkBuffer, m_skinnedVoxelRasterWorkBufferPhase2, phaseIndex == 1u),
                     m_skinnedVoxelRasterWorkCounterBuffer,
                     m_voxelRasterIndirectArgsBuffer,
                     m_skinnedVoxelRasterIndirectArgsBuffer,

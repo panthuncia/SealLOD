@@ -33,7 +33,11 @@
         "RvtAlbedoAtlas": {},
         "RvtNormalAtlas": {},
         "RvtPageKeys": {},
-        "RvtMaterialAtlas": {}
+        "RvtMaterialAtlas": {},
+        "RvtScratchAlbedo": {},
+        "RvtScratchNormal": {},
+        "RvtScratchMaterial": {},
+        "RvtEncodeDispatchArgs": {}
     },
     "PerMaterialDataBuffer": {},
     "PerMaterialOpenPBRDataBuffer": {},

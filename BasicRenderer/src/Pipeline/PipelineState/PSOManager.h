@@ -168,6 +168,12 @@ public:
     // Pipeline cache entries live until Cleanup(); passes may cache references
     // to them keyed on this generation.
     uint64_t PipelineCacheGeneration() const noexcept { return m_asyncPSOGeneration.load(std::memory_order_acquire); }
+    // On-demand variants (TryGetOrRequestPipelineState) requested and not yet compiled, queued ones included.
+    uint32_t PendingAsyncPipelineCount() const noexcept { return m_asyncPSOsPending.load(std::memory_order_acquire); }
+    // Compiles, into the artifact cache, every D3D12 bundle runs have recorded (the compile manifest beside the DXIL
+    // artifacts), dropping those that no longer compile. For an offline tool after the shader sources change. Returns how
+    // many compiled; progress gets (done, total).
+    std::size_t PrecompileRecordedShaderBundles(const std::function<void(std::size_t, std::size_t)>& progress = {});
 
     // Compiles and creates the state object on the calling thread, unless the same recipe was made before. Throws when the
     // primary backend isn't D3D12. It has no peer-backend build: ResolvePipeline leaves it absent, so its pass must stay on
@@ -343,6 +349,7 @@ private:
     ComPtr<ID3D12PipelineState> environmentConversionPSO;
     mutable std::shared_mutex m_cacheMutex; // shared: cache lookups; exclusive: inserts, rebuilds
     std::atomic<uint64_t> m_asyncPSOGeneration = 0;
+    std::atomic<uint32_t> m_asyncPSOsPending = 0;
     mutable std::mutex m_livePipelineMutex;
     std::unordered_map<std::string, LivePipelineEntry> m_livePipelines;
     std::unordered_map<uint64_t, br::diagnostics::LiveJobInfo> m_liveJobs;
@@ -417,6 +424,7 @@ private:
         const uint64_t generation = m_asyncPSOGeneration.load(std::memory_order_acquire);
         // The cache hit above is the per-frame path; only a miss materializes the name.
         const std::string queueTaskName(taskName);
+        m_asyncPSOsPending.fetch_add(1, std::memory_order_acq_rel);
         TaskSchedulerManager::GetInstance().Submit(
             // On-demand variants are explicit static/material publication
             // dependencies. Background priority can starve the final variant
@@ -432,6 +440,10 @@ private:
                 generation,
                 taskName = std::string(taskName),
                 factory = std::forward<TFactory>(factory)]() mutable {
+                struct PendingRelease {
+                    std::atomic<uint32_t>& pending;
+                    ~PendingRelease() { pending.fetch_sub(1, std::memory_order_acq_rel); }
+                } pendingRelease{ m_asyncPSOsPending };
                 try {
                     org::PipelineState pipelineState = factory();
                     pipelineState = RegisterPipeline(

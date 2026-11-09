@@ -146,6 +146,10 @@ bool SaveOpacityMicromaps(const std::wstring& path, const OpacityMicromapFileInf
 
 	std::filesystem::path temporary(path);
 	temporary += L".tmp";
+	// The CLod container beside it may live only in the cache pack, whose build removed the loose folder.
+	if (std::error_code ec; !std::filesystem::create_directories(temporary.parent_path(), ec) && ec) {
+		return Fail(error, "can't create the folder");
+	}
 	{
 		std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
 		if (!file) return Fail(error, "can't create the file");

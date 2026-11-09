@@ -172,6 +172,11 @@ void Renderer::SetSettings() {
         const char* value = std::getenv("SARP_TERRAIN_RVT_REFRESH");
         return !(value && value[0] == '0');
     }());
+    // TerrainRvt::CompressionSettingName: block-compressed RVT atlases. SARP_TERRAIN_RVT_COMPRESSION=0 starts with it off.
+    settingsManager.registerSetting<bool>("terrainRvtCompression", [] {
+        const char* value = std::getenv("SARP_TERRAIN_RVT_COMPRESSION");
+        return !(value && value[0] == '0');
+    }());
     settingsManager.registerSetting<bool>(TerrainRvtTelemetryDebugSettingName, false);
     settingsManager.registerSetting<uint32_t>("terrainRvtDebugView", 0u);
     settingsManager.registerSetting<uint32_t>("terrainRvtPageSize", 128u);
@@ -496,6 +501,17 @@ void Renderer::SetSettings() {
             recipe.Remove<br::pipeline::TerrainRvtTechnique>();
         }
         RequestPipelineReplacement(std::move(recipe));
+        }));
+    // The atlases change format: the pages they hold go with them.
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("terrainRvtCompression", [this](const bool& newValue) {
+        (void)newValue;
+        m_producerPersistentState->InvalidateTerrainRvt();
+        rebuildRenderGraph = true;
+        }));
+    // Sizes the compression scratch.
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("terrainRvtMaxGeneratedPagesPerFrame", [this](const uint32_t& newValue) {
+        (void)newValue;
+        rebuildRenderGraph = true;
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("terrainRvtPageSize", [this](const uint32_t& newValue) {
         (void)newValue;

@@ -4,7 +4,7 @@
 // rayTracingSceneBuild.hlsl), with a multiplier of 1 because records are laid out in that order.
 //
 // Recursion depth is 1. A closest hit evaluates the material, samples the BSDF and one light, and returns the next ray and an
-// unoccluded light contribution. Ray generation traces that shadow ray itself, so shading never holds traversal state.
+// unoccluded light contribution. Ray generation traces that shadow ray itself, inline, so shading never holds traversal state.
 //
 // Alpha tests use one fixed mip per texture, which opacity micromaps are baked against: see clodRayTracingAlpha.hlsli.
 #define CLOD_RT_FIXED_ALPHA_MIP 1
@@ -12,6 +12,16 @@
 #include "include/clodRayTracingHits.hlsli"
 #include "include/pathTracingBsdf.hlsli"
 #include "include/pathTracingLights.hlsli"
+#include "include/pathTracingWatch.hlsli"
+
+// Cost breakdown only (PATH_TRACE_EXPERIMENT, pathTracingHit.hlsli): 3 skips every alpha test, 5 those of hierarchy roots'
+// instances (merged geometry, whose templates have a material palette), treating the candidate as opaque.
+bool PathTraceSkipAlphaTest(uint instanceID)
+{
+    if (PATH_TRACE_EXPERIMENT == 3) return true;
+    if (PATH_TRACE_EXPERIMENT == 5) return CLodTemplateHasPalette(LoadMeshTemplateForDrawRecord(LoadInstanceDrawRecord(CLodRtInstanceDraw(instanceID))));
+    return false;
+}
 
 // Payload access qualifiers aren't used, and the library compiles with -disable-payload-qualifiers: the engine's shader
 // preprocessor can't parse them, and without a clean parse it can't prune descriptor names, which have a limit of 64.
@@ -103,6 +113,20 @@ void PathTraceRayGen()
     const float pixelSpread = CLodRtPixelConeSpread(camera, float(perFrame.screenResY));
     float coneSpread = pixelSpread;
     const uint maxBounces = CLOD_RT_PT_MAX_BOUNCES;
+    // Pixel watch: the bounce that added most, and how the primary hit went.
+    const bool watch = PathWatchEnabled();
+    float watchTopLuminance = -1.0f;
+    uint watchTopBounce = 0u;
+    uint4 watchTopIds = 0u.xxxx;
+    float3 watchTopEmitted = 0.0f.xxx;
+    float3 watchTopDirect = 0.0f.xxx;
+    float watchTopThroughput = 0.0f;
+    bool watchPrimaryTerrain = false;
+    uint4 watchPrimaryIds = 0u.xxxx;
+    float watchPrimaryT = 0.0f;
+    uint watchPrimaryFlags = 0u;
+    float watchPrimaryThroughput = 0.0f;
+    bool watchHitSomething = false;
     for (uint bounce = 0u; bounce < maxBounces; ++bounce) {
         PathTracePayload payload = (PathTracePayload)0;
         payload.rngState = rng.state;
@@ -127,19 +151,54 @@ void PathTraceRayGen()
         rng.increment = payload.rngIncrement;
 
         float3 contribution = payload.emitted;
-        if (payload.shadowTMax > 0.0f) {
+        bool watchShadowVisible = false;
+        if (payload.shadowTMax > 0.0f && PATH_TRACE_EXPERIMENT != 2) {
             RayDesc shadowRay;
             shadowRay.Origin = payload.nextOrigin;
             shadowRay.Direction = PathTraceUnpackDirection(payload.shadowDirection);
             shadowRay.TMin = 0.0f;
             shadowRay.TMax = payload.shadowTMax;
-            PathTraceShadowPayload shadowPayload = (PathTraceShadowPayload)0;
-            shadowPayload.occluded = 1.0f;
-            shadowPayload.alphaConeSpread = pixelSpread;
             const uint shadowOmmFlags = (CLOD_RT_PT_FLAGS & CLOD_RT_PT_FLAG_OMM_2_STATE_SECONDARY) != 0u ? RAY_FLAG_FORCE_OMM_2_STATE : 0u;
-            TraceRay(scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER | shadowOmmFlags, 0xFFu, 1u, 1u, 1u, shadowRay, shadowPayload);
-            if (shadowPayload.occluded == 0.0f) {
+            // Inline, with alpha candidates tested here: through TraceRay, each one called the shadow any-hit through the shader
+            // table, which measured 0.6 ms slower of 14.8 at the saved camera. The shadow hit groups and miss shader stay in the
+            // table only so the terrain instances' hit group offset keeps its meaning.
+            // 3: RAYQUERY_FLAG_ALLOW_OPACITY_MICROMAPS | RAYQUERY_FLAG_ALLOW_CLUSTERED_GEOMETRY.
+            RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES, 3> shadowQuery;
+            shadowQuery.TraceRayInline(scene, shadowOmmFlags, 0xFFu, shadowRay);
+            while (shadowQuery.Proceed()) {
+                if (shadowQuery.CandidateType() == CANDIDATE_NON_OPAQUE_TRIANGLE) {
+                    StructuredBuffer<CLodRtClasInfo> clasInfo = ResourceDescriptorHeap[CLOD_RT_SEC_CLAS_INFO_SRV];
+                    if (PathTraceSkipAlphaTest(shadowQuery.CandidateInstanceID()) || !CLodRtCandidateIsTransparent(clasInfo, shadowQuery.CandidateInstanceID(), shadowQuery.CandidateInstanceIndex(),
+                            shadowQuery.CandidateClusterID(), shadowQuery.CandidatePrimitiveIndex(), shadowQuery.CandidateTriangleBarycentrics(),
+                            shadowRay.Direction, shadowQuery.CandidateTriangleRayT(), pixelSpread)) {
+                        shadowQuery.CommitNonOpaqueTriangleHit();
+                    }
+                }
+            }
+            if (shadowQuery.CommittedStatus() == COMMITTED_NOTHING) {
                 contribution += payload.unoccluded;
+                watchShadowVisible = true;
+            }
+        }
+        if (watch && hit.IsHit()) {
+            const uint4 ids = uint4(hit.GetInstanceID(), hit.GetInstanceIndex(), 0xFFFFFFFFu, hit.GetPrimitiveIndex());
+            if (bounce == 0u) {
+                watchHitSomething = true;
+                // Hit groups: 0 general radiance, 2 terrain radiance (the table order in PathTracePass.h).
+                watchPrimaryTerrain = hit.GetShaderTableIndex() == 2u;
+                watchPrimaryIds = ids;
+                watchPrimaryT = hit.GetRayTCurrent();
+                watchPrimaryFlags = (payload.hitT < 0.0f ? 1u : 0u) | (payload.shadowTMax > 0.0f ? 2u : 0u) | (watchShadowVisible ? 4u : 0u);
+                watchPrimaryThroughput = PathTraceLuminance(payload.weight);
+            }
+            const float added = PathTraceLuminance(contribution * throughput);
+            if (added > watchTopLuminance) {
+                watchTopLuminance = added;
+                watchTopBounce = bounce;
+                watchTopIds = ids;
+                watchTopEmitted = payload.emitted * throughput;
+                watchTopDirect = watchShadowVisible ? payload.unoccluded * throughput : 0.0f.xxx;
+                watchTopThroughput = PathTraceLuminance(throughput);
             }
         }
         contribution *= throughput;
@@ -152,7 +211,7 @@ void PathTraceRayGen()
         }
         radiance += contribution;
 
-        if (payload.hitT < 0.0f) {
+        if (payload.hitT < 0.0f || PATH_TRACE_EXPERIMENT == 4) {
             break;
         }
         throughput *= payload.weight;
@@ -173,6 +232,22 @@ void PathTraceRayGen()
 
     if (any(isnan(radiance)) || any(isinf(radiance))) {
         radiance = 0.0f.xxx;
+        if (watch) PathWatchCount(CLOD_RT_WATCH_NON_FINITE);
+    }
+    if (watch && watchHitSomething) {
+        const float luminance = PathTraceLuminance(radiance);
+        if (luminance > 1.0f) {
+            PathWatchMaxLuminance(luminance); // Only bright pixels contend for the word.
+        }
+        if (luminance > asfloat(CLOD_RT_PT_WATCH_BRIGHT)) {
+            PathWatchRecord(CLOD_RT_WATCH_BRIGHT_PIXEL, watchTopBounce, 0u, pixel, watchTopIds, asuint(watchTopThroughput),
+                asuint(radiance), asuint(watchTopEmitted), asuint(watchTopDirect));
+        }
+        if (watchPrimaryTerrain && luminance < 1e-3f) {
+            RWTexture2D<float4> baseColor = ResourceDescriptorHeap[CLOD_RT_PT_BASE_COLOR_UAV];
+            PathWatchRecord(CLOD_RT_WATCH_DARK_TERRAIN_PIXEL, 0u, watchPrimaryFlags, pixel, watchPrimaryIds, 0u,
+                asuint(radiance), asuint(baseColor[pixel].rgb), asuint(float3(watchPrimaryT, watchPrimaryThroughput, watchTopLuminance)));
+        }
     }
 
     RWTexture2D<float4> output = ResourceDescriptorHeap[CLOD_RT_SEC_OUTPUT_UAV];
@@ -264,6 +339,13 @@ void PathTraceShadeHit(inout PathTracePayload payload, BuiltInTriangleIntersecti
     if (!CLodResolvePathHit(InstanceID(), InstanceIndex(), ClusterID(), PrimitiveIndex(), attributes.barycentrics, HitKind() == HIT_KIND_TRIANGLE_FRONT_FACE,
             position, rayDirection, coneWidth, isPrimary, isTerrain, hit)) {
         payload.hitT = -1.0f;
+        if (PathWatchEnabled()) {
+            StructuredBuffer<CLodRtClasInfo> clasInfo = ResourceDescriptorHeap[CLOD_RT_SEC_CLAS_INFO_SRV];
+            const CLodRtClasInfo info = clasInfo[ClusterID()];
+            PathWatchRecord(CLOD_RT_WATCH_RESOLVE_FAILED, payload.bounce, g_clodPathHitFailure | (isTerrain ? CLOD_RT_WATCH_TERRAIN : 0u),
+                DispatchRaysIndex().xy, uint4(InstanceID(), InstanceIndex(), ClusterID(), PrimitiveIndex()), g_clodPathHitFailureDetail,
+                uint3(info.slabDescriptor, info.pageOffsetUnits, info.localMeshlet), uint3(info.groupLocalIndex, asuint(t), 0u), asuint(position));
+        }
         return;
     }
     FragmentInfo fragment;
@@ -328,6 +410,51 @@ void PathTraceShadeHit(inout PathTracePayload payload, BuiltInTriangleIntersecti
 
     payload.rngState = rng.state;
     payload.rngIncrement = rng.increment;
+
+    if (PathWatchEnabled() && isPrimary && payload.shadowTMax <= 0.0f && payload.hitT < 0.0f) {
+        // misc: 1 the light sample was valid, 2 no lobe has weight, 4 a lobe weight isn't finite, 8 the light's BSDF value
+        // isn't finite, 16 the normal isn't finite, 32 the light's radiance or pdf isn't finite.
+        const float3 lightValue = light.valid ? PathBsdfEval(context, light.direction) : 0.0f.xxx;
+        const uint why = (light.valid ? 1u : 0u) | (all(context.lobeProbabilities == 0.0f) ? 2u : 0u)
+            | (!all(isfinite(context.lobeProbabilities)) ? 4u : 0u) | (!PathWatchFinite3(lightValue) ? 8u : 0u)
+            | (!PathWatchFinite3(context.normal) ? 16u : 0u) | (!all(isfinite(float4(light.radiance, light.pdf))) ? 32u : 0u);
+        PathWatchRecord(CLOD_RT_WATCH_PRIMARY_ENDED, 0u, isTerrain ? CLOD_RT_WATCH_TERRAIN : 0u, DispatchRaysIndex().xy,
+            uint4(InstanceID(), InstanceIndex(), ClusterID(), PrimitiveIndex()), why,
+            asuint(float3(context.normDotView, context.specularAlpha, t)),
+            asuint(float3(light.valid ? dot(context.normal, light.direction) : -2.0f, light.valid ? dot(context.geometricNormal, light.direction) : -2.0f,
+                PathTraceLuminance(lightValue))),
+            asuint(context.lobeProbabilities.xyz));
+    }
+
+    if (PathWatchEnabled()) {
+        const MaterialInputs m = hit.materialInputs;
+        uint bad = 0u;
+        if (!PathWatchFinite3(m.albedo)) bad |= CLOD_RT_WATCH_ALBEDO_NON_FINITE;
+        else if (any(m.albedo > 1.001f) || any(m.albedo < 0.0f)) bad |= CLOD_RT_WATCH_ALBEDO_RANGE;
+        if (!PathWatchFinite3(m.emissive)) bad |= CLOD_RT_WATCH_EMISSIVE_NON_FINITE;
+        else if (PathTraceLuminance(m.emissive) > CLOD_RT_WATCH_EMISSIVE_LIMIT) bad |= CLOD_RT_WATCH_EMISSIVE_HUGE;
+        if (!all(isfinite(float4(m.roughness, m.metallic, m.coatWeight, m.fuzzWeight)))) bad |= CLOD_RT_WATCH_SCALAR_NON_FINITE;
+        if (!PathWatchFinite3(m.normalWS) || dot(m.normalWS, m.normalWS) < 0.25f) bad |= CLOD_RT_WATCH_NORMAL_BAD;
+        if (payload.hitT >= 0.0f) {
+            if (!PathWatchFinite3(payload.weight)) bad |= CLOD_RT_WATCH_WEIGHT_NON_FINITE;
+            else if (PathTraceLuminance(payload.weight) > CLOD_RT_WATCH_WEIGHT_LIMIT) bad |= CLOD_RT_WATCH_WEIGHT_HUGE;
+        }
+        if (payload.shadowTMax > 0.0f) {
+            if (!PathWatchFinite3(payload.unoccluded)) bad |= CLOD_RT_WATCH_DIRECT_NON_FINITE;
+            else if (PathTraceLuminance(payload.unoccluded) > asfloat(CLOD_RT_PT_WATCH_BRIGHT)) bad |= CLOD_RT_WATCH_DIRECT_HUGE;
+        }
+        const uint4 ids = uint4(InstanceID(), InstanceIndex(), ClusterID(), PrimitiveIndex());
+        if (bad != 0u) {
+            PathWatchRecord(CLOD_RT_WATCH_BAD_MATERIAL, payload.bounce, bad | (isTerrain ? CLOD_RT_WATCH_TERRAIN : 0u), DispatchRaysIndex().xy, ids,
+                m.openPBRMaterialDataIndex, asuint(m.albedo), asuint(m.emissive),
+                asuint(float3(m.roughness, m.metallic, PathTraceLuminance(payload.hitT >= 0.0f ? payload.weight : payload.unoccluded))));
+        }
+        if (isPrimary && isTerrain && PathTraceLuminance(m.albedo) < 0.005f) {
+            PathWatchRecord(CLOD_RT_WATCH_DARK_TERRAIN_ALBEDO, 0u, m.terrainRvtFallbackReason & 0xFFFFu, DispatchRaysIndex().xy, ids,
+                m.terrainRvtDebugFlags, asuint(m.albedo), uint3(m.terrainRvtRequestedMip, m.terrainRvtResidentMip, m.terrainRvtPageTableIndex),
+                uint3(m.terrainRvtPhysicalPageIndex, m.terrainRvtAtlasPoolIndex, asuint(t)));
+        }
+    }
 }
 
 [shader("closesthit")]
@@ -345,6 +472,7 @@ void PathTraceTerrainClosestHit(inout PathTracePayload payload, BuiltInTriangleI
 // Instances without alpha-tested materials are forced opaque when the TLAS is built, so these run only for alpha.
 bool PathTraceHitIsTransparent(BuiltInTriangleIntersectionAttributes attributes, float coneSpread)
 {
+    if (PathTraceSkipAlphaTest(InstanceID())) return false;
     StructuredBuffer<CLodRtClasInfo> clasInfo = ResourceDescriptorHeap[CLOD_RT_SEC_CLAS_INFO_SRV];
     return CLodRtCandidateIsTransparent(clasInfo, InstanceID(), InstanceIndex(), ClusterID(), PrimitiveIndex(), attributes.barycentrics, WorldRayDirection(), RayTCurrent(), coneSpread);
 }

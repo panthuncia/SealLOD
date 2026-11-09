@@ -763,6 +763,8 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     reyesMaterialInfo.reyesUvDensity = materialInfo.reyesUvDensity;
     reyesMaterialInfo.objectSurfaceTexelDensity = materialInfo.objectSurfaceTexelDensity;
     reyesMaterialInfo.objectSurfaceSamplingMode = materialInfo.objectSurfaceSamplingMode;
+    reyesMaterialInfo.uvTransformLinearDelta = materialInfo.uvTransformLinearDelta;
+    reyesMaterialInfo.uvTransformOffset = materialInfo.uvTransformOffset;
 #endif
     uint materialFlags = materialInfo.materialFlags;
     const float reyesObjectNormalMapBlend = isReyesPatch

@@ -296,6 +296,12 @@ void Renderer::Cleanup() {
 	spdlog::info("Cleanup complete");
 }
 
+void Renderer::PrewarmStreamline() {
+    if (!br::runtime::renderer_settings::IsStreamlineDisabledByEnvironment()) {
+        rhi::PrewarmD3D12Streamline();
+    }
+}
+
 void Renderer::Initialize(
     HWND hwnd,
     UINT x_res,
@@ -743,6 +749,10 @@ void Renderer::Initialize(
     m_pEnvironmentManager->SetBc6hCompressor([factory = m_pTextureFactory.get()](std::shared_ptr<TextureSourceData> source,
         std::string name, std::function<void(std::shared_ptr<TextureSourceData>)> done) {
         return factory->SubmitBC6HCompressionJob(std::move(source), std::move(name), std::move(done));
+    });
+    // Only after an environment's first launch: later ones load the BC6H cache before the graph is built.
+    m_pEnvironmentManager->SetPrefilteredCubemapReplacedFn([this](const Environment* environment) {
+        if (m_currentEnvironment && m_currentEnvironment.get() == environment) rebuildRenderGraph = true;
     });
     if (currentRenderGraph) {
         m_pTextureFactory->SetReadbackService(m_orgRuntime->Readbacks());
