@@ -19,6 +19,7 @@ CLodStreamingBeginFramePass::CLodStreamingBeginFramePass(
     std::shared_ptr<org::Buffer> loadCounter,
     std::shared_ptr<org::Buffer> loadRequestKeys,
     std::shared_ptr<org::Buffer> usedGroupsCounter,
+    std::shared_ptr<org::Buffer> usedGroupsBits,
     std::shared_ptr<org::Buffer> sourceGroupMismatchCounter,
     std::shared_ptr<org::Buffer> runtimeState,
     std::function<bool(std::vector<uint32_t>&, uint32_t&, org::UploadInstance*)> queueNonResidentBitsUpload,
@@ -28,6 +29,7 @@ CLodStreamingBeginFramePass::CLodStreamingBeginFramePass(
     : m_loadCounter(std::move(loadCounter))
     , m_loadRequestKeys(std::move(loadRequestKeys))
     , m_usedGroupsCounter(std::move(usedGroupsCounter))
+    , m_usedGroupsBits(std::move(usedGroupsBits))
     , m_sourceGroupMismatchCounter(std::move(sourceGroupMismatchCounter))
     , m_runtimeState(std::move(runtimeState))
     , m_queueNonResidentBitsUpload(std::move(queueNonResidentBitsUpload))
@@ -44,7 +46,8 @@ CLodStreamingBeginFrameBindings CLodStreamingBeginFramePass::Declare(org::PassBu
         builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
             L"ClearUintStructuredBufferCSMain", "CLodStreamingBeginFrameClearUint")),
         builder.UnorderedAccess(m_loadCounter),
-        builder.UnorderedAccess(m_loadRequestKeys), builder.UnorderedAccess(m_usedGroupsCounter)};
+        builder.UnorderedAccess(m_loadRequestKeys), builder.UnorderedAccess(m_usedGroupsCounter),
+        builder.UnorderedAccess(m_usedGroupsBits)};
     builder.UnorderedAccess(m_runtimeState);
     if (m_sourceGroupMismatchCounter) {
         bindings.sourceMismatchCounter = builder.UnorderedAccess(m_sourceGroupMismatchCounter);
@@ -129,6 +132,7 @@ void CLodStreamingBeginFramePass::Record(const CLodStreamingBeginFrameBindings& 
     };
     clear(bindings.loadCounter, 0u, 1u);
     clear(bindings.usedGroupsCounter, 0u, 1u);
+    clear(bindings.usedGroupsBits, 0u, CLodTouchedGroupBitsWordCount);
     if (bindings.hasSourceMismatchCounter) clear(bindings.sourceMismatchCounter, 0u, 1u);
     clear(bindings.loadRequestKeys, 0xffffffffu, CLodStreamingRequestCapacity);
 }

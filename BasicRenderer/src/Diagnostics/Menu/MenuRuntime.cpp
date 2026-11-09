@@ -473,6 +473,11 @@ void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     m_clodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld = getCLodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld();
     observerSetting(m_clodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld, CLodDirectionalVirtualShadowSmrtMaxTraceDistanceWorldSettingName);
 
+    getCLodDirectionalVirtualShadowSmrtMaxLateralTexels = settingsManager.getSettingGetter<float>(CLodDirectionalVirtualShadowSmrtMaxLateralTexelsSettingName);
+    setCLodDirectionalVirtualShadowSmrtMaxLateralTexels = settingsManager.getSettingSetter<float>(CLodDirectionalVirtualShadowSmrtMaxLateralTexelsSettingName);
+    m_clodDirectionalVirtualShadowSmrtMaxLateralTexels = getCLodDirectionalVirtualShadowSmrtMaxLateralTexels();
+    observerSetting(m_clodDirectionalVirtualShadowSmrtMaxLateralTexels, CLodDirectionalVirtualShadowSmrtMaxLateralTexelsSettingName);
+
     getCLodDirectionalVirtualShadowReceiverTraceEnabled = settingsManager.getSettingGetter<bool>(CLodDirectionalVirtualShadowReceiverTraceEnabledSettingName);
     setCLodDirectionalVirtualShadowReceiverTraceEnabled = settingsManager.getSettingSetter<bool>(CLodDirectionalVirtualShadowReceiverTraceEnabledSettingName);
     m_clodDirectionalVirtualShadowReceiverTraceEnabled = getCLodDirectionalVirtualShadowReceiverTraceEnabled();
@@ -1400,6 +1405,18 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
             setCLodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld(
                 m_clodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld);
         }
+        if (ImGui::SliderFloat(
+                "Directional VSM SMRT Max Lateral Drift (shadow texels)",
+                &m_clodDirectionalVirtualShadowSmrtMaxLateralTexels,
+                1.0f,
+                256.0f,
+                "%.1f",
+                ImGuiSliderFlags_Logarithmic)) {
+            m_clodDirectionalVirtualShadowSmrtMaxLateralTexels =
+                std::max(m_clodDirectionalVirtualShadowSmrtMaxLateralTexels, 1.0f);
+            setCLodDirectionalVirtualShadowSmrtMaxLateralTexels(
+                m_clodDirectionalVirtualShadowSmrtMaxLateralTexels);
+        }
         ImGui::SeparatorText("Adaptive Receiver Screen Trace");
         if (ImGui::Checkbox(
                 "Enable VSM Receiver Screen Trace",
@@ -1944,7 +1961,8 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
                 const auto& record = group.representative;
                 spdlog::info(
                     "Memory diagnostics resource_group: frame={} rank={} total_bytes={} allocation_bytes={} count={} "
-                    "type={} usage='{}' name='{}' identifier='{}' width={} height={} mips={} array={} format={} aliased={}",
+                    "type={} usage='{}' name='{}' identifier='{}' width={} height={} mips={} array={} format={} aliased={} "
+                    "owner='{}' heap={} in_alias_pool={}",
                     memoryAccountingFrame,
                     rank,
                     group.bytes,
@@ -1959,7 +1977,10 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
                     record.mipLevels,
                     record.arraySize,
                     static_cast<uint32_t>(record.format),
-                    record.aliased);
+                    record.aliased,
+                    record.owner,
+                    static_cast<uint32_t>(record.heapType),
+                    record.placedInAliasPool);
             }
         }
     }

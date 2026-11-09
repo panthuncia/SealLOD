@@ -228,6 +228,7 @@ ComputeCullingBindings ComputeCullingPass::Declare(org::PassBuilder& builder)
     bindings.isFirstPass = m_config.isFirstPass;
     bindings.perViewDepthOcclusion = m_config.UsesPerViewDepthOcclusion();
     bindings.rtCoarseCut = m_config.rtCoarseCutDescriptor;
+    if (m_config.rtCoarseCut) builder.UnorderedAccess(m_config.rtCoarseCut); // Persistent: its own descriptor is the one bound.
     const auto uav = [&](const auto& resource) { return builder.UnorderedAccess(resource).View(); };
     bindings.visibleClusters = uav(outputs.visibleClusters);
     bindings.visibleClusterTransformIndices = uav(outputs.visibleClusterTransformIndices);
@@ -255,7 +256,8 @@ ComputeCullingBindings ComputeCullingPass::Declare(org::PassBuilder& builder)
         Builtin::CLod::StreamingLoadRequests,
         Builtin::CLod::StreamingLoadCounter,
         Builtin::CLod::StreamingTouchedGroupsCounter,
-        Builtin::CLod::StreamingTouchedGroups);
+        Builtin::CLod::StreamingTouchedGroups,
+        Builtin::CLod::StreamingTouchedGroupsBits);
     builder.ShaderResource(
         Builtin::IndirectCommandBuffers::Master,
         Builtin::CLod::Offsets,

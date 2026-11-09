@@ -151,9 +151,15 @@
       "OutputAOTerm": {}
     },
     "RayTracing": {
+      "BlasData": {},
+      "ClasInfo": {},
+      "ClasPool": {},
+      "InstanceRows": {},
+      "MicromapArrays": {},
       "SpecularAlbedo": {},
       "SpecularHitDistance": {},
-      "SunShadow": {}
+      "SunShadow": {},
+      "Tlas": {}
     },
     "Shadows": {
       "CLodClipmapInfo": {},

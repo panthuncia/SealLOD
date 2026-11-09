@@ -10,9 +10,11 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <tuple>
 #include <vector>
 
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include "Render/ResourceUseDeclaration.h"
 #include "Render/PipelineState.h"
 #include <BasicRenderer/Streaming/TaskScheduler.h>
 #include <rhi.h>
@@ -20,8 +22,7 @@
 class MeshManager;
 class PagePool;
 namespace CLodCache { class OpacityMicromapFile; }
-namespace org { class Buffer; }
-namespace org { class RecordingContext; }
+namespace org { class Buffer; class RecordingContext; class RenderGraph; class RenderPassBuilder; class ResourceGroup; }
 
 namespace br::render {
 
@@ -48,21 +49,29 @@ namespace br::render {
 // A cluster's CLAS ID (slot) indexes the tables of CLAS addresses and hit information. BLASes and the TLAS are rebuilt
 // from the RT view's cluster list each frame.
 //
-// Its GPU resources are private and not tracked by the render graph. They're created once at their limits, and the
-// passes that record through this class do their own barriers.
+// Its buffers are render graph buffers, created once at their limits. The persistent ones keep their memory, address and
+// descriptors for the system's life (the GPU stores CLAS and BLAS addresses into them); the ones rebuilt each frame are
+// placed by the graph. Every pass that touches one declares it (the Declare* functions here), so the graph orders those
+// passes and makes every barrier between them. Within a pass, the recording functions sync only between their own
+// dispatches and acceleration structure operations, and a buffer the pass leaves in another state than it declared has
+// that state declared as an internal transition.
 class CLodRayTracingSystem {
 public:
     struct Limits {
-        // The cache, in 8 KiB pages: its one size setting. SARP_RT_CLAS_POOL_MB overrides it.
-        uint64_t clasPoolBytes = 768ull * 1024ull * 1024ull; // An r100 flight's working set is about 730 MiB.
+        // The cache, in 8 KiB pages: its one size setting. Zero sizes it from the device's memory budget, a sixth of it
+        // within [768 MiB, 2 GiB]: an r100 flight's working set is about 730 MiB, Zorah's 1.6 GiB. SARP_RT_CLAS_POOL_MB
+        // overrides it.
+        uint64_t clasPoolBytes = 0;
         uint32_t maxClasSlots = 1u << 21; // Cached CLAS IDs, in chunks of 32.
         uint32_t maxEntries = 1u << 17; // Cached groups; r100 caches about 46k.
         // Sized from SaveLab peaks (docs/merge_hierarchies.md, "VRAM"); overflow drops work and the stats log counts it.
         // What the RT view may select. Far more than the BLASes reference, because instances with the same cut share one.
         // It also sizes the RT view's traversal frontiers and visible cluster buffers (36 B per cluster in all). Merged
-        // scenes peak at 0.58M (r100); an unmerged r100 scene needs 4.3M: SARP_RT_MAX_LIST_CLUSTERS overrides it.
-        uint32_t maxClustersInBvh = 1u << 21;
-        uint32_t maxClusterReferences = 1u << 19; // Clusters across all distinct BLASes. Peak 229k.
+        // scenes peak at 0.58M (r100), Zorah at 2.8M; an unmerged r100 scene needs 4.3M: SARP_RT_MAX_LIST_CLUSTERS overrides it.
+        uint32_t maxClustersInBvh = 1u << 22;
+        // Clusters across all distinct BLASes: about 160 B each with the BLAS batch and its scratch. Peak 229k (r100),
+        // 770k (Zorah); past it BLASes are truncated. SARP_RT_MAX_CLUSTER_REFERENCES overrides it.
+        uint32_t maxClusterReferences = 1u << 20;
         uint32_t maxBlases = 1u << 15; // Peak 16k.
         // TLAS rows: 330 B each with the TLAS and its scratch. Peak 324k merged (r100); an unmerged r100 scene needs 552k:
         // SARP_RT_MAX_INSTANCES overrides it.
@@ -176,11 +185,6 @@ public:
         bool comparisonValid = false;
     };
 
-    // The RT view's culling never consults the CLAS cache: the cache is driven by the cluster list culling produces.
-    struct CullingDescriptors {
-        uint32_t coarseCut = 0;
-    };
-
     struct ScenePipelines {
         org::PipelineState clear, resetDraws, count, allocate, addCoarseConsumers, allocateFinish, place, writeInstances;
         org::PipelineState cacheInit, cacheCollect, cacheOmmRetire, cacheEvict, cacheAdmit, cacheAssign, cacheArgs, cachePack, cacheEnd;
@@ -209,8 +213,27 @@ public:
     // Creates everything at its limits. Safe to call repeatedly; false when the device can't do clusters.
     bool EnsureInitialized(rhi::Device device, const RayTracingFeatureInfo& features);
     bool IsInitialized() const noexcept { return m_stats.initialized; }
-    CullingDescriptors GetCullingDescriptors() const noexcept;
     VisibilityDescriptors GetVisibilityDescriptors() const noexcept;
+
+    // ---- Render graph declarations, one per kind of pass that uses this system's buffers.
+    // What passes that trace the scene read: the TLAS, and through it the BLAS batch, the CLAS pool and micromap arrays,
+    // plus the CLAS info and instance rows hits read. By name, for passes made without the system.
+    static void DeclareTracing(org::RenderPassBuilder& builder);
+    // The names DeclareTracing declares. Once the graph exists, before its passes are declared.
+    void RegisterGraphResources(org::RenderGraph& graph);
+    // The scene build's passes, in this order.
+    void DeclareSceneClas(org::RenderPassBuilder& builder) const;
+    void DeclareSceneBlas(org::RenderPassBuilder& builder) const;
+    // Returns the TLAS rows' view: a placed buffer, whose descriptor is the recording's to give.
+    org::DeclaredViewToken DeclareSceneTlas(org::RenderPassBuilder& builder) const;
+    // Raytraced visibility, which clears the hash (and the comparison, which it then reads back when readStats).
+    void DeclareVisibility(org::RenderPassBuilder& builder, bool readStats) const;
+    // The path trace pass's pixel watch, when it's on.
+    void DeclarePixelWatch(org::RenderPassBuilder& builder) const;
+    // The RT view's culling writes which coarse clusters stand in for others; the BLAS pass reads it, the TLAS pass clears it.
+    // The culling pass declares it as unordered access.
+    std::shared_ptr<org::Buffer> GetCoarseCut() const;
+    uint32_t GetCoarseCutUav() const noexcept { return m_coarseCut.uav; }
 
     // Once per frame, before recording and after AdvanceFrame: reads back statistics, and records new page slabs in the
     // slab address table. Constant time apart from new slabs.
@@ -219,8 +242,18 @@ public:
     void Shutdown();
     ~CLodRayTracingSystem();
 
-    // Keeps the CLAS cache, then records BLASes and the TLAS. clusters and counter are the RT view's culling output.
-    void RecordSceneBuild(org::RecordingContext& recording, const ScenePipelines& pipelines, uint32_t clustersSrv, uint32_t sideBandSrv, uint32_t counterSrv, uint32_t clusterCapacity);
+    // The scene build, in three passes ordered by what they write and read. Each stage's scratch is graph memory live only
+    // in its pass, so the stages share it. clusters and counter are the RT view's culling output; a stage that doesn't read
+    // an input leaves it 0.
+    struct SceneInputs {
+        uint32_t clustersSrv = 0, sideBandSrv = 0, counterSrv = 0, clusterCapacity = 0, tlasInstancesUav = 0;
+    };
+    // Counts what the cluster list needs and keeps the CLAS cache: builds into the arena, then moves into the pool.
+    void RecordSceneClas(org::RecordingContext& recording, const ScenePipelines& pipelines, const SceneInputs& inputs);
+    // Groups clusters by instance and builds the BLASes into the BLAS data.
+    void RecordSceneBlas(org::RecordingContext& recording, const ScenePipelines& pipelines, const SceneInputs& inputs);
+    // Writes the instance rows, builds the TLAS, and copies out what the CPU reads back.
+    void RecordSceneTlas(org::RecordingContext& recording, const ScenePipelines& pipelines, const SceneInputs& inputs);
     void RecordVisibilityBegin(org::RecordingContext& recording, const org::PipelineState& clearPipeline, bool clearStats);
     void RecordVisibilityEnd(org::RecordingContext& recording, bool readStats);
     // Pixel watch (SARP_RT_PIXEL_WATCH=<luminance>): the path trace pass clears it before tracing and reads it back after.
@@ -249,21 +282,30 @@ public:
     uint32_t GetPrimaryVisibleClusterCapacity() const noexcept { return m_primaryVisibleClusterCapacity; }
 
 private:
-    struct RawBuffer {
-        rhi::ResourcePtr resource;
+    // A persistent render graph buffer, with what the recording needs of it: its views' descriptor indices, its address,
+    // and its mapping for host-visible heaps. All fixed for the system's life.
+    struct GraphBuffer {
+        std::shared_ptr<org::Buffer> buffer;
         uint64_t bytes = 0;
         uint64_t address = 0;
         uint32_t srv = 0;
         uint32_t uav = 0;
         uint8_t* mapped = nullptr;
-        rhi::ResourceHandle Handle() const { return resource->GetHandle(); }
+        rhi::ResourceHandle Handle() const;
+        explicit operator bool() const noexcept { return static_cast<bool>(buffer); }
     };
+    // Every buffer CreateBuffer made: name, bytes and heap, for the memory log.
+    std::vector<std::tuple<std::string, uint64_t, rhi::HeapType>> m_allocations;
     enum class View : uint8_t { None, Raw, Structured };
-    bool CreateBuffer(RawBuffer& out, uint64_t bytes, rhi::HeapType heap, rhi::ResourceFlags flags, const char* name, View view = View::None, uint32_t stride = 0);
+    // High: over budget, the OS demotes what it likes, and the per-instance reads here get about twenty times slower.
+    bool CreateBuffer(GraphBuffer& out, uint64_t bytes, rhi::HeapType heap, rhi::ResourceFlags flags, const char* name, View view = View::None, uint32_t stride = 0,
+        bool highPriority = false);
     void RecordCache(org::RecordingContext& recording, const ScenePipelines& pipelines);
     MiscConstants CacheConstants() const;
+    MiscConstants SceneConstants(const SceneInputs& inputs) const;
+    void RecordSceneClear(org::RecordingContext& recording, const ScenePipelines& pipelines, const GraphBuffer& buffer, uint64_t bytes);
+    void SceneStamp(rhi::CommandList& commands, uint32_t index);
     uint32_t ArenaSlot() const noexcept { return m_frame % m_transientSlices; }
-    void RecordSlabAddresses(rhi::CommandList& commands);
     void LogStats();
 
     // ---- Opacity micromaps (CPU side).
@@ -321,6 +363,9 @@ private:
     // Loaded micromaps into this frame's upload, table and rebuild list.
     void StageOmmLoads();
     bool InsertOmmEntry(uint32_t group, const std::array<uint32_t, 4>& entry);
+    // The micromap array and index pools (192 MiB at the defaults), made when the first group with micromaps loads: a
+    // scene baked without them never pays for them. Their scratch is placed by the graph.
+    bool EnsureOmmPools();
     bool OmmArraySize(const std::array<uint32_t, 13>& levelCounts, uint64_t& resultBytes, uint64_t& scratchBytes);
     void RecordOmmUploads(rhi::CommandList& commands);
     uint64_t SliceOffset(uint64_t sliceBytes, uint32_t slice) const noexcept { return sliceBytes * slice; }
@@ -335,24 +380,36 @@ private:
     bool m_tlasBuilt = false;
     uint32_t m_clusterInfoStride = 0;
 
-    RawBuffer m_clasPool, m_clasInfo, m_clasAddresses, m_slotOmmKeys, m_blasOmmKeys;
+    GraphBuffer m_clasPool, m_clasInfo, m_clasAddresses, m_slotOmmKeys, m_blasOmmKeys;
     // The cache (clodRayTracingCache.hlsli).
-    RawBuffer m_groupState, m_cacheCtrl, m_cacheEntries, m_pageNext, m_pageRefs, m_cacheQueues, m_transient, m_cacheRanges, m_cachePending;
-    RawBuffer m_buildArgs, m_buildScratch, m_arenaAddresses, m_arenaSizes, m_moveArgs, m_moveDestinations, m_packScratch;
+    GraphBuffer m_groupState, m_cacheCtrl, m_cacheEntries, m_pageNext, m_pageRefs, m_cacheQueues, m_transient, m_cacheRanges, m_cachePending;
+    GraphBuffer m_buildArgs, m_arenaAddresses, m_arenaSizes, m_moveArgs, m_moveDestinations, m_packScratch;
     // The build arena: every frame's builds land here, and are moved into pages or into that frame's transient arena,
-    // a slice of m_clasPool past its pages, one per frame that may still be tracing it.
-    RawBuffer m_buildArena;
+    // a slice of m_clasPool past its pages, one per frame that may still be tracing it. All within the CLAS pass, so the
+    // graph places it, like the scratch buffers.
+    std::shared_ptr<org::Buffer> m_buildArena;
     uint32_t m_transientSlices = 1;
     uint64_t m_transientSliceBytes = 0;
-    RawBuffer m_slabAddresses; // Upload heap, written as slabs appear; slabs are only ever added.
-    RawBuffer m_requests, m_demand; // This frame's requests, collected from the demand bitset (CLOD_RT_DEMAND_*).
-    RawBuffer m_coarseCut;
-    RawBuffer m_drawTable, m_instanceList, m_instanceRows, m_instanceBlas, m_shareTable, m_counters;
-    RawBuffer m_blasArgs, m_blasAddressArray, m_blasResult, m_blasScratch, m_blasAddresses, m_blasSizes;
-    RawBuffer m_tlasInstances, m_tlasStorage, m_tlasScratch;
-    RawBuffer m_visibilityHash, m_visibilityStats;
-    RawBuffer m_pixelWatch;
-    RawBuffer m_readback;
+    // Device addresses by slab descriptor index, in an upload heap: written as slabs appear, and slabs are only ever
+    // added, so no frame the GPU still runs reads an entry that changes.
+    GraphBuffer m_slabAddresses;
+    GraphBuffer m_requests, m_demand; // This frame's requests, collected from the demand bitset (CLOD_RT_DEMAND_*).
+    GraphBuffer m_coarseCut;
+    GraphBuffer m_drawTable, m_instanceList, m_instanceRows, m_instanceBlas, m_shareTable, m_counters;
+    GraphBuffer m_blasArgs, m_blasAddressArray, m_blasAddresses, m_blasSizes;
+    GraphBuffer m_tlasStorage;
+    // Rebuilt every frame, so placed by the graph: the BLAS batch, from the BLAS pass to the last pass that traces
+    // (Builtin::RayTracing::BlasData), and the TLAS rows, within the TLAS pass. The TLAS itself (m_tlasStorage) is
+    // persistent: its view holds its address.
+    std::shared_ptr<org::Buffer> m_blasResult, m_tlasInstances;
+    // Scratch for the CLAS builds and moves, the BLAS batch, the TLAS and micromap arrays, each live only in its pass, so
+    // the graph shares their memory with whatever else isn't live then (the RT view's culling frontiers, in path tracing).
+    std::shared_ptr<org::Buffer> m_buildScratch, m_blasScratch, m_tlasScratch, m_ommScratch;
+    GraphBuffer m_visibilityHash, m_visibilityStats;
+    GraphBuffer m_pixelWatch;
+    // Per frame in flight, a slice: the scene build's (counters, cache control, timers, micromap requests and releases),
+    // the visibility comparison's, the pixel watch's. One buffer per pass that writes it.
+    GraphBuffer m_readback, m_statsReadback, m_watchReadback;
     uint64_t m_readbackSliceBytes = 0;
     uint64_t m_arenaBytes = 0; // The build arena's size.
     uint32_t m_pageCount = 0;
@@ -370,7 +427,9 @@ private:
 
     bool m_ommRequested = false;
     bool m_ommEnabled = false;
-    RawBuffer m_ommArrayPool, m_ommIndexPool, m_ommScratch, m_ommUpload, m_ommTable, m_ommWanted, m_ommRebuild, m_ommRelease;
+    GraphBuffer m_ommArrayPool, m_ommIndexPool, m_ommUpload, m_ommTable, m_ommWanted, m_ommRebuild, m_ommRelease;
+    // The pools are made on first use, so passes declare them through these, empty until then.
+    std::shared_ptr<org::ResourceGroup> m_ommArrays, m_ommIndices;
     RangeAllocator m_ommArrayAllocator, m_ommIndexAllocator;
     std::map<std::array<uint32_t, 13>, std::pair<uint64_t, uint64_t>> m_ommArraySizes; // Histogram -> result and scratch bytes.
     // The GPU table's contents. This side inserts; the GPU only turns entries into tombstones, which this side mirrors
@@ -390,6 +449,8 @@ private:
     std::vector<uint32_t> m_ommRebuilds;
     uint64_t m_ommUploadBytes = 0;
     uint64_t m_ommScratchUsed = 0;
+    bool m_ommPoolsReady = false;
+    bool m_ommPoolsFailed = false;
     bool m_ommStaged = false; // This frame has staging to record (BeginFrame ran for it).
     // Shared with the IO threads.
     TaskScope m_ommScope;
@@ -410,7 +471,6 @@ private:
     std::vector<uint8_t> m_sliceHasReadback;
     std::vector<uint8_t> m_sliceHasStats;
     std::vector<uint8_t> m_sliceHasWatch;
-    uint64_t m_watchReadbackOffset = 0; // In each readback slice.
     float m_watchBright = 0.0f; // Zero when the watch is off.
     std::array<uint64_t, 16> m_watchTotals{};
     std::array<uint64_t, 16> m_watchLogged{};

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -779,6 +780,13 @@ CLodStreamingSystem::CLodStreamingSystem() {
     m_usedGroupsBuffer->SetName("CLod Used Groups Buffer");
     tagBufferUsage(m_usedGroupsBuffer, "Cluster LOD streaming");
 
+    // A bit per group, cleared each frame: a group is appended to the used list only by its first touch that frame. The
+    // clear is its first use, so it can share memory.
+    m_usedGroupsBits = CreateAliasedUnmaterializedStructuredBuffer(
+        CLodTouchedGroupBitsWordCount, sizeof(uint32_t), true, false, false, true);
+    m_usedGroupsBits->SetName("CLod Used Groups Bits");
+    tagBufferUsage(m_usedGroupsBits, "Cluster LOD streaming");
+
     m_sourceGroupMismatchCounter = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false, false);
     m_sourceGroupMismatchCounter->SetName("CLod Source Group Mismatch Counter");
     tagBufferUsage(m_sourceGroupMismatchCounter, "Cluster LOD diagnostics");
@@ -930,6 +938,7 @@ void CLodStreamingSystem::OnRegistryReset(org::ResourceRegistry* reg) {
     releaseBufferBacking(m_streamingRuntimeState);
     releaseBufferBacking(m_usedGroupsCounter);
     releaseBufferBacking(m_usedGroupsBuffer);
+    releaseBufferBacking(m_usedGroupsBits);
     releaseBufferBacking(m_sourceGroupMismatchCounter);
     releaseBufferBacking(m_sourceGroupMismatchDetails);
     if (m_parallelSortState) {
@@ -992,6 +1001,7 @@ void CLodStreamingSystem::ResetStreamingStateForShutdown() {
     releaseBufferBacking(m_streamingRuntimeState);
     releaseBufferBacking(m_usedGroupsCounter);
     releaseBufferBacking(m_usedGroupsBuffer);
+    releaseBufferBacking(m_usedGroupsBits);
     releaseBufferBacking(m_sourceGroupMismatchCounter);
     releaseBufferBacking(m_sourceGroupMismatchDetails);
     if (m_parallelSortState) {
@@ -1502,6 +1512,7 @@ void CLodStreamingSystem::GatherStructuralPasses(org::RenderGraph& rg, std::vect
     rg.RegisterResource(Builtin::CLod::StreamingRuntimeState, m_streamingRuntimeState);
     rg.RegisterResource(Builtin::CLod::StreamingTouchedGroupsCounter, m_usedGroupsCounter);
     rg.RegisterResource(Builtin::CLod::StreamingTouchedGroups, m_usedGroupsBuffer);
+    rg.RegisterResource(Builtin::CLod::StreamingTouchedGroupsBits, m_usedGroupsBits);
 
     // The async uploads are submitted through the graph's external client after each frame (SubmitExternalWork).
     auto asyncUpload = std::make_shared<CLodStructuralAsyncUploadPass>(
@@ -1559,6 +1570,7 @@ void CLodStreamingSystem::GatherStructuralPasses(org::RenderGraph& rg, std::vect
 		m_streamingLoadCounter,
         m_streamingLoadRequestKeys,
 		m_usedGroupsCounter,
+		m_usedGroupsBits,
         m_sourceGroupMismatchCounter,
 		m_streamingRuntimeState,
 		[](std::vector<uint32_t>& outBits, uint32_t& outFirstWord, org::UploadInstance*) {
@@ -3121,6 +3133,16 @@ void CLodStreamingSystem::StreamingDrainTask(const br::TaskContext& context) {
                         if (mapped) {
                             std::memcpy(&usedGroupsCount, mapped, sizeof(uint32_t));
                             apiResource.Unmap(0, 0);
+                        }
+                    }
+                    if (usedGroupsCount > CLodUsedGroupsCapacity) {
+                        // Groups past the list read as unused, and their pages can be evicted while in use.
+                        static std::atomic<uint64_t> lastOverflowLogNs{ 0u };
+                        const uint64_t nowNs = static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count());
+                        uint64_t lastNs = lastOverflowLogNs.load(std::memory_order_relaxed);
+                        if (nowNs - lastNs > 5'000'000'000ull && lastOverflowLogNs.compare_exchange_strong(lastNs, nowNs)) {
+                            spdlog::warn("CLod streaming: {} groups touched this frame, past the used-group list's {}; the rest may be evicted while in use",
+                                usedGroupsCount, CLodUsedGroupsCapacity);
                         }
                     }
                     usedGroupsCount = std::min<uint32_t>(usedGroupsCount, CLodUsedGroupsCapacity);

@@ -1501,8 +1501,11 @@ void CLodRtWriteInstancesCS(uint3 id : SV_DispatchThreadID)
             }
         }
 
-        // Raster's counter-clockwise front faces are clockwise here, because its projection flips Y. Mirrored objects swap.
-        uint flags = (transform.objectFlags & OBJECT_FLAG_REVERSE_WINDING) != 0u ? RTAS_INSTANCE_FLAG_TRIANGLE_FRONT_COUNTERCLOCKWISE : 0u;
+        // Raster's counter-clockwise front faces are clockwise here, because its projection flips Y. Unlike raster, mirrored
+        // objects don't swap: DXR decides facing in object space, which the instance transform doesn't change. Swapping
+        // them culled the front faces of every single-sided mirrored instance, and rays saw their insides (black stairs,
+        // roofs and floors on Zorah).
+        uint flags = 0u;
         if (anyDoubleSided) {
             flags |= RTAS_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE;
         }

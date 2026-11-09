@@ -44,3 +44,25 @@ if(MSVC)
 endif()
 add_dependencies(CLodCacheTool tbb_config_sync)
 target_compile_definitions(CLodCacheTool PRIVATE NOMINMAX _UNICODE UNICODE)
+
+# The CRT heap serializes allocation across threads, and the builder allocates per group on every worker: with all
+# cores building, most workers were blocked in its lock. AllocatorProxy.cpp replaces this program's operator new and
+# delete with the TBB scalable allocator (tbbmalloc, from the USD bundle that also supplies tbb.dll). tbbmalloc_proxy
+# is not used: it declines current UCRTs and silently leaves the CRT heap in place.
+option(CLOD_CACHE_TOOL_SCALABLE_ALLOCATOR "Route CLodCacheTool's operator new/delete to tbbmalloc" ON)
+set(_clod_tool_tbbmalloc_root "${BASICRENDERER_USD_ROOT}/usd_rel")
+if(CLOD_CACHE_TOOL_SCALABLE_ALLOCATOR AND EXISTS "${_clod_tool_tbbmalloc_root}/lib/tbbmalloc.lib")
+    if(NOT TARGET CLodCacheTool::tbbmalloc)
+        add_library(CLodCacheTool::tbbmalloc SHARED IMPORTED)
+        set_target_properties(CLodCacheTool::tbbmalloc PROPERTIES
+            IMPORTED_IMPLIB "${_clod_tool_tbbmalloc_root}/lib/tbbmalloc.lib"
+            IMPORTED_LOCATION "${_clod_tool_tbbmalloc_root}/bin/tbbmalloc.dll")
+    endif()
+    target_sources(CLodCacheTool PRIVATE "AllocatorProxy.cpp")
+    target_link_libraries(CLodCacheTool PRIVATE CLodCacheTool::tbbmalloc)
+    add_custom_command(TARGET CLodCacheTool POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_clod_tool_tbbmalloc_root}/bin/tbbmalloc.dll" "$<TARGET_FILE_DIR:CLodCacheTool>"
+        VERBATIM)
+elseif(CLOD_CACHE_TOOL_SCALABLE_ALLOCATOR)
+    message(STATUS "CLodCacheTool: ${_clod_tool_tbbmalloc_root}/lib/tbbmalloc.lib not found; keeping the CRT heap")
+endif()

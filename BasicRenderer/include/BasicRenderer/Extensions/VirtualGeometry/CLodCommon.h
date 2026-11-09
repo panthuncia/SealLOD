@@ -139,6 +139,7 @@ inline constexpr const char* CLodDirectionalVirtualShadowSmrtSamplesPerRayDirect
 inline constexpr const char* CLodDirectionalVirtualShadowSmrtMaxRayAngleFromLightDegreesSettingName = "clodDirectionalVirtualShadowSmrtMaxRayAngleFromLightDegrees";
 inline constexpr const char* CLodDirectionalVirtualShadowSmrtRayLengthScaleDirectionalSettingName = "clodDirectionalVirtualShadowSmrtRayLengthScaleDirectional";
 inline constexpr const char* CLodDirectionalVirtualShadowSmrtMaxTraceDistanceWorldSettingName = "clodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld";
+inline constexpr const char* CLodDirectionalVirtualShadowSmrtMaxLateralTexelsSettingName = "clodDirectionalVirtualShadowSmrtMaxLateralTexels";
 inline constexpr const char* CLodDirectionalVirtualShadowReceiverTraceEnabledSettingName = "clodDirectionalVirtualShadowReceiverTraceEnabled";
 inline constexpr const char* CLodDirectionalVirtualShadowReceiverTraceSampleCountSettingName = "clodDirectionalVirtualShadowReceiverTraceSampleCount";
 inline constexpr const char* CLodDirectionalVirtualShadowReceiverTraceMaxDistanceWorldSettingName = "clodDirectionalVirtualShadowReceiverTraceMaxDistanceWorld";
@@ -369,6 +370,10 @@ inline constexpr uint32_t CLodVirtualShadowDefaultSmrtSamplesPerRayDirectional =
 inline constexpr float CLodVirtualShadowDefaultSmrtMaxRayAngleFromLightDegrees = 5.0f;
 inline constexpr float CLodVirtualShadowDefaultSmrtRayLengthScaleDirectional = 1.0f;
 inline constexpr float CLodVirtualShadowDefaultSmrtMaxTraceDistanceWorld = 1500.0f;
+// SMRT rays are cut where their sideways drift from the receiver, in texels of the receiver's clipmap, reaches this. It
+// keeps the trace inside the pages the receiver's neighborhood allocated whatever the world's scale: a world-unit length
+// that suits one scene leaves the allocated pages in another, and a ray that reads an unallocated page is rejected.
+inline constexpr float CLodVirtualShadowDefaultSmrtMaxLateralTexels = 32.0f;
 inline constexpr bool CLodVirtualShadowDefaultReceiverTraceEnabled = true;
 inline constexpr uint32_t CLodVirtualShadowDefaultReceiverTraceSampleCount = 8u;
 inline constexpr float CLodVirtualShadowDefaultReceiverTraceMaxDistanceWorld = 256.0f;
@@ -1331,6 +1336,10 @@ inline constexpr uint32_t CLodMaxViewDepthIndices = 512u;
 inline constexpr uint32_t CLodStreamingInitialGroupCapacity = 1u << 17u;
 inline constexpr uint32_t CLodStreamingRequestCapacity = (1u << 16);
 inline constexpr uint32_t CLodUsedGroupsCapacity = (1u << 17); // 128K entries for GPU used-groups append buffer
+// Groups the per-frame touched bitset covers (CLOD_TOUCHED_GROUP_BIT_GROUPS in workGraphCulling.hlsl); groups past it
+// are appended on every touch, as before the bitset.
+inline constexpr uint32_t CLodTouchedGroupBitsGroups = (1u << 24);
+inline constexpr uint32_t CLodTouchedGroupBitsWordCount = CLodTouchedGroupBitsGroups / 32u;
 
 constexpr uint32_t CLodBitsetWordCount(uint32_t bitCount)
 {

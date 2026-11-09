@@ -466,6 +466,7 @@ static const uint WG_COUNTER_CLASSIFY_SW_DISABLED = 70;
 
 static const uint CLOD_STREAM_REQUEST_CAPACITY = (1u << 16);
 static const uint CLOD_USED_GROUPS_CAPACITY = (1u << 17);
+static const uint CLOD_TOUCHED_GROUP_BIT_GROUPS = (1u << 24); // CLodTouchedGroupBitsGroups
 static const uint CLOD_STREAM_VIEWID_MASK = 0xFFFFu;
 static const uint CLOD_STREAM_PRIORITY_SHIFT = 16u;
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
@@ -2489,6 +2490,26 @@ bool CLodGroupIsResident(uint groupGlobalIndex)
 
 void CLodMarkGroupTouched(uint groupGlobalIndex)
 {
+    // Only a group's first touch in a frame is appended. Traversal touches a group once per instance and check, and
+    // the ray tracing view, with no frustum or occlusion culling, touched millions of times a frame: the list
+    // overflowed, groups past it read as unused, and their pages were evicted while in use and loaded again.
+    if (groupGlobalIndex < CLOD_TOUCHED_GROUP_BIT_GROUPS)
+    {
+        RWStructuredBuffer<uint> touchedBits =
+            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::StreamingTouchedGroupsBits)];
+        const uint word = groupGlobalIndex >> 5u;
+        const uint bit = 1u << (groupGlobalIndex & 31u);
+        if ((touchedBits[word] & bit) != 0u)
+        {
+            return;
+        }
+        uint previousBits = 0u;
+        InterlockedOr(touchedBits[word], bit, previousBits);
+        if ((previousBits & bit) != 0u)
+        {
+            return;
+        }
+    }
     RWStructuredBuffer<uint> usedGroupsCounter =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::StreamingTouchedGroupsCounter)];
     RWStructuredBuffer<uint> usedGroupsBuffer =

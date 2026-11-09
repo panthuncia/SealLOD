@@ -192,12 +192,16 @@ void RecordTextureStreamingFeedbackRequestedTopMip(
     {
         return;
     }
+    // The reduction masks other textures' lanes out itself rather than relying on only the leader's lanes being active
+    // inside the branch: SM 6 does not guarantee lanes reconverge that way in a loop with divergent returns, and on
+    // NVIDIA lanes of other textures took part, so a texture was sent other materials' (finer) requests. Under raster
+    // on Zorah that kept about 7 GB of textures at mip 0 that feedback for their own pixels put at mip 2-5.
     for (;;)
     {
         const uint leaderTextureID = WaveReadLaneFirst(streamingTextureID);
+        const uint groupRequestedTopMip = WaveActiveMin(streamingTextureID == leaderTextureID ? requestedTopMip : 0xFFFFFFFFu);
         if (streamingTextureID == leaderTextureID)
         {
-            const uint groupRequestedTopMip = WaveActiveMin(requestedTopMip);
             if (WaveIsFirstLane())
             {
                 uint previousRequestedTopMip;

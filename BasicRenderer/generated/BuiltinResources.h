@@ -131,9 +131,15 @@ struct Builtin {
     inline static constexpr std::string_view VisibilityTexture = "Builtin::PrimaryCamera::VisibilityTexture";
   };
   struct RayTracing {
+    inline static constexpr std::string_view BlasData = "Builtin::RayTracing::BlasData";
+    inline static constexpr std::string_view ClasInfo = "Builtin::RayTracing::ClasInfo";
+    inline static constexpr std::string_view ClasPool = "Builtin::RayTracing::ClasPool";
+    inline static constexpr std::string_view InstanceRows = "Builtin::RayTracing::InstanceRows";
+    inline static constexpr std::string_view MicromapArrays = "Builtin::RayTracing::MicromapArrays";
     inline static constexpr std::string_view SpecularAlbedo = "Builtin::RayTracing::SpecularAlbedo";
     inline static constexpr std::string_view SpecularHitDistance = "Builtin::RayTracing::SpecularHitDistance";
     inline static constexpr std::string_view SunShadow = "Builtin::RayTracing::SunShadow";
+    inline static constexpr std::string_view Tlas = "Builtin::RayTracing::Tlas";
   };
   struct Shadows {
     inline static constexpr std::string_view CLodClipmapInfo = "Builtin::Shadows::CLodClipmapInfo";

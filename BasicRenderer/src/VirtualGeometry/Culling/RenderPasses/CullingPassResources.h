@@ -34,7 +34,8 @@ struct CullingPassConfig {
     bool rayTracingViewPathTraced = false;
     // Raster side of raytraced primary visibility: leaves out the draws the BVH represents.
     bool skipRayTracingCoveredDraws = false;
-    // Filled when rayTracingView is set.
+    // Filled when rayTracingView is set: the ray tracing system's coarse cut, which the pass writes (and declares).
+    std::shared_ptr<org::Buffer> rtCoarseCut;
     uint32_t rtCoarseCutDescriptor = 0u;
 
     // Clusters are classified into hardware and software raster lists.

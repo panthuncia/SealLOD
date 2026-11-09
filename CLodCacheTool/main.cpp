@@ -1294,6 +1294,7 @@ static bool TryConsumeOption(const std::string& arg) {
         return parsed;
     };
     if (auto v = value("--profile=")) { g_profilePath = *v; return true; }
+    if (auto v = value("--outcomes-csv=")) { g_gltfScene.outcomesCsv = *v; return true; }
     if (auto v = value("--only-mesh=")) { g_gltfScene.onlyMeshes = *v; return true; }
     if (auto v = value("--skip-meshes=")) { g_gltfScene.skipMeshes = *v; return true; }
     if (auto v = value("--memory-budget-gb=")) {
@@ -1603,8 +1604,8 @@ int main(int argc, char* argv[]) {
                 "  --only-mesh=regex          glTF: only meshes whose name matches\n"
                 "  --skip-meshes=regex        glTF: leave out meshes whose name matches\n"
                 "  --shard-index=i --shard-count=n  glTF: meshes whose index % n == i\n"
-                "  --memory-budget-gb=N       glTF: bound primitives building at once (default half of RAM)\n"
-                "  --bytes-per-triangle=N     glTF: build memory estimate per triangle (default 1024)\n"
+                "  --memory-budget-gb=N       glTF: bound primitives building at once (default 3/4 of available RAM)\n"
+                "  --bytes-per-triangle=N     glTF: build memory estimate per triangle (default 320)\n"
                 "  --jobs=N                   glTF: primitives building at once at most (default hardware threads)\n"
                 "  --cache-only               report misses instead of building\n"
                 "  --no-textures              glTF: skip the texture stage\n"
@@ -1619,7 +1620,10 @@ int main(int argc, char* argv[]) {
     // Initialise task scheduler
     spdlog::info("Initialising task scheduler...");
     auto& scheduler = br::TaskSchedulerManager::GetInstance();
-    scheduler.Initialize();
+    // An offline tool has no render thread to keep a core free for.
+    br::TaskSchedulerManager::Config schedulerConfig;
+    schedulerConfig.reserveRenderCpu = false;
+    scheduler.Initialize(schedulerConfig);
     spdlog::info("Task scheduler ready.");
 
     // Gather files

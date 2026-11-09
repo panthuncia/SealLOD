@@ -193,8 +193,35 @@ std::wstring BuildCacheFilePath(const std::wstring& fileName, const std::wstring
 	return (GetCacheRootPath() / directory / fileName).wstring();
 }
 
+namespace {
+	std::mutex g_sceneCacheRootsMutex;
+	std::unordered_map<std::string, std::filesystem::path> g_sceneCacheRoots;
+}
+
+void SetSceneCacheRoot(const std::string& sourceIdentifier, const std::filesystem::path& root)
+{
+	std::lock_guard lock(g_sceneCacheRootsMutex);
+	g_sceneCacheRoots[sourceIdentifier] = std::filesystem::absolute(root);
+}
+
+std::filesystem::path GetSceneCacheRoot(const std::string& sourceIdentifier)
+{
+	{
+		std::lock_guard lock(g_sceneCacheRootsMutex);
+		if (const auto found = g_sceneCacheRoots.find(sourceIdentifier); found != g_sceneCacheRoots.end()) return found->second;
+	}
+	return GetCacheRootPath();
+}
+
+std::wstring BuildCacheFilePathUnder(const std::filesystem::path& root, const std::wstring& fileName, const std::wstring& directory) {
+	return (root / directory / fileName).wstring();
+}
+
 std::wstring GetCacheFilePath(const std::wstring& fileName, const std::wstring& directory) {
-	const std::filesystem::path cacheRoot = GetCacheRootPath();
+	return GetCacheFilePathUnder(GetCacheRootPath(), fileName, directory);
+}
+
+std::wstring GetCacheFilePathUnder(const std::filesystem::path& cacheRoot, const std::wstring& fileName, const std::wstring& directory) {
 	std::filesystem::path cacheDir = cacheRoot / directory;
 
 	// Avoid repeated OS syscalls: only call create_directories once per unique

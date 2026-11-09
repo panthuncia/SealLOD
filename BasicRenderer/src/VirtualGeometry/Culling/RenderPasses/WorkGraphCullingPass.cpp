@@ -192,7 +192,8 @@ org::ResourceBindingToken WorkGraphCullingPass::DeclareSceneInputs(org::PassBuil
         Builtin::CLod::StreamingLoadCounter,
         Builtin::CLod::StreamingRuntimeState,
         Builtin::CLod::StreamingTouchedGroupsCounter,
-        Builtin::CLod::StreamingTouchedGroups);
+        Builtin::CLod::StreamingTouchedGroups,
+        Builtin::CLod::StreamingTouchedGroupsBits);
     builder.ShaderResource(
         Builtin::IndirectCommandBuffers::Master,
         Builtin::CLod::Offsets,

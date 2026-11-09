@@ -705,16 +705,22 @@ void CLodExtension::RefreshCoreVisibleClusterCapacity()
 
 void CLodExtension::AppendRayTracingPasses(const CLodVariantTraits& traits, std::vector<org::ExternalPassDesc>& outPasses)
 {
-    const std::string scenePassName = MakeVariantPassName(traits, "ScenePass");
-    auto sceneDesc = org::ExternalPassDesc::Compute(scenePassName, std::make_shared<CLodRayTracingScenePass>(
-        m_options.rayTracingSystem, m_visibleClustersBuffer, m_visibleClusterTransformIndicesBuffer, m_visibleClustersCounterBuffer,
-        m_options.slabResourceGroup, m_visibleClusterCapacity));
-    auto sceneInsertPoint = org::ExternalInsertPoint::After(MakeVariantPassName(traits, "HierarchicalCullingPass1"));
-    if (m_options.pathTraced) {
-        sceneInsertPoint.AlsoBefore("PathTraceArgsPass");
+    // The scene build's three stages, one after another: each one's scratch is live only in its pass, so they share it.
+    std::string previous = MakeVariantPassName(traits, "HierarchicalCullingPass1");
+    for (const auto& [stage, name] : { std::pair{ CLodRayTracingSceneStage::Clas, "SceneClasPass" },
+             std::pair{ CLodRayTracingSceneStage::Blas, "SceneBlasPass" }, std::pair{ CLodRayTracingSceneStage::Tlas, "SceneTlasPass" } }) {
+        const std::string passName = MakeVariantPassName(traits, name);
+        auto sceneDesc = org::ExternalPassDesc::Compute(passName, std::make_shared<CLodRayTracingScenePass>(
+            m_options.rayTracingSystem, stage, m_visibleClustersBuffer, m_visibleClusterTransformIndicesBuffer, m_visibleClustersCounterBuffer,
+            m_options.slabResourceGroup, m_visibleClusterCapacity));
+        auto sceneInsertPoint = org::ExternalInsertPoint::After(previous);
+        if (m_options.pathTraced) {
+            sceneInsertPoint.AlsoBefore("PathTraceArgsPass");
+        }
+        sceneDesc.At(std::move(sceneInsertPoint));
+        outPasses.push_back(std::move(sceneDesc));
+        previous = passName;
     }
-    sceneDesc.At(std::move(sceneInsertPoint));
-    outPasses.push_back(std::move(sceneDesc));
 
     if (m_options.scheduleRayTracedVisibility && m_options.rayTracingSystem->GetPrimaryVisibleClusters()) {
         auto visibilityDesc = org::ExternalPassDesc::Compute(MakeVariantPassName(traits, "VisibilityPass"), std::make_shared<RayTracedVisibilityPass>(
@@ -1797,7 +1803,8 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
                 config.rayTracingView = true;
                 config.rayTracingViewStreams = m_options.rayTracedPrimaryVisibility || m_options.pathTraced;
                 config.rayTracingViewPathTraced = m_options.pathTraced;
-                config.rtCoarseCutDescriptor = m_options.rayTracingSystem->GetCullingDescriptors().coarseCut;
+                config.rtCoarseCut = m_options.rayTracingSystem->GetCoarseCut();
+                config.rtCoarseCutDescriptor = m_options.rayTracingSystem->GetCoarseCutUav();
             }
             else if (traits.type == CLodExtensionType::VisiblityBuffer && m_options.rayTracedPrimaryVisibility) {
                 config.skipRayTracingCoveredDraws = true;

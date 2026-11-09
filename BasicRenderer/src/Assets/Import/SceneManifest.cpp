@@ -57,7 +57,7 @@ namespace br::import
 			throw std::runtime_error("scene manifest '" + manifestPath.string() + "' is not JSON: " + error.what());
 		}
 		const auto schema = document.value("schema", 0u);
-		if (schema != SceneManifest::kSchemaVersion) {
+		if (schema != SceneManifest::kSchemaVersion && schema != 1u) {
 			throw std::runtime_error("scene manifest '" + manifestPath.string() + "' has schema " + std::to_string(schema) +
 				", this build reads " + std::to_string(SceneManifest::kSchemaVersion) + "; rebuild it with CLodCacheTool");
 		}
@@ -81,6 +81,9 @@ namespace br::import
 		}
 		manifest.generator = document.value("generator", std::string());
 		manifest.created = document.value("created", std::string());
+		if (document.contains("scene") && document["scene"].is_object()) {
+			manifest.scene = SceneCacheFromJson(document["scene"]);
+		}
 		return manifest;
 	}
 
@@ -101,13 +104,15 @@ namespace br::import
 		document["counts"] = std::move(counts);
 		document["generator"] = manifest.generator;
 		document["created"] = manifest.created;
+		if (manifest.scene) document["scene"] = SceneCacheToJson(*manifest.scene);
 
 		std::filesystem::create_directories(manifestPath.parent_path());
 		const auto temporary = std::filesystem::path(manifestPath).concat(".tmp");
 		{
 			std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
 			if (!stream) throw std::runtime_error("scene manifest: cannot write '" + temporary.string() + "'");
-			stream << document.dump(2) << '\n';
+			// The scene section is large (a matrix per placement): indented only when there is none.
+			stream << document.dump(manifest.scene ? -1 : 2) << '\n';
 			if (!stream) throw std::runtime_error("scene manifest: write failed for '" + temporary.string() + "'");
 		}
 		std::filesystem::rename(temporary, manifestPath);
@@ -127,6 +132,28 @@ namespace br::import
 			"' (relative to the manifest) nor '" + manifest.sourceAbsolutePath + "'");
 	}
 
+	std::filesystem::path SceneManifestSourceLocation(const std::filesystem::path& manifestPath, const SceneManifest& manifest)
+	{
+		try {
+			return ResolveSceneManifestSource(manifestPath, manifest);
+		}
+		catch (const std::runtime_error&) {
+			if (!manifest.sourcePath.empty()) return (manifestPath.parent_path() / std::filesystem::path(manifest.sourcePath)).lexically_normal();
+			return std::filesystem::path(manifest.sourceAbsolutePath);
+		}
+	}
+
+	std::vector<std::filesystem::path> FindSceneManifests(const std::filesystem::path& directory)
+	{
+		std::vector<std::filesystem::path> manifests;
+		std::error_code error;
+		for (const auto& entry : std::filesystem::directory_iterator(directory, error)) {
+			if (entry.is_regular_file(error) && IsSceneManifestPath(entry.path())) manifests.push_back(entry.path());
+		}
+		std::sort(manifests.begin(), manifests.end());
+		return manifests;
+	}
+
 	std::filesystem::path ResolveSceneManifestCacheRoot(const std::filesystem::path& manifestPath, const SceneManifest& manifest)
 	{
 		return std::filesystem::absolute(manifestPath.parent_path() / std::filesystem::path(manifest.cacheRoot)).lexically_normal();
@@ -140,8 +167,16 @@ namespace br::import
 			spdlog::info("Scene manifest '{}': cache root {}", manifestPath.string(), root.string());
 			return true;
 		}
-		spdlog::warn("Scene manifest '{}' wants cache root {}, but {} is already in use; its CLod data will not be found",
-			manifestPath.string(), root.string(), GetCacheRootPath().string());
-		return false;
+		// The root is in use (another scene's, or the default, as when the scene is loaded while the app runs). The scene's
+		// CLod data is still its own cache's; everything else (textures, shaders) stays under the root in use.
+		if (manifest.sourceIdentifier.empty()) {
+			spdlog::warn("Scene manifest '{}' names no source identifier, and cache root {} is in use; its CLod data will not be found",
+				manifestPath.string(), GetCacheRootPath().string());
+			return false;
+		}
+		SetSceneCacheRoot(manifest.sourceIdentifier, root);
+		spdlog::info("Scene manifest '{}': CLod data from {} (cache root {} already in use)", manifestPath.string(), root.string(),
+			GetCacheRootPath().string());
+		return true;
 	}
 }

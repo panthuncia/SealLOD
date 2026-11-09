@@ -41,7 +41,8 @@ void Menu::DrawBrowseButton(const std::wstring& targetDirectory) {
     if (ImGui::Button("Browse"))
     {
         std::wstring selectedFile;
-        std::wstring customFilter = L"HDR Files\0*.hdr\0All Files\0*.*\0";
+        using namespace std::string_literals;
+        const std::wstring customFilter = L"HDR Files\0*.hdr\0All Files\0*.*\0\0"s; // Keeps the nulls a C string would end at.
         if (OpenFileDialog(selectedFile, customFilter))
         {
             spdlog::info("Selected file: {}", ws2s(selectedFile));

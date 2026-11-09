@@ -796,6 +796,25 @@ void TextureStreamingManager::BeginTextureStreamingFeedbackFrame(uint64_t frameI
 			continue;
 		}
 
+		// SARP_TEXTURE_FEEDBACK_TRACE_IDS=<id>,<id>,...: log every feedback frame's request for these textures.
+		static const std::vector<uint32_t> tracedTextureIDs = [] {
+			std::vector<uint32_t> ids;
+			if (const char* v = std::getenv("SARP_TEXTURE_FEEDBACK_TRACE_IDS")) {
+				for (const char* at = v; *at;) {
+					char* end = nullptr;
+					const unsigned long id = std::strtoul(at, &end, 10);
+					if (end == at) break;
+					ids.push_back(static_cast<uint32_t>(id));
+					at = *end == ',' ? end + 1 : end;
+				}
+			}
+			return ids;
+		}();
+		if (!tracedTextureIDs.empty() && std::find(tracedTextureIDs.begin(), tracedTextureIDs.end(), streamingTextureID) != tracedTextureIDs.end()) {
+			const auto state = texture->GetStreamingState();
+			spdlog::info("Texture feedback trace: frame={} id={} requested={} resident={} pending={}", frameIndex, streamingTextureID,
+				requestedTopMip, state.residency.residentTopMip, state.pendingTopMip);
+		}
 		uint32_t policyTopMip = requestedTopMip;
 		// SARP_TEXTURE_FEEDBACK_FORCE_MIP=<n>: debug override, every request becomes mip n (0 gives a full-resolution reference).
 		static const int forcedFeedbackMip = [] { const char* v = std::getenv("SARP_TEXTURE_FEEDBACK_FORCE_MIP"); return v && v[0] ? std::atoi(v) : -1; }();

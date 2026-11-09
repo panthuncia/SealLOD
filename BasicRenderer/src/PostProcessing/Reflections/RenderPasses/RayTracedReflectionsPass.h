@@ -31,6 +31,9 @@ struct RayTracedReflectionsFrameData {
 struct RayTracedReflectionsBindings {
     org::PipelineState tracePipeline, shadePipeline, shadeTerrainPipeline;
     org::DeclaredViewToken outputShader, outputCpu, hits;
+    // The RVT is declared only when the pipeline recipe has terrain RVT. Without it the terrain shading's RVT slots bind as
+    // absent, as material evaluation's do.
+    bool terrainRvt = false;
 };
 
 class RayTracedReflectionsPass
@@ -75,6 +78,7 @@ public:
                 Builtin::Terrain::RvtCounters, Builtin::Terrain::RvtStats);
         }
         RayTracedReflectionsBindings bindings{};
+        bindings.terrainRvt = m_terrainRvt;
         // What every material could need. Unlike primary evaluation there's one program per surface kind rather than one per
         // material combination, because material flags still decide at run time what is sampled.
         const std::vector<org::PipelineShaderDefine> materialDefines = {
@@ -96,6 +100,7 @@ public:
         bindings.shadeTerrainPipeline = builder.Pipeline(sm610(br::render::ComputePipeline(L"Shaders/ClusterLOD/rayTracedReflectionShade.hlsl",
             L"CLodRtReflectionShadeCS", "CLod.RayTracing.ReflectionShadeTerrain.PSO", terrainDefines)));
         bindings.hits = builder.UnorderedAccess(m_hits).View();
+        br::render::CLodRayTracingSystem::DeclareTracing(builder);
         const auto output = builder.UnorderedAccessClear(Builtin::PostProcessing::ScreenSpaceReflections);
         bindings.outputShader = output.View(0);
         bindings.outputCpu = output.View(1);
@@ -138,10 +143,14 @@ public:
                 rhi::BarrierBatch barrier{};
                 barrier.globals = { &uav, 1u };
                 recording.Commands().Barriers(barrier);
-                recording.BindComputePipeline(bindings.shadePipeline);
+                // Both shading programs name the RVT's slots (the material one through shared shading code).
+                static constexpr std::string_view kRvtPrefixes[] = { "Builtin::Terrain::Rvt" };
+                org::PassRecordContext::BindOptions options{};
+                if (!bindings.terrainRvt) options.absentPrefixes = kRvtPrefixes;
+                recording.BindComputePipeline(bindings.shadePipeline, options);
                 br::render::PushMiscConstants(recording, constants);
                 recording.Commands().Dispatch((frame.width + 7u) / 8u, (frame.height + 7u) / 8u, 1u);
-                recording.BindComputePipeline(bindings.shadeTerrainPipeline);
+                recording.BindComputePipeline(bindings.shadeTerrainPipeline, options);
                 br::render::PushMiscConstants(recording, constants);
                 recording.Commands().Dispatch((frame.width + 7u) / 8u, (frame.height + 7u) / 8u, 1u);
                 traced = true;

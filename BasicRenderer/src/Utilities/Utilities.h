@@ -194,6 +194,8 @@ std::string ToLower(const std::string& str);
 std::vector<std::string> GetFilesInDirectoryMatchingExtension(const std::wstring& directory, const std::wstring& extension);
 
 bool OpenFileDialog(std::wstring& selectedFile, const std::wstring& filter);
+// A folder picker; false when cancelled.
+bool OpenFolderDialog(std::wstring& selectedFolder);
 
 void CopyFileToDirectory(const std::wstring& sourceFile, const std::wstring& destinationDirectory);
 

@@ -23,14 +23,16 @@ struct GltfSceneBuildOptions
 	// Meshes whose index % shardCount == shardIndex.
 	std::uint32_t shardIndex = 0;
 	std::uint32_t shardCount = 1;
-	// Primitives building at once are bounded by triangles * bytesPerTriangle against this; 0 picks half of physical
-	// memory.
+	// Primitives building at once are bounded by triangles * bytesPerTriangle against this, and by the process's private
+	// bytes; 0 picks three quarters of the memory available when the build starts.
 	std::uint64_t memoryBudgetBytes = 0;
-	std::uint64_t bytesPerTriangle = 1024;
+	std::uint64_t bytesPerTriangle = 320;
 	unsigned jobs = 0;
 	// Report misses instead of building, and leave the manifest as it is.
 	bool cacheOnly = false;
 	bool conditionTextures = true;
+	// One row per primitive: mesh, primitive, outcome, triangles, start and end seconds from the build's start.
+	std::filesystem::path outcomesCsv;
 	// Each primitive's built or loaded CLod data, for reports. Called from workers.
 	std::function<void(const std::string& label, const MeshPreprocessResult& result)> report;
 };

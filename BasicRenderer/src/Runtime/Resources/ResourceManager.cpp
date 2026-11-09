@@ -116,6 +116,8 @@ void ::ResourceManager::UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, D
         SettingsManager::GetInstance().getSettingGetter<float>(CLodDirectionalVirtualShadowSmrtRayLengthScaleDirectionalSettingName)();
 	perFrameCBData.shadowVirtualSmrtMaxTraceDistanceWorld =
 		SettingsManager::GetInstance().getSettingGetter<float>(CLodDirectionalVirtualShadowSmrtMaxTraceDistanceWorldSettingName)();
+    perFrameCBData.shadowVirtualSmrtMaxLateralTexels =
+        SettingsManager::GetInstance().getSettingGetter<float>(CLodDirectionalVirtualShadowSmrtMaxLateralTexelsSettingName)();
     perFrameCBData.shadowVirtualReceiverTraceEnabled =
         SettingsManager::GetInstance().getSettingGetter<bool>(CLodDirectionalVirtualShadowReceiverTraceEnabledSettingName)() ? 1u : 0u;
     perFrameCBData.shadowVirtualReceiverTraceSampleCount =

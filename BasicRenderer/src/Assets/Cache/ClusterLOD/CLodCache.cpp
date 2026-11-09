@@ -374,12 +374,12 @@ namespace CLodCache {
 
 		std::wstring GetCacheFilePathBySource(const std::wstring& fileName, const std::string& sourceIdentifier)
 		{
-			return GetCacheFilePath(fileName, BuildSceneCacheSubdirectory(sourceIdentifier));
+			return GetCacheFilePathUnder(GetSceneCacheRoot(sourceIdentifier), fileName, BuildSceneCacheSubdirectory(sourceIdentifier));
 		}
 
 		std::wstring BuildCacheFilePathBySource(const std::wstring& fileName, const std::string& sourceIdentifier)
 		{
-			return BuildCacheFilePath(fileName, BuildSceneCacheSubdirectory(sourceIdentifier));
+			return BuildCacheFilePathUnder(GetSceneCacheRoot(sourceIdentifier), fileName, BuildSceneCacheSubdirectory(sourceIdentifier));
 		}
 
 		// Merged meshes share one directory, so they can be listed without knowing their keys (ListMergedMeshes).

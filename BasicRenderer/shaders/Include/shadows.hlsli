@@ -22,6 +22,7 @@ static const float kCLodVirtualShadowPi = 3.14159265359f;
 static const float kCLodVirtualShadowTwoPi = 6.28318530718f;
 static const float kCLodVirtualShadowDegreesToRadians = kCLodVirtualShadowPi / 180.0f;
 static const float kCLodVirtualShadowGoldenRatioConjugate = 0.618033988749895f;
+static const float kCLodVirtualShadowReceiverNormalOffsetTexels = 2.0f;
 
 struct CLodVirtualShadowDebugInfo
 {
@@ -1262,8 +1263,22 @@ float calculateDirectionalVSMShadowDetailed(float2 pixelCoords, float3 fragPosWo
 
     const uint activeClipmapCount = min(numDirectionalClipmaps, kCLodVirtualShadowClipmapCount);
     const float3 lightToFrag = -light.dirWorldSpace.xyz;
+    // The receiver lookup is a single depth compare, and it is the shadow when SMRT is off or none of its rays is valid.
+    // Taken at the receiver itself, a sloped surface compares against its own quantized depth and shows acne (bands across
+    // lit surfaces), so the lookup moves off the surface along the normal by a few texels of the clipmap it reads.
+    float3 receiverLookupPosition = fragPosWorldSpace;
+    if (activeClipmapCount != 0u)
+    {
+        const float receiverTexelWorldSize = CLodVirtualShadowContinuousTexelWorldSize(
+            fragPosWorldSpace,
+            compactMainCameraBuffer[0].positionWorldSpace.xyz,
+            clipmapInfos[0].texelWorldSize,
+            clipmapInfos[0].directionalLodBias,
+            activeClipmapCount);
+        receiverLookupPosition += normalize(normal) * (receiverTexelWorldSize * kCLodVirtualShadowReceiverNormalOffsetTexels);
+    }
     const CLodVirtualShadowLookupResult receiverLookup = CLodVirtualShadowLookupDirectionalOcclusion(
-        fragPosWorldSpace,
+        receiverLookupPosition,
         normal,
         activeClipmapCount,
         clipmapInfos,
@@ -1399,9 +1414,17 @@ float calculateDirectionalVSMShadowDetailed(float2 pixelCoords, float3 fragPosWo
         return hardShadow;
     }
 
-    const float maxTraceDistance =
+    // The world-unit length is only a cap. A ray tilted off the light drifts sideways in the shadow map as it goes, and
+    // past the receiver's neighborhood it reads pages nothing allocated, which rejects the ray. Bounding the drift in
+    // texels of the clipmap the rays read makes the trace length follow the shadow map's resolution, not the world's units.
+    const float lateralDriftLimitWorld =
+        max(perFrameBuffer.shadowVirtualSmrtMaxLateralTexels, 1.0f) *
+        receiverLookup.clipmapInfo.texelWorldSize /
+        max(tan(coneAngleRadians), 1.0e-4f);
+    const float maxTraceDistance = min(
         perFrameBuffer.shadowVirtualSmrtMaxTraceDistanceWorld *
-        perFrameBuffer.shadowVirtualSmrtRayLengthScaleDirectional;
+            perFrameBuffer.shadowVirtualSmrtRayLengthScaleDirectional,
+        lateralDriftLimitWorld);
     if (maxTraceDistance <= 1.0e-5f)
     {
         return hardShadow;

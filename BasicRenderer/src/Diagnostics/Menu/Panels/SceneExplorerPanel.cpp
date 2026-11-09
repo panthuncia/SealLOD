@@ -295,27 +295,29 @@ void Menu::DrawLoadModelButton() {
     if (ImGui::Button("Load Model"))
     {
         std::wstring selectedFile;
-        std::wstring customFilter = L"Scene Files\0*.glb;*.gltf;*.usd;*.usda;*.usdc;*.usdz;*.nif\0All Files\0*.*\0";
+        // Pairs of a name and its patterns, each null-terminated, then one more null: a literal that keeps them (not a C string).
+        using namespace std::string_literals;
+        const std::wstring customFilter =
+            L"Scene Files\0*.glb;*.gltf;*.usd;*.usda;*.usdc;*.usdz;*.nif;*.brscene.json\0All Files\0*.*\0\0"s;
         if (OpenFileDialog(selectedFile, customFilter))
         {
-			//auto exePath = GetExePath();
-			//// Strip EXE path from selectedFile
-			//if (selectedFile.find(exePath) == 0) {
-			//	selectedFile.erase(0, exePath.length());
-			//}
-			//// Strip filename from selectedFile
-   //         auto pathCopy = selectedFile;
-			//auto lastSlash = selectedFile.find_last_of(L"\\/");
-			//if (lastSlash != std::wstring::npos) {
-			//	selectedFile.erase(lastSlash, selectedFile.size()-1);
-			//}
-
             spdlog::info("Selected file: {}", ws2s(selectedFile));
-			getLoadModel()(ws2s(selectedFile));
+            getLoadModel()(ws2s(selectedFile));
         }
         else
         {
             spdlog::warn("No file selected.");
+        }
+    }
+    ImGui::SameLine();
+    // A folder of scene caches (*.brscene.json), such as one CLodCacheTool wrote: each one in it loads.
+    if (ImGui::Button("Load Folder"))
+    {
+        std::wstring selectedFolder;
+        if (OpenFolderDialog(selectedFolder))
+        {
+            spdlog::info("Selected folder: {}", ws2s(selectedFolder));
+            getLoadModel()(ws2s(selectedFolder));
         }
     }
 }

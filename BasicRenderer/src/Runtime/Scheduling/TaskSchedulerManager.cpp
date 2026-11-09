@@ -23,6 +23,7 @@
 #include <oneapi/tbb/info.h>
 #include <oneapi/tbb/parallel_for.h>
 #include <oneapi/tbb/task_arena.h>
+#include <oneapi/tbb/task_group.h>
 #include <oneapi/tbb/task_scheduler_observer.h>
 #include <spdlog/spdlog.h>
 #include <tracy/TracyC.h>
@@ -177,7 +178,10 @@ CpuSetSelection SelectCpuSets(bool reserveRenderCpu) {
     std::vector<Candidate> candidates;
     for (ULONG offset = 0; offset < required;) {
         auto* info = reinterpret_cast<PSYSTEM_CPU_SET_INFORMATION>(storage.data() + offset);
-        if (info->Type == CpuSetInformation && !info->CpuSet.Parked) {
+        // Parked is the power manager's state at this instant, not availability: an idle machine parks most of its
+        // cores and unparks them under load. Leaving them out pinned the process to whatever was awake at startup
+        // (11 of 24 cores on a laptop).
+        if (info->Type == CpuSetInformation) {
             candidates.push_back({ info->CpuSet.Id, info->CpuSet.EfficiencyClass, info->CpuSet.LogicalProcessorIndex });
         }
         if (info->Size == 0) break;
@@ -1123,6 +1127,38 @@ void TaskSchedulerManager::ParallelForImpl(std::string_view, std::size_t count, 
     if (!m_runtimeState || count == 1) for (std::size_t i = 0; i < count; ++i) body(i);
     else if (g_inSchedulerTask) parallel();
     else m_runtimeState->frameArena->execute(parallel);
+}
+
+void TaskSchedulerManager::RunTaskGroup(std::string_view, const std::function<void(const SpawnFunction&)>& start) {
+    if (!m_runtimeState) {
+        std::deque<std::function<void()>> queue;
+        const SpawnFunction spawn = [&queue](std::function<void()> task) { queue.push_back(std::move(task)); };
+        start(spawn);
+        while (!queue.empty()) {
+            auto task = std::move(queue.front());
+            queue.pop_front();
+            task();
+        }
+        return;
+    }
+    const auto run = [&] {
+        oneapi::tbb::task_group group;
+        const SpawnFunction spawn = [&group](std::function<void()> task) {
+            group.run([task = std::move(task)] {
+                const bool prior = g_inSchedulerTask;
+                g_inSchedulerTask = true;
+                // Isolated: a worker waiting inside this task's own ParallelFor steals only this task's work. Otherwise
+                // it can steal another whole task, and every chunk it holds for this one waits until that finishes:
+                // with long nested tasks those waits chain until most workers sleep.
+                oneapi::tbb::this_task_arena::isolate([&] { task(); });
+                g_inSchedulerTask = prior;
+            });
+        };
+        start(spawn);
+        group.wait();
+    };
+    if (g_inSchedulerTask) run();
+    else m_runtimeState->frameArena->execute(run);
 }
 
 void TaskSchedulerManager::ParallelForLimitedImpl(std::string_view, std::size_t count,

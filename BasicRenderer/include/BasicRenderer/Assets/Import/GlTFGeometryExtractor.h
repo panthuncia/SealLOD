@@ -36,6 +36,8 @@ struct ExtractionResult {
 	// The CLod cache identity of the file: "gltf://<file name>#<content hash>". It names the file's content, not its
 	// place, so a scene and its cache can each be moved or copied.
 	std::string sourceIdentifier;
+	// Most triangles admitted at once under a memory budget: with the peak working set, what a triangle really costs.
+	std::uint64_t peakAdmittedTriangles = 0;
 };
 
 // What happened to one primitive.
@@ -69,8 +71,8 @@ struct ExtractOptions {
 	// Bounds the memory of primitives building at once: each is admitted at triangles * bytesPerTriangle, largest first,
 	// and one always runs. 0: no bound (the scheduler's ParallelFor).
 	std::uint64_t memoryBudgetBytes = 0;
-	std::uint64_t bytesPerTriangle = 1024;
-	// Concurrent primitives when memoryBudgetBytes bounds them. 0: hardware threads.
+	std::uint64_t bytesPerTriangle = 320;
+	// Most primitives admitted at once when memoryBudgetBytes bounds them. 0: only the budget limits them.
 	unsigned jobs = 0;
 	// The identity a cache was built for; a file now hashing differently is reported (its caches will miss).
 	std::string expectedSourceIdentifier;
@@ -80,6 +82,17 @@ struct ExtractOptions {
 // caches for every primitive.  Returns the parsed JSON (for scene-
 // hierarchy / material use by the renderer) and per-primitive data.
 ExtractionResult ExtractAll(const std::string& filePath, const ExtractOptions& options = {});
+
+// A primitive's CLod cache identity and the vertex format its mesh is made with, from the document alone: what a
+// cached scene records so its meshes are made exactly as an import of the source makes them.
+struct PrimitiveFormat {
+	CLodCacheLoader::MeshCacheIdentity identity;
+	unsigned int vertexFlags = 0;
+	unsigned int vertexSize = 0;
+	unsigned int skinningVertexSize = 0;
+	std::uint32_t uvSetCount = 0;
+};
+PrimitiveFormat DescribePrimitiveFormat(const nlohmann::json& gltf, const std::string& sourceIdentifier, size_t meshIndex, size_t primitiveIndex);
 
 // Required extensions this importer reads. A file requiring any other is refused.
 bool IsSupportedRequiredExtension(std::string_view extension);

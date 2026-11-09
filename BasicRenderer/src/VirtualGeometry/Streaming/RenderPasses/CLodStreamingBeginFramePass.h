@@ -13,7 +13,7 @@ struct UpdateContext;
 
 struct CLodStreamingBeginFrameBindings {
     org::PipelineState clearUint;
-    org::DeclaredViewToken loadCounter, loadRequestKeys, usedGroupsCounter, sourceMismatchCounter;
+    org::DeclaredViewToken loadCounter, loadRequestKeys, usedGroupsCounter, usedGroupsBits, sourceMismatchCounter;
     bool hasSourceMismatchCounter = false;
 };
 
@@ -25,6 +25,7 @@ public:
         std::shared_ptr<org::Buffer> loadCounter,
         std::shared_ptr<org::Buffer> loadRequestKeys,
         std::shared_ptr<org::Buffer> usedGroupsCounter,
+        std::shared_ptr<org::Buffer> usedGroupsBits,
         std::shared_ptr<org::Buffer> sourceGroupMismatchCounter,
         std::shared_ptr<org::Buffer> runtimeState,
         std::function<bool(std::vector<uint32_t>&, uint32_t&, org::UploadInstance*)> queueNonResidentBitsUpload,
@@ -40,6 +41,7 @@ private:
     std::shared_ptr<org::Buffer> m_loadCounter;
     std::shared_ptr<org::Buffer> m_loadRequestKeys;
     std::shared_ptr<org::Buffer> m_usedGroupsCounter;
+    std::shared_ptr<org::Buffer> m_usedGroupsBits;
     std::shared_ptr<org::Buffer> m_sourceGroupMismatchCounter;
     std::shared_ptr<org::Buffer> m_runtimeState;
     std::function<bool(std::vector<uint32_t>&, uint32_t&, org::UploadInstance*)> m_queueNonResidentBitsUpload;

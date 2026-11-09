@@ -7,7 +7,6 @@
 #include <condition_variable>
 #include <exception>
 #include <iterator>
-#include <thread>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
@@ -24,6 +23,9 @@
 #include <unordered_map>
 #include <map>
 #include <vector>
+
+#include <windows.h>
+#include <psapi.h>
 
 #include <DirectXMath.h>
 #include <meshoptimizer.h>
@@ -104,7 +106,11 @@ struct ParsedDocument {
 
 	// Cache of decompressed bufferView data for EXT_meshopt_compression.
 	// Keyed by bufferView index. Protected by mutex for parallel access.
-	std::unordered_map<size_t, std::vector<uint8_t>> decompressedBufferViews;
+	struct DecodedView {
+		std::unique_ptr<uint8_t[]> bytes;
+		size_t size = 0;
+	};
+	std::unordered_map<size_t, DecodedView> decompressedBufferViews;
 	std::unique_ptr<std::mutex> decompressedViewsMutex = std::make_unique<std::mutex>();
 	// Primitives still to run that read each compressed bufferView; a view is released when its count reaches zero, so a
 	// scene's decompressed geometry is never all held at once.
@@ -143,32 +149,39 @@ uint64_t GetFileSize(const std::filesystem::path& path) {
 	return static_cast<uint64_t>(size);
 }
 
+template <typename Allocate>
+void ReadFileRangeInto(const std::filesystem::path& path, uint64_t offset, uint64_t size, Allocate&& allocate) {
+	const HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+		FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+	if (file == INVALID_HANDLE_VALUE) {
+		throw std::runtime_error("Failed to open file: " + path.string());
+	}
+	struct Closer { HANDLE h; ~Closer() { CloseHandle(h); } } closer{ file };
+	LARGE_INTEGER fileSize{};
+	if (!GetFileSizeEx(file, &fileSize) || offset > static_cast<uint64_t>(fileSize.QuadPart) ||
+		size > static_cast<uint64_t>(fileSize.QuadPart) - offset) {
+		throw std::runtime_error("Read range out of file bounds: " + path.string());
+	}
+	uint8_t* destination = allocate(static_cast<size_t>(size));
+	uint64_t done = 0;
+	while (done < size) {
+		const DWORD request = static_cast<DWORD>((std::min)(size - done, uint64_t{ 1 } << 30));
+		OVERLAPPED position{};
+		position.Offset = static_cast<DWORD>(offset + done);
+		position.OffsetHigh = static_cast<DWORD>((offset + done) >> 32);
+		DWORD read = 0;
+		if (!ReadFile(file, destination + done, request, &read, &position) || read == 0) {
+			throw std::runtime_error("Failed to read file range: " + path.string());
+		}
+		done += read;
+	}
+}
+
+// Reads on the calling thread with one positional read. Handing the read to the blocking-I/O pool and waiting gained
+// nothing (the caller blocked either way) and left the caller's worker core idle while the pool queued it.
 std::vector<uint8_t> ReadFileRange(const std::filesystem::path& path, uint64_t offset, uint64_t size) {
 	std::vector<uint8_t> out;
-	auto& scheduler = TaskSchedulerManager::GetInstance();
-	auto ioScope = scheduler.CreateScope("GlTFGeometryExtractor::ReadFileRange");
-	scheduler.SubmitBlockingIo(ioScope, TaskDomain::AssetImport, "GlTFGeometryExtractor::ReadFileRange", [&](const br::TaskContext&) {
-		std::ifstream file(path, std::ios::binary);
-		if (!file) {
-			throw std::runtime_error("Failed to open file: " + path.string());
-		}
-
-		const uint64_t fileSize = GetFileSize(path);
-		if (offset > fileSize || size > fileSize - offset) {
-			throw std::runtime_error("Read range out of file bounds: " + path.string());
-		}
-
-		file.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
-		out.resize(static_cast<size_t>(size));
-		if (size > 0) {
-			file.read(reinterpret_cast<char*>(out.data()), static_cast<std::streamsize>(size));
-			if (!file) {
-				throw std::runtime_error("Failed to read file range: " + path.string());
-			}
-		}
-	}, TaskLane::Streaming, {});
-	ioScope.Wait();
-
+	ReadFileRangeInto(path, offset, size, [&](size_t bytes) { out.resize(bytes); return out.data(); });
 	return out;
 }
 
@@ -439,7 +452,7 @@ bool IsMeshoptCompressedView(const json& gltf, size_t bufferViewIndex) {
 
 // EXT_meshopt_compression: decompress a bufferView and cache the result.
 // Returns a pointer to the decompressed data vector (stable because it's in an unordered_map).
-const std::vector<uint8_t>& GetDecompressedBufferView(ParsedDocument& doc, size_t bufferViewIndex) {
+const ParsedDocument::DecodedView& GetDecompressedBufferView(ParsedDocument& doc, size_t bufferViewIndex) {
 	// Fast path: check cache under lock.
 	{
 		std::lock_guard<std::mutex> lock(*doc.decompressedViewsMutex);
@@ -466,20 +479,37 @@ const std::vector<uint8_t>& GetDecompressedBufferView(ParsedDocument& doc, size_
 	}
 
 	// Read compressed data from the source buffer.
-	auto compressedData = ReadFromSource(doc.buffers[compBufferIndex], compByteOffset, compByteLength);
+	std::unique_ptr<uint8_t[]> compressedData;
+	size_t compressedSize = compByteLength;
+	const BufferSource& compSource = doc.buffers[compBufferIndex];
+	if (compSource.backing == BufferBacking::FileSpan) {
+		if (compByteOffset > compSource.fileLength || compByteLength > compSource.fileLength - compByteOffset) {
+			throw std::runtime_error("Buffer source range out of bounds: " + compSource.filePath.string());
+		}
+		ReadFileRangeInto(compSource.filePath, compSource.fileOffset + compByteOffset, compByteLength,
+			[&](size_t bytes) { compressedData.reset(new uint8_t[(std::max)(bytes, size_t{ 1 })]); return compressedData.get(); });
+	} else {
+		auto bytes = ReadFromSource(compSource, compByteOffset, compByteLength);
+		compressedData.reset(new uint8_t[(std::max)(bytes.size(), size_t{ 1 })]);
+		std::memcpy(compressedData.get(), bytes.data(), bytes.size());
+		compressedSize = bytes.size();
+	}
 
-	// Decompress.
-	std::vector<uint8_t> decompressed(count * stride);
+	// Decompress into a buffer the decoder overwrites in full, so it is not zero-filled first.
+	ParsedDocument::DecodedView decoded;
+	decoded.size = count * stride;
+	decoded.bytes.reset(new uint8_t[(std::max)(decoded.size, size_t{ 1 })]);
+	uint8_t* const decompressed = decoded.bytes.get();
 	int rc = -1;
 	if (mode == "ATTRIBUTES") {
-		rc = meshopt_decodeVertexBuffer(decompressed.data(), count, stride,
-			compressedData.data(), compressedData.size());
+		rc = meshopt_decodeVertexBuffer(decompressed, count, stride,
+			compressedData.get(), compressedSize);
 	} else if (mode == "TRIANGLES") {
-		rc = meshopt_decodeIndexBuffer(decompressed.data(), count, stride,
-			compressedData.data(), compressedData.size());
+		rc = meshopt_decodeIndexBuffer(decompressed, count, stride,
+			compressedData.get(), compressedSize);
 	} else if (mode == "INDICES") {
-		rc = meshopt_decodeIndexSequence(decompressed.data(), count, stride,
-			compressedData.data(), compressedData.size());
+		rc = meshopt_decodeIndexSequence(decompressed, count, stride,
+			compressedData.get(), compressedSize);
 	} else {
 		throw std::runtime_error("EXT_meshopt_compression: unsupported mode '" + mode + "'");
 	}
@@ -491,11 +521,11 @@ const std::vector<uint8_t>& GetDecompressedBufferView(ParsedDocument& doc, size_
 
 	// Apply optional decode filter.
 	if (filter == "OCTAHEDRAL") {
-		meshopt_decodeFilterOct(decompressed.data(), count, stride);
+		meshopt_decodeFilterOct(decompressed, count, stride);
 	} else if (filter == "QUATERNION") {
-		meshopt_decodeFilterQuat(decompressed.data(), count, stride);
+		meshopt_decodeFilterQuat(decompressed, count, stride);
 	} else if (filter == "EXPONENTIAL") {
-		meshopt_decodeFilterExp(decompressed.data(), count, stride);
+		meshopt_decodeFilterExp(decompressed, count, stride);
 	} else if (filter != "NONE") {
 		throw std::runtime_error("EXT_meshopt_compression: unsupported filter '" + filter + "'");
 	}
@@ -505,7 +535,7 @@ const std::vector<uint8_t>& GetDecompressedBufferView(ParsedDocument& doc, size_
 
 	// Cache under lock.
 	std::lock_guard<std::mutex> lock(*doc.decompressedViewsMutex);
-	auto [it, inserted] = doc.decompressedBufferViews.emplace(bufferViewIndex, std::move(decompressed));
+	auto [it, inserted] = doc.decompressedBufferViews.emplace(bufferViewIndex, std::move(decoded));
 	return it->second;
 }
 
@@ -546,12 +576,12 @@ std::vector<uint8_t> ReadAccessorRawWindow(ParsedDocument& doc, size_t accessorI
 		const size_t relativeStart = accessor.byteOffset + firstElement * stride;
 		const size_t bytesNeeded = (elementCount - 1) * stride + packedElementSize;
 
-		if (relativeStart + bytesNeeded > decompressed.size()) {
+		if (relativeStart + bytesNeeded > decompressed.size) {
 			throw std::runtime_error("Accessor range exceeds decompressed bufferView bounds");
 		}
 
-		return std::vector<uint8_t>(decompressed.begin() + relativeStart,
-			decompressed.begin() + relativeStart + bytesNeeded);
+		return std::vector<uint8_t>(decompressed.bytes.get() + relativeStart,
+			decompressed.bytes.get() + relativeStart + bytesNeeded);
 	}
 
 	if (view.bufferIndex >= doc.buffers.size()) {
@@ -1035,34 +1065,13 @@ std::optional<MeshPreprocessResult> BuildPrimitivePreprocessData(
         hasAnyTexcoordSet = true;
     }
 
-	unsigned int meshFlags = VertexFlags::VERTEX_NORMALS; // Always present: authored or generated
-	if (hasTexcoords) {
-		meshFlags |= VertexFlags::VERTEX_TEXCOORDS;
-	}
-	if (hasColors) {
-		meshFlags |= VertexFlags::VERTEX_COLORS;
-	}
-	if (hasSkinning) {
-		meshFlags |= VertexFlags::VERTEX_SKINNED;
-	}
-
-	const uint8_t vertexSize = static_cast<uint8_t>(MeshVertexLayout::VertexSize(meshFlags));
-	const unsigned int skinningVertexSize = hasSkinning
-		? static_cast<unsigned int>(sizeof(XMFLOAT3) + sizeof(XMFLOAT3) + sizeof(PackedSkinningInfluences))
-		: 0u;
-
-	CLodCacheLoader::MeshCacheIdentity cacheIdentity{};
-	cacheIdentity.sourceIdentifier = doc.sourceIdentifier;
-	cacheIdentity.primPath = "/glTF/Mesh/" + std::to_string(meshIndex) + "/Primitive/" + std::to_string(primitiveIndex);
-	cacheIdentity.subsetName = "";
-	bool doubleSidedVoxelSourceNormals = false;
-	if (primitive.contains("material")) {
-		const size_t materialIndex = primitive["material"].get<size_t>();
-		if (doc.gltf.contains("materials") && materialIndex < doc.gltf["materials"].size()) {
-			doubleSidedVoxelSourceNormals = doc.gltf["materials"][materialIndex].value("doubleSided", false);
-		}
-	}
-	cacheIdentity.doubleSidedVoxelSourceNormals = doubleSidedVoxelSourceNormals;
+	const GlTFGeometryExtractor::PrimitiveFormat format =
+		GlTFGeometryExtractor::DescribePrimitiveFormat(doc.gltf, doc.sourceIdentifier, meshIndex, primitiveIndex);
+	const unsigned int meshFlags = format.vertexFlags;
+	const unsigned int vertexSize = format.vertexSize;
+	const unsigned int skinningVertexSize = format.skinningVertexSize;
+	CLodCacheLoader::MeshCacheIdentity cacheIdentity = format.identity;
+	const bool doubleSidedVoxelSourceNormals = cacheIdentity.doubleSidedVoxelSourceNormals;
 
 	auto prebuiltData = CLodCacheLoader::TryLoadPrebuilt(cacheIdentity);
 	if (outCacheHit) *outCacheHit = prebuiltData.has_value();
@@ -1355,6 +1364,38 @@ std::optional<MeshPreprocessResult> BuildPrimitivePreprocessData(
 
 namespace GlTFGeometryExtractor {
 
+PrimitiveFormat DescribePrimitiveFormat(const json& gltf, const std::string& sourceIdentifier, size_t meshIndex, size_t primitiveIndex) {
+	const json& primitive = gltf.at("meshes").at(meshIndex).at("primitives").at(primitiveIndex);
+	static const json noAttributes = json::object();
+	const json& attributes = primitive.contains("attributes") ? primitive["attributes"] : noAttributes;
+	PrimitiveFormat format;
+	format.vertexFlags = VertexFlags::VERTEX_NORMALS; // Always present: authored or generated
+	if (attributes.contains("TEXCOORD_0")) format.vertexFlags |= VertexFlags::VERTEX_TEXCOORDS;
+	if (attributes.contains("COLOR_0")) format.vertexFlags |= VertexFlags::VERTEX_COLORS;
+	const bool hasSkinning = attributes.contains("JOINTS_0") && attributes.contains("WEIGHTS_0");
+	if (hasSkinning) format.vertexFlags |= VertexFlags::VERTEX_SKINNED;
+	format.vertexSize = static_cast<uint8_t>(MeshVertexLayout::VertexSize(format.vertexFlags));
+	format.skinningVertexSize = hasSkinning
+		? static_cast<unsigned int>(sizeof(XMFLOAT3) + sizeof(XMFLOAT3) + sizeof(PackedSkinningInfluences))
+		: 0u;
+	for (auto it = attributes.begin(); it != attributes.end(); ++it) {
+		if (it.key().rfind("TEXCOORD_", 0) != 0) continue;
+		const auto setIndex = static_cast<uint32_t>(std::stoul(it.key().substr(strlen("TEXCOORD_"))));
+		format.uvSetCount = (std::max)(format.uvSetCount, setIndex + 1u);
+	}
+
+	format.identity.sourceIdentifier = sourceIdentifier;
+	format.identity.primPath = "/glTF/Mesh/" + std::to_string(meshIndex) + "/Primitive/" + std::to_string(primitiveIndex);
+	format.identity.subsetName = "";
+	if (primitive.contains("material") && gltf.contains("materials")) {
+		const size_t materialIndex = primitive["material"].get<size_t>();
+		if (materialIndex < gltf["materials"].size()) {
+			format.identity.doubleSidedVoxelSourceNormals = gltf["materials"][materialIndex].value("doubleSided", false);
+		}
+	}
+	return format;
+}
+
 bool IsSupportedRequiredExtension(std::string_view extension) {
 	return extension == "EXT_meshopt_compression" ||
 		extension == "EXT_mesh_gpu_instancing" ||
@@ -1394,6 +1435,7 @@ ExtractionResult ExtractAll(const std::string& filePath, const ExtractOptions& o
 		size_t primitiveIndex = 0;
 		const json* primitive = nullptr;
 		uint64_t triangles = 0;
+		uint64_t vertices = 0;
 		std::vector<size_t> compressedViews;
 	};
 
@@ -1441,6 +1483,9 @@ ExtractionResult ExtractAll(const std::string& filePath, const ExtractOptions& o
 			}
 			else if (primitive.contains("attributes") && primitive["attributes"].contains("POSITION")) {
 				item.triangles = accessorCount(primitive["attributes"]["POSITION"].get<size_t>()) / 3u;
+			}
+			if (primitive.contains("attributes") && primitive["attributes"].contains("POSITION")) {
+				item.vertices = accessorCount(primitive["attributes"]["POSITION"].get<size_t>());
 			}
 			if (doc.hasMeshoptCompression) {
 				for (const size_t accessorIndex : accessorIndices) {
@@ -1503,59 +1548,69 @@ ExtractionResult ExtractAll(const std::string& filePath, const ExtractOptions& o
 		TaskSchedulerManager::GetInstance().ParallelFor("GlTFGeometryExtractor::PreprocessPrimitives", workItems.size(), runItem);
 	}
 	else {
-		// Largest first, so the biggest builds do not end up alone at the tail; each is admitted while the primitives
-		// building fit the budget, and the first one in any case. Builds still parallelize inside through the scheduler.
+		// Largest first, so the biggest builds do not end up alone at the tail. A primitive is admitted while the admitted
+		// ones fit the budget (the first one in any case); each one finishing admits what then fits. Admitted primitives
+		// are tasks on the scheduler's workers, so their own ParallelFors share those workers instead of oversubscribing.
 		std::vector<size_t> order(workItems.size());
 		for (size_t i = 0; i < order.size(); ++i) order[i] = i;
-		std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return workItems[a].triangles > workItems[b].triangles; });
+		// Build time is about 2.1 us per triangle plus 4 us per vertex (Zorah, all cores busy): disconnected geometry,
+		// with more vertices than triangles, costs twice as much per triangle and would otherwise start last.
+		auto work = [&](size_t workIndex) { return workItems[workIndex].triangles + 2u * workItems[workIndex].vertices; };
+		std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return work(a) > work(b); });
 		std::vector<bool> taken(order.size(), false);
-		size_t remaining = order.size();
 		size_t firstUntaken = 0;
 		uint64_t admittedBytes = 0;
 		size_t running = 0;
 		std::mutex mutex;
-		std::condition_variable admitted;
+		const size_t jobLimit = options.jobs != 0u ? options.jobs : SIZE_MAX;
+		const size_t workerCount = (std::max)(1u, TaskSchedulerManager::GetInstance().WorkerCount() + 1u);
 		auto cost = [&](size_t workIndex) { return workItems[workIndex].triangles * options.bytesPerTriangle; };
+		// The estimate is checked against what the process really holds: nothing more is admitted while its private
+		// bytes are over the budget, whatever the estimates say.
+		auto overBudget = [&] {
+			PROCESS_MEMORY_COUNTERS_EX counters{};
+			counters.cb = sizeof(counters);
+			return GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters), sizeof(counters)) &&
+				counters.PrivateUsage > options.memoryBudgetBytes;
+		};
 
-		auto worker = [&] {
-			for (;;) {
-				size_t workIndex = 0;
-				{
-					std::unique_lock lock(mutex);
-					size_t slot = order.size();
-					admitted.wait(lock, [&] {
-						if (remaining == 0) return true;
-						while (firstUntaken < order.size() && taken[firstUntaken]) ++firstUntaken;
-						for (size_t i = firstUntaken; i < order.size(); ++i) {
-							if (taken[i]) continue;
-							if (running == 0 || admittedBytes + cost(order[i]) <= options.memoryBudgetBytes) {
-								slot = i;
-								return true;
-							}
-						}
-						return false;
-					});
-					if (remaining == 0) return;
-					taken[slot] = true;
-					--remaining;
+		std::function<void(const TaskSchedulerManager::SpawnFunction&)> admit = [&](const TaskSchedulerManager::SpawnFunction& spawn) {
+			std::vector<size_t> admitted;
+			{
+				std::lock_guard lock(mutex);
+				while (firstUntaken < order.size() && taken[firstUntaken]) ++firstUntaken;
+				const bool memoryFull = running != 0 && firstUntaken < order.size() && overBudget();
+				// A smaller primitive may overtake one that does not fit yet only while there are idle workers: letting
+				// small ones keep the budget full starved the large ones until the end, where they ran alone.
+				bool largerWaiting = false;
+				for (size_t i = firstUntaken; i < order.size() && running < jobLimit && !memoryFull; ++i) {
+					if (taken[i]) continue;
+					const uint64_t itemCost = cost(order[i]);
+					if (running != 0 && admittedBytes + itemCost > options.memoryBudgetBytes) {
+						largerWaiting = true;
+						continue;
+					}
+					if (largerWaiting && running >= workerCount) break;
+					taken[i] = true;
 					++running;
-					workIndex = order[slot];
-					admittedBytes += cost(workIndex);
+					admittedBytes += itemCost;
+					result.peakAdmittedTriangles = (std::max)(result.peakAdmittedTriangles, admittedBytes / (std::max<uint64_t>)(1u, options.bytesPerTriangle));
+					admitted.push_back(order[i]);
 				}
-				runItem(workIndex);
-				{
-					std::lock_guard lock(mutex);
-					admittedBytes -= cost(workIndex);
-					--running;
-				}
-				admitted.notify_all();
+			}
+			for (const size_t workIndex : admitted) {
+				spawn([&, workIndex] {
+					runItem(workIndex);
+					{
+						std::lock_guard lock(mutex);
+						admittedBytes -= cost(workIndex);
+						--running;
+					}
+					admit(spawn);
+				});
 			}
 		};
-		const unsigned workerCount = (std::max)(1u, options.jobs != 0u ? options.jobs : std::thread::hardware_concurrency());
-		std::vector<std::thread> workers;
-		workers.reserve(workerCount);
-		for (unsigned i = 0; i < workerCount; ++i) workers.emplace_back(worker);
-		for (auto& thread : workers) thread.join();
+		TaskSchedulerManager::GetInstance().RunTaskGroup("GlTFGeometryExtractor::PreprocessPrimitives", admit);
 	}
 
 	if (firstFailure) std::rethrow_exception(firstFailure);

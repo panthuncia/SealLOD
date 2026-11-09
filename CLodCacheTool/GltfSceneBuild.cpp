@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <ctime>
+#include <fstream>
 #include <exception>
 #include <mutex>
 #include <regex>
@@ -17,7 +18,9 @@
 
 #include <BasicRenderer/Assets/Import/CLodCache.h>
 #include <BasicRenderer/Assets/Import/GlTFGeometryExtractor.h>
+#include <BasicRenderer/Assets/Import/CLodCacheLoader.h>
 #include <BasicRenderer/Assets/Import/SceneManifest.h>
+#include <BasicRenderer/Streaming/TaskScheduler.h>
 #include <BasicRenderer/Assets/TexturePipeline.h>
 
 #include "Assets/Import/GlTF/GlTFLoader.h"
@@ -28,17 +31,29 @@ namespace
 {
 	using Kind = GlTFGeometryExtractor::PrimitiveOutcome::Kind;
 
-	std::uint64_t PhysicalMemoryBytes()
+	// The default budget: three quarters of the memory available now, so the build leaves room for what else runs.
+	std::uint64_t DefaultMemoryBudgetBytes()
 	{
 		MEMORYSTATUSEX status{};
 		status.dwLength = sizeof(status);
-		return GlobalMemoryStatusEx(&status) ? status.ullTotalPhys : 0ull;
+		return GlobalMemoryStatusEx(&status) ? status.ullAvailPhys / 4u * 3u : 0ull;
 	}
 
 	std::uint64_t PeakWorkingSetBytes()
 	{
 		PROCESS_MEMORY_COUNTERS counters{};
 		return GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof(counters)) ? counters.PeakWorkingSetSize : 0ull;
+	}
+
+	// The process's user and kernel CPU seconds so far.
+	std::pair<double, double> ProcessCpuSeconds()
+	{
+		FILETIME creation{}, exit{}, kernel{}, user{};
+		if (!GetProcessTimes(GetCurrentProcess(), &creation, &exit, &kernel, &user)) return { 0.0, 0.0 };
+		auto seconds = [](const FILETIME& time) {
+			return static_cast<double>((static_cast<std::uint64_t>(time.dwHighDateTime) << 32) | time.dwLowDateTime) / 1e7;
+		};
+		return { seconds(user), seconds(kernel) };
 	}
 
 	std::string UtcNow()
@@ -74,11 +89,14 @@ namespace
 		std::uint64_t failed = 0;
 	};
 
-	TextureCounts ConditionTextures(const nlohmann::json& gltf, const fs::path& scenePath, const GltfSceneBuildOptions& options)
+	// The scene's textures when it is described (those its kept meshes use), else every material's.
+	TextureCounts ConditionTextures(const nlohmann::json& gltf, const fs::path& scenePath, const br::import::SceneCacheDescription* scene,
+		const GltfSceneBuildOptions& options)
 	{
 		br::import::ImportSettings settings;
 		settings.profile = options.profile;
-		auto requests = GlTFLoader::BuildMaterialTextureRequests(gltf, scenePath.string(), settings);
+		auto requests = scene ? GlTFLoader::SceneTextureRequests(*scene, scenePath.string(), settings)
+			: GlTFLoader::BuildMaterialTextureRequests(gltf, scenePath.string(), settings);
 		TextureCounts counts;
 		counts.requested = requests.size();
 
@@ -130,9 +148,40 @@ namespace
 	}
 }
 
+namespace
+{
+	// What the renderer will do with the manifest, short of making GPU objects: it reads back as written, and how many of
+	// its primitives have current CLod data (all, once every shard has run).
+	void CheckSceneCache(const fs::path& manifestPath, const br::import::SceneCacheDescription& written)
+	{
+		const auto read = br::import::ReadSceneManifest(manifestPath);
+		if (!read.scene || br::import::SceneCacheToJson(*read.scene) != br::import::SceneCacheToJson(written)) {
+			spdlog::error("  Scene manifest {} does not read back as written", manifestPath.string());
+			return;
+		}
+		std::atomic<size_t> present{ 0 };
+		TaskSchedulerManager::GetInstance().ParallelFor("CLodCacheTool::CheckSceneCache", written.primitives.size(), [&](size_t index) {
+			const auto& primitive = written.primitives[index];
+			CLodCacheLoader::MeshCacheIdentity identity{};
+			identity.sourceIdentifier = written.sourceIdentifier;
+			identity.primPath = primitive.primPath;
+			identity.doubleSidedVoxelSourceNormals = primitive.doubleSidedVoxelSourceNormals;
+			if (CLodCacheLoader::TryLoadPrebuilt(identity)) present.fetch_add(1, std::memory_order_relaxed);
+		});
+		if (present.load() == written.primitives.size()) {
+			spdlog::info("  Scene cache complete: all {} primitives have CLod data", written.primitives.size());
+		}
+		else {
+			spdlog::info("  Scene cache: {} of {} primitives have CLod data; until the rest are built (other shards?), opening it imports the source",
+				present.load(), written.primitives.size());
+		}
+	}
+}
+
 bool BuildGltfScene(const fs::path& scenePath, const GltfSceneBuildOptions& options)
 {
 	const auto begin = std::chrono::steady_clock::now();
+	const auto cpuBegin = ProcessCpuSeconds();
 	std::optional<std::regex> only;
 	std::optional<std::regex> skip;
 	try {
@@ -159,11 +208,11 @@ bool BuildGltfScene(const fs::path& scenePath, const GltfSceneBuildOptions& opti
 	};
 	extract.cacheOnly = options.cacheOnly;
 	extract.continueOnError = true;
-	extract.memoryBudgetBytes = options.memoryBudgetBytes != 0 ? options.memoryBudgetBytes : PhysicalMemoryBytes() / 2u;
+	extract.memoryBudgetBytes = options.memoryBudgetBytes != 0 ? options.memoryBudgetBytes : DefaultMemoryBudgetBytes();
 	extract.bytesPerTriangle = options.bytesPerTriangle;
 	extract.jobs = options.jobs;
-	spdlog::info("  Memory budget {:.1f} GiB at {} bytes/triangle, {} jobs", Gib(extract.memoryBudgetBytes), extract.bytesPerTriangle,
-		options.jobs != 0u ? options.jobs : std::thread::hardware_concurrency());
+	spdlog::info("  Memory budget {:.1f} GiB at {} bytes/triangle{}", Gib(extract.memoryBudgetBytes), extract.bytesPerTriangle,
+		options.jobs != 0u ? ", at most " + std::to_string(options.jobs) + " primitives at once" : std::string());
 
 	// Report and drop each primitive as it is done: the scene's CLod data is never all in memory.
 	extract.onPrimitive = [&](GlTFGeometryExtractor::ExtractedPrimitive&& primitive) {
@@ -175,6 +224,8 @@ bool BuildGltfScene(const fs::path& scenePath, const GltfSceneBuildOptions& opti
 	Counters counters;
 	std::mutex failureMutex;
 	std::vector<GlTFGeometryExtractor::PrimitiveOutcome> failures;
+	struct OutcomeRow { GlTFGeometryExtractor::PrimitiveOutcome outcome; double end = 0.0; };
+	std::vector<OutcomeRow> outcomeRows;
 	std::atomic<std::int64_t> lastProgressMs{ 0 };
 	std::atomic<std::uint64_t> totalTriangles{ 0 };
 	extract.onOutcome = [&](const GlTFGeometryExtractor::PrimitiveOutcome& outcome) {
@@ -198,6 +249,10 @@ bool BuildGltfScene(const fs::path& scenePath, const GltfSceneBuildOptions& opti
 			spdlog::info("  mesh {} primitive {}: {} triangles in {:.0f} s", outcome.meshIndex, outcome.primitiveIndex, outcome.triangles, outcome.seconds);
 		}
 		const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - begin).count();
+		if (!options.outcomesCsv.empty()) {
+			std::lock_guard lock(failureMutex);
+			outcomeRows.push_back({ outcome, elapsedMs / 1000.0 });
+		}
 		auto last = lastProgressMs.load(std::memory_order_relaxed);
 		if (elapsedMs - last >= 10000 && lastProgressMs.compare_exchange_strong(last, elapsedMs)) {
 			spdlog::info("  Progress: {} primitives ({} hit, {} built, {} failed, {} missing), {:.2f} G triangles built, {:.0f} s, peak {:.1f} GiB",
@@ -220,6 +275,17 @@ bool BuildGltfScene(const fs::path& scenePath, const GltfSceneBuildOptions& opti
 		static_cast<double>(counters.trianglesBuilt.load()) / 1e9, counters.failed.load(), counters.missing.load(), geometrySeconds,
 		Gib(PeakWorkingSetBytes()));
 	{
+		const auto cpu = ProcessCpuSeconds();
+		const double user = cpu.first - cpuBegin.first;
+		const double kernel = cpu.second - cpuBegin.second;
+		spdlog::info("  CPU: {:.0f} s user + {:.0f} s kernel over {:.0f} s = {:.1f} of {} cores busy",
+			user, kernel, geometrySeconds, (user + kernel) / (std::max)(geometrySeconds, 1e-3), std::thread::hardware_concurrency());
+	}
+	if (result.peakAdmittedTriangles != 0) {
+		spdlog::info("  At most {:.1f} M triangles admitted at once: {:.0f} bytes/triangle of peak working set",
+			result.peakAdmittedTriangles / 1e6, static_cast<double>(PeakWorkingSetBytes()) / static_cast<double>(result.peakAdmittedTriangles));
+	}
+	{
 		std::lock_guard lock(failureMutex);
 		std::sort(failures.begin(), failures.end(), [](const auto& a, const auto& b) {
 			return a.meshIndex != b.meshIndex ? a.meshIndex < b.meshIndex : a.primitiveIndex < b.primitiveIndex;
@@ -233,10 +299,45 @@ bool BuildGltfScene(const fs::path& scenePath, const GltfSceneBuildOptions& opti
 		if (failures.size() > 50u) spdlog::error("  ... and {} more failures", failures.size() - 50u);
 	}
 
+	if (!options.outcomesCsv.empty()) {
+		std::ofstream csv(options.outcomesCsv, std::ios::trunc);
+		csv << "mesh,primitive,kind,triangles,start_s,end_s,seconds\n";
+		for (const auto& row : outcomeRows) {
+			static const char* kinds[] = { "hit", "built", "missing", "failed" };
+			csv << row.outcome.meshIndex << ',' << row.outcome.primitiveIndex << ',' << kinds[static_cast<int>(row.outcome.kind)] << ','
+				<< row.outcome.triangles << ',' << (row.end - row.outcome.seconds) << ',' << row.end << ',' << row.outcome.seconds << '\n';
+		}
+	}
+
+	// The scene as the cache will hold it: what the texture stage prepares and the manifest records.
+	std::optional<br::import::SceneCacheDescription> scene;
+	// The whole scene the filters keep, not only this shard's meshes: each shard writes the same description, and the
+	// cache loads it alone once every shard has run.
+	try {
+		br::import::ImportSettings settings;
+		settings.profile = options.profile;
+		auto includeMesh = [&](size_t, std::string_view name) {
+			const std::string text(name);
+			return !(options.profile && options.profile->SkipsMesh(name)) && !(skip && std::regex_match(text, *skip)) &&
+				!(only && !std::regex_match(text, *only));
+		};
+		scene = GlTFLoader::DescribeScene(result.gltf, scenePath.string(), settings, result.sourceIdentifier, includeMesh);
+		size_t placements = 0;
+		for (const auto& part : scene->parts) placements += (std::max)(size_t{ 1 }, part.instanceMatrices.size());
+		spdlog::info("  Scene: {} parts ({} placements), {} primitives, {} materials, {} textures{}", scene->parts.size(), placements,
+			scene->primitives.size(), scene->materials.size(), scene->textures.size(),
+			scene->notCacheableReason.empty() ? std::string("; loads from the cache alone")
+				: "; not loadable from the cache alone: " + scene->notCacheableReason);
+	}
+	catch (const std::exception& describeError) {
+		spdlog::error("  Scene description failed, so the manifest opens the source: {}", describeError.what());
+		scene.reset();
+	}
+
 	TextureCounts textures;
 	if (options.conditionTextures) {
 		try {
-			textures = ConditionTextures(result.gltf, scenePath, options);
+			textures = ConditionTextures(result.gltf, scenePath, scene ? &*scene : nullptr, options);
 		}
 		catch (const std::exception& error) {
 			spdlog::error("  Texture stage failed: {}", error.what());
@@ -275,9 +376,11 @@ bool BuildGltfScene(const fs::path& scenePath, const GltfSceneBuildOptions& opti
 		};
 		manifest.generator = "CLodCacheTool";
 		manifest.created = UtcNow();
+		manifest.scene = std::move(scene);
 		try {
 			br::import::WriteSceneManifest(manifestPath, manifest);
 			spdlog::info("  Scene manifest: {}{}", manifestPath.string(), complete ? "" : " (incomplete: see failures above)");
+			if (manifest.scene) CheckSceneCache(manifestPath, *manifest.scene);
 		}
 		catch (const std::exception& writeError) {
 			spdlog::error("  Scene manifest {} not written: {}", manifestPath.string(), writeError.what());

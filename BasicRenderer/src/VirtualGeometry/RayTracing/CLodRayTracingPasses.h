@@ -24,62 +24,93 @@ inline org::ComputePipelineDesc CLodRtComputePipeline(std::wstring path, std::ws
     return desc;
 }
 
-// Builds the ray tracing scene from the RT view's culling output. Raytracing passes that run after it in the frame can
-// use the TLAS.
+// Builds the ray tracing scene from the RT view's culling output, in three passes: the CLAS cache, the BLASes, then the
+// TLAS. Raytracing passes that run after the last in the frame can use the TLAS. Each stage's scratch is graph memory
+// live only in its pass, so the graph can alias the stages' scratch with each other.
+enum class CLodRayTracingSceneStage : uint8_t { Clas, Blas, Tlas };
+
 struct CLodRayTracingSceneFrame {
     std::shared_ptr<br::render::CLodRayTracingSystem> system;
 };
 
 struct CLodRayTracingSceneBindings {
     br::render::CLodRayTracingSystem::ScenePipelines pipelines;
-    org::DeclaredViewToken clusters, sideBand, counter;
+    org::DeclaredViewToken clusters, sideBand, counter, tlasInstances;
     uint32_t clusterCapacity = 0u;
+    CLodRayTracingSceneStage stage = CLodRayTracingSceneStage::Clas;
 };
 
 class CLodRayTracingScenePass
     : public org::TypedRenderGraphPass<CLodRayTracingScenePass, CLodRayTracingSceneFrame, CLodRayTracingSceneBindings> {
 public:
-    CLodRayTracingScenePass(std::shared_ptr<br::render::CLodRayTracingSystem> system, std::shared_ptr<org::Buffer> clusters,
+    CLodRayTracingScenePass(std::shared_ptr<br::render::CLodRayTracingSystem> system, CLodRayTracingSceneStage stage, std::shared_ptr<org::Buffer> clusters,
         std::shared_ptr<org::Buffer> sideBand, std::shared_ptr<org::Buffer> counter, std::shared_ptr<org::ResourceGroup> slabs, uint32_t clusterCapacity)
-        : m_system(std::move(system)), m_clusters(std::move(clusters)), m_sideBand(std::move(sideBand)), m_counter(std::move(counter)),
+        : m_system(std::move(system)), m_stage(stage), m_clusters(std::move(clusters)), m_sideBand(std::move(sideBand)), m_counter(std::move(counter)),
           m_slabs(std::move(slabs)), m_clusterCapacity(clusterCapacity) {
     }
 
     CLodRayTracingSceneBindings Declare(org::PassBuilder& builder) {
+        using Stage = CLodRayTracingSceneStage;
         CLodRayTracingSceneBindings bindings{};
+        bindings.stage = m_stage;
         const auto make = [&](const wchar_t* entry, const char* name) {
             return builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/rayTracingSceneBuild.hlsl", entry, name));
         };
         auto& pipelines = bindings.pipelines;
-        pipelines.clear = make(L"CLodRtClearCS", "CLod.RayTracing.Clear.PSO");
-        pipelines.cacheInit = make(L"CLodRtCacheInitCS", "CLod.RayTracing.CacheInit.PSO");
-        pipelines.cacheCollect = make(L"CLodRtCacheCollectCS", "CLod.RayTracing.CacheCollect.PSO");
-        pipelines.cacheOmmRetire = make(L"CLodRtCacheOmmRetireCS", "CLod.RayTracing.CacheOmmRetire.PSO");
-        pipelines.cacheEvict = make(L"CLodRtCacheEvictCS", "CLod.RayTracing.CacheEvict.PSO");
-        pipelines.cacheAdmit = make(L"CLodRtCacheAdmitCS", "CLod.RayTracing.CacheAdmit.PSO");
-        pipelines.cacheAssign = make(L"CLodRtCacheAssignCS", "CLod.RayTracing.CacheAssign.PSO");
-        pipelines.cacheArgs = make(L"CLodRtCacheArgsCS", "CLod.RayTracing.CacheArgs.PSO");
-        pipelines.cachePack = make(L"CLodRtCachePackCS", "CLod.RayTracing.CachePack.PSO");
-        pipelines.cacheEnd = make(L"CLodRtCacheEndCS", "CLod.RayTracing.CacheEnd.PSO");
-        pipelines.resetDraws = make(L"CLodRtResetDrawsCS", "CLod.RayTracing.ResetDraws.PSO");
-        pipelines.count = make(L"CLodRtCountCS", "CLod.RayTracing.Count.PSO");
-        pipelines.allocate = make(L"CLodRtAllocateCS", "CLod.RayTracing.Allocate.PSO");
-        pipelines.addCoarseConsumers = make(L"CLodRtAddCoarseConsumersCS", "CLod.RayTracing.AddCoarseConsumers.PSO");
-        pipelines.allocateFinish = make(L"CLodRtAllocateFinishCS", "CLod.RayTracing.AllocateFinish.PSO");
-        pipelines.place = make(L"CLodRtPlaceCS", "CLod.RayTracing.Place.PSO");
-        pipelines.writeInstances = make(L"CLodRtWriteInstancesCS", "CLod.RayTracing.WriteInstances.PSO");
+        if (m_stage != Stage::Blas) pipelines.clear = make(L"CLodRtClearCS", "CLod.RayTracing.Clear.PSO");
+        if (m_stage == Stage::Clas) {
+            pipelines.cacheInit = make(L"CLodRtCacheInitCS", "CLod.RayTracing.CacheInit.PSO");
+            pipelines.cacheCollect = make(L"CLodRtCacheCollectCS", "CLod.RayTracing.CacheCollect.PSO");
+            pipelines.cacheOmmRetire = make(L"CLodRtCacheOmmRetireCS", "CLod.RayTracing.CacheOmmRetire.PSO");
+            pipelines.cacheEvict = make(L"CLodRtCacheEvictCS", "CLod.RayTracing.CacheEvict.PSO");
+            pipelines.cacheAdmit = make(L"CLodRtCacheAdmitCS", "CLod.RayTracing.CacheAdmit.PSO");
+            pipelines.cacheAssign = make(L"CLodRtCacheAssignCS", "CLod.RayTracing.CacheAssign.PSO");
+            pipelines.cacheArgs = make(L"CLodRtCacheArgsCS", "CLod.RayTracing.CacheArgs.PSO");
+            pipelines.cachePack = make(L"CLodRtCachePackCS", "CLod.RayTracing.CachePack.PSO");
+            pipelines.resetDraws = make(L"CLodRtResetDrawsCS", "CLod.RayTracing.ResetDraws.PSO");
+            pipelines.count = make(L"CLodRtCountCS", "CLod.RayTracing.Count.PSO");
+        }
+        else if (m_stage == Stage::Blas) {
+            pipelines.allocate = make(L"CLodRtAllocateCS", "CLod.RayTracing.Allocate.PSO");
+            pipelines.addCoarseConsumers = make(L"CLodRtAddCoarseConsumersCS", "CLod.RayTracing.AddCoarseConsumers.PSO");
+            pipelines.allocateFinish = make(L"CLodRtAllocateFinishCS", "CLod.RayTracing.AllocateFinish.PSO");
+            pipelines.place = make(L"CLodRtPlaceCS", "CLod.RayTracing.Place.PSO");
+        }
+        else {
+            pipelines.writeInstances = make(L"CLodRtWriteInstancesCS", "CLod.RayTracing.WriteInstances.PSO");
+            pipelines.cacheEnd = make(L"CLodRtCacheEndCS", "CLod.RayTracing.CacheEnd.PSO");
+        }
         bindings.clusterCapacity = m_clusterCapacity;
-        bindings.clusters = builder.ShaderResource(m_clusters).View();
-        bindings.sideBand = builder.ShaderResource(m_sideBand).View(); // Which part portal occurrence reached each cluster.
-        bindings.counter = builder.ShaderResource(m_counter).View();
-        if (m_slabs) builder.ShaderResource(ResourceGroupResolver(m_slabs));
-        builder.ShaderResource(Builtin::PerMeshBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases, Builtin::PerMaterialDataBuffer, Builtin::PerMeshInstanceBuffer,
-            Builtin::InstanceDrawRecordBuffer, Builtin::PerInstanceTransformBuffer, Builtin::PerObjectBuffer,
-            Builtin::CLod::Offsets, Builtin::CLod::MeshMetadata, Builtin::CLod::Groups, Builtin::CLod::AssemblyTransforms,
-            Builtin::CLod::Segments, Builtin::CLod::GroupPageMap, // The cache finds a group's pages, to build and to place it.
-            Builtin::CLod::StreamingRuntimeState, Builtin::CLod::StreamingNonResidentBits, // And builds again only resident groups.
-            Builtin::Material::TextureStreamingMetadataBuffer); // Micromap bakes and the instance check read alpha textures' residency.
-        builder.UnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer); // And keep them resident at their test mip.
+        if (m_stage != Stage::Tlas) { // Count and place read the cluster list; the TLAS stage doesn't.
+            bindings.clusters = builder.ShaderResource(m_clusters).View();
+            bindings.sideBand = builder.ShaderResource(m_sideBand).View(); // Which part portal occurrence reached each cluster.
+            bindings.counter = builder.ShaderResource(m_counter).View();
+        }
+        // What each stage reads and writes, and nothing else: the graph orders the stages, and makes the barriers between
+        // them, from it. The system's own buffers it declares itself.
+        switch (m_stage) {
+        case Stage::Clas:
+            m_system->DeclareSceneClas(builder);
+            // Read by the cache's shaders, and by the CLAS build, which builds from the pages' vertices and indices.
+            if (m_slabs) builder.AccelerationStructureBuildInput(ResourceGroupResolver(m_slabs));
+            builder.ShaderResource(Builtin::PerMeshBuffer, Builtin::PerMeshInstanceBuffer, Builtin::InstanceDrawRecordBuffer, Builtin::PerMaterialDataBuffer,
+                Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases, Builtin::CLod::MeshMetadata, Builtin::CLod::Groups,
+                Builtin::CLod::Segments, Builtin::CLod::GroupPageMap, // The cache finds a group's pages, to build it.
+                Builtin::CLod::StreamingRuntimeState, Builtin::CLod::StreamingNonResidentBits); // And builds again only resident groups.
+            break;
+        case Stage::Blas:
+            m_system->DeclareSceneBlas(builder);
+            builder.ShaderResource(Builtin::CLod::Groups, Builtin::CLod::Segments, Builtin::CLod::GroupPageMap); // Place finds each cluster's CLAS.
+            break;
+        case Stage::Tlas:
+            bindings.tlasInstances = m_system->DeclareSceneTlas(builder);
+            builder.ShaderResource(Builtin::PerMeshBuffer, Builtin::PerMeshInstanceBuffer, Builtin::InstanceDrawRecordBuffer, Builtin::PerInstanceTransformBuffer,
+                Builtin::PerMaterialDataBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases, Builtin::CLod::MeshMetadata,
+                Builtin::CLod::Groups, Builtin::CLod::AssemblyTransforms,
+                Builtin::Material::TextureStreamingMetadataBuffer); // The instance check reads alpha textures' residency,
+            builder.UnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer); // and keeps them resident at their test mip.
+            break;
+        }
         return bindings;
     }
 
@@ -89,12 +120,23 @@ public:
 
     static void Record(const CLodRayTracingSceneBindings& bindings, const CLodRayTracingSceneFrame& frame, org::PassRecordContext& recording) {
         std::scoped_lock lock(frame.system->FrameOperationMutex());
-        frame.system->RecordSceneBuild(recording, bindings.pipelines,
-            recording.Index(bindings.clusters), recording.Index(bindings.sideBand), recording.Index(bindings.counter), bindings.clusterCapacity);
+        br::render::CLodRayTracingSystem::SceneInputs inputs{};
+        inputs.clusterCapacity = bindings.clusterCapacity;
+        if (bindings.stage == CLodRayTracingSceneStage::Tlas) {
+            inputs.tlasInstancesUav = recording.Index(bindings.tlasInstances);
+            frame.system->RecordSceneTlas(recording, bindings.pipelines, inputs);
+            return;
+        }
+        inputs.clustersSrv = recording.Index(bindings.clusters);
+        inputs.sideBandSrv = recording.Index(bindings.sideBand);
+        inputs.counterSrv = recording.Index(bindings.counter);
+        if (bindings.stage == CLodRayTracingSceneStage::Clas) frame.system->RecordSceneClas(recording, bindings.pipelines, inputs);
+        else frame.system->RecordSceneBlas(recording, bindings.pipelines, inputs);
     }
 
 private:
     std::shared_ptr<br::render::CLodRayTracingSystem> m_system;
+    CLodRayTracingSceneStage m_stage = CLodRayTracingSceneStage::Clas;
     std::shared_ptr<org::Buffer> m_clusters, m_sideBand, m_counter;
     std::shared_ptr<org::ResourceGroup> m_slabs;
     uint32_t m_clusterCapacity = 0u;
@@ -134,6 +176,8 @@ public:
         bindings.visibleClusters = builder.UnorderedAccess(m_system->GetPrimaryVisibleClusters()).View();
         bindings.transformIndices = builder.UnorderedAccess(m_system->GetPrimaryTransformIndices()).View();
         bindings.capacity = m_system->GetPrimaryVisibleClusterCapacity();
+        br::render::CLodRayTracingSystem::DeclareTracing(builder);
+        m_system->DeclareVisibility(builder, m_mode == CLOD_RT_VIS_MODE_COMPARE);
         // Far from where raster's lists grow: hardware from the bottom, Reyes from the top.
         bindings.recordBase = bindings.capacity / 2u;
         if (m_slabs) builder.ShaderResource(ResourceGroupResolver(m_slabs));
@@ -226,6 +270,7 @@ public:
         }
         else {
             bindings.output = builder.UnorderedAccess(m_working).View();
+            br::render::CLodRayTracingSystem::DeclareTracing(builder);
             if (m_slabs) builder.ShaderResource(ResourceGroupResolver(m_slabs));
             builder.ShaderResource(Builtin::Surface::NormalRoughness, Builtin::Light::InfoBuffer, Builtin::Light::ActiveLightIndices,
                 Builtin::PerMeshBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases, Builtin::PerMaterialDataBuffer, Builtin::PerMeshInstanceBuffer, Builtin::InstanceDrawRecordBuffer,

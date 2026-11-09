@@ -158,13 +158,17 @@ struct PathTraceBindings {
     org::DeclaredViewToken output, baseColor, normalRoughness, motion, projectedDepth, accumulation, specularAlbedo, specularHitDistance;
     bool hasAccumulation = false;
     bool hasRayReconstructionGuides = false;
+    // The RVT is declared only when the pipeline recipe has terrain RVT. Without it the terrain hit shader's RVT slots bind
+    // as absent, as material evaluation's do.
+    bool terrainRvt = false;
 };
 
 // Replaces raster, material evaluation and deferred lighting. Everything after it reads HDRColorTarget as usual.
 class PathTracePass : public org::TypedRenderGraphPass<PathTracePass, PathTraceFrameData, PathTraceBindings> {
 public:
-    PathTracePass(std::shared_ptr<PathTraceState> state, std::shared_ptr<org::ResourceGroup> slabs, bool terrainRvt, bool rayReconstruction)
-        : m_state(std::move(state)), m_slabs(std::move(slabs)), m_terrainRvt(terrainRvt), m_rayReconstruction(rayReconstruction) {
+    PathTracePass(std::shared_ptr<PathTraceState> state, std::shared_ptr<br::render::CLodRayTracingSystem> system, std::shared_ptr<org::ResourceGroup> slabs,
+        bool terrainRvt, bool rayReconstruction)
+        : m_state(std::move(state)), m_system(std::move(system)), m_slabs(std::move(slabs)), m_terrainRvt(terrainRvt), m_rayReconstruction(rayReconstruction) {
         if (SettingsManager::GetInstance().getSettingGetter<bool>("pathTracingAccumulate")()) {
             const auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
             org::TextureDescription description;
@@ -198,6 +202,9 @@ public:
         if (m_slabs) builder.ShaderResource(ResourceGroupResolver(m_slabs));
         // Primary hits ask for the mips they see. Nothing past them does: see pathTracingHit.hlsli.
         builder.UnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer);
+        br::render::CLodRayTracingSystem::DeclareTracing(builder);
+        if (m_system) m_system->DeclarePixelWatch(builder);
+        bindings.terrainRvt = m_terrainRvt;
         if (m_terrainRvt) {
             builder.ShaderResource(Builtin::Terrain::RvtInfo, Builtin::Terrain::RvtClipInfos, Builtin::Terrain::RvtPageTable,
                 Builtin::Terrain::RvtPageKeys, Builtin::Terrain::RvtPhysicalPageOwner, Builtin::Terrain::RvtPhysicalPageAtlas,
@@ -280,7 +287,10 @@ public:
         constants[CLOD_RT_PT_WATCH_BRIGHT] = std::bit_cast<uint32_t>(frame.system->GetPixelWatchBright());
         frame.system->RecordPixelWatchBegin(recording, bindings.clearPipeline);
         recording.Retain(frame.table);
-        recording.BindRayTracingPipeline(frame.table->Payload());
+        static constexpr std::string_view kRvtPrefixes[] = { "Builtin::Terrain::Rvt" };
+        org::PassRecordContext::BindOptions options{};
+        if (!bindings.terrainRvt) options.absentPrefixes = kRvtPrefixes;
+        recording.BindRayTracingPipeline(frame.table->Payload(), options);
         br::render::PushMiscConstants(recording, constants);
         recording.TraceRaysIndirect(frame.table->IndirectDesc(), bindings.arguments);
         frame.system->RecordPixelWatchEnd(recording);
@@ -288,6 +298,7 @@ public:
 
 private:
     std::shared_ptr<PathTraceState> m_state;
+    std::shared_ptr<br::render::CLodRayTracingSystem> m_system; // For its pixel watch's declaration; recording uses the frame's.
     std::shared_ptr<org::ResourceGroup> m_slabs;
     bool m_terrainRvt = false;
     bool m_rayReconstruction = false;

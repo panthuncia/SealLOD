@@ -457,6 +457,10 @@ private:
     std::function<float()> getCLodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld;
     std::function<void(float)> setCLodDirectionalVirtualShadowSmrtMaxTraceDistanceWorld;
 
+    float m_clodDirectionalVirtualShadowSmrtMaxLateralTexels = CLodVirtualShadowDefaultSmrtMaxLateralTexels;
+    std::function<float()> getCLodDirectionalVirtualShadowSmrtMaxLateralTexels;
+    std::function<void(float)> setCLodDirectionalVirtualShadowSmrtMaxLateralTexels;
+
     bool m_clodDirectionalVirtualShadowReceiverTraceEnabled = CLodVirtualShadowDefaultReceiverTraceEnabled;
     std::function<bool()> getCLodDirectionalVirtualShadowReceiverTraceEnabled;
     std::function<void(bool)> setCLodDirectionalVirtualShadowReceiverTraceEnabled;

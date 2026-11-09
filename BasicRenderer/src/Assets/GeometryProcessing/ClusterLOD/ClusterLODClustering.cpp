@@ -8,6 +8,7 @@
 #include "Assets/GeometryProcessing/ClusterLOD/ClusterLODSkinningSidecar.h"
 
 #include <limits>
+#include <memory>
 #include <vector>
 #include <cstddef>
 #include <cstdint>
@@ -433,47 +434,69 @@ namespace
 		if (vertexCount == 0 || indices.empty() || (indices.size() % 3u) != 0u)
 			return {};
 
-		std::vector<unsigned int> positionRemap(vertexCount);
+		// Overwrite-only scratch is allocated without zero-filling.
+		std::unique_ptr<unsigned int[]> positionRemap(new unsigned int[vertexCount]);
 		meshopt_generatePositionRemap(
-			positionRemap.data(), reinterpret_cast<const float*>(vertices.data()), vertexCount, vertexStrideBytes);
+			positionRemap.get(), reinterpret_cast<const float*>(vertices.data()), vertexCount, vertexStrideBytes);
 
-		std::vector<uint64_t> edges;
-		edges.reserve(indices.size());
-		auto appendEdge = [&](uint32_t sourceA, uint32_t sourceB)
+		// An exterior edge is one only a single triangle has. Edges are bucketed by their lower canonical vertex (a counting
+		// sort: two linear passes) and compared within each bucket, which holds a vertex's few edges, instead of sorting
+		// every edge of the mesh together.
+		auto canonicalEdge = [&](uint32_t sourceA, uint32_t sourceB, uint32_t& lo, uint32_t& hi) -> bool
 		{
 			if (sourceA >= vertexCount || sourceB >= vertexCount)
-				return;
+				return false;
 			const uint32_t a = positionRemap[sourceA];
 			const uint32_t b = positionRemap[sourceB];
 			if (a == b)
-				return;
-			const uint32_t lo = std::min(a, b);
-			const uint32_t hi = std::max(a, b);
-			edges.push_back((static_cast<uint64_t>(lo) << 32u) | hi);
+				return false;
+			lo = std::min(a, b);
+			hi = std::max(a, b);
+			return true;
+		};
+		auto forEachEdge = [&](auto&& visit)
+		{
+			for (size_t triangle = 0; triangle < indices.size(); triangle += 3u)
+			{
+				uint32_t lo = 0;
+				uint32_t hi = 0;
+				if (canonicalEdge(indices[triangle + 0u], indices[triangle + 1u], lo, hi)) visit(lo, hi);
+				if (canonicalEdge(indices[triangle + 1u], indices[triangle + 2u], lo, hi)) visit(lo, hi);
+				if (canonicalEdge(indices[triangle + 2u], indices[triangle + 0u], lo, hi)) visit(lo, hi);
+			}
 		};
 
-		for (size_t triangle = 0; triangle < indices.size(); triangle += 3u)
-		{
-			appendEdge(indices[triangle + 0u], indices[triangle + 1u]);
-			appendEdge(indices[triangle + 1u], indices[triangle + 2u]);
-			appendEdge(indices[triangle + 2u], indices[triangle + 0u]);
-		}
+		std::vector<uint32_t> bucketStart(vertexCount + 1u, 0u);
+		forEachEdge([&](uint32_t lo, uint32_t) { ++bucketStart[lo + 1u]; });
+		for (size_t vertex = 0; vertex < vertexCount; ++vertex)
+			bucketStart[vertex + 1u] += bucketStart[vertex];
+		std::vector<uint32_t> bucketCursor(bucketStart.begin(), bucketStart.end() - 1);
+		std::unique_ptr<uint32_t[]> upperVertices(new uint32_t[bucketStart[vertexCount]]);
+		forEachEdge([&](uint32_t lo, uint32_t hi) { upperVertices[bucketCursor[lo]++] = hi; });
+		bucketCursor = {};
 
-		std::sort(edges.begin(), edges.end());
 		std::vector<unsigned char> canonicalBoundary(vertexCount, 0u);
 		size_t exteriorEdgeCount = 0;
-		for (size_t begin = 0; begin < edges.size();)
+		for (size_t lo = 0; lo < vertexCount; ++lo)
 		{
-			size_t end = begin + 1u;
-			while (end < edges.size() && edges[end] == edges[begin])
-				++end;
-			if (end - begin == 1u)
+			uint32_t* const first = upperVertices.get() + bucketStart[lo];
+			uint32_t* const last = upperVertices.get() + bucketStart[lo + 1u];
+			if (first == last)
+				continue;
+			std::sort(first, last);
+			for (uint32_t* begin = first; begin != last;)
 			{
-				canonicalBoundary[static_cast<uint32_t>(edges[begin] >> 32u)] = 1u;
-				canonicalBoundary[static_cast<uint32_t>(edges[begin])] = 1u;
-				++exteriorEdgeCount;
+				uint32_t* end = begin + 1;
+				while (end != last && *end == *begin)
+					++end;
+				if (end - begin == 1)
+				{
+					canonicalBoundary[lo] = 1u;
+					canonicalBoundary[*begin] = 1u;
+					++exteriorEdgeCount;
+				}
+				begin = end;
 			}
-			begin = end;
 		}
 
 		std::vector<unsigned char> flags(vertexCount, 0u);
@@ -709,21 +732,32 @@ namespace
 		output.group.segmentCount = 0;
 		output.group.terminalSegmentCount = 0;
 
-		std::unordered_map<uint32_t, uint32_t> groupVertexToLocal;
-		groupVertexToLocal.reserve(capturedGroup.clusters.size() * MS_MESHLET_SIZE);
+		const size_t maxGroupVertices = capturedGroup.clusters.size() * MS_MESHLET_SIZE;
 		std::vector<uint32_t> groupLocalToGlobal;
-		groupLocalToGlobal.reserve(capturedGroup.clusters.size() * MS_MESHLET_SIZE);
+		groupLocalToGlobal.reserve(maxGroupVertices);
+
+		// Global -> group-local vertex index: an open-addressing table at most half full. Local indices are handed out in
+		// first-seen order, as before; a slot holds localIndex + 1, with 0 meaning empty.
+		size_t tableSize = 64;
+		while (tableSize < maxGroupVertices * 2u)
+			tableSize <<= 1u;
+		const size_t tableMask = tableSize - 1u;
+		std::unique_ptr<uint32_t[]> tableKeys(new uint32_t[tableSize]);
+		std::unique_ptr<uint32_t[]> tableSlots(new uint32_t[tableSize]());
 
 		auto getGroupLocalVertexIndex = [&](uint32_t globalVertexIndex) -> uint32_t
 			{
-				auto it = groupVertexToLocal.find(globalVertexIndex);
-				if (it != groupVertexToLocal.end())
+				size_t slot = (static_cast<size_t>(globalVertexIndex) * 0x9E3779B97F4A7C15ull >> 32u) & tableMask;
+				while (tableSlots[slot] != 0u)
 				{
-					return it->second;
+					if (tableKeys[slot] == globalVertexIndex)
+						return tableSlots[slot] - 1u;
+					slot = (slot + 1u) & tableMask;
 				}
 
 				const uint32_t localIndex = static_cast<uint32_t>(groupLocalToGlobal.size());
-				groupVertexToLocal.emplace(globalVertexIndex, localIndex);
+				tableKeys[slot] = globalVertexIndex;
+				tableSlots[slot] = localIndex + 1u;
 				groupLocalToGlobal.push_back(globalVertexIndex);
 				return localIndex;
 			};
@@ -2177,7 +2211,11 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 		captureContext.recomputeGroupNormals = recomputeGroupNormals;
 		{
 			ZoneScopedN("ClusterLODUtilities::Build::clodBuildEx");
-			clodBuildEx(config, mesh, &captureContext, &ClodBuildCallbacks::Output, nullptr);
+			// Each depth's simplifications run in parallel; groups are still output and split in order, so the result is
+			// the serial one.
+			clodBuildParallelConfig parallelConfig{};
+			parallelConfig.iteration_callback = &ClodBuildCallbacks::Iterate;
+			clodBuildEx(config, mesh, &captureContext, &ClodBuildCallbacks::Output, &parallelConfig);
 		}
 		TracyPlot("CLOD.Build.Groups", static_cast<int64_t>(state.groups.size()));
 		TracyPlot("CLOD.Build.Segments", static_cast<int64_t>(state.segments.size()));

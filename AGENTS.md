@@ -95,6 +95,11 @@ Options worth knowing: `BASICRENDERER_USE_PACKAGE_DEPS` (default `ON`),
 `BASICRENDERER_ENABLE_SUBMODULE_FALLBACK` (default `ON`), `BASICRENDERER_USD_VARIANT=dbg|rel`,
 `BASICRHI_ENABLE_RESHAPE` (default `OFF`), `BASICRENDERER_BUILD_BRNIFLY` (default `ON`).
 
+To package the demo as a folder that runs by double-clicking `BasicRenderer.exe` (runtime DLLs, shaders, textures and
+a warm shader cache, no models), run `scripts\deploy_demo.ps1` (`-Build` builds `BasicRendererDemo` first,
+`-Destination` defaults to `D:\BasicRendererDemo`). It finds SARP's build when this is SARP's submodule, otherwise
+the newest under `out\build`.
+
 The root `CMakeLists.txt` handles repository configuration. Target definitions and
 explicit renderer source lists are in `BasicRenderer/CMakeLists.txt`. Shared
 first-party dependency discovery is in `cmake/RendererDependencies.cmake`.

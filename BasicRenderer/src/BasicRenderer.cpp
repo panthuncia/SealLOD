@@ -362,6 +362,11 @@ void ProcessRawInput(LPARAM lParam) {
 // Window callback procedure
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
 
+// --no-input: the renderer takes no keyboard or mouse input, so the camera stays where it starts. Raw input is registered
+// with RIDEV_INPUTSINK, which delivers it while other windows have focus: unattended runs (measurements, captures) would
+// otherwise follow whatever the user does elsewhere.
+bool g_rendererInputDisabled = false;
+
 void RegisterRawInputDevices(HWND hwnd) {
     RAWINPUTDEVICE rid[2];
 
@@ -438,7 +443,7 @@ HWND InitWindow(HINSTANCE hInstance, int nCmdShow) {
     SetForegroundWindow(hwnd);
     SetFocus(hwnd);
 
-    RegisterRawInputDevices(hwnd);
+    if (!g_rendererInputDisabled) RegisterRawInputDevices(hwnd);
 
     return hwnd;
 }
@@ -522,11 +527,24 @@ std::vector<std::string> FindCommandLineValues(std::string_view commandLine, std
     return values;
 }
 
-// --model <path>[@scale]: the models the demo loads. Defaults to the Bistro exterior.
+// --model <path>[@scale]: the models the demo loads. A directory loads each scene cache (*.brscene.json) in it. Without
+// one, the Bistro exterior if the models folder has it (a build's does, a deployment's doesn't), or nothing: Scene
+// Explorer's Load Model and Load Folder add models while it runs.
 struct DemoModel {
     std::string path;
     float scale = 1.0f;
 };
+
+// A model file as it is, or a directory's scene caches.
+std::vector<std::string> ExpandDemoModelPath(const std::string& path)
+{
+    std::error_code error;
+    if (!std::filesystem::is_directory(path, error)) return { path };
+    std::vector<std::string> manifests;
+    for (const auto& manifest : br::import::FindSceneManifests(path)) manifests.push_back(manifest.string());
+    if (manifests.empty()) spdlog::error("{}: the directory holds no scene cache (*.brscene.json)", path);
+    return manifests;
+}
 
 std::vector<DemoModel> FindDemoModels(std::string_view commandLine)
 {
@@ -537,9 +555,10 @@ std::vector<DemoModel> FindDemoModels(std::string_view commandLine)
             model.path = value.substr(0, at);
             model.scale = std::stof(value.substr(at + 1));
         }
-        models.push_back(std::move(model));
+        for (auto& path : ExpandDemoModelPath(model.path)) models.push_back({ std::move(path), model.scale });
     }
-    if (models.empty()) models.push_back({"models/bistroExterior.glb"});
+    std::error_code error;
+    if (models.empty() && std::filesystem::is_regular_file("models/bistroExterior.glb", error)) models.push_back({"models/bistroExterior.glb"});
     return models;
 }
 
@@ -1090,6 +1109,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     //tracy::SetThreadName("Main");
 
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    // What the demo loads (shaders, textures) and writes (logs, cache) is beside the exe: run from there, however it was
+    // started (a shortcut's working folder, another directory's command line). Relative --model paths are from there too.
+    {
+        wchar_t exePath[MAX_PATH] = {};
+        if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) != 0) {
+            std::error_code error;
+            std::filesystem::current_path(std::filesystem::path(exePath).parent_path(), error);
+        }
+    }
     std::filesystem::path logPath = "logs/log.txt";
     char* configuredLogPath = nullptr;
     size_t configuredLogPathLength = 0;
@@ -1183,6 +1211,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     SetDllDirectoryA(".\\D3D\\");
 
+    g_rendererInputDisabled = commandLine.find("--no-input") != std::string_view::npos;
+    if (g_rendererInputDisabled) spdlog::info("--no-input: keyboard and mouse input are ignored");
     HWND hwnd = InitWindow(hInstance, nShowCmd);
 
     spdlog::info("initializing renderer...");
@@ -1259,7 +1289,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         }
         // Scene Explorer's Load Model adds to the running static scene. The menu calls it on this thread.
         SettingsManager::GetInstance().getSettingSetter<std::function<void(const std::string&)>>("loadModel")(
-            [scene = staticScene.get()](const std::string& path) { scene->AddModel(path, XMMatrixIdentity()); });
+            [scene = staticScene.get()](const std::string& path) {
+                for (const auto& model : ExpandDemoModelPath(path)) scene->AddModel(model, XMMatrixIdentity());
+            });
 
         renderer.SetEnvironment("sky");
 
@@ -1614,7 +1646,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 	const bool imguiHandled = renderer.HandleMenuInput(hWnd, message, wParam, lParam);
     const bool blockRendererInput = IsRendererInputMessage(message) && ShouldBlockRendererInputForImGui(message);
 
-    if (IsRendererInputMessage(message) && !blockRendererInput) {
+    if (IsRendererInputMessage(message) && !blockRendererInput && !g_rendererInputDisabled) {
         renderer.GetInputManager().ProcessInput(message, wParam, lParam);
     }
 

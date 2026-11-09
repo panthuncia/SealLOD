@@ -421,7 +421,22 @@ void Renderer::CreateRenderGraph() {
                 if (m_openPBRLookupResources.fuzzLTC) newGraph->RegisterResource(Builtin::OpenPBR::FuzzLTC, m_openPBRLookupResources.fuzzLTC);
                 break;
             }
-            case ClusterLod:
+            case ClusterLod: {
+                // What passes which trace read of the ray tracing scene (CLodRayTracingSystem::DeclareTracing) they declare by
+                // name, so it is registered here, before any pass declares. The extensions below set up the rest of ray tracing.
+                const bool pathTraced = m_pipelineRecipe.Contains<br::pipeline::PathTracingTechnique>();
+                const bool wantsRayTracing = pathTraced || m_rayTracedPrimaryVisibilityMode != 0u || m_rayTracedReflections || m_rayTracedShadows;
+                auto& deviceManager = DeviceManager::GetInstance();
+                if (wantsRayTracing && m_clodRayTracingSystem && deviceManager.GetCLodRayTracingSupported()) {
+                    // Only the path tracer's alpha test is the one micromaps are baked against. Read when the BVH is first made.
+                    m_clodRayTracingSystem->RequestOpacityMicromaps(
+                        pathTraced && SettingsManager::GetInstance().getSettingGetter<bool>("pathTracingOpacityMicromaps")());
+                    if (m_clodRayTracingSystem->EnsureInitialized(deviceManager.GetDevice(), deviceManager.GetRayTracingFeatures())) {
+                        m_clodRayTracingSystem->RegisterGraphResources(*newGraph);
+                    }
+                }
+                break; // It and the techniques below own ordered graph extensions.
+            }
             case ClusterLodAlpha:
             case ClusterLodShadow:
             case ClusterLodVoxel:
@@ -508,7 +523,7 @@ void Renderer::CreateRenderGraph() {
                 auto pathTraceState = MakePathTraceState();
                 newGraph->BuildPass<PathTraceArgsPass>("PathTraceArgsPass", pathTraceState);
                 newGraph->SetPassTechnique("PathTraceArgsPass", "Ray Tracing::Path Tracing");
-                newGraph->BuildPass<PathTracePass>("PathTracePass", pathTraceState, m_pMeshManager ? m_pMeshManager->GetCLodSlabResourceGroup() : nullptr,
+                newGraph->BuildPass<PathTracePass>("PathTracePass", pathTraceState, m_clodRayTracingSystem, m_pMeshManager ? m_pMeshManager->GetCLodSlabResourceGroup() : nullptr,
                     m_pipelineRecipe.Contains<br::pipeline::TerrainRvtTechnique>(),
                     UpscalingManager::GetInstance().GetCurrentUpscalingMode() == UpscalingMode::DLSSRayReconstruction);
                 newGraph->SetPassTechnique("PathTracePass", "Ray Tracing::Path Tracing");

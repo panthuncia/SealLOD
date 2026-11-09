@@ -2,6 +2,7 @@
 #include "Utilities/Utilities.h"
 
 #include <wrl.h>
+#include <shobjidl.h>
 #include <stdexcept>
 #include <algorithm>
 #include <codecvt>
@@ -1194,6 +1195,30 @@ bool OpenFileDialog(std::wstring& selectedFile, const std::wstring& filter) {
     }
 
     return false;  // Dialog was canceled or failed
+}
+
+bool OpenFolderDialog(std::wstring& selectedFolder) {
+    // The dialog is COM: initialize it on this thread unless something already did, in whatever mode.
+    const HRESULT init = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    const bool uninitialize = SUCCEEDED(init);
+    bool selected = false;
+    {
+        Microsoft::WRL::ComPtr<IFileOpenDialog> dialog;
+        if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) {
+            FILEOPENDIALOGOPTIONS options = 0;
+            dialog->GetOptions(&options);
+            dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST | FOS_NOCHANGEDIR);
+            Microsoft::WRL::ComPtr<IShellItem> item;
+            PWSTR path = nullptr;
+            if (SUCCEEDED(dialog->Show(nullptr)) && SUCCEEDED(dialog->GetResult(&item)) && SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path))) {
+                selectedFolder = path;
+                CoTaskMemFree(path);
+                selected = true;
+            }
+        }
+    }
+    if (uninitialize) CoUninitialize();
+    return selected;
 }
 
 void CopyFileToDirectory(const std::wstring& sourceFile, const std::wstring& destinationDirectory) {

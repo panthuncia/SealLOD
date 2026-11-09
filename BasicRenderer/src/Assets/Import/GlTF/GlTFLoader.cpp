@@ -1,6 +1,11 @@
 #include "Assets/Import/GlTF/GlTFLoader.h"
 
 #include <algorithm>
+#include <variant>
+#include <string_view>
+#include <functional>
+#include <chrono>
+#include <atomic>
 #include <array>
 #include <cctype>
 #include <cstdint>
@@ -27,6 +32,8 @@
 #include "BasicRenderer/Scene/Animation/Skeleton.h"
 #include <BasicRenderer/Assets/Import/GlTFGeometryExtractor.h>
 #include <BasicRenderer/Assets/Import/ImportProfile.h>
+#include <BasicRenderer/Assets/Import/SceneCache.h>
+#include <BasicRenderer/Streaming/TaskScheduler.h>
 #include "BasicRenderer/Assets/Material.h"
 #include "BasicRenderer/Assets/Geometry/Mesh.h"
 #include <BasicRenderer/Scene/VertexFlags.h>
@@ -850,7 +857,7 @@ rhi::AddressMode ConvertWrapMode(int wrapMode) {
     }
 }
 
-std::shared_ptr<org::Sampler> CreateTextureSampler(const json& gltf, const json& textureNode) {
+std::shared_ptr<org::Sampler> CreateTextureSampler(const br::import::SceneCacheTexture& texture) {
     rhi::SamplerDesc samplerDesc = {};
     samplerDesc.addressU = rhi::AddressMode::Wrap;
     samplerDesc.addressV = rhi::AddressMode::Wrap;
@@ -867,22 +874,12 @@ std::shared_ptr<org::Sampler> CreateTextureSampler(const json& gltf, const json&
     samplerDesc.magFilter = rhi::Filter::Linear;
     samplerDesc.mipFilter = rhi::MipFilter::Linear;
 
-    if (!textureNode.contains("sampler")) {
-        return org::Sampler::CreateSampler(samplerDesc);
-    }
+    // The glTF defaults (no sampler) are the values above: wrap, linear, linear mips.
+    samplerDesc.addressU = ConvertWrapMode(texture.wrapS);
+    samplerDesc.addressV = ConvertWrapMode(texture.wrapT);
 
-    const auto& samplers = gltf.contains("samplers") ? gltf["samplers"] : json::array();
-    const size_t samplerIndex = textureNode["sampler"].get<size_t>();
-    if (samplerIndex >= samplers.size()) {
-        throw std::runtime_error("glTF sampler index out of range");
-    }
-
-    const auto& samplerNode = samplers[samplerIndex];
-    samplerDesc.addressU = ConvertWrapMode(samplerNode.value<int>("wrapS", 10497));
-    samplerDesc.addressV = ConvertWrapMode(samplerNode.value<int>("wrapT", 10497));
-
-    const int minFilter = samplerNode.value<int>("minFilter", 9987);
-    const int magFilter = samplerNode.value<int>("magFilter", 9729);
+    const int minFilter = texture.minFilter;
+    const int magFilter = texture.magFilter;
 
     samplerDesc.magFilter = (magFilter == 9728) ? rhi::Filter::Nearest : rhi::Filter::Linear;
     switch (minFilter) {
@@ -914,6 +911,21 @@ std::shared_ptr<org::Sampler> CreateTextureSampler(const json& gltf, const json&
     }
 
     return org::Sampler::CreateSampler(samplerDesc);
+}
+
+// A texture's glTF sampler values, left at the glTF defaults when it names none.
+void ReadGltfSamplerValues(const json& gltf, const json& textureNode, br::import::SceneCacheTexture& texture) {
+    if (!textureNode.contains("sampler")) return;
+    const auto& samplers = gltf.contains("samplers") ? gltf["samplers"] : json::array();
+    const size_t samplerIndex = textureNode["sampler"].get<size_t>();
+    if (samplerIndex >= samplers.size()) {
+        throw std::runtime_error("glTF sampler index out of range");
+    }
+    const auto& samplerNode = samplers[samplerIndex];
+    texture.wrapS = samplerNode.value<int>("wrapS", texture.wrapS);
+    texture.wrapT = samplerNode.value<int>("wrapT", texture.wrapT);
+    texture.minFilter = samplerNode.value<int>("minFilter", texture.minFilter);
+    texture.magFilter = samplerNode.value<int>("magFilter", texture.magFilter);
 }
 
 // A cheap version for a file the loader reads by reference: changes when the file is replaced, without reading it.
@@ -1026,58 +1038,6 @@ std::string GltfTextureImageName(const json& gltf, size_t textureIndex)
     return {};
 }
 
-// A material texture's request, without its sampler (which needs a device): what LoadTexture requests and what an
-// offline tool conditions, so both have the same cache key.
-br::textures::TextureRequest MakeGltfTextureRequest(
-    const json& gltf,
-    const std::filesystem::path& sourcePath,
-    GlTFMaterialCache& cache,
-    size_t textureIndex,
-    bool preferSRGB,
-    TextureSemantic semantic,
-    bool preservePackedChannels,
-    NormalMapConvention normalConvention)
-{
-    const auto& textures = gltf.at("textures");
-    if (textureIndex >= textures.size()) {
-        throw std::runtime_error("glTF texture index out of range");
-    }
-    br::textures::TextureRequest request;
-    request.source = CachedGltfImageSource(gltf, sourcePath, cache, ResolveTextureImageIndex(textures[textureIndex]));
-    request.processing = MakeMaterialTextureProcessingSettings(semantic, preferSRGB, {}, preservePackedChannels, normalConvention);
-    request.preferSRGB = preferSRGB;
-    request.debugName = request.source.identity;
-    return request;
-}
-
-std::shared_ptr<TextureAsset> LoadTexture(
-    const json& gltf,
-    const std::filesystem::path& sourcePath,
-    GlTFMaterialCache& cache,
-    size_t textureIndex,
-    bool preferSRGB,
-    TextureSemantic semantic,
-    bool preservePackedChannels = false,
-    NormalMapConvention normalConvention = NormalMapConvention::DirectX)
-{
-    const std::string cacheKey = BuildTextureResourceKey(gltf, sourcePath, cache, textureIndex, preferSRGB, semantic, preservePackedChannels, normalConvention);
-    auto existingTexture = cache.textureCache.find(cacheKey);
-    if (existingTexture != cache.textureCache.end()) {
-        return existingTexture->second;
-    }
-
-    const auto& textures = gltf.at("textures");
-    if (textureIndex >= textures.size()) {
-        throw std::runtime_error("glTF texture index out of range");
-    }
-
-    auto request = MakeGltfTextureRequest(gltf, sourcePath, cache, textureIndex, preferSRGB, semantic, preservePackedChannels, normalConvention);
-    request.sampler = CreateTextureSampler(gltf, textures[textureIndex]);
-    auto texture = br::textures::RequestTexture(std::move(request));
-    cache.textureCache[cacheKey] = texture;
-    return texture;
-}
-
 DirectX::XMFLOAT4 ReadFloat4(const json& values, const DirectX::XMFLOAT4& fallback) {
     if (!values.is_array() || values.size() != 4) {
         return fallback;
@@ -1150,167 +1110,340 @@ MaterialUvTransform ReadMaterialUvTransform(const json& materialNode, const std:
     return result;
 }
 
-std::shared_ptr<Material> LoadMaterial(
-    const json& gltf,
-    const std::filesystem::path& sourcePath,
-    GlTFMaterialCache& cache,
-    size_t materialIndex)
-{
-    if (materialIndex >= cache.materialCache.size()) {
-        throw std::runtime_error("glTF material index out of range");
-    }
-    if (cache.materialCache[materialIndex] != nullptr) {
-        return cache.materialCache[materialIndex];
-    }
+// The importer's materials in two steps. The describer reads the glTF into a SceneCacheDescription (what a scene cache
+// stores); the realizer makes textures and materials from a description. A live import runs both; a cached scene only
+// the realizer, so the two make the same requests and materials.
+struct GltfSceneDescriber {
+    const json& gltf;
+    std::filesystem::path sourcePath;
+    GlTFMaterialCache& cache;
+    br::import::SceneCacheDescription& scene;
+    std::unordered_map<size_t, uint32_t> images;
+    std::unordered_map<std::string, uint32_t> textures;
+    std::unordered_map<size_t, int32_t> materials;
 
-    const std::string sharedCacheKey = MakeMaterialCacheKey(cache.sourceKey, materialIndex);
-    {
-        std::lock_guard<std::mutex> lock(g_gltfMaterialCacheMutex);
-        auto sharedIt = g_sharedMaterialCache.find(sharedCacheKey);
-        if (sharedIt != g_sharedMaterialCache.end()) {
-            if (auto material = sharedIt->second.material.lock()) {
-                cache.materialCache[materialIndex] = material;
-                return material;
+    uint32_t Image(size_t imageIndex) {
+        if (const auto it = images.find(imageIndex); it != images.end()) return it->second;
+        const auto& image = gltf.at("images").at(imageIndex);
+        // The live source decides what the bytes are, so a description says what a live import read.
+        const auto source = CachedGltfImageSource(gltf, sourcePath, cache, imageIndex);
+        br::import::SceneCacheImage record;
+        record.sourceImage = static_cast<uint32_t>(imageIndex);
+        record.ktx2 = std::holds_alternative<br::textures::ProvidedTextureSource>(source.data);
+        const std::string uri = image.value("uri", std::string());
+        if (!uri.empty() && uri.rfind("data:", 0) != 0) {
+            record.kind = br::import::SceneCacheImage::Kind::File;
+            record.file = uri;
+        }
+        else if (const auto* file = std::get_if<br::textures::FileTextureSource>(&source.data); file && image.contains("bufferView")) {
+            record.kind = br::import::SceneCacheImage::Kind::FileRange;
+            record.file = file->path == sourcePath ? std::string() : file->path.lexically_relative(sourcePath.parent_path()).generic_string();
+            record.offset = file->offset;
+            record.length = file->size;
+        }
+        else if (record.ktx2 && image.contains("bufferView")) {
+            // A KTX2 bufferView streams through its provider; the range is the bufferView's within its buffer file.
+            const auto& bufferView = gltf.at("bufferViews").at(image["bufferView"].get<size_t>());
+            const auto& buffer = cache.bufferSources.at(bufferView.at("buffer").get<size_t>());
+            if (buffer.backing != BufferBacking::FileSpan) throw std::runtime_error("glTF KTX2 image is not in a file");
+            record.kind = br::import::SceneCacheImage::Kind::FileRange;
+            record.file = buffer.filePath == sourcePath ? std::string() : buffer.filePath.lexically_relative(sourcePath.parent_path()).generic_string();
+            record.offset = buffer.fileOffset + bufferView.value<uint64_t>("byteOffset", 0);
+            record.length = bufferView.at("byteLength").get<uint64_t>();
+        }
+        else {
+            record.kind = br::import::SceneCacheImage::Kind::Embedded;
+            if (scene.notCacheableReason.empty()) {
+                scene.notCacheableReason = "image " + std::to_string(imageIndex) + " is embedded (a data URI or an inline buffer)";
             }
-
-            g_sharedMaterialCache.erase(sharedIt);
         }
+        if (record.kind == br::import::SceneCacheImage::Kind::FileRange) {
+            record.bufferView = image.at("bufferView").get<uint32_t>();
+            record.mimeType = image.value("mimeType", std::string());
+        }
+        const auto index = static_cast<uint32_t>(scene.images.size());
+        scene.images.push_back(std::move(record));
+        images.emplace(imageIndex, index);
+        return index;
     }
 
-    const auto& materialNode = gltf.at("materials").at(materialIndex);
+    uint32_t Texture(size_t textureIndex, bool preferSRGB, TextureSemantic semantic, bool preservePackedChannels = false,
+        NormalMapConvention normalConvention = NormalMapConvention::DirectX)
+    {
+        const std::string key = BuildTextureResourceKey(gltf, sourcePath, cache, textureIndex, preferSRGB, semantic, preservePackedChannels, normalConvention);
+        if (const auto it = textures.find(key); it != textures.end()) return it->second;
+        const auto& textureNode = gltf.at("textures").at(textureIndex);
+        br::import::SceneCacheTexture record;
+        record.image = Image(ResolveTextureImageIndex(textureNode));
+        ReadGltfSamplerValues(gltf, textureNode, record);
+        record.preferSRGB = preferSRGB;
+        record.semantic = semantic;
+        record.preservePackedChannels = preservePackedChannels;
+        record.normalConvention = normalConvention;
+        const auto index = static_cast<uint32_t>(scene.textures.size());
+        scene.textures.push_back(record);
+        textures.emplace(key, index);
+        return index;
+    }
 
-    MaterialDescription desc;
-    desc.name = materialNode.value("name", "glTF_Material_" + std::to_string(materialIndex));
-    desc.baseColor = { nullptr, 1.0f, { 0, 1, 2, 3 } };
-    desc.metallic = { nullptr, 1.0f, { 2 } };
-    desc.roughness = { nullptr, 1.0f, { 1 } };
-    desc.emissive = { nullptr, 1.0f, { 0, 1, 2 } };
-    desc.opacity = { nullptr, 1.0f, { 3 } };
-    desc.aoMap = { nullptr, 1.0f, { 0 } };
-    desc.heightMap = { nullptr, 1.0f, { 0 } };
-    desc.normal = { nullptr, 1.0f, { 0, 1, 2 } };
-    desc.invertNormalGreen = false;
+    // The material a primitive uses, or -1 for the default material.
+    int32_t PrimitiveMaterial(const json& primitiveNode) {
+        if (!primitiveNode.contains("material") || !gltf.contains("materials") || !gltf["materials"].is_array()) return -1;
+        return Material(primitiveNode["material"].get<size_t>());
+    }
 
-    if (materialNode.contains("pbrMetallicRoughness")) {
-        const auto& pbr = materialNode["pbrMetallicRoughness"];
-        if (pbr.contains("baseColorFactor")) {
-            desc.diffuseColor = ReadFloat4(pbr["baseColorFactor"], desc.diffuseColor);
-        }
-        if (pbr.contains("metallicFactor")) {
-            desc.metallic.factor = pbr["metallicFactor"].get<float>();
-        }
-        if (pbr.contains("roughnessFactor")) {
-            desc.roughness.factor = pbr["roughnessFactor"].get<float>();
-        }
-        if (pbr.contains("baseColorTexture")) {
-            const auto& textureInfo = pbr["baseColorTexture"];
-            const size_t textureIndex = textureInfo.at("index").get<size_t>();
-            desc.baseColor.texture = LoadTexture(gltf, sourcePath, cache, textureIndex, true, TextureSemantic::BaseColor);
-            desc.baseColor.uvSetIndex = ReadTextureUvSetIndex(textureInfo);
-        }
-        if (pbr.contains("metallicRoughnessTexture")) {
-            const auto& textureInfo = pbr["metallicRoughnessTexture"];
-            const size_t textureIndex = textureInfo.at("index").get<size_t>();
-            auto texture = LoadTexture(gltf, sourcePath, cache, textureIndex, false, TextureSemantic::MetallicRoughness, true);
-            desc.metallic.texture = texture;
-            desc.roughness.texture = texture;
-            if (cache.profile && !cache.profile->materialChannels.empty()) {
-                // Channel counts are only known up front for provided (KTX2) images; a rule that needs one cannot match
-                // a decoded image.
-                const auto shape = DescribeProvidedGltfTexture(gltf, sourcePath, cache, textureIndex);
-                const std::uint32_t channels = shape ? shape->desc.channels : 0u;
-                if (const auto* rule = cache.profile->FindMetallicRoughnessRule(channels, GltfTextureImageName(gltf, textureIndex))) {
-                    if (rule->metallic) desc.metallic.channels = { *rule->metallic };
-                    if (rule->roughness) desc.roughness.channels = { *rule->roughness };
+    int32_t Material(size_t materialIndex) {
+        if (const auto it = materials.find(materialIndex); it != materials.end()) return it->second;
+        const auto& materialNode = gltf.at("materials").at(materialIndex);
+        using Slot = br::import::SceneCacheTextureSlot;
+        br::import::SceneCacheMaterial record;
+        record.sourceMaterial = static_cast<uint32_t>(materialIndex);
+        auto setSlot = [&](Slot slot, uint32_t texture) { record.textures[static_cast<size_t>(slot)] = static_cast<int32_t>(texture); };
+        auto slotTexture = [&](Slot slot) { return record.textures[static_cast<size_t>(slot)]; };
+
+        MaterialDescription& desc = record.description;
+        desc.name = materialNode.value("name", "glTF_Material_" + std::to_string(materialIndex));
+        desc.baseColor = { nullptr, 1.0f, { 0, 1, 2, 3 } };
+        desc.metallic = { nullptr, 1.0f, { 2 } };
+        desc.roughness = { nullptr, 1.0f, { 1 } };
+        desc.emissive = { nullptr, 1.0f, { 0, 1, 2 } };
+        desc.opacity = { nullptr, 1.0f, { 3 } };
+        desc.aoMap = { nullptr, 1.0f, { 0 } };
+        desc.heightMap = { nullptr, 1.0f, { 0 } };
+        desc.normal = { nullptr, 1.0f, { 0, 1, 2 } };
+        desc.invertNormalGreen = false;
+
+        if (materialNode.contains("pbrMetallicRoughness")) {
+            const auto& pbr = materialNode["pbrMetallicRoughness"];
+            if (pbr.contains("baseColorFactor")) {
+                desc.diffuseColor = ReadFloat4(pbr["baseColorFactor"], desc.diffuseColor);
+            }
+            if (pbr.contains("metallicFactor")) {
+                desc.metallic.factor = pbr["metallicFactor"].get<float>();
+            }
+            if (pbr.contains("roughnessFactor")) {
+                desc.roughness.factor = pbr["roughnessFactor"].get<float>();
+            }
+            if (pbr.contains("baseColorTexture")) {
+                const auto& textureInfo = pbr["baseColorTexture"];
+                setSlot(Slot::BaseColor, Texture(textureInfo.at("index").get<size_t>(), true, TextureSemantic::BaseColor));
+                desc.baseColor.uvSetIndex = ReadTextureUvSetIndex(textureInfo);
+            }
+            if (pbr.contains("metallicRoughnessTexture")) {
+                const auto& textureInfo = pbr["metallicRoughnessTexture"];
+                const size_t textureIndex = textureInfo.at("index").get<size_t>();
+                const uint32_t texture = Texture(textureIndex, false, TextureSemantic::MetallicRoughness, true);
+                setSlot(Slot::Metallic, texture);
+                setSlot(Slot::Roughness, texture);
+                if (cache.profile && !cache.profile->materialChannels.empty()) {
+                    // Channel counts are only known up front for provided (KTX2) images; a rule that needs one cannot match
+                    // a decoded image.
+                    const auto shape = DescribeProvidedGltfTexture(gltf, sourcePath, cache, textureIndex);
+                    const std::uint32_t channels = shape ? shape->desc.channels : 0u;
+                    if (const auto* rule = cache.profile->FindMetallicRoughnessRule(channels, GltfTextureImageName(gltf, textureIndex))) {
+                        if (rule->metallic) desc.metallic.channels = { *rule->metallic };
+                        if (rule->roughness) desc.roughness.channels = { *rule->roughness };
+                    }
                 }
+                const uint32_t uvSetIndex = ReadTextureUvSetIndex(textureInfo);
+                desc.metallic.uvSetIndex = uvSetIndex;
+                desc.roughness.uvSetIndex = uvSetIndex;
             }
-            const uint32_t uvSetIndex = ReadTextureUvSetIndex(textureInfo);
-            desc.metallic.uvSetIndex = uvSetIndex;
-            desc.roughness.uvSetIndex = uvSetIndex;
         }
-    }
 
-    if (materialNode.contains("normalTexture")) {
-        const auto& textureInfo = materialNode["normalTexture"];
-        const size_t textureIndex = textureInfo.at("index").get<size_t>();
-        // glTF normals are OpenGL (+Y): the shader flips green, so the texture loads as stored and a block-compressed one
-        // streams straight from its file instead of being decompressed, flipped and re-encoded.
-        desc.normal.texture = LoadTexture(gltf, sourcePath, cache, textureIndex, false, TextureSemantic::Normal, false, NormalMapConvention::DirectX);
-        desc.normal.uvSetIndex = ReadTextureUvSetIndex(textureInfo);
-        desc.invertNormalGreen = true;
-        if (textureInfo.contains("scale")) {
-            desc.normal.factor = textureInfo["scale"].get<float>();
+        if (materialNode.contains("normalTexture")) {
+            const auto& textureInfo = materialNode["normalTexture"];
+            const size_t textureIndex = textureInfo.at("index").get<size_t>();
+            // glTF normals are OpenGL (+Y): the shader flips green, so the texture loads as stored and a block-compressed one
+            // streams straight from its file instead of being decompressed, flipped and re-encoded.
+            setSlot(Slot::Normal, Texture(textureIndex, false, TextureSemantic::Normal, false, NormalMapConvention::DirectX));
+            desc.normal.uvSetIndex = ReadTextureUvSetIndex(textureInfo);
+            desc.invertNormalGreen = true;
+            if (textureInfo.contains("scale")) {
+                desc.normal.factor = textureInfo["scale"].get<float>();
+            }
+            if (const auto shape = DescribeProvidedGltfTexture(gltf, sourcePath, cache, textureIndex); shape && shape->desc.channels == 2u) {
+                desc.normal.channels = { 0u, 1u, 4u };
+            }
         }
-        if (const auto shape = DescribeProvidedGltfTexture(gltf, sourcePath, cache, textureIndex); shape && shape->desc.channels == 2u) {
-            desc.normal.channels = { 0u, 1u, 4u };
+
+        if (materialNode.contains("occlusionTexture")) {
+            const auto& occlusion = materialNode["occlusionTexture"];
+            setSlot(Slot::AO, Texture(occlusion.at("index").get<size_t>(), false, TextureSemantic::AO));
+            desc.aoMap.uvSetIndex = ReadTextureUvSetIndex(occlusion);
+            if (occlusion.contains("strength")) {
+                desc.aoMap.factor = occlusion["strength"].get<float>();
+            }
         }
-    }
 
-    if (materialNode.contains("occlusionTexture")) {
-        const auto& occlusion = materialNode["occlusionTexture"];
-        const size_t textureIndex = occlusion.at("index").get<size_t>();
-        desc.aoMap.texture = LoadTexture(gltf, sourcePath, cache, textureIndex, false, TextureSemantic::AO);
-        desc.aoMap.uvSetIndex = ReadTextureUvSetIndex(occlusion);
-        if (occlusion.contains("strength")) {
-            desc.aoMap.factor = occlusion["strength"].get<float>();
+        if (materialNode.contains("emissiveFactor")) {
+            const auto emissive = ReadFloat3(materialNode["emissiveFactor"], { 0.0f, 0.0f, 0.0f });
+            desc.emissiveColor = { emissive.x, emissive.y, emissive.z, 1.0f };
         }
-    }
-
-    if (materialNode.contains("emissiveFactor")) {
-        const auto emissive = ReadFloat3(materialNode["emissiveFactor"], { 0.0f, 0.0f, 0.0f });
-        desc.emissiveColor = { emissive.x, emissive.y, emissive.z, 1.0f };
-    }
-    if (materialNode.contains("emissiveTexture")) {
-        const auto& textureInfo = materialNode["emissiveTexture"];
-        const size_t textureIndex = textureInfo.at("index").get<size_t>();
-        desc.emissive.texture = LoadTexture(gltf, sourcePath, cache, textureIndex, true, TextureSemantic::Emissive);
-        desc.emissive.uvSetIndex = ReadTextureUvSetIndex(textureInfo);
-    }
-
-    const std::string alphaMode = materialNode.value("alphaMode", std::string("OPAQUE"));
-    if (alphaMode == "MASK") {
-        desc.blendState = BlendState::BLEND_STATE_MASK;
-        desc.alphaCutoff = materialNode.value("alphaCutoff", 0.5f);
-    }
-    else if (alphaMode == "BLEND") {
-        desc.blendState = BlendState::BLEND_STATE_BLEND;
-        desc.opacity.factor = desc.diffuseColor.w;
-        if (desc.baseColor.texture != nullptr) {
-            desc.opacity.texture = desc.baseColor.texture;
-            desc.opacity.uvSetIndex = desc.baseColor.uvSetIndex;
+        if (materialNode.contains("emissiveTexture")) {
+            const auto& textureInfo = materialNode["emissiveTexture"];
+            setSlot(Slot::Emissive, Texture(textureInfo.at("index").get<size_t>(), true, TextureSemantic::Emissive));
+            desc.emissive.uvSetIndex = ReadTextureUvSetIndex(textureInfo);
         }
+
+        const std::string alphaMode = materialNode.value("alphaMode", std::string("OPAQUE"));
+        if (alphaMode == "MASK") {
+            desc.blendState = BlendState::BLEND_STATE_MASK;
+            desc.alphaCutoff = materialNode.value("alphaCutoff", 0.5f);
+        }
+        else if (alphaMode == "BLEND") {
+            desc.blendState = BlendState::BLEND_STATE_BLEND;
+            desc.opacity.factor = desc.diffuseColor.w;
+            if (slotTexture(Slot::BaseColor) >= 0) {
+                record.textures[static_cast<size_t>(Slot::Opacity)] = slotTexture(Slot::BaseColor);
+                desc.opacity.uvSetIndex = desc.baseColor.uvSetIndex;
+            }
+        }
+        else {
+            desc.diffuseColor.w = 1.0f;
+            desc.opacity.factor = 1.0f;
+        }
+
+        desc.forceDoubleSided = materialNode.value("doubleSided", false);
+        desc.uvTransform = ReadMaterialUvTransform(materialNode, desc.name);
+
+        const auto index = static_cast<int32_t>(scene.materials.size());
+        scene.materials.push_back(std::move(record));
+        materials.emplace(materialIndex, index);
+        return index;
     }
-    else {
-        desc.diffuseColor.w = 1.0f;
-        desc.opacity.factor = 1.0f;
+};
+
+// An image's source from its description: what GltfImageSource makes for it, without the glTF.
+br::textures::TextureSource RealizeImageSource(
+    const br::import::SceneCacheImage& image,
+    const std::filesystem::path& sourcePath,
+    const std::string& sourceKey)
+{
+    using Kind = br::import::SceneCacheImage::Kind;
+    if (image.kind == Kind::File) {
+        const auto imagePath = sourcePath.parent_path() / std::filesystem::path(image.file);
+        if (!image.ktx2) return br::textures::MakeFileTextureSource(imagePath);
+        auto source = br::textures::MakeFileTextureSource(imagePath);
+        source.formatHint = "image/ktx2";
+        source.version = GltfFileVersion(imagePath);
+        source.data = br::textures::ProvidedTextureSource{ br::textures::MakeKtx2TextureMipProvider(
+            br::textures::MakeFileTextureByteSource(imagePath), source.identity) };
+        return source;
     }
-
-    desc.forceDoubleSided = materialNode.value("doubleSided", false);
-    desc.uvTransform = ReadMaterialUvTransform(materialNode, desc.name);
-
-    auto material = Material::CreateShared(desc);
-    cache.materialCache[materialIndex] = material;
-
-    {
-        std::lock_guard<std::mutex> lock(g_gltfMaterialCacheMutex);
-        g_sharedMaterialCache[sharedCacheKey] = SharedMaterialCacheEntry{ cache.materialCache[materialIndex] };
+    if (image.kind == Kind::FileRange) {
+        br::textures::TextureSource source;
+        source.identity = sourceKey + "#image-bv:" + std::to_string(image.bufferView) + ":" + image.mimeType;
+        source.version = GltfFileVersion(sourcePath);
+        source.formatHint = image.mimeType;
+        const auto file = image.file.empty() ? sourcePath : sourcePath.parent_path() / std::filesystem::path(image.file);
+        if (image.ktx2) {
+            source.formatHint = "image/ktx2";
+            source.data = br::textures::ProvidedTextureSource{ br::textures::MakeKtx2TextureMipProvider(
+                br::textures::MakeFileTextureByteSource(file, image.offset, image.length), source.identity) };
+            return source;
+        }
+        source.data = br::textures::FileTextureSource{ file, image.offset, image.length };
+        return source;
     }
-
-    return cache.materialCache[materialIndex];
+    throw std::runtime_error("glTF image " + std::to_string(image.sourceImage) + " is embedded in its source, which a scene cache cannot read");
 }
 
-std::shared_ptr<Material> ResolvePrimitiveMaterial(
-    const json& gltf,
-    const std::filesystem::path& sourcePath,
-    GlTFMaterialCache& cache,
-    const json& primitiveNode,
-    const std::shared_ptr<Material>& defaultMaterial)
-{
-    if (!primitiveNode.contains("material") || !gltf.contains("materials") || !gltf["materials"].is_array()) {
-        return defaultMaterial;
+struct GltfSceneRealizer {
+    const br::import::SceneCacheDescription& scene;
+    std::filesystem::path sourcePath;
+    std::string sourceKey;
+    // A live import's glTF: images come from its sources (each read once, and embedded ones readable).
+    const json* liveGltf = nullptr;
+    GlTFMaterialCache* live = nullptr;
+    std::unordered_map<uint32_t, br::textures::TextureSource> imageSources;
+    std::vector<std::shared_ptr<TextureAsset>> textures;
+    std::vector<std::shared_ptr<Material>> materials;
+
+    br::textures::TextureSource ImageSource(uint32_t index) {
+        const auto& image = scene.images.at(index);
+        if (live) return CachedGltfImageSource(*liveGltf, sourcePath, *live, image.sourceImage);
+        auto it = imageSources.find(index);
+        if (it == imageSources.end()) it = imageSources.emplace(index, RealizeImageSource(image, sourcePath, sourceKey)).first;
+        return it->second;
     }
 
-    return LoadMaterial(gltf, sourcePath, cache, primitiveNode["material"].get<size_t>());
+    // A material texture's request, without its sampler (which needs a device).
+    br::textures::TextureRequest Request(uint32_t index) {
+        const auto& texture = scene.textures.at(index);
+        br::textures::TextureRequest request;
+        request.source = ImageSource(texture.image);
+        request.processing = MakeMaterialTextureProcessingSettings(
+            texture.semantic, texture.preferSRGB, {}, texture.preservePackedChannels, texture.normalConvention);
+        request.preferSRGB = texture.preferSRGB;
+        request.debugName = request.source.identity;
+        return request;
+    }
+
+    std::shared_ptr<TextureAsset> Texture(uint32_t index) {
+        if (textures.size() < scene.textures.size()) textures.resize(scene.textures.size());
+        auto& texture = textures.at(index);
+        if (!texture) {
+            auto request = Request(index);
+            request.sampler = CreateTextureSampler(scene.textures[index]);
+            texture = br::textures::RequestTexture(std::move(request));
+        }
+        return texture;
+    }
+
+    std::shared_ptr<Material> GetMaterial(int32_t index) {
+        if (index < 0) return Material::GetDefaultMaterial();
+        if (materials.size() < scene.materials.size()) materials.resize(scene.materials.size());
+        auto& material = materials.at(static_cast<size_t>(index));
+        if (material) return material;
+
+        const auto& record = scene.materials[static_cast<size_t>(index)];
+        const std::string sharedCacheKey = MakeMaterialCacheKey(sourceKey, record.sourceMaterial);
+        {
+            std::lock_guard<std::mutex> lock(g_gltfMaterialCacheMutex);
+            auto sharedIt = g_sharedMaterialCache.find(sharedCacheKey);
+            if (sharedIt != g_sharedMaterialCache.end()) {
+                if (auto shared = sharedIt->second.material.lock()) {
+                    material = shared;
+                    return material;
+                }
+                g_sharedMaterialCache.erase(sharedIt);
+            }
+        }
+
+        MaterialDescription desc = record.description;
+        TextureAndConstant* slots[] = { &desc.baseColor, &desc.metallic, &desc.roughness, &desc.emissive, &desc.opacity, &desc.aoMap, &desc.heightMap, &desc.normal };
+        static_assert(std::size(slots) == static_cast<size_t>(br::import::SceneCacheTextureSlot::Count));
+        for (size_t slot = 0; slot < record.textures.size(); ++slot) {
+            if (record.textures[slot] >= 0) slots[slot]->texture = Texture(static_cast<uint32_t>(record.textures[slot]));
+        }
+        material = Material::CreateShared(desc);
+        {
+            std::lock_guard<std::mutex> lock(g_gltfMaterialCacheMutex);
+            g_sharedMaterialCache[sharedCacheKey] = SharedMaterialCacheEntry{ material };
+        }
+        return material;
+    }
+};
+
+// The key materials and textures of a file share: its path, and the profile it is read under.
+std::string MakeGltfSourceKey(const std::filesystem::path& sourcePath, const std::shared_ptr<const br::import::ImportProfile>& profile) {
+    std::string key = NormalizeSourceKey(sourcePath);
+    if (profile) {
+        // Materials read under a profile differ from the same file's without one.
+        char profileHash[17];
+        std::snprintf(profileHash, sizeof(profileHash), "%016llx", static_cast<unsigned long long>(profile->Hash()));
+        key += std::string("#profile:") + profileHash;
+    }
+    return key;
+}
+
+GlTFMaterialCache MakeGltfMaterialCache(const json& gltf, const std::filesystem::path& sourcePath, const br::import::ImportSettings& settings) {
+    GlTFMaterialCache cache;
+    cache.sourceKey = MakeGltfSourceKey(sourcePath, settings.profile);
+    cache.profile = settings.profile;
+    cache.bufferSources = BuildBufferSources(gltf, sourcePath);
+    return cache;
 }
 
 Components::Transform ReadNodeTransform(const json& gltfNode) {
@@ -1709,20 +1842,11 @@ GltfMeshes BuildGltfMeshes(const std::string& filePath, const br::import::Import
     auto& extraction = result.extraction;
     const std::filesystem::path sourcePath(filePath);
 
-    auto defaultMaterial = Material::GetDefaultMaterial();
     auto& materialCache = result.materialCache;
-    materialCache.sourceKey = NormalizeSourceKey(sourcePath);
-    materialCache.profile = settings.profile;
-    if (settings.profile) {
-        // Materials read under a profile differ from the same file's without one.
-        char profileHash[17];
-        std::snprintf(profileHash, sizeof(profileHash), "%016llx", static_cast<unsigned long long>(settings.profile->Hash()));
-        materialCache.sourceKey += std::string("#profile:") + profileHash;
-    }
-    materialCache.bufferSources = BuildBufferSources(extraction.gltf, sourcePath);
-    if (extraction.gltf.contains("materials") && extraction.gltf["materials"].is_array()) {
-        materialCache.materialCache.resize(extraction.gltf["materials"].size());
-    }
+    materialCache = MakeGltfMaterialCache(extraction.gltf, sourcePath, settings);
+    br::import::SceneCacheDescription description;
+    GltfSceneDescriber describer{ extraction.gltf, sourcePath, materialCache, description };
+    GltfSceneRealizer realizer{ description, sourcePath, materialCache.sourceKey, &extraction.gltf, &materialCache };
 
     // Build mesh/primitive structure from glTF JSON
     const size_t meshCount = extraction.gltf.contains("meshes") ? extraction.gltf["meshes"].size() : 0;
@@ -1742,12 +1866,7 @@ GltfMeshes BuildGltfMeshes(const std::string& filePath, const br::import::Import
     // Build GPU meshes from extracted geometry
     for (auto& ep : extraction.primitives) {
         const auto& primitiveNode = extraction.gltf["meshes"][ep.meshIndex]["primitives"][ep.primitiveIndex];
-        auto material = ResolvePrimitiveMaterial(
-            extraction.gltf,
-            sourcePath,
-            materialCache,
-            primitiveNode,
-            defaultMaterial);
+        auto material = realizer.GetMaterial(describer.PrimitiveMaterial(primitiveNode));
         PreparedPrimitiveData preparedPrimitive{
             std::move(ep.result),
             material
@@ -1783,29 +1902,194 @@ std::vector<br::textures::TextureRequest> BuildMaterialTextureRequests(
     const br::import::ImportSettings& settings)
 {
     const std::filesystem::path sourcePath(filePath);
-    GlTFMaterialCache cache;
-    cache.sourceKey = NormalizeSourceKey(sourcePath);
-    cache.profile = settings.profile;
-    cache.bufferSources = BuildBufferSources(gltf, sourcePath);
+    GlTFMaterialCache cache = MakeGltfMaterialCache(gltf, sourcePath, settings);
+    br::import::SceneCacheDescription description;
+    GltfSceneDescriber describer{ gltf, sourcePath, cache, description };
+    GltfSceneRealizer realizer{ description, sourcePath, cache.sourceKey, &gltf, &cache };
+    if (gltf.contains("materials")) {
+        for (size_t material = 0; material < gltf["materials"].size(); ++material) (void)describer.Material(material);
+    }
     std::vector<br::textures::TextureRequest> requests;
     std::unordered_set<std::string> keys;
-    auto add = [&](const json& textureInfo, bool preferSRGB, TextureSemantic semantic, bool packed, NormalMapConvention convention) {
-        auto request = MakeGltfTextureRequest(gltf, sourcePath, cache, textureInfo.at("index").get<size_t>(), preferSRGB, semantic, packed, convention);
+    for (uint32_t texture = 0; texture < description.textures.size(); ++texture) {
+        auto request = realizer.Request(texture);
         if (keys.insert(br::textures::TextureCacheKey(request)).second) requests.push_back(std::move(request));
-    };
-    if (!gltf.contains("materials")) return requests;
-    // The slots and settings LoadMaterial requests: keep the two in step.
-    for (const auto& material : gltf["materials"]) {
-        if (material.contains("pbrMetallicRoughness")) {
-            const auto& pbr = material["pbrMetallicRoughness"];
-            if (pbr.contains("baseColorTexture")) add(pbr["baseColorTexture"], true, TextureSemantic::BaseColor, false, NormalMapConvention::DirectX);
-            if (pbr.contains("metallicRoughnessTexture")) add(pbr["metallicRoughnessTexture"], false, TextureSemantic::MetallicRoughness, true, NormalMapConvention::DirectX);
-        }
-        if (material.contains("normalTexture")) add(material["normalTexture"], false, TextureSemantic::Normal, false, NormalMapConvention::DirectX);
-        if (material.contains("occlusionTexture")) add(material["occlusionTexture"], false, TextureSemantic::AO, false, NormalMapConvention::DirectX);
-        if (material.contains("emissiveTexture")) add(material["emissiveTexture"], true, TextureSemantic::Emissive, false, NormalMapConvention::DirectX);
     }
     return requests;
+}
+
+br::import::SceneCacheDescription DescribeScene(
+    const nlohmann::json& gltf,
+    const std::string& filePath,
+    const br::import::ImportSettings& settings,
+    const std::string& sourceIdentifier,
+    const std::function<bool(size_t meshIndex, std::string_view meshName)>& includeMesh)
+{
+    const std::filesystem::path sourcePath(filePath);
+    GlTFMaterialCache cache = MakeGltfMaterialCache(gltf, sourcePath, settings);
+    br::import::SceneCacheDescription scene;
+    scene.sourceIdentifier = sourceIdentifier;
+    GltfSceneDescriber describer{ gltf, sourcePath, cache, scene };
+    if (gltf.contains("animations") && !gltf["animations"].empty()) scene.notCacheableReason = "the scene is animated";
+
+    // A mesh's primitives, described once however many nodes place it.
+    std::unordered_map<size_t, std::vector<uint32_t>> meshPrimitives;
+    auto primitivesOf = [&](size_t meshIndex) -> const std::vector<uint32_t>& {
+        if (const auto it = meshPrimitives.find(meshIndex); it != meshPrimitives.end()) return it->second;
+        std::vector<uint32_t> indices;
+        const auto& mesh = gltf.at("meshes").at(meshIndex);
+        if (mesh.contains("primitives") && (!includeMesh || includeMesh(meshIndex, mesh.value("name", std::string())))) {
+            const auto& primitives = mesh["primitives"];
+            for (size_t primitiveIndex = 0; primitiveIndex < primitives.size(); ++primitiveIndex) {
+                const auto format = GlTFGeometryExtractor::DescribePrimitiveFormat(gltf, sourceIdentifier, meshIndex, primitiveIndex);
+                br::import::SceneCachePrimitive record;
+                record.mesh = static_cast<uint32_t>(meshIndex);
+                record.primitive = static_cast<uint32_t>(primitiveIndex);
+                record.primPath = format.identity.primPath;
+                record.doubleSidedVoxelSourceNormals = format.identity.doubleSidedVoxelSourceNormals;
+                record.vertexFlags = format.vertexFlags;
+                record.vertexSize = format.vertexSize;
+                record.skinningVertexSize = format.skinningVertexSize;
+                record.uvSetCount = format.uvSetCount;
+                record.material = describer.PrimitiveMaterial(primitives[primitiveIndex]);
+                indices.push_back(static_cast<uint32_t>(scene.primitives.size()));
+                scene.primitives.push_back(std::move(record));
+            }
+        }
+        return meshPrimitives.emplace(meshIndex, std::move(indices)).first->second;
+    };
+
+    // The nodes as LoadImportedAssetFromFile places them.
+    if (gltf.contains("nodes")) {
+        const auto tree = BuildNodeTree(gltf);
+        const auto& nodes = gltf["nodes"];
+        std::vector<int> visited(nodes.size(), 0);
+        auto visit = [&](auto&& self, size_t nodeIndex, const XMMATRIX& parentGlobal) -> void {
+            if (visited[nodeIndex]++) throw std::runtime_error("glTF node graph is not a tree");
+            const auto& node = nodes[nodeIndex];
+            const XMMATRIX global = ComposeNodeMatrix(ReadNodeTransform(node)) * parentGlobal;
+            if (node.contains("mesh")) {
+                const size_t meshIndex = node["mesh"].get<size_t>();
+                if (node.contains("skin")) {
+                    if (scene.notCacheableReason.empty()) scene.notCacheableReason = "node " + std::to_string(nodeIndex) + " is skinned";
+                }
+                else if (const auto& primitives = primitivesOf(meshIndex); !primitives.empty()) {
+                    br::import::SceneCachePart part;
+                    part.name = node.value("name", "glTF_Node_" + std::to_string(nodeIndex));
+                    XMStoreFloat4x4(&part.localMatrix, global);
+                    part.instanceMatrices = ReadNodeInstanceMatrices(gltf, cache.bufferSources, node, global);
+                    part.primitives = primitives;
+                    scene.parts.push_back(std::move(part));
+                }
+            }
+            if (node.contains("children")) {
+                for (const auto& child : node["children"]) self(self, child.get<size_t>(), global);
+            }
+        };
+        for (const size_t root : tree.roots) visit(visit, root, XMMatrixIdentity());
+    }
+
+    // A cached scene's textures must be the ones a live import requests: same identity, version and processing.
+    if (scene.notCacheableReason.empty()) {
+        GltfSceneRealizer liveRealizer{ scene, sourcePath, cache.sourceKey, &gltf, &cache };
+        GltfSceneRealizer cachedRealizer{ scene, sourcePath, cache.sourceKey };
+        for (uint32_t texture = 0; texture < scene.textures.size(); ++texture) {
+            const std::string liveKey = br::textures::TextureCacheKey(liveRealizer.Request(texture));
+            const std::string cachedKey = br::textures::TextureCacheKey(cachedRealizer.Request(texture));
+            if (liveKey != cachedKey) {
+                throw std::runtime_error("scene cache texture " + std::to_string(texture) + " realizes as '" + cachedKey +
+                    "', but a live import requests '" + liveKey + "'");
+            }
+        }
+    }
+    return scene;
+}
+
+std::vector<br::textures::TextureRequest> SceneTextureRequests(
+    const br::import::SceneCacheDescription& scene,
+    const std::string& sourceLocation,
+    const br::import::ImportSettings& settings)
+{
+    const std::filesystem::path sourcePath(sourceLocation);
+    GltfSceneRealizer realizer{ scene, sourcePath, MakeGltfSourceKey(sourcePath, settings.profile) };
+    std::vector<br::textures::TextureRequest> requests;
+    std::unordered_set<std::string> keys;
+    for (uint32_t texture = 0; texture < scene.textures.size(); ++texture) {
+        auto request = realizer.Request(texture);
+        if (keys.insert(br::textures::TextureCacheKey(request)).second) requests.push_back(std::move(request));
+    }
+    return requests;
+}
+
+std::optional<br::import::ImportedAssetPayload> LoadImportedAssetFromSceneCache(
+    const br::import::SceneCacheDescription& scene,
+    const std::string& sourceLocation,
+    const br::import::ImportSettings& settings,
+    bool requireComplete)
+{
+    try {
+        const std::filesystem::path sourcePath(sourceLocation);
+        const auto begin = std::chrono::steady_clock::now();
+        std::vector<std::optional<ClusterLODPrebuiltData>> prebuilt(scene.primitives.size());
+        std::atomic<size_t> missing{ 0 };
+        TaskSchedulerManager::GetInstance().ParallelFor("GlTFLoader::LoadSceneCache", scene.primitives.size(), [&](size_t index) {
+            const auto& primitive = scene.primitives[index];
+            CLodCacheLoader::MeshCacheIdentity identity{};
+            identity.sourceIdentifier = scene.sourceIdentifier;
+            identity.primPath = primitive.primPath;
+            identity.subsetName = "";
+            identity.doubleSidedVoxelSourceNormals = primitive.doubleSidedVoxelSourceNormals;
+            prebuilt[index] = CLodCacheLoader::TryLoadPrebuilt(identity);
+            if (!prebuilt[index]) missing.fetch_add(1, std::memory_order_relaxed);
+        });
+        const auto cacheReadSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
+        if (missing.load() != 0) {
+            if (requireComplete) {
+                spdlog::warn("Scene cache for {}: {} of {} primitives have no current CLod data", sourceLocation, missing.load(), scene.primitives.size());
+                return std::nullopt;
+            }
+            spdlog::warn("Scene cache for {}: {} of {} primitives have no current CLod data and are left out (the source is not there to build them)",
+                sourceLocation, missing.load(), scene.primitives.size());
+        }
+
+        GltfSceneRealizer realizer{ scene, sourcePath, MakeGltfSourceKey(sourcePath, settings.profile) };
+        std::vector<std::shared_ptr<Mesh>> meshes(scene.primitives.size());
+        for (size_t index = 0; index < scene.primitives.size(); ++index) {
+            if (!prebuilt[index]) continue;
+            const auto& primitive = scene.primitives[index];
+            // As the extractor makes a cached primitive's mesh: its format, and UV sets named but empty (the values are in
+            // its CLod pages).
+            MeshIngestBuilder ingest(primitive.vertexSize, primitive.skinningVertexSize, primitive.vertexFlags);
+            std::vector<MeshUvSetData> uvSets(primitive.uvSetCount);
+            for (uint32_t set = 0; set < primitive.uvSetCount; ++set) uvSets[set].name = "TEXCOORD_" + std::to_string(set);
+            ingest.SetUvSets(std::move(uvSets));
+            meshes[index] = ingest.Build(realizer.GetMaterial(primitive.material), std::move(prebuilt[index]), MeshCpuDataPolicy::ReleaseAfterUpload);
+        }
+
+        br::import::ImportedAssetPayload payload;
+        std::unordered_set<std::uint64_t> meshIDs;
+        for (const auto& cachedPart : scene.parts) {
+            br::import::RenderablePartPayload part;
+            part.localMatrix = XMLoadFloat4x4(&cachedPart.localMatrix);
+            part.name = cachedPart.name;
+            part.instanceMatrices = cachedPart.instanceMatrices;
+            for (const uint32_t primitive : cachedPart.primitives) {
+                const auto& mesh = meshes[primitive];
+                if (!mesh) continue;
+                part.meshes.push_back(mesh);
+                if (meshIDs.insert(mesh->GetGlobalID()).second) payload.meshes.push_back(mesh);
+            }
+            if (!part.meshes.empty()) payload.parts.push_back(std::move(part));
+        }
+        spdlog::info("Scene cache for {}: {} parts, {} meshes, {} textures; CLod data read in {:.2f} s, {:.2f} s in all", sourceLocation,
+            payload.parts.size(), payload.meshes.size(), scene.textures.size(), cacheReadSeconds,
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count());
+        return payload;
+    }
+    catch (const std::exception& e) {
+        spdlog::error("Scene cache for {} failed to load: {}", sourceLocation, e.what());
+        return std::nullopt;
+    }
 }
 
 std::optional<br::import::ImportedAssetPayload> LoadImportedAssetFromFile(const std::string& filePath, const br::import::ImportSettings& settings) {

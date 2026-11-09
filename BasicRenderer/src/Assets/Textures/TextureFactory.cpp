@@ -737,6 +737,7 @@ std::shared_ptr<org::PixelBuffer> TextureFactory::CreateAlwaysResidentPixelBuffe
 
     if (doMipmapping) {
         desc.hasUAV = true; // need UAV mips for GPU mipgen
+        desc.residencyPriority = rhi::ResidencyPriorityNormal; // An asset: written once.
         if (rhi::helpers::IsSRGB(desc.format)) {
             desc.uavFormat = rhi::Format::Unknown;
         }

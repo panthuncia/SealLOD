@@ -101,7 +101,7 @@ struct PerFrameCB {
     float shadowVirtualReceiverTraceMaxDistanceWorld = 256.0f;
     float shadowVirtualReceiverTraceUncertaintyScale = 1.5f;
     float shadowVirtualReceiverTraceDepthSafetyScale = 4.0f;
-    unsigned int shadowVirtualReceiverTracePad0 = 0u;
+    float shadowVirtualSmrtMaxLateralTexels = 32.0f;
     unsigned int shadowVirtualReceiverTracePad1 = 0u;
     unsigned int terrainStochasticSamplingEnabled = 1u;
     unsigned int terrainStochasticDiffuseEnabled = 1u;

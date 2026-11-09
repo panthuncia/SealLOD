@@ -279,6 +279,7 @@ size_t clodBuildEx(clodConfig config, clodMesh mesh, OutputEx output)
 #include <string.h>
 
 #include <algorithm>
+#include <memory>
 #include <vector>
 
 #include <tracy/Tracy.hpp>
@@ -344,36 +345,38 @@ static std::vector<Cluster> clusterize(const clodConfig& config, const clodMesh&
 	TracyPlot("CLOD.clodBuild.clusterize.Indices", static_cast<int64_t>(index_count));
 	size_t max_meshlets = meshopt_buildMeshletsBound(index_count, config.max_vertices, config.min_triangles);
 
-	std::vector<meshopt_Meshlet> meshlets(max_meshlets);
-	std::vector<unsigned int> meshlet_vertices(index_count);
+	// Scratch the builder overwrites: allocated without zero-filling, which cost as much as a small builder stage.
+	std::unique_ptr<meshopt_Meshlet[]> meshlets(new meshopt_Meshlet[max_meshlets]);
+	std::unique_ptr<unsigned int[]> meshlet_vertices(new unsigned int[index_count]);
 
 #if MESHOPTIMIZER_VERSION < 1000
-	std::vector<unsigned char> meshlet_triangles(index_count + max_meshlets * 3); // account for 4b alignment
+	std::unique_ptr<unsigned char[]> meshlet_triangles(new unsigned char[index_count + max_meshlets * 3]); // account for 4b alignment
 #else
-	std::vector<unsigned char> meshlet_triangles(index_count);
+	std::unique_ptr<unsigned char[]> meshlet_triangles(new unsigned char[index_count]);
 #endif
+	size_t meshlet_count = 0;
 
 	if (config.cluster_spatial)
 	{
 		ZoneScopedN("clusterlod::clusterize::meshopt_buildMeshletsSpatial");
-		meshlets.resize(meshopt_buildMeshletsSpatial(meshlets.data(), meshlet_vertices.data(), meshlet_triangles.data(), indices, index_count,
+		meshlet_count = (meshopt_buildMeshletsSpatial(meshlets.get(), meshlet_vertices.get(), meshlet_triangles.get(), indices, index_count,
 		    mesh.vertex_positions, mesh.vertex_count, mesh.vertex_positions_stride,
 		    config.max_vertices, config.min_triangles, config.max_triangles, config.cluster_fill_weight));
 	}
 	else
 	{
 		ZoneScopedN("clusterlod::clusterize::meshopt_buildMeshletsFlex");
-		meshlets.resize(meshopt_buildMeshletsFlex(meshlets.data(), meshlet_vertices.data(), meshlet_triangles.data(), indices, index_count,
+		meshlet_count = (meshopt_buildMeshletsFlex(meshlets.get(), meshlet_vertices.get(), meshlet_triangles.get(), indices, index_count,
 		    mesh.vertex_positions, mesh.vertex_count, mesh.vertex_positions_stride,
 		    config.max_vertices, config.min_triangles, config.max_triangles, 0.f, config.cluster_split_factor));
 	}
-	TracyPlot("CLOD.clodBuild.clusterize.Meshlets", static_cast<int64_t>(meshlets.size()));
+	TracyPlot("CLOD.clodBuild.clusterize.Meshlets", static_cast<int64_t>(meshlet_count));
 
-	std::vector<Cluster> clusters(meshlets.size());
+	std::vector<Cluster> clusters(meshlet_count);
 
 	{
 		ZoneScopedN("clusterlod::clusterize::BuildClusters");
-		for (size_t i = 0; i < meshlets.size(); ++i)
+		for (size_t i = 0; i < meshlet_count; ++i)
 		{
 			const meshopt_Meshlet& meshlet = meshlets[i];
 

@@ -175,6 +175,13 @@ public:
             [callable = std::move(callable)](std::size_t i) mutable { callable(i); });
     }
 
+    // A pool whose tasks admit more tasks as they finish (work bounded by something other than a count, like memory).
+    // start runs first and spawns the initial tasks; any task may spawn more. Everything runs on the scheduler's workers,
+    // the calling thread joining in, and returns once every spawned task is done. A ParallelFor inside a task shares the
+    // same workers: it never waits to enter the arena.
+    using SpawnFunction = std::function<void(std::function<void()>)>;
+    void RunTaskGroup(std::string_view name, const std::function<void(const SpawnFunction& spawn)>& start);
+
 private:
     TaskSchedulerManager() = default;
     void DispatchDomain(TaskDomain domain);

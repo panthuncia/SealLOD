@@ -326,7 +326,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>("renderGraphQueueSyncTraceEnabled", false);
 	settingsManager.registerSetting<org::AutoAliasMode>("autoAliasMode", org::AutoAliasMode::Balanced);
     settingsManager.registerSetting<org::AutoAliasPackingStrategy>("autoAliasPackingStrategy", org::AutoAliasPackingStrategy::GreedySweepLine);
-    settingsManager.registerSetting<bool>("autoAliasEnableLogging", false);
+    settingsManager.registerSetting<bool>("autoAliasEnableLogging", ReadTruthyEnvironmentFlag("BASICRENDERER_AUTO_ALIAS_LOG"));
     settingsManager.registerSetting<bool>("autoAliasLogExclusionReasons", false);
     settingsManager.registerSetting<bool>("autoAliasBuildDebugData", false);
     settingsManager.registerSetting<bool>("queueSchedulingEnableLogging", false);
@@ -392,6 +392,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<float>(CLodDirectionalVirtualShadowSmrtMaxRayAngleFromLightDegreesSettingName, CLodVirtualShadowDefaultSmrtMaxRayAngleFromLightDegrees);
     settingsManager.registerSetting<float>(CLodDirectionalVirtualShadowSmrtRayLengthScaleDirectionalSettingName, CLodVirtualShadowDefaultSmrtRayLengthScaleDirectional);
     settingsManager.registerSetting<float>(CLodDirectionalVirtualShadowSmrtMaxTraceDistanceWorldSettingName, CLodVirtualShadowDefaultSmrtMaxTraceDistanceWorld);
+    settingsManager.registerSetting<float>(CLodDirectionalVirtualShadowSmrtMaxLateralTexelsSettingName, CLodVirtualShadowDefaultSmrtMaxLateralTexels);
     settingsManager.registerSetting<bool>(CLodDirectionalVirtualShadowReceiverTraceEnabledSettingName, CLodVirtualShadowDefaultReceiverTraceEnabled);
     settingsManager.registerSetting<uint32_t>(CLodDirectionalVirtualShadowReceiverTraceSampleCountSettingName, CLodVirtualShadowDefaultReceiverTraceSampleCount);
     settingsManager.registerSetting<float>(CLodDirectionalVirtualShadowReceiverTraceMaxDistanceWorldSettingName, CLodVirtualShadowDefaultReceiverTraceMaxDistanceWorld);

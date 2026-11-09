@@ -407,6 +407,7 @@ private:
     std::shared_ptr<org::Buffer> m_streamingRuntimeState;
     std::shared_ptr<org::Buffer> m_usedGroupsCounter;
     std::shared_ptr<org::Buffer> m_usedGroupsBuffer;
+    std::shared_ptr<org::Buffer> m_usedGroupsBits;
     std::shared_ptr<org::Buffer> m_sourceGroupMismatchCounter;
     std::shared_ptr<org::Buffer> m_sourceGroupMismatchDetails;
 
