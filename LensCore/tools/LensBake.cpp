@@ -6,6 +6,8 @@
 //       ghost paths by energy over field angles 0..1.1x the half field and lambda F, d, C
 //   LensBake pupil <lens.json> [--focus-m M] [--stop S] [--rims 0|1] [--mono 0|1] [--nodes N] [--angles A] [--rays R] [--json <out.json>]
 //       the exact pupil sampler's discs (as LensManager builds them), the light outside them and what it rejects
+//   LensBake focuspupil <lens.json> [--focus-nodes F] [--between B] [--near-m M] [--mono 0|1] [--rays R] [--check-m list] [--json <out.json>]
+//       the exact pupil over a focus range (per-frame focus): build time, light outside it and acceptance between focus nodes
 //   LensBake fitpoly <lens.json> --out <file.brlens> [--degrees 5,7] [--rows N] [--seed S] [--min-focus-mm D] [--manifest <MANIFEST.json>]
 //       the polynomial lens: least squares on exact rays, its accuracy on fresh rays, written to a .brlens
 //   LensBake eval <file.brlens> <lens.json> [--count N] [--seed S] [--json <out.json>]
@@ -50,6 +52,8 @@ namespace {
 			"  LensBake info <lens.json> [--field-deg <half field>] [--ghosts <n>]\n"
 			"  LensBake rank <lens.json> [--top <n>] [--grid <n>]\n"
 			"  LensBake pupil <lens.json> [--focus-m M] [--stop S] [--rims 0|1] [--mono 0|1] [--nodes N] [--angles A] [--rays R] [--json <out.json>]\n"
+			"  LensBake focuspupil <lens.json> [--focus-nodes F] [--between B] [--near-m M] [--mono 0|1] [--stop S] [--rays R] [--offsets list]\n"
+			"               [--check-m list] [--compare 0|1] [--radius-between N] [--json <out.json>]\n"
 			"  LensBake fitpoly <lens.json> --out <file.brlens> [--degrees 5,7] [--rows N] [--seed S] [--threads K] [--min-focus-mm D]\n"
 			"               [--eval-count N] [--eval-seed S] [--manifest <MANIFEST.json>]\n"
 			"  LensBake eval <file.brlens> <lens.json> [--count N] [--seed S] [--threads K] [--json <out.json>]\n");
@@ -388,6 +392,221 @@ namespace {
 		return 0;
 	}
 
+	// The exact pupil over a focus range (ComputeFocusedPupilDiscs, as LensManager builds it for per-frame focus): its build time,
+	// and at focus coordinates between the nodes, the light outside the bilinearly interpolated region and its acceptance, against
+	// a single-focus build at the same focus (--compare 1). Also K and the distortion table interpolated against exact.
+	int FocusPupil(int argc, char** argv)
+	{
+		const Args args(argc, argv, { "--focus-nodes", "--between", "--near-m", "--stop", "--mono", "--rays", "--check-m", "--compare", "--threads",
+			"--offsets", "--json", "--radius-between", "--k-accuracy", "--k-curve" });
+		if (!args.ok || args.positional.size() != 1) {
+			return Usage();
+		}
+		LensPrescription lens;
+		if (!LoadLens(args.positional[0].c_str(), lens)) {
+			return 1;
+		}
+		TraceOptions options;
+		options.stopScale = std::clamp(args.Num("--stop", 1.0), 0.01, 1.0);
+		const bool mono = args.U64("--mono", 1) != 0;
+		const uint32_t threads = static_cast<uint32_t>(args.U64("--threads", 0));
+		const uint32_t focusNodes = static_cast<uint32_t>(std::max<uint64_t>(2, args.U64("--focus-nodes", 16)));
+		const uint32_t between = static_cast<uint32_t>(args.U64("--between", 1));
+		const FocusRange range = MakeFocusRange(lens, args.Num("--near-m", 0.3) * 1000.0, focusNodes);
+		const ParaxialData paraxial = ComputeParaxial(lens);
+		const double designField = lens.imageCircleRadiusMm > 0.0 ? std::atan(lens.imageCircleRadiusMm / paraxial.efl) : 25.0 * kDeg;
+		const double maxField = std::min(designField * 1.4, 85.0 * kDeg);
+		const std::vector<DistortionTable> tables = ComputeDistortionTables(lens, range.sensorZ, maxField, 129);
+		const double imageCircle = lens.imageCircleRadiusMm > 0.0 ? lens.imageCircleRadiusMm : tables.front().imageRadius.back();
+		const double maxSensorRadius = imageCircle * 1.25;
+		PupilDiscOptions discOptions;
+		discOptions.threads = threads;
+		discOptions.betweenSamples = static_cast<uint32_t>(args.U64("--radius-between", discOptions.betweenSamples));
+		if (mono) {
+			discOptions.wavelengths = { kLambdaD };
+		}
+		const FocusedPupilDiscs focused = ComputeFocusedPupilDiscs(lens, range.sensorZ, maxSensorRadius, options, discOptions, between);
+		std::printf("%s: %u focus nodes, shift %.4f..%.4f mm (infinity to %.3f m), %s, stop %.3f, %u planes between focus nodes; built in %.0f ms\n",
+			lens.name.c_str(), focusNodes, range.shiftMin, range.shiftMax, range.distanceMm.back() / 1000.0, mono ? "d line" : "380-780 nm",
+			options.stopScale, between, focused.buildMs);
+		std::printf("  apertures:");
+		for (const uint32_t a : focused.apertures) {
+			std::printf(" %u%s", a, lens.surfaces[a].isStop ? " (stop)" : "");
+		}
+		std::printf("\n");
+		std::vector<double> nodeK(focusNodes);
+		for (uint32_t f = 0; f < focusNodes; ++f) {
+			nodeK[f] = CentreNormalization(lens, focused.focus[f], options);
+		}
+		// LensManager's normalization table: K at 8 focus coordinates per focus interval, 1 / sqrt(K) interpolated linearly.
+		constexpr uint32_t kPerInterval = 8;
+		std::vector<double> tableK((focusNodes - 1u) * kPerInterval + 1u);
+		for (uint32_t k = 0; k < tableK.size(); ++k) {
+			tableK[k] = CentreNormalization(lens, focused.AtFocus(double(k) / kPerInterval), options);
+		}
+		const auto tableInverseK = [&](double s) {
+			const double x = std::clamp(s, 0.0, double(focusNodes - 1u)) * kPerInterval;
+			const size_t k = std::min<size_t>(static_cast<size_t>(x), tableK.size() - 2);
+			const double root = (1.0 / std::sqrt(tableK[k])) * (k + 1.0 - x) + (1.0 / std::sqrt(tableK[k + 1])) * (x - k);
+			return root * root;
+		};
+		const uint64_t rays = args.U64("--rays", 200000);
+		const auto acceptanceOver = [&](const PupilDiscStats& stats, uint64_t& leak, uint64_t& pass) {
+			double weightSum = 0.0, accept = 0.0;
+			for (uint32_t index = 0; index < stats.intervals.size(); ++index) {
+				const auto& s = stats.intervals[index];
+				leak += s.passOutside;
+				pass += s.passInRegion + s.passOutside;
+				const double r0 = double(index) / stats.intervals.size() * maxSensorRadius, r1 = (index + 1.0) / stats.intervals.size() * maxSensorRadius;
+				if (r0 < imageCircle && s.rays > 0) {
+					const double weight = std::min(r1, imageCircle) * std::min(r1, imageCircle) - r0 * r0;
+					weightSum += weight;
+					accept += weight * s.Acceptance();
+				}
+			}
+			return weightSum > 0.0 ? accept / weightSum : 0.0;
+		};
+		const auto measure = [&](const PupilDiscs& discs, uint64_t seed) {
+			return mono ? MeasurePupilDiscs(lens, discs, options, rays, kLambdaD, kLambdaD, 0.1, seed, threads)
+						: MeasurePupilDiscs(lens, discs, options, rays, 380.0, 780.0, 0.1, seed, threads);
+		};
+		json report = { { "lens", lens.name }, { "focus_nodes", focusNodes }, { "between", between }, { "mono", mono }, { "stop", options.stopScale },
+			{ "build_ms", focused.buildMs }, { "shift_range_mm", { range.shiftMin, range.shiftMax } }, { "apertures", focused.apertures } };
+		// Between the focus nodes: the interpolated region at fixed offsets in every interval.
+		std::vector<double> offsets;
+		{
+			std::string list = args.Str("--offsets", "0,0.25,0.5,0.75");
+			for (size_t start = 0; start < list.size();) {
+				const size_t comma = list.find(',', start);
+				offsets.push_back(std::atof(list.substr(start, comma - start).c_str()));
+				start = comma == std::string::npos ? list.size() : comma + 1;
+			}
+		}
+		uint64_t totalLeak = 0, totalPass = 0;
+		json perOffset = json::array();
+		std::printf("  offset  acceptance (mean over intervals, min)  leak rays\n");
+		for (const double offset : offsets) {
+			double sum = 0.0, minimum = 1.0;
+			uint64_t leak = 0, pass = 0;
+			for (uint32_t interval = 0; interval + 1 < focusNodes; ++interval) {
+				const PupilDiscStats stats = measure(focused.AtFocus(interval + offset), 1000u + interval);
+				const double accept = acceptanceOver(stats, leak, pass);
+				sum += accept;
+				minimum = std::min(minimum, accept);
+			}
+			totalLeak += leak;
+			totalPass += pass;
+			std::printf("  %.3f   %.4f  %.4f                        %llu of %llu\n", offset, sum / (focusNodes - 1), minimum, static_cast<unsigned long long>(leak),
+				static_cast<unsigned long long>(pass));
+			perOffset.push_back({ { "offset", offset }, { "acceptance_mean", sum / (focusNodes - 1) }, { "acceptance_min", minimum }, { "leak_rays", leak },
+				{ "pass_rays", pass } });
+		}
+		report["offsets"] = perOffset;
+		// Named focus distances, with the single-focus build (the per-focus rebuild) to compare with.
+		json checks = json::array();
+		std::string list = args.Str("--check-m", "0.8,2.2,7");
+		const bool compare = args.U64("--compare", 1) != 0;
+		std::printf("  focus_m   s       acceptance interp / single   leak interp / single   K interp/exact - 1   distortion max rel err\n");
+		for (size_t start = 0; start < list.size();) {
+			const size_t comma = list.find(',', start);
+			const double focusM = std::atof(list.substr(start, comma - start).c_str());
+			start = comma == std::string::npos ? list.size() : comma + 1;
+			const double shift = SensorShiftForFocus(lens, focusM * 1000.0);
+			const double s = range.Coordinate(shift);
+			const PupilDiscs interpolated = focused.AtFocus(s);
+			uint64_t leak = 0, pass = 0, singleLeak = 0, singlePass = 0;
+			const double accept = acceptanceOver(measure(interpolated, 77), leak, pass);
+			double singleAccept = 0.0;
+			if (compare) {
+				const PupilDiscs single = ComputePupilDiscs(lens, lens.sensorZ + shift, maxSensorRadius, options, discOptions);
+				singleAccept = acceptanceOver(measure(single, 77), singleLeak, singlePass);
+			}
+			totalLeak += leak;
+			totalPass += pass;
+			// K: interpolated 1 / K (as the shader does) against K at the exact plane.
+			const size_t i = std::min<size_t>(static_cast<size_t>(s), focusNodes - 2);
+			const double t = s - double(i);
+			// As the shader: 1 / sqrt(K) linearly (K is close to the exit pupil's area over its squared distance from the sensor).
+			const double inverseK = tableInverseK(s);
+			const double inverseKLinear = (1.0 / nodeK[i]) * (1.0 - t) + (1.0 / nodeK[i + 1]) * t;
+			const double exactK = CentreNormalization(lens, interpolated, options);
+			// Distortion: the interpolated table against one at the exact plane.
+			const DistortionTable exact = ComputeDistortionTable(lens, lens.sensorZ + shift, maxField, 129);
+			double distortionError = 0.0;
+			for (size_t e = 1; e < exact.imageRadius.size() && e < tables[i].imageRadius.size(); ++e) {
+				const double value = tables[i].imageRadius[e] * (1.0 - t) + tables[i + 1].imageRadius[e] * t;
+				distortionError = std::max(distortionError, std::abs(value / exact.imageRadius[e] - 1.0));
+			}
+			std::printf("  %6.2f  %6.3f   %.4f / %.4f              %llu / %llu               %+.2e            %.2e\n", focusM, s, accept, singleAccept,
+				static_cast<unsigned long long>(leak), static_cast<unsigned long long>(singleLeak), inverseK * exactK - 1.0, distortionError);
+			std::printf("          K with 1/K interpolated linearly between focus nodes instead: %+.2e\n", inverseKLinear * exactK - 1.0);
+			if (args.U64("--k-accuracy", 0) != 0) {
+				// K's own integration error: the 384 grid and this plane's region against a 2048 grid.
+				const double fine = CentreNormalization(lens, interpolated, options, 2048);
+				const double single = CentreNormalization(lens, ComputePupilDiscs(lens, lens.sensorZ + shift, maxSensorRadius, options, discOptions), options);
+				std::printf("          K accuracy: grid 384 on the interpolated region %+.2e, on a single-focus region %+.2e, against grid 2048\n",
+					exactK / fine - 1.0, single / fine - 1.0);
+				// The old per-focus build's K: a 384 grid over the centre bin's pupil box (48 bins, 128 grid, widened 2%).
+				ExitPupilBounds boxes = ComputeExitPupilBounds(lens, lens.sensorZ + shift, maxSensorRadius, 48, 128, kLambdaD, options, threads);
+				auto box = boxes.bins[0];
+				const double padX = 0.02 * (box.maxX - box.minX), padY = 0.02 * (box.maxY - box.minY);
+				box.minX -= padX; box.maxX += padX; box.minY -= padY; box.maxY += padY;
+				const LensPath backward = TransmissionPath(lens, false);
+				double old = 0.0;
+				const double cellX = (box.maxX - box.minX) / 384.0, cellY = (box.maxY - box.minY) / 384.0;
+				for (uint32_t row = 0; row < 384; ++row) {
+					for (uint32_t column = 0; column < 384; ++column) {
+						const Vec3 origin{ 0.0, 0.0, lens.sensorZ + shift };
+						const Vec3 toRear = Vec3{ box.minX + (column + 0.5) * cellX, box.minY + (row + 0.5) * cellY, boxes.rearPlaneZ } - origin;
+						const double d2 = Dot(toRear, toRear);
+						const Ray ray{ origin, toRear * (1.0 / std::sqrt(d2)) };
+						const TraceResult result = TraceSequential(lens, ray, kLambdaD, backward, options);
+						if (result.status == TraceStatus::Ok) old += result.throughput * ray.dir.z * ray.dir.z / d2 * cellX * cellY;
+					}
+				}
+				std::printf("          K accuracy: the old build's box grid %+.2e; the new table's interpolated 1/K against grid 2048 %+.2e\n", old / fine - 1.0,
+					inverseK * fine - 1.0);
+			}
+			checks.push_back({ { "focus_m", focusM }, { "coordinate", s }, { "acceptance", accept }, { "acceptance_single", singleAccept }, { "leak_rays", leak },
+				{ "pass_rays", pass }, { "leak_rays_single", singleLeak }, { "k_relative_error", inverseK * exactK - 1.0 }, { "k_relative_error_linear", inverseKLinear * exactK - 1.0 }, { "distortion_max_relative_error", distortionError } });
+		}
+		report["checks"] = checks;
+		if (args.U64("--k-curve", 0) != 0) {
+			// K along the focus range at 8 points per focus interval, against 1 / sqrt(K) and 1 / K interpolated between the nodes.
+			std::printf("  K curve: s, K, sqrt-interp error, linear-interp error\n");
+			for (uint32_t step = 0; step <= (focusNodes - 1u) * 8u; ++step) {
+				const double s = step / 8.0;
+				const double k = CentreNormalization(lens, focused.AtFocus(s), options);
+				const size_t i = std::min<size_t>(static_cast<size_t>(s), focusNodes - 2);
+				const double t = s - double(i);
+				const double root = (1.0 / std::sqrt(nodeK[i])) * (1.0 - t) + (1.0 / std::sqrt(nodeK[i + 1])) * t;
+				const double linear = (1.0 / nodeK[i]) * (1.0 - t) + (1.0 / nodeK[i + 1]) * t;
+				std::printf("  %.3f %.6f %+.2e %+.2e\n", s, k, root * root * k - 1.0, linear * k - 1.0);
+			}
+		}
+		// Breathing: how much the chief-ray mapping's shape changes over the range, relative to the frame edge (what motion vectors
+		// would see if they ignored the focus change): max over angles of |r_near(a) / r_near(edge) - r_far(a) / r_far(edge)|.
+		{
+			const auto& far = tables.front();
+			const auto& near = tables.back();
+			const size_t edge = std::min(far.imageRadius.size(), near.imageRadius.size()) - 1;
+			double breathing = 0.0, magnification = near.imageRadius[edge] / far.imageRadius[edge] - 1.0;
+			for (size_t e = 1; e <= edge; ++e) {
+				breathing = std::max(breathing, std::abs(near.imageRadius[e] / near.imageRadius[edge] - far.imageRadius[e] / far.imageRadius[edge]));
+			}
+			std::printf("  breathing over the range: magnification %+.4f at the table's edge, shape change %.2e of the edge radius\n", magnification, breathing);
+			report["breathing"] = { { "magnification", magnification }, { "shape_change", breathing } };
+		}
+		std::printf("  total: %llu passing rays outside the region of %llu\n", static_cast<unsigned long long>(totalLeak), static_cast<unsigned long long>(totalPass));
+		report["leak_rays"] = totalLeak;
+		report["pass_rays"] = totalPass;
+		if (args.Has("--json")) {
+			std::ofstream out(args.Str("--json"));
+			out << report.dump(1);
+		}
+		return totalLeak == 0 ? 0 : 3;
+	}
+
 	// The exact pupil sampler's discs (ComputePupilDiscs, as LensManager builds them) and what it misses and rejects.
 	int Pupil(int argc, char** argv)
 	{
@@ -525,6 +744,9 @@ int main(int argc, char** argv)
 	}
 	if (command == "pupil") {
 		return Pupil(argc - 2, argv + 2);
+	}
+	if (command == "focuspupil") {
+		return FocusPupil(argc - 2, argv + 2);
 	}
 	return Usage();
 }

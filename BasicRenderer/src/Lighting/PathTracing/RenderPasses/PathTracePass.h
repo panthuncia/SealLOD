@@ -236,7 +236,7 @@ public:
             Builtin::OpenPBR::FuzzLTC, Builtin::OpenPBR::IdealMetalEnergyComplement, Builtin::OpenPBR::IdealMetalAverageEnergyComplement,
             Builtin::OpenPBR::OpaqueDielectricAverageEnergyComplement, Builtin::Noise::BlueNoise2D);
         // The physical lens (LensManager), declared whether or not it is on: the graph validates every name a shader uses.
-        builder.ShaderResource(Builtin::RayTracing::LensData);
+        builder.ShaderResource(Builtin::RayTracing::LensData, Builtin::RayTracing::LensFocus);
         builder.ShaderResource(Builtin::OpenPBR::OpaqueDielectricEnergyComplement,
             org::SrvView{ static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull) });
         if (m_slabs) builder.ShaderResource(ResourceGroupResolver(m_slabs));
@@ -302,6 +302,9 @@ public:
             std::array<uint64_t, 8> scene = { stats.instances, stats.clustersInBvh, stats.clasBuildsTotal, stats.clasFreedTotal,
                 context->materialTextureStreamingStats.totalResidentBytes, (uint64_t(frame.maxBounces) << 32u) | frame.flags,
                 camera, settings.getSettingGetter<uint64_t>("pathTracingCameraModelHash")() };
+            // The lens's focus is per frame, outside the lens hash: the GPU restarts the frame it moves (LensFocusRestart), and this
+            // word (the manual focus, or the autofocus epoch last read back) keeps accumulatedFrames from counting past that.
+            if (m_lens && frame.lens && frame.lens->Active()) scene[7] ^= m_lens->FocusRestartKey() * 0x9E3779B97F4A7C15ull;
             std::scoped_lock lock(m_state->mutex);
             scene[7] ^= m_state->tableCodeHash; // CurrentTable writes it under the same mutex.
             if (scene != m_state->accumulationScene) {

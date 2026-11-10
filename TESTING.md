@@ -44,7 +44,12 @@ Accumulation restarts when the scene's ray-tracing state, the path-tracing
 settings, the camera's view or unjittered projection (FOV, aspect, near plane),
 or the `pathTracingCameraModelHash` setting changes. Jitter does not restart it.
 Code that changes how primary rays are generated (a lens model) sets
-`pathTracingCameraModelHash` to a hash of that state.
+`pathTracingCameraModelHash` to a hash of that state. The lens's focus is not in
+it: focus is per frame, and the path tracer restarts accumulation on the GPU the
+frame the focus moves (manual focus changes also restart it on the CPU side;
+in autofocus the CPU's frame count follows the focus epoch it reads back a few
+frames later, so `accumulated_frames` never counts more samples than the
+buffer holds).
 
 ### HDR capture
 
@@ -111,12 +116,30 @@ tested through the control pipe.
 
 `lens.get`, `lens.set`, `lens.selftest` and `lens.selftest.status` control the
 path tracer's physical camera lens: `lens.set` takes `mode` (`pinhole`,
-`explicit` or `polynomial`), `file`, `focus_m`, `monochromatic`, `stop_scale`,
-`field_mode` (`remap` or `physical`) and `polynomial_degree` (5 or 7); the lens
-builds off the render thread, so poll `lens.get` until its `state` is
-`explicit` or `polynomial`. `lens.selftest` starts a GPU-against-CPU parity test
+`explicit` or `polynomial`), `file`, `focus_m`, `focus_mode` (`manual` or
+`auto`), `af_point` (`[x, y]` in NDC), `af_region`, `af_speed`, `monochromatic`,
+`f_number` (0 is wide open), `field_mode` (`remap` or `physical`) and
+`polynomial_degree` (5 or 7). Focus settings apply the next frame without a
+rebuild (`published_revision` stays); the others rebuild the lens off the render
+thread (a few seconds), so poll `lens.get` until its `state` is `explicit` or
+`polynomial`. `lens.get`'s `lens.focus` reports the focus the GPU last read back,
+the autofocus target and measurement, and an approximate depth of field. `lens.selftest` starts a GPU-against-CPU parity test
 of the published lens and `lens.selftest.status` returns its report (`passed`).
 SARP's `docs/lens_simulation.md` describes every field.
+
+`lens.flare.get`, `lens.flare.set`, `lens.flare.selftest` and
+`lens.flare.selftest.status` control the lens's ghost flares (SARP's
+`docs/lens_simulation.md`, "Ghost flares"): `lens.flare.set` takes `enabled`,
+`max_ghosts`, `grid`, `wavelengths`, `max_lights` (each of these rebuilds the
+graph) and `intensity` (1 is physical), and `test_source`
+(`{"direction":[x,y,z],"distance_m":d,"irradiance":[r,g,b]}` in view space, or
+`null`), which replaces the scene's flare sources with one source, for tests.
+The ghosts are rebuilt off the render thread whenever the lens is; poll
+`lens.flare.get` until its `state` is `ready`. `lens.flare.selftest` compares one
+frame's GPU ghost lattice with LensCore and `lens.flare.selftest.status` returns
+the report (`passed`). The flares are added to the upscaled HDR colour, so
+`capture.hdr` with `target` `hdr` includes them; capturing with `intensity` 0 and
+1 and subtracting isolates them.
 
 `camera.set` takes an optional `fov_deg` (the primary camera's vertical field of
 view, in (1, 170)) and reports `fov_deg` and `aspect`. A lens covers only its

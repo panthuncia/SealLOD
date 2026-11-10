@@ -28,7 +28,7 @@ FLOAT = 5126
 UINT32 = 5125
 ARRAY_BUFFER = 34962
 ELEMENT_ARRAY_BUFFER = 34963
-VARIANTS = ("chart", "bokeh", "flare", "furnace", "all")
+VARIANTS = ("chart", "bokeh", "flare", "furnace", "focus", "all")
 
 
 # --- Geometry: each mesh is (positions Nx3, normals Nx3, indices Mx3), counter-clockwise seen from the front. ---
@@ -152,11 +152,11 @@ class SceneBuilder:
         g = self.args.black_albedo
         return self.material("chart_black", base=(g, g, g))
 
-    def add_chart(self):
+    def add_chart(self, depth=None, width=None, lateral=(0.0, 0.0), prefix="chart"):
         """ISO-12233-style chart: slanted-edge squares, checkerboards of four pitches and a Siemens star, on a white panel."""
         a = self.args
-        d = a.focus_distance
-        width = a.chart_width
+        d = a.focus_distance if depth is None else depth
+        width = a.chart_width if width is None else width
         height = width * 0.75
         lift = 0.001  # black features sit 1 mm in front of the white panel, so nothing is coplanar
         slant = math.radians(a.slant_deg)
@@ -188,10 +188,20 @@ class SceneBuilder:
                                   (star_centre[0] + star_radius * math.cos(a1), star_centre[1] + star_radius * math.sin(a1))]))
             black[-1][0][:, 2] = lift
 
-        panel = self.mesh("chart_panel", quad(width, height), self.white())
-        features = self.mesh("chart_features", merged(black), self.black())
-        self.place("chart_panel", panel, depth=d)
-        self.place("chart_features", features, depth=d)
+        panel = self.mesh(prefix + "_panel", quad(width, height), self.white())
+        features = self.mesh(prefix + "_features", merged(black), self.black())
+        self.place(prefix + "_panel", panel, lateral, depth=d)
+        self.place(prefix + "_features", features, lateral, depth=d)
+
+    def add_focus_charts(self):
+        """Small charts at several depths, each at its own place in the frame (--focus-depths, --focus-positions as NDC x, y
+        pairs), each 1/4 of the frame height across: for autofocus, pointed at one chart at a time."""
+        a = self.args
+        positions = a.focus_positions
+        for index, depth in enumerate(a.focus_depths):
+            x, y = positions[2 * index], positions[2 * index + 1]
+            half_w, half_h = self.frame_half_extent(depth)
+            self.add_chart(depth, 0.25 * 2.0 * half_h, (x * half_w, y * half_h), f"focus_chart_{depth:g}m")
 
     def add_corner_patches(self):
         """Black/white slanted 2x2 checkers near the four frame corners at the focus distance (lateral CA)."""
@@ -264,8 +274,10 @@ def build_scene(args):
         builder.add_flare()
     if variant == "furnace":
         builder.add_furnace()
+    if variant == "focus":
+        builder.add_focus_charts()
     if variant != "furnace" and not args.no_backdrop:
-        depths = {"chart": [args.focus_distance], "bokeh": args.bokeh_depths, "flare": [args.sun_distance],
+        depths = {"chart": [args.focus_distance], "bokeh": args.bokeh_depths, "flare": [args.sun_distance], "focus": args.focus_depths,
                   "all": [args.focus_distance, *args.bokeh_depths]}[variant]
         builder.add_backdrop(max(depths) * 1.5 + 1.0)
     return builder
@@ -430,6 +442,9 @@ def main():
     parser.add_argument("--corner-fraction", type=float, default=0.85, help="corner patch position, fraction of frame half-extent")
     parser.add_argument("--sphere-radius", type=float, default=0.015)
     parser.add_argument("--bokeh-depths", type=floats(0), default=[1.5, 3.0, 12.0])
+    parser.add_argument("--focus-depths", type=floats(0), default=[2.2, 0.8, 1.5, 4.0, 7.0], help="focus variant: chart depths, metres")
+    parser.add_argument("--focus-positions", type=floats(0), default=[0.0, 0.0, -0.5, 0.5, 0.5, 0.5, -0.5, -0.5, 0.5, -0.5],
+                        help="focus variant: each chart's centre as NDC x, y pairs (+y up)")
     parser.add_argument("--bokeh-grid", type=floats(2), default=[7, 5], help="columns,rows per depth")
     parser.add_argument("--edge-fraction", type=float, default=0.92, help="bokeh grid extent, fraction of frame half-extent")
     parser.add_argument("--emissive", type=float, default=20.0, help="bokeh sphere radiance")

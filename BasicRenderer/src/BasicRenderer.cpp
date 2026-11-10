@@ -2069,10 +2069,16 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                 } else if (command == "capture.hdr") {
                     response["job_id"] = m_hdrCaptures.Request(renderer, request->document);
                 } else if (command == "lens.get" || command == "lens.set" || command == "lens.selftest" || command == "lens.selftest.status") {
-                    // The physical lens (SARP's docs/lens_simulation.md). lens.set takes mode, file, focus_m, monochromatic, stop_scale,
-                    // field_mode ("remap" or "physical") and polynomial_degree; the lens builds off this thread, so lens.get's
-                    // "state" says when it is in use.
+                    // The physical lens (SARP's docs/lens_simulation.md). lens.set takes mode, file, focus_m, focus_mode ("manual" or
+                    // "auto"), af_point ([x, y] NDC), af_region, af_speed, monochromatic, f_number, field_mode ("remap" or "physical")
+                    // and polynomial_degree. Focus is per frame; the rest builds off this thread, so lens.get's "state" says when it
+                    // is in use, and its "focus" has the autofocus state.
                     response["lens"] = nlohmann::json::parse(renderer.HandleLensControl(command, request->document.dump()));
+                } else if (command.starts_with("lens.flare.")) {
+                    // The lens's ghost flares (SARP's docs/lens_simulation.md "Ghost flares"): lens.flare.get, lens.flare.set
+                    // {enabled, max_ghosts, grid, wavelengths, max_lights, intensity, test_source}, lens.flare.selftest and
+                    // lens.flare.selftest.status.
+                    response["flare"] = nlohmann::json::parse(renderer.HandleLensControl(command, request->document.dump()));
                 } else if (command == "upscaler.get") {
                     // What upscaler runs: "evaluated" is what the last frame's upscaling pass ran, "graph" the mode the graph
                     // was built with, "setting" the upscalingMode setting. A path traced frame should say DLSS Ray

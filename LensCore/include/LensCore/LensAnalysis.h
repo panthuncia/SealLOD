@@ -144,6 +144,53 @@ namespace lens {
 	PupilDiscs ComputePupilDiscs(const LensPrescription& lens, double sensorZ, double maxSensorRadius, const TraceOptions& options = {},
 		const PupilDiscOptions& discOptions = {});
 
+	// The exact pupil over a range of focus: one PupilDiscs per sensor plane (focus node), all with the same apertures and node
+	// count, so that they interpolate bilinearly in (sensor radius, focus node). Each focus node is fitted as ComputePupilDiscs
+	// fits one plane (the apertures are the union of the binding ones, then at most maxDiscs over every node); then, besides
+	// the radii between nodes, the boundary is found again between focus nodes (focusBetweenSamples planes per interval, at each
+	// radius node and halfway between them) and the four corners' radii grow by any shortfall, so the region stays conservative
+	// at every focus in the range. With one plane this is ComputePupilDiscs. The planes must be ordered (uniform spacing makes the
+	// focus coordinate linear in the sensor plane, which is what AtFocus assumes).
+	struct FocusedPupilDiscs {
+		std::vector<PupilDiscs> focus;
+		std::vector<uint32_t> apertures;
+		double buildMs = 0.0;
+
+		uint32_t FocusCount() const { return static_cast<uint32_t>(focus.size()); }
+		// The discs at focus coordinate s in [0, FocusCount() - 1] (clamped), interpolated linearly between the two nearest
+		// focus nodes, sensorZ included. A radius node empty at either focus node is empty.
+		PupilDiscs AtFocus(double s) const;
+		// The region at a sensor radius and focus coordinate (bilinear), without building the interpolated PupilDiscs.
+		PupilRegion At(double sensorRadius, double s) const;
+		// The sensor plane at focus coordinate s.
+		double SensorZAt(double s) const;
+	};
+
+	FocusedPupilDiscs ComputeFocusedPupilDiscs(const LensPrescription& lens, const std::vector<double>& sensorZs, double maxSensorRadius,
+		const TraceOptions& options = {}, const PupilDiscOptions& discOptions = {}, uint32_t focusBetweenSamples = 1);
+
+	// Focus nodes: sensor planes uniform in the focus shift (close to uniform in 1 / distance) from infinity focus (shift 0) to
+	// nearFocusMm, kept inside [sensorZMin, sensorZMax] (a polynomial's fitted range). Node i is at shift
+	// shiftMin + i (shiftMax - shiftMin) / (count - 1); its focus distance is the object distance that shift focuses.
+	struct FocusRange {
+		double baseSensorZ = 0.0; // the prescription's (infinity focus) sensor plane
+		double shiftMin = 0.0;
+		double shiftMax = 0.0;
+		std::vector<double> shift;      // per node
+		std::vector<double> sensorZ;    // baseSensorZ + shift
+		std::vector<double> distanceMm; // per node; infinity for shift 0
+
+		uint32_t Count() const { return static_cast<uint32_t>(shift.size()); }
+		// The focus coordinate of a shift (clamped to the range): 0 at shiftMin, Count() - 1 at shiftMax.
+		double Coordinate(double sensorShift) const;
+	};
+
+	FocusRange MakeFocusRange(const LensPrescription& lens, double nearFocusMm, uint32_t count, double sensorZMin = -1e30, double sensorZMax = 1e30,
+		double lambdaNm = kLambdaD);
+	// The object distance (mm from the first vertex) a sensor shift focuses: SensorShiftForFocus inverted (bisection in
+	// 1 / distance). Infinity for a shift <= 0.
+	double FocusDistanceForShift(const LensPrescription& lens, double sensorShift, double lambdaNm = kLambdaD);
+
 	// Random camera rays per node interval: sensor radius uniform between the two nodes, rear point uniform over the
 	// region's bounding box at that radius widened by boxMargin of its size on each side, wavelength uniform in
 	// [lambdaMin, lambdaMax] (lambdaMin alone when equal), traced exactly. What passes, inside and outside the region; the
@@ -165,6 +212,12 @@ namespace lens {
 		std::vector<Interval> intervals; // nodes - 1
 	};
 
+	// The normalization K: the camera estimator's expectation at the sensor centre at lambdaNm, the integral of
+	// throughput * cos^2 / d^2 over the rear plane, on a grid x grid of cell centres over the bounding box of the exact pupil's
+	// region at sensor radius 0 (which holds all the light). The renderer divides by it, so a uniform white scene is 1 there.
+	double CentreNormalization(const LensPrescription& lens, const PupilDiscs& discs, const TraceOptions& options, uint32_t grid = 384,
+		double lambdaNm = kLambdaD);
+
 	PupilDiscStats MeasurePupilDiscs(const LensPrescription& lens, const PupilDiscs& discs, const TraceOptions& options, uint64_t raysPerInterval,
 		double lambdaMin, double lambdaMax, double boxMargin = 0.1, uint64_t seed = 1, uint32_t threads = 0);
 
@@ -184,6 +237,10 @@ namespace lens {
 	bool FindChiefRay(const LensPrescription& lens, double fieldAngle, double lambdaNm, Ray& chiefRay);
 	DistortionTable ComputeDistortionTable(const LensPrescription& lens, double sensorZ, double maxFieldAngle, uint32_t sampleCount = 128,
 		double lambdaNm = kLambdaD);
+	// The same table at several sensor planes from one set of chief rays, all cut to the same (shortest) length, so they share
+	// the field angles and interpolate entry by entry.
+	std::vector<DistortionTable> ComputeDistortionTables(const LensPrescription& lens, const std::vector<double>& sensorZs, double maxFieldAngle,
+		uint32_t sampleCount = 128, double lambdaNm = kLambdaD);
 
 	struct RankedPath {
 		LensPath path;

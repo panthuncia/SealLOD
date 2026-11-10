@@ -54,6 +54,8 @@
 #include "Lighting/Environment/RenderPasses/SkyboxRenderPass.h"
 #include "Lighting/PathTracing/RenderPasses/PathTracePass.h"
 #include "Camera/Lens/RenderPasses/LensSelfTestPass.h"
+#include "Camera/Lens/RenderPasses/LensFocusPass.h"
+#include "Camera/Lens/RenderPasses/LensFlarePasses.h"
 #include "Lighting/Environment/RenderPasses/EnvironmentFilterPass.h"
 #include "Diagnostics/RenderPasses/DebugSpheresPass.h"
 #include "Diagnostics/RenderPasses/DebugSkeletonPass.h"
@@ -154,6 +156,10 @@ Renderer::PathTracingAccumulation Renderer::GetPathTracingAccumulation() const {
 }
 
 std::string Renderer::HandleLensControl(const std::string& command, const std::string& requestJson) {
+    if (command.starts_with("lens.flare.")) {
+        if (!m_ghostFlareManager) throw std::runtime_error("the renderer has no lens flare manager");
+        return m_ghostFlareManager->HandleControl(command, requestJson);
+    }
     if (!m_lensManager) throw std::runtime_error("the renderer has no lens manager");
     return m_lensManager->HandleControl(command, requestJson);
 }
@@ -309,6 +315,7 @@ void Renderer::CreateRenderGraph() {
 	newGraph->RegisterProvider(m_pSkeletonManager.get());
     newGraph->RegisterProvider(&m_coreResourceProvider);
     if (m_lensManager) newGraph->RegisterProvider(m_lensManager.get());
+    if (m_ghostFlareManager) newGraph->RegisterProvider(m_ghostFlareManager.get());
     newGraph->PrepareExtensionsForBuild();
     }
     probeGraphBuildPhase("CreateRenderGraph after PrepareExtensionsForBuild");
@@ -542,12 +549,20 @@ void Renderer::CreateRenderGraph() {
                 auto pathTraceState = MakePathTraceState();
                 m_pathTraceState = pathTraceState;
                 newGraph->BuildPass<PathTraceArgsPass>("PathTraceArgsPass", pathTraceState);
+                if (m_lensManager) {
+                    // The lens's focus for this frame's camera rays (manual, or a step toward the last autofocus measurement).
+                    newGraph->BuildPass<LensFocusPass>("LensFocusPass", m_lensManager);
+                    newGraph->SetPassTechnique("LensFocusPass", "Ray Tracing::Path Tracing");
+                }
                 newGraph->SetPassTechnique("PathTraceArgsPass", "Ray Tracing::Path Tracing");
                 newGraph->BuildPass<PathTracePass>("PathTracePass", pathTraceState, m_clodRayTracingSystem, m_pMeshManager ? m_pMeshManager->GetCLodSlabResourceGroup() : nullptr,
                     m_pipelineRecipe.Contains<br::pipeline::TerrainRvtTechnique>(),
                     UpscalingManager::GetInstance().GetCurrentUpscalingMode() == UpscalingMode::DLSSRayReconstruction, m_lensManager);
                 newGraph->SetPassTechnique("PathTracePass", "Ray Tracing::Path Tracing");
                 if (m_lensManager) {
+                    // The primary hits' depth over the autofocus region, for the next frame's focus.
+                    newGraph->BuildPass<LensAutofocusPass>("LensAutofocusPass", m_lensManager);
+                    newGraph->SetPassTechnique("LensAutofocusPass", "Ray Tracing::Path Tracing");
                     newGraph->BuildPass<LensSelfTestPass>("LensSelfTestPass", m_lensManager);
                     newGraph->SetPassTechnique("LensSelfTestPass", "Ray Tracing::Path Tracing");
                 }
@@ -582,6 +597,15 @@ void Renderer::CreateRenderGraph() {
                 newGraph->BuildPass<UpscalingPass>("UpscalingPass",
                     br::render::UpscalingGenerationService::CaptureCurrent());
                 newGraph->SetPassTechnique("UpscalingPass", "Post Process::Upscaling");
+                // The physical lens's ghost flares, added to the upscaled colour (Ray Reconstruction never sees them) before
+                // bloom and tonemapping. Path traced, with a BVH, their sources' visibility is by ray query.
+                if (m_ghostFlareManager && SettingsManager::GetInstance().getSettingGetter<bool>("lensFlareEnabled")()) {
+                    const auto output = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("outputResolution")();
+                    const bool rayQuery = m_pipelineRecipe.Contains<br::pipeline::PathTracingTechnique>() && m_clodRayTracingSystem
+                        && m_clodRayTracingSystem->IsInitialized() && DeviceManager::GetInstance().GetCLodRayTracingSupported();
+                    BuildLensFlarePasses(newGraph, m_ghostFlareManager, rayQuery ? m_clodRayTracingSystem : nullptr,
+                        rayQuery && m_pMeshManager ? m_pMeshManager->GetCLodSlabResourceGroup() : nullptr, output.x, output.y, 2u);
+                }
                 break;
             case Bloom:
 				BuildBloomPipeline(newGraph);

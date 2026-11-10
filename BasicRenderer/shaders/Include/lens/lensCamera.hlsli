@@ -120,10 +120,11 @@ float2 LensSamplePupilRegion(uint count, float4 centre, float4 radius, float2 u,
     return float2(x, (2.0f * u.y - 1.0f) * LensHalfChord(c, r, x));
 }
 
-// The exact pupil at a sensor radius: the two nearest nodes' discs and polynomial transmission (per band), interpolated.
-// False past the last node or where a node has no light.
-bool LensPupilRegionAt(StructuredBuffer<float4> data, LensHeader header, float sensorRadius, out float4 centre, out float4 radius,
-    out float3 transmission)
+// The exact pupil at a sensor radius and the frame's focus: the discs and polynomial transmission (per band) of the two nearest
+// radius nodes at the two nearest focus nodes, interpolated bilinearly (the discs are widened to hold the pupil anywhere between
+// them). False past the last node or where a node has no light.
+bool LensPupilRegionAt(StructuredBuffer<float4> data, LensHeader header, LensFocus focus, float sensorRadius, out float4 centre,
+    out float4 radius, out float3 transmission)
 {
     centre = 0.0f.xxxx;
     radius = 0.0f.xxxx;
@@ -133,20 +134,56 @@ bool LensPupilRegionAt(StructuredBuffer<float4> data, LensHeader header, float s
     if (!(scaled <= float(header.pupilNodeCount - 1u))) return false;
     const uint node = min(uint(scaled), header.pupilNodeCount - 2u);
     const float t = scaled - float(node);
-    const uint row = header.pupilNodeOffset + node * LENS_PUPIL_NODE_ROWS;
+    const uint row = header.pupilNodeOffset + (focus.node * header.pupilNodeCount + node) * LENS_PUPIL_NODE_ROWS;
     const uint next = row + LENS_PUPIL_NODE_ROWS;
     const float4 a0 = data[row], a1 = data[row + 1u], b0 = data[next], b1 = data[next + 1u];
     if (!(a0.y > 0.0f) || !(b0.y > 0.0f)) return false;
     centre = lerp(float4(a0.xz, a1.xz), float4(b0.xz, b1.xz), t);
     radius = lerp(float4(a0.yw, a1.yw), float4(b0.yw, b1.yw), t);
     transmission = lerp(data[row + 2u].xyz, data[next + 2u].xyz, t);
+    if (focus.t > 0.0f) {
+        const uint farRow = header.pupilNodeOffset + (LensFocusNextNode(header, focus) * header.pupilNodeCount + node) * LENS_PUPIL_NODE_ROWS;
+        const uint farNext = farRow + LENS_PUPIL_NODE_ROWS;
+        const float4 c0 = data[farRow], c1 = data[farRow + 1u], d0 = data[farNext], d1 = data[farNext + 1u];
+        if (!(c0.y > 0.0f) || !(d0.y > 0.0f)) return false;
+        centre = lerp(centre, lerp(float4(c0.xz, c1.xz), float4(d0.xz, d1.xz), t), focus.t);
+        radius = lerp(radius, lerp(float4(c0.yw, c1.yw), float4(d0.yw, d1.yw), t), focus.t);
+        transmission = lerp(transmission, lerp(data[farRow + 2u].xyz, data[farNext + 2u].xyz, t), focus.t);
+    }
     return true;
 }
 
-// A primary ray through the lens for a point on the image (pixelPosition in pixels). False when it doesn't clear the lens:
-// the path then carries nothing. On success the ray is in world space and weight is its estimator weight (transmission,
-// the sensor-to-rear-plane geometry over the pupil sample's pdf, the normalization that makes the centre pixel match a
-// pinhole camera's exposure, and the wavelength's RGB response over its pdf).
+// The same from the frame's pupil, which LensFocusPass interpolated to the focus once for the frame (focus rows from
+// LENS_FOCUS_ROW_PUPIL): two radius nodes per ray. Bilinear from the lens data when the rows are another revision's.
+bool LensPupilRegionAtFrame(StructuredBuffer<float4> data, LensHeader header, LensFrame frame, float sensorRadius, out float4 centre,
+    out float4 radius, out float3 transmission)
+{
+    if (!frame.cached || header.pupilNodeCount > LENS_FOCUS_MAX_PUPIL_NODES) {
+        return LensPupilRegionAt(data, header, frame.focus, sensorRadius, centre, radius, transmission);
+    }
+    centre = 0.0f.xxxx;
+    radius = 0.0f.xxxx;
+    transmission = 0.0f.xxx;
+    if (header.pupilNodeCount < 2u || header.pupilDiscCount == 0u) return false;
+    const float scaled = sensorRadius / header.maxSensorRadius * float(header.pupilNodeCount - 1u);
+    if (!(scaled <= float(header.pupilNodeCount - 1u))) return false;
+    const uint node = min(uint(scaled), header.pupilNodeCount - 2u);
+    const float t = scaled - float(node);
+    StructuredBuffer<float4> state = LensFocusData();
+    const uint row = LENS_FOCUS_ROW_PUPIL + node * LENS_PUPIL_NODE_ROWS;
+    const uint next = row + LENS_PUPIL_NODE_ROWS;
+    const float4 a0 = state[row], a1 = state[row + 1u], b0 = state[next], b1 = state[next + 1u];
+    if (!(a0.y > 0.0f) || !(b0.y > 0.0f)) return false;
+    centre = lerp(float4(a0.xz, a1.xz), float4(b0.xz, b1.xz), t);
+    radius = lerp(float4(a0.yw, a1.yw), float4(b0.yw, b1.yw), t);
+    transmission = lerp(state[row + 2u].xyz, state[next + 2u].xyz, t);
+    return true;
+}
+
+// A primary ray through the lens for a point on the image (pixelPosition in pixels), at the frame's focus (LensLoadFocus). False
+// when it doesn't clear the lens: the path then carries nothing. On success the ray is in world space and weight is its
+// estimator weight (transmission, the sensor-to-rear-plane geometry over the pupil sample's pdf, the normalization that makes
+// the centre pixel match a pinhole camera's exposure, and the wavelength's RGB response over its pdf).
 bool LensCameraRay(Camera camera, float2 pixelPosition, float2 resolution, float2 pupilSample, float wavelengthSample, out RayDesc ray,
     out float3 weight)
 {
@@ -159,6 +196,9 @@ bool LensCameraRay(Camera camera, float2 pixelPosition, float2 resolution, float
     StructuredBuffer<float4> data = LensData();
     const LensHeader header = LensLoadHeader(data);
     if (!header.valid) return false;
+    // The frame's focus, sensor frame and 1/K, computed once for the frame by LensFocusPass.
+    const LensFrame lensFrame = LensLoadFrame(data, header, false, camera.unjitteredProjection);
+    const LensFocus focus = lensFrame.focus;
 
     // The pixel's NDC without the upscaler's jitter: the jittered pinhole direction, projected without it.
     const float2 uv = pixelPosition / resolution;
@@ -169,7 +209,7 @@ bool LensCameraRay(Camera camera, float2 pixelPosition, float2 resolution, float
     const float2 unjittered = clip.xy / max(abs(clip.w), 1e-6f);
 
     // The image is inverted on the sensor: the top right of the frame is the sensor's bottom left.
-    const LensSensorFrame frame = LensSensorHalfExtent(data, header, camera.unjitteredProjection);
+    const LensSensorFrame frame = lensFrame.sensor;
     const float2 sensor = -unjittered * frame.halfExtent;
     const float sensorRadius = length(sensor);
     if (!(sensorRadius < header.maxSensorRadius)) return false;
@@ -178,14 +218,14 @@ bool LensCameraRay(Camera camera, float2 pixelPosition, float2 resolution, float
     // rotated to the point's azimuth. The pdf is 1 / area.
     float4 centre, radius;
     float3 polynomialTransmission;
-    if (!LensPupilRegionAt(data, header, sensorRadius, centre, radius, polynomialTransmission)) return false;
+    if (!LensPupilRegionAtFrame(data, header, lensFrame, sensorRadius, centre, radius, polynomialTransmission)) return false;
     float area;
     const float2 canonical = LensSamplePupilRegion(header.pupilDiscCount, centre, radius, pupilSample, area);
     if (!(area > 0.0f)) return false;
     const float2 azimuth = sensorRadius > 0.0f ? sensor / sensorRadius : float2(1.0f, 0.0f);
     const float2 rear = float2(azimuth.x * canonical.x - azimuth.y * canonical.y, azimuth.y * canonical.x + azimuth.x * canonical.y);
 
-    float3 origin = float3(sensor, header.sensorZ);
+    float3 origin = float3(sensor, focus.sensorZ);
     const float3 toRear = float3(rear, header.rearPlaneZ) - origin;
     const float distance2 = dot(toRear, toRear);
     float3 direction = toRear * rsqrt(distance2);
@@ -222,7 +262,7 @@ bool LensCameraRay(Camera camera, float2 pixelPosition, float2 resolution, float
     ray.Direction = normalize(mul(float4(direction, 0.0f), camera.viewInverse).xyz);
     const float3 forward = -camera.viewInverse[2].xyz;
     ray.TMin = camera.zNear / max(dot(ray.Direction, forward), 1e-3f);
-    weight = spectral * (transmission * geometry * area * header.inverseNormalization);
+    weight = spectral * (transmission * geometry * area * lensFrame.inverseNormalization);
     return all(isfinite(weight));
 }
 

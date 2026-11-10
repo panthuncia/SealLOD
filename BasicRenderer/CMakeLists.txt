@@ -259,6 +259,7 @@ set(SOURCES
     "src/Runtime/Renderer/RendererSceneApi.cpp"
     # src/Camera
     "src/Camera/Lens/LensManager.cpp"
+    "src/Camera/Lens/GhostFlareManager.cpp"
     # src/Animation
     "src/Animation/Playback/AnimationClip.cpp"
     "src/Animation/Playback/AnimationController.cpp"

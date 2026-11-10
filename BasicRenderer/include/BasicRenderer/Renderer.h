@@ -61,7 +61,7 @@ struct ID3D12Resource;
 class Scene;
 class CLodVirtualShadowFrameTelemetryState;
 struct PathTraceState;
-namespace br::lens { class LensManager; }
+namespace br::lens { class LensManager; class GhostFlareManager; }
 namespace org {
 class DynamicResource;
 class ExternalTextureResource;
@@ -168,7 +168,8 @@ public:
         uint64_t restarts = 0;
     };
     PathTracingAccumulation GetPathTracingAccumulation() const;
-    // The physical camera lens's control commands (lens.get, lens.set, lens.selftest, lens.selftest.status): a JSON
+    // The physical camera lens's control commands (lens.get, lens.set, lens.selftest, lens.selftest.status, and lens.flare.get,
+    // lens.flare.set, lens.flare.selftest, lens.flare.selftest.status for its ghost flares): a JSON
     // request, a JSON reply. Throws std::exception on a bad request. See SARP's docs/lens_simulation.md.
     std::string HandleLensControl(const std::string& command, const std::string& requestJson);
     // upscaler.get: the upscaling mode requested, the one the current graph runs and what its last evaluation ran, as JSON.
@@ -437,6 +438,7 @@ private:
     bool m_pathTracing = false;
     std::shared_ptr<PathTraceState> m_pathTraceState; // The current graph's, when it path traces.
     std::shared_ptr<br::lens::LensManager> m_lensManager; // The path tracer's physical lens.
+    std::shared_ptr<br::lens::GhostFlareManager> m_ghostFlareManager; // The lens's ghost flares.
     // What switching path tracing off goes back to. A successful replacement clears the rollback copy, so it can't serve.
     std::optional<br::pipeline::PipelineRecipe> m_rasterRecipeBeforePathTracing;
     // The upscaler raster used, for when path tracing (which selects DLSS Ray Reconstruction) is switched off.

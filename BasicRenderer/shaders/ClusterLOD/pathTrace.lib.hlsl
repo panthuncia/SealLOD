@@ -122,14 +122,17 @@ bool PathTraceLensCameraRay(Camera camera, float2 pixelPosition, float2 resoluti
 }
 
 // The physical lens's motion: both view-space directions through its chief-ray mapping, as pinhole motion projects both
-// positions through the unjittered matrices. A defocused point gets its in-focus position's motion.
+// positions through the unjittered matrices, each at its own frame's focus (focus breathing changes the mapping a little). A
+// defocused point gets its in-focus position's motion.
 float2 PathTraceLensMotion(Camera camera, float3 currentView, float3 previousView)
 {
     StructuredBuffer<float4> data = LensData();
     const LensHeader header = LensLoadHeader(data);
     if (!header.valid) return 0.0f.xx;
-    const float2 current = LensProjectViewDirection(data, header, LensSensorHalfExtent(data, header, camera.unjitteredProjection), currentView);
-    const float2 previous = LensProjectViewDirection(data, header, LensSensorHalfExtent(data, header, camera.prevUnjitteredProjection), previousView);
+    const LensFrame frame = LensLoadFrame(data, header, false, camera.unjitteredProjection);
+    const LensFrame previousFrame = LensLoadFrame(data, header, true, camera.prevUnjitteredProjection);
+    const float2 current = LensProjectViewDirection(data, header, frame.focus, frame.sensor, currentView);
+    const float2 previous = LensProjectViewDirection(data, header, previousFrame.focus, previousFrame.sensor, previousView);
     return current - previous;
 }
 
@@ -148,6 +151,18 @@ void PathTraceWritePrimaryMiss(uint2 pixel, float3 direction, Camera camera)
     }
     RWTexture2D<float> projectedDepth = ResourceDescriptorHeap[CLOD_RT_PT_PROJECTED_DEPTH_UAV];
     projectedDepth[pixel] = 0.0f;
+    // Every guide a surface hit writes, so none keeps a surface from an earlier frame. Specular albedo is cleared by no pass:
+    // left alone, sky pixels kept the albedo of whatever geometry last covered them, and Ray Reconstruction drew those stale
+    // edges into the sky after the camera moved. Base colour and normal are cleared with the visibility buffer, but only
+    // while that pass is in the graph.
+    RWTexture2D<float4> baseColor = ResourceDescriptorHeap[CLOD_RT_PT_BASE_COLOR_UAV];
+    baseColor[pixel] = 0.0f.xxxx;
+    RWTexture2D<float4> normalRoughness = ResourceDescriptorHeap[CLOD_RT_PT_NORMAL_ROUGHNESS_UAV];
+    normalRoughness[pixel] = 0.0f.xxxx;
+    if (CLOD_RT_PT_SPECULAR_ALBEDO_UAV != CLOD_RT_PT_NO_DESCRIPTOR) {
+        RWTexture2D<float4> specularAlbedo = ResourceDescriptorHeap[CLOD_RT_PT_SPECULAR_ALBEDO_UAV];
+        specularAlbedo[pixel] = 0.0f.xxxx;
+    }
     if (CLOD_RT_PT_SPECULAR_HIT_UAV != CLOD_RT_PT_NO_DESCRIPTOR) {
         RWTexture2D<float> specularHit = ResourceDescriptorHeap[CLOD_RT_PT_SPECULAR_HIT_UAV];
         specularHit[pixel] = camera.zFar;
@@ -348,7 +363,9 @@ void PathTraceRayGen()
     if ((flags & CLOD_RT_PT_FLAG_ACCUMULATE) != 0u) {
         // Alpha counts samples, so a moved camera restarts every pixel without any state on the CPU.
         RWTexture2D<float4> accumulation = ResourceDescriptorHeap[CLOD_RT_PT_ACCUMULATION_UAV];
+        // The lens's focus moves without a rebuild (LensFocusPass, autofocus): it says when it moved.
         const bool still = (flags & CLOD_RT_PT_FLAG_RESTART_ACCUMULATION) == 0u
+            && ((flags & CLOD_RT_PT_FLAG_LENS) == 0u || !LensFocusRestart())
             && all(camera.view[0] == camera.prevView[0]) && all(camera.view[1] == camera.prevView[1])
             && all(camera.view[2] == camera.prevView[2]) && all(camera.view[3] == camera.prevView[3]);
         const float4 history = still ? accumulation[pixel] : 0.0f.xxxx;

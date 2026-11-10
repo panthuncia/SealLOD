@@ -31,7 +31,7 @@ public:
 
     LensSelfTestBindings Declare(org::PassBuilder& builder) {
         LensSelfTestBindings bindings{};
-        builder.ShaderResource(Builtin::RayTracing::LensData);
+        builder.ShaderResource(Builtin::RayTracing::LensData, Builtin::RayTracing::LensFocus);
         bindings.output = builder.UnorderedAccess(m_lens->SelfTestOutput()).View();
         return bindings;
     }

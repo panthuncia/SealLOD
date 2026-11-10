@@ -582,11 +582,90 @@ namespace lens {
 	PupilDiscs ComputePupilDiscs(const LensPrescription& lens, double sensorZ, double maxSensorRadius, const TraceOptions& options,
 		const PupilDiscOptions& discOptions)
 	{
+		FocusedPupilDiscs focused = ComputeFocusedPupilDiscs(lens, { sensorZ }, maxSensorRadius, options, discOptions, 0);
+		PupilDiscs discs = std::move(focused.focus.front());
+		discs.buildMs = focused.buildMs;
+		return discs;
+	}
+
+	PupilDiscs FocusedPupilDiscs::AtFocus(double s) const
+	{
+		if (focus.empty()) {
+			return {};
+		}
+		if (focus.size() == 1) {
+			return focus.front();
+		}
+		const double last = static_cast<double>(focus.size() - 1);
+		s = std::clamp(std::isfinite(s) ? s : 0.0, 0.0, last);
+		const size_t index = std::min(static_cast<size_t>(s), focus.size() - 2);
+		const double t = s - static_cast<double>(index);
+		const PupilDiscs& a = focus[index];
+		const PupilDiscs& b = focus[index + 1];
+		PupilDiscs out = a;
+		out.sensorZ = a.sensorZ + (b.sensorZ - a.sensorZ) * t;
+		for (size_t node = 0; node < out.nodes.size() && node < b.nodes.size(); ++node) {
+			PupilRegion& region = out.nodes[node];
+			const PupilRegion& other = b.nodes[node];
+			if (region.count == 0 || other.count == 0) {
+				region = {};
+				continue;
+			}
+			for (uint32_t d = 0; d < region.count; ++d) {
+				region.centre[d] += (other.centre[d] - region.centre[d]) * t;
+				region.radius[d] += (other.radius[d] - region.radius[d]) * t;
+			}
+		}
+		return out;
+	}
+
+	double FocusedPupilDiscs::SensorZAt(double s) const
+	{
+		if (focus.empty()) {
+			return 0.0;
+		}
+		if (focus.size() == 1) {
+			return focus.front().sensorZ;
+		}
+		s = std::clamp(std::isfinite(s) ? s : 0.0, 0.0, static_cast<double>(focus.size() - 1));
+		const size_t index = std::min(static_cast<size_t>(s), focus.size() - 2);
+		const double t = s - static_cast<double>(index);
+		return focus[index].sensorZ + (focus[index + 1].sensorZ - focus[index].sensorZ) * t;
+	}
+
+	PupilRegion FocusedPupilDiscs::At(double sensorRadius, double s) const
+	{
+		if (focus.empty()) {
+			return {};
+		}
+		if (focus.size() == 1) {
+			return focus.front().At(sensorRadius);
+		}
+		s = std::clamp(std::isfinite(s) ? s : 0.0, 0.0, static_cast<double>(focus.size() - 1));
+		const size_t index = std::min(static_cast<size_t>(s), focus.size() - 2);
+		const double t = s - static_cast<double>(index);
+		const PupilRegion a = focus[index].At(sensorRadius);
+		const PupilRegion b = focus[index + 1].At(sensorRadius);
+		if (a.count == 0 || b.count == 0) {
+			return {};
+		}
+		PupilRegion region = a;
+		for (uint32_t d = 0; d < region.count; ++d) {
+			region.centre[d] += (b.centre[d] - a.centre[d]) * t;
+			region.radius[d] += (b.radius[d] - a.radius[d]) * t;
+		}
+		return region;
+	}
+
+	FocusedPupilDiscs ComputeFocusedPupilDiscs(const LensPrescription& lens, const std::vector<double>& sensorZs, double maxSensorRadius,
+		const TraceOptions& options, const PupilDiscOptions& discOptions, uint32_t focusBetweenSamples)
+	{
 		const auto started = std::chrono::steady_clock::now();
-		PupilDiscs discs;
-		discs.sensorZ = sensorZ;
-		discs.rearPlaneZ = lens.RearPlaneZ();
-		discs.maxSensorRadius = maxSensorRadius;
+		FocusedPupilDiscs result;
+		const uint32_t focusCount = static_cast<uint32_t>(sensorZs.size());
+		if (focusCount == 0) {
+			return result;
+		}
 		PupilDiscOptions settings = discOptions;
 		settings.nodes = std::max(settings.nodes, 2u);
 		settings.angles = std::max(settings.angles, 8u);
@@ -594,55 +673,89 @@ namespace lens {
 		if (settings.wavelengths.empty()) {
 			settings.wavelengths = { kLambdaD };
 		}
-		DiscFitter fitter{ lens, TransmissionPath(lens, false), options, sensorZ, discs.rearPlaneZ, lens.surfaces.back().semiAperture * 1.25, settings, {} };
-		const uint32_t surfaceCount = lens.SurfaceCount();
-		fitter.toAperture.resize(surfaceCount);
-		for (uint32_t s = 0; s < surfaceCount; ++s) {
-			fitter.toAperture[s].steps.assign(fitter.path.steps.begin(), fitter.path.steps.begin() + (surfaceCount - s));
-		}
 		const uint32_t nodeCount = settings.nodes;
-		const auto radiusAt = [&](double node) { return node / (nodeCount - 1) * maxSensorRadius; };
-		discs.nodes.assign(nodeCount, PupilRegion{});
-
-		// 1. The pupil's boundary at each node, and which apertures bind it.
-		std::vector<std::vector<BoundaryPoint>> boundary(nodeCount);
-		std::vector<std::vector<std::array<double, 2>>> interiors(nodeCount);
-		ParallelFor(nodeCount, settings.threads, [&](uint32_t node) { boundary[node] = fitter.PupilBoundary(radiusAt(node), &interiors[node]); });
-		std::vector<uint32_t> binding;
-		uint32_t lastValid = 0;
-		for (uint32_t node = 0; node < nodeCount; ++node) {
-			if (boundary[node].empty()) {
-				break; // light ends here
+		const double rearZ = lens.RearPlaneZ();
+		result.focus.assign(focusCount, PupilDiscs{});
+		for (uint32_t f = 0; f < focusCount; ++f) {
+			result.focus[f].sensorZ = sensorZs[f];
+			result.focus[f].rearPlaneZ = rearZ;
+			result.focus[f].maxSensorRadius = maxSensorRadius;
+			result.focus[f].nodes.assign(nodeCount, PupilRegion{});
+		}
+		const auto finish = [&]() {
+			result.buildMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+			for (auto& discs : result.focus) {
+				discs.buildMs = result.buildMs;
 			}
-			lastValid = node;
-			for (const auto& p : boundary[node]) {
-				if (p.label >= 0 && std::find(binding.begin(), binding.end(), static_cast<uint32_t>(p.label)) == binding.end()) {
-					binding.push_back(static_cast<uint32_t>(p.label));
+			return std::move(result);
+		};
+
+		DiscFitter base{ lens, TransmissionPath(lens, false), options, sensorZs[0], rearZ, lens.surfaces.back().semiAperture * 1.25, settings, {} };
+		const uint32_t surfaceCount = lens.SurfaceCount();
+		base.toAperture.resize(surfaceCount);
+		for (uint32_t s = 0; s < surfaceCount; ++s) {
+			base.toAperture[s].steps.assign(base.path.steps.begin(), base.path.steps.begin() + (surfaceCount - s));
+		}
+		std::vector<DiscFitter> fitters;
+		fitters.reserve(focusCount);
+		for (uint32_t f = 0; f < focusCount; ++f) {
+			fitters.push_back(base);
+			fitters.back().sensorZ = sensorZs[f];
+		}
+		const auto radiusAt = [&](double node) { return node / (nodeCount - 1) * maxSensorRadius; };
+		const auto at = [nodeCount](uint32_t f, uint32_t node) { return static_cast<size_t>(f) * nodeCount + node; };
+
+		// 1. The pupil's boundary at each focus and radius node, and which apertures bind it (at any of them).
+		std::vector<std::vector<BoundaryPoint>> boundary(static_cast<size_t>(focusCount) * nodeCount);
+		std::vector<std::vector<std::array<double, 2>>> interiors(boundary.size());
+		ParallelFor(static_cast<uint32_t>(boundary.size()), settings.threads, [&](uint32_t job) {
+			const uint32_t f = job / nodeCount, node = job % nodeCount;
+			boundary[job] = fitters[f].PupilBoundary(radiusAt(node), &interiors[job]);
+		});
+		std::vector<uint32_t> binding;
+		std::vector<uint32_t> lastValid(focusCount, 0);
+		for (uint32_t f = 0; f < focusCount; ++f) {
+			if (boundary[at(f, 0)].empty()) {
+				return finish();
+			}
+			for (uint32_t node = 0; node < nodeCount; ++node) {
+				if (boundary[at(f, node)].empty()) {
+					break; // light ends here
+				}
+				lastValid[f] = node;
+				for (const auto& p : boundary[at(f, node)]) {
+					if (p.label >= 0 && std::find(binding.begin(), binding.end(), static_cast<uint32_t>(p.label)) == binding.end()) {
+						binding.push_back(static_cast<uint32_t>(p.label));
+					}
 				}
 			}
 		}
-		if (boundary[0].empty() || binding.empty()) {
-			return discs;
+		if (binding.empty()) {
+			return finish();
 		}
 		std::sort(binding.begin(), binding.end());
 
 		// 2. Each binding aperture's disc per node: the centre from its rim image, the radius the smallest that holds the
 		// pupil's boundary points.
-		std::vector<std::vector<double>> centres(nodeCount, std::vector<double>(binding.size(), 0.0));
-		std::vector<std::vector<double>> radii(nodeCount, std::vector<double>(binding.size(), 0.0));
-		ParallelFor(lastValid + 1, settings.threads, [&](uint32_t node) {
+		std::vector<std::vector<double>> centres(boundary.size(), std::vector<double>(binding.size(), 0.0));
+		std::vector<std::vector<double>> radii(boundary.size(), std::vector<double>(binding.size(), 0.0));
+		ParallelFor(static_cast<uint32_t>(boundary.size()), settings.threads, [&](uint32_t job) {
+			const uint32_t f = job / nodeCount, node = job % nodeCount;
+			if (node > lastValid[f]) {
+				return;
+			}
 			double meanX = 0.0;
-			for (const auto& p : boundary[node]) {
+			for (const auto& p : boundary[job]) {
 				meanX += p.x;
 			}
-			meanX /= static_cast<double>(boundary[node].size());
+			meanX /= static_cast<double>(boundary[job].size());
 			for (size_t d = 0; d < binding.size(); ++d) {
 				double centre = meanX;
-				if (!fitter.FitRimCentre(radiusAt(node), interiors[node], binding[d], centre)) {
+				if (!fitters[f].FitRimCentre(radiusAt(node), interiors[job], binding[d], centre)) {
 					// No usable rim image: centre it on the pupil points this aperture blocks, else on all of them.
 					double sum = 0.0;
 					uint32_t count = 0;
-					for (const auto& p : boundary[node]) {
+					for (const auto& p : boundary[job]) {
 						if (p.label == static_cast<int>(binding[d])) {
 							sum += p.x;
 							++count;
@@ -650,18 +763,26 @@ namespace lens {
 					}
 					centre = count ? sum / count : meanX;
 				}
-				centres[node][d] = centre;
-				radii[node][d] = MaxDistance(boundary[node], centre);
+				centres[job][d] = centre;
+				radii[job][d] = MaxDistance(boundary[job], centre);
 			}
 		});
 
-		// 3. Past the last node with light, one more node extrapolated from the last two, so the light between them is held.
-		const uint32_t lastNode = lastValid + 1 < nodeCount ? lastValid + 1 : lastValid;
-		if (lastNode != lastValid) {
-			for (size_t d = 0; d < binding.size(); ++d) {
-				const uint32_t previous = lastValid > 0 ? lastValid - 1 : lastValid;
-				centres[lastNode][d] = 2.0 * centres[lastValid][d] - centres[previous][d];
-				radii[lastNode][d] = std::max(0.0, 2.0 * radii[lastValid][d] - radii[previous][d]);
+		// 3. Past the last node with light, nodes extrapolated linearly from the last two, so the light between them is held: one
+		// node with one focus, and with several, up to the last node any focus needs (the others' light, between focus nodes, is
+		// checked in step 5).
+		uint32_t commonLast = 0;
+		for (uint32_t f = 0; f < focusCount; ++f) {
+			commonLast = std::max(commonLast, lastValid[f] + 1 < nodeCount ? lastValid[f] + 1 : lastValid[f]);
+		}
+		for (uint32_t f = 0; f < focusCount; ++f) {
+			for (uint32_t node = lastValid[f] + 1; node <= commonLast; ++node) {
+				const uint32_t previous = node - 1;
+				const uint32_t beforePrevious = previous > 0 ? previous - 1 : previous;
+				for (size_t d = 0; d < binding.size(); ++d) {
+					centres[at(f, node)][d] = 2.0 * centres[at(f, previous)][d] - centres[at(f, beforePrevious)][d];
+					radii[at(f, node)][d] = std::max(0.0, 2.0 * radii[at(f, previous)][d] - radii[at(f, beforePrevious)][d]);
+				}
 			}
 		}
 
@@ -672,37 +793,42 @@ namespace lens {
 			kept[d] = d;
 		}
 		const auto importance = [&](size_t d) {
-			double result = 0.0;
-			for (uint32_t node = 0; node <= lastValid; ++node) {
-				double minX = std::numeric_limits<double>::infinity(), maxX = -minX, maxY = 0.0;
-				for (const auto& p : boundary[node]) {
-					minX = std::min(minX, p.x);
-					maxX = std::max(maxX, p.x);
-					maxY = std::max(maxY, std::abs(p.y));
-				}
-				const double pad = 0.05 * (maxX - minX) + 1e-6;
-				constexpr uint32_t kGrid = 96;
-				uint32_t all = 0, others = 0;
-				for (uint32_t row = 0; row < kGrid; ++row) {
-					for (uint32_t column = 0; column < kGrid; ++column) {
-						const double x = minX - pad + (maxX - minX + 2.0 * pad) * (column + 0.5) / kGrid;
-						const double y = (maxY + pad) * (row + 0.5) / kGrid;
-						bool inAll = true, inOthers = true;
-						for (const size_t e : kept) {
-							if (std::hypot(x - centres[node][e], y) > radii[node][e]) {
-								inAll = false;
-								inOthers = inOthers && e == d;
+			double value = 0.0;
+			for (uint32_t f = 0; f < focusCount; ++f) {
+				for (uint32_t node = 0; node <= lastValid[f]; ++node) {
+					const auto& points = boundary[at(f, node)];
+					const auto& c = centres[at(f, node)];
+					const auto& r = radii[at(f, node)];
+					double minX = std::numeric_limits<double>::infinity(), maxX = -minX, maxY = 0.0;
+					for (const auto& p : points) {
+						minX = std::min(minX, p.x);
+						maxX = std::max(maxX, p.x);
+						maxY = std::max(maxY, std::abs(p.y));
+					}
+					const double pad = 0.05 * (maxX - minX) + 1e-6;
+					constexpr uint32_t kGrid = 96;
+					uint32_t all = 0, others = 0;
+					for (uint32_t row = 0; row < kGrid; ++row) {
+						for (uint32_t column = 0; column < kGrid; ++column) {
+							const double x = minX - pad + (maxX - minX + 2.0 * pad) * (column + 0.5) / kGrid;
+							const double y = (maxY + pad) * (row + 0.5) / kGrid;
+							bool inAll = true, inOthers = true;
+							for (const size_t e : kept) {
+								if (std::hypot(x - c[e], y) > r[e]) {
+									inAll = false;
+									inOthers = inOthers && e == d;
+								}
 							}
+							all += inAll ? 1u : 0u;
+							others += inOthers ? 1u : 0u;
 						}
-						all += inAll ? 1u : 0u;
-						others += inOthers ? 1u : 0u;
+					}
+					if (others > 0) {
+						value = std::max(value, 1.0 - double(all) / double(others));
 					}
 				}
-				if (others > 0) {
-					result = std::max(result, 1.0 - double(all) / double(others));
-				}
 			}
-			return result;
+			return value;
 		};
 		while (kept.size() > 1) {
 			size_t weakest = 0;
@@ -720,42 +846,199 @@ namespace lens {
 			kept.erase(kept.begin() + static_cast<std::ptrdiff_t>(weakest));
 		}
 		for (const size_t d : kept) {
-			discs.apertures.push_back(binding[d]);
+			result.apertures.push_back(binding[d]);
 		}
 
-		// 5. Between nodes the interpolated discs must hold the boundary found there too: widen both nodes' radii by any
-		// shortfall.
-		std::vector<std::vector<double>> shortfall(nodeCount, std::vector<double>(kept.size(), 0.0)); // per interval
-		ParallelFor(lastNode, settings.threads, [&](uint32_t interval) {
-			for (uint32_t s = 1; s <= settings.betweenSamples; ++s) {
-				const double t = double(s) / (settings.betweenSamples + 1);
-				const std::vector<BoundaryPoint> points = fitter.PupilBoundary(radiusAt(interval + t));
-				for (size_t k = 0; k < kept.size(); ++k) {
-					const size_t d = kept[k];
-					const double c = centres[interval][d] + (centres[interval + 1][d] - centres[interval][d]) * t;
-					const double r = radii[interval][d] + (radii[interval + 1][d] - radii[interval][d]) * t;
-					shortfall[interval][k] = std::max(shortfall[interval][k], MaxDistance(points, c) - r);
+		// 5. Between nodes the interpolated discs must hold the boundary found there too: widen the nodes' radii by any
+		// shortfall. Between radius nodes at each focus node (linear), and between focus nodes (bilinear: the corners grow).
+		std::vector<std::vector<double>> widen(boundary.size(), std::vector<double>(kept.size(), 0.0));
+		if (commonLast > 0) {
+			// Radius intervals at each focus node.
+			std::vector<std::vector<double>> shortfall(boundary.size(), std::vector<double>(kept.size(), 0.0)); // per (focus, interval)
+			ParallelFor(focusCount * commonLast, settings.threads, [&](uint32_t job) {
+				const uint32_t f = job / commonLast, interval = job % commonLast;
+				auto& out = shortfall[at(f, interval)];
+				for (uint32_t s = 1; s <= settings.betweenSamples; ++s) {
+					const double t = double(s) / (settings.betweenSamples + 1);
+					const std::vector<BoundaryPoint> points = fitters[f].PupilBoundary(radiusAt(interval + t));
+					for (size_t k = 0; k < kept.size(); ++k) {
+						const size_t d = kept[k];
+						const auto& c0 = centres[at(f, interval)];
+						const auto& c1 = centres[at(f, interval + 1)];
+						const auto& r0 = radii[at(f, interval)];
+						const auto& r1 = radii[at(f, interval + 1)];
+						const double c = c0[d] + (c1[d] - c0[d]) * t;
+						const double r = r0[d] + (r1[d] - r0[d]) * t;
+						out[k] = std::max(out[k], MaxDistance(points, c) - r);
+					}
+				}
+			});
+			for (uint32_t f = 0; f < focusCount; ++f) {
+				for (uint32_t interval = 0; interval < commonLast; ++interval) {
+					for (size_t k = 0; k < kept.size(); ++k) {
+						const double value = shortfall[at(f, interval)][k];
+						widen[at(f, interval)][k] = std::max(widen[at(f, interval)][k], value);
+						widen[at(f, interval + 1)][k] = std::max(widen[at(f, interval + 1)][k], value);
+					}
 				}
 			}
-		});
-		std::vector<std::vector<double>> widen(nodeCount, std::vector<double>(kept.size(), 0.0));
-		for (uint32_t interval = 0; interval < lastNode; ++interval) {
-			for (size_t k = 0; k < kept.size(); ++k) {
-				widen[interval][k] = std::max(widen[interval][k], shortfall[interval][k]);
-				widen[interval + 1][k] = std::max(widen[interval + 1][k], shortfall[interval][k]);
+		}
+		if (focusCount > 1 && focusBetweenSamples > 0 && commonLast > 0) {
+			// Between focus nodes: at each radius node and halfway to the next (radius sample 2n is node n, 2n + 1 halfway past it),
+			// on focusBetweenSamples planes per focus interval.
+			const uint32_t radiusSamples = 2u * commonLast + 1u;
+			const uint32_t jobs = (focusCount - 1) * focusBetweenSamples * radiusSamples;
+			const auto cornerOf = [&](uint32_t radiusSample, uint32_t& node, uint32_t& nextNode, double& tr) {
+				node = std::min(radiusSample / 2u, commonLast - 1u);
+				nextNode = node + 1u;
+				tr = radiusSample == radiusSamples - 1u ? 1.0 : (radiusSample % 2u) * 0.5;
+			};
+			std::vector<std::vector<double>> shortfall(jobs, std::vector<double>(kept.size(), 0.0));
+			ParallelFor(jobs, settings.threads, [&](uint32_t job) {
+				const uint32_t interval = job / (focusBetweenSamples * radiusSamples);
+				const uint32_t plane = (job / radiusSamples) % focusBetweenSamples;
+				uint32_t node = 0, nextNode = 0;
+				double tr = 0.0;
+				cornerOf(job % radiusSamples, node, nextNode, tr);
+				const double tf = double(plane + 1) / (focusBetweenSamples + 1);
+				DiscFitter fitter = base;
+				fitter.sensorZ = sensorZs[interval] + (sensorZs[interval + 1] - sensorZs[interval]) * tf;
+				const std::vector<BoundaryPoint> points = fitter.PupilBoundary(radiusAt(node + tr));
+				if (points.empty()) {
+					return;
+				}
+				for (size_t k = 0; k < kept.size(); ++k) {
+					const size_t d = kept[k];
+					const auto bilinear = [&](const std::vector<std::vector<double>>& values) {
+						const double a = values[at(interval, node)][d] + (values[at(interval, nextNode)][d] - values[at(interval, node)][d]) * tr;
+						const double b = values[at(interval + 1, node)][d] + (values[at(interval + 1, nextNode)][d] - values[at(interval + 1, node)][d]) * tr;
+						return a + (b - a) * tf;
+					};
+					shortfall[job][k] = std::max(0.0, MaxDistance(points, bilinear(centres)) - bilinear(radii));
+				}
+			});
+			for (uint32_t job = 0; job < jobs; ++job) {
+				const uint32_t interval = job / (focusBetweenSamples * radiusSamples);
+				uint32_t node = 0, nextNode = 0;
+				double tr = 0.0;
+				cornerOf(job % radiusSamples, node, nextNode, tr);
+				for (size_t k = 0; k < kept.size(); ++k) {
+					const double value = shortfall[job][k];
+					if (!(value > 0.0)) {
+						continue;
+					}
+					for (const uint32_t f : { interval, interval + 1 }) {
+						if (tr < 1.0) widen[at(f, node)][k] = std::max(widen[at(f, node)][k], value);
+						if (tr > 0.0) widen[at(f, nextNode)][k] = std::max(widen[at(f, nextNode)][k], value);
+					}
+				}
 			}
 		}
 
-		for (uint32_t node = 0; node <= lastNode; ++node) {
-			PupilRegion& region = discs.nodes[node];
-			region.count = static_cast<uint32_t>(kept.size());
-			for (size_t k = 0; k < kept.size(); ++k) {
-				region.centre[k] = centres[node][kept[k]];
-				region.radius[k] = (radii[node][kept[k]] + widen[node][k]) * (1.0 + settings.relativeMargin) + settings.absoluteMarginMm;
+		for (uint32_t f = 0; f < focusCount; ++f) {
+			PupilDiscs& discs = result.focus[f];
+			discs.apertures = result.apertures;
+			for (uint32_t node = 0; node <= commonLast; ++node) {
+				PupilRegion& region = discs.nodes[node];
+				region.count = static_cast<uint32_t>(kept.size());
+				for (size_t k = 0; k < kept.size(); ++k) {
+					region.centre[k] = centres[at(f, node)][kept[k]];
+					region.radius[k] = (radii[at(f, node)][kept[k]] + widen[at(f, node)][k]) * (1.0 + settings.relativeMargin) + settings.absoluteMarginMm;
+				}
 			}
 		}
-		discs.buildMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
-		return discs;
+		return finish();
+	}
+
+	double FocusRange::Coordinate(double sensorShift) const
+	{
+		if (shift.size() < 2 || !(shiftMax > shiftMin)) {
+			return 0.0;
+		}
+		const double t = (std::clamp(sensorShift, shiftMin, shiftMax) - shiftMin) / (shiftMax - shiftMin);
+		return t * static_cast<double>(shift.size() - 1);
+	}
+
+	FocusRange MakeFocusRange(const LensPrescription& lens, double nearFocusMm, uint32_t count, double sensorZMin, double sensorZMax, double lambdaNm)
+	{
+		FocusRange range;
+		range.baseSensorZ = lens.sensorZ;
+		double nearShift = SensorShiftForFocus(lens, nearFocusMm, lambdaNm);
+		if (!std::isfinite(nearShift) || nearShift < 0.0) {
+			nearShift = 0.0;
+		}
+		range.shiftMin = std::clamp(0.0, sensorZMin - lens.sensorZ, sensorZMax - lens.sensorZ);
+		range.shiftMax = std::clamp(nearShift, sensorZMin - lens.sensorZ, sensorZMax - lens.sensorZ);
+		if (range.shiftMax < range.shiftMin) {
+			range.shiftMax = range.shiftMin;
+		}
+		count = std::max(count, range.shiftMax > range.shiftMin ? 2u : 1u);
+		for (uint32_t i = 0; i < count; ++i) {
+			const double shift = count > 1 ? range.shiftMin + (range.shiftMax - range.shiftMin) * i / (count - 1) : range.shiftMin;
+			range.shift.push_back(shift);
+			range.sensorZ.push_back(lens.sensorZ + shift);
+			range.distanceMm.push_back(FocusDistanceForShift(lens, shift, lambdaNm));
+		}
+		return range;
+	}
+
+	double FocusDistanceForShift(const LensPrescription& lens, double sensorShift, double lambdaNm)
+	{
+		if (!(sensorShift > 0.0)) {
+			return std::numeric_limits<double>::infinity();
+		}
+		// SensorShiftForFocus grows with 1 / distance until the object reaches the front focal point: bracket in 1 / distance.
+		double lo = 0.0, hi = 1.0e-3;
+		for (int i = 0; i < 60; ++i) {
+			const double shift = SensorShiftForFocus(lens, 1.0 / hi, lambdaNm);
+			if (!std::isfinite(shift) || shift < 0.0 || shift >= sensorShift) {
+				break;
+			}
+			lo = hi;
+			hi *= 2.0;
+		}
+		for (int i = 0; i < 80; ++i) {
+			const double mid = 0.5 * (lo + hi);
+			const double shift = SensorShiftForFocus(lens, 1.0 / mid, lambdaNm);
+			if (std::isfinite(shift) && shift >= 0.0 && shift < sensorShift) {
+				lo = mid;
+			} else {
+				hi = mid;
+			}
+		}
+		const double u = 0.5 * (lo + hi);
+		return u > 0.0 ? 1.0 / u : std::numeric_limits<double>::infinity();
+	}
+
+	double CentreNormalization(const LensPrescription& lens, const PupilDiscs& discs, const TraceOptions& options, uint32_t grid, double lambdaNm)
+	{
+		const PupilRegion region = discs.At(0.0);
+		double minX = 0.0, maxX = 0.0;
+		if (!PupilRegionExtent(region, minX, maxX) || grid == 0) {
+			return 0.0;
+		}
+		double halfY = std::numeric_limits<double>::infinity();
+		for (uint32_t d = 0; d < region.count; ++d) {
+			halfY = std::min(halfY, region.radius[d]);
+		}
+		const LensPath backward = TransmissionPath(lens, false);
+		const double cellX = (maxX - minX) / grid, cellY = 2.0 * halfY / grid;
+		const Vec3 origin{ 0.0, 0.0, discs.sensorZ };
+		double normalization = 0.0;
+		for (uint32_t row = 0; row < grid; ++row) {
+			for (uint32_t column = 0; column < grid; ++column) {
+				const Vec3 rear{ minX + (column + 0.5) * cellX, -halfY + (row + 0.5) * cellY, discs.rearPlaneZ };
+				const Vec3 toRear = rear - origin;
+				const double distance2 = Dot(toRear, toRear);
+				const Ray ray{ origin, toRear * (1.0 / std::sqrt(distance2)) };
+				const TraceResult result = TraceSequential(lens, ray, lambdaNm, backward, options);
+				if (result.status != TraceStatus::Ok) {
+					continue;
+				}
+				normalization += result.throughput * ray.dir.z * ray.dir.z / distance2 * cellX * cellY;
+			}
+		}
+		return normalization;
 	}
 
 	PupilDiscStats MeasurePupilDiscs(const LensPrescription& lens, const PupilDiscs& discs, const TraceOptions& options, uint64_t raysPerInterval,
@@ -968,6 +1251,49 @@ namespace lens {
 		}
 		table.maxFieldAngle = table.fieldAngle.empty() ? 0.0 : table.fieldAngle.back();
 		return table;
+	}
+
+	std::vector<DistortionTable> ComputeDistortionTables(const LensPrescription& lens, const std::vector<double>& sensorZs, double maxFieldAngle,
+		uint32_t sampleCount, double lambdaNm)
+	{
+		std::vector<DistortionTable> tables(sensorZs.size());
+		for (size_t f = 0; f < sensorZs.size(); ++f) {
+			tables[f].sensorZ = sensorZs[f];
+		}
+		const LensPath path = TransmissionPath(lens, true);
+		const TraceOptions options = NoClipping();
+		bool open = !tables.empty();
+		for (uint32_t i = 0; i < sampleCount && open; ++i) {
+			const double angle = maxFieldAngle * i / (sampleCount - 1);
+			Ray chief;
+			if (!FindChiefRay(lens, angle, lambdaNm, chief)) {
+				break;
+			}
+			const TraceResult result = TraceSequential(lens, chief, lambdaNm, path, options);
+			if (result.status != TraceStatus::Ok) {
+				break;
+			}
+			// Every plane's entry, or none: the tables stay the same length.
+			std::vector<double> radii(tables.size());
+			for (size_t f = 0; f < tables.size() && open; ++f) {
+				Ray exit = result.exit;
+				if (!PropagateToPlane(exit, sensorZs[f]) || (!tables[f].imageRadius.empty() && exit.origin.x <= tables[f].imageRadius.back())) {
+					open = false;
+				}
+				radii[f] = exit.origin.x;
+			}
+			if (!open) {
+				break;
+			}
+			for (size_t f = 0; f < tables.size(); ++f) {
+				tables[f].fieldAngle.push_back(angle);
+				tables[f].imageRadius.push_back(radii[f]);
+			}
+		}
+		for (auto& table : tables) {
+			table.maxFieldAngle = table.fieldAngle.empty() ? 0.0 : table.fieldAngle.back();
+		}
+		return tables;
 	}
 
 	std::vector<RankedPath> RankGhostPaths(const LensPrescription& lens, const std::vector<double>& fieldAngles, uint32_t gridResolution, double lambdaNm,

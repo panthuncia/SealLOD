@@ -754,11 +754,21 @@ void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     bindPathTracing(m_lensMode, setLensMode, "lensMode");
     bindPathTracing(m_lensFile, setLensFile, "lensFile");
     bindPathTracing(m_lensFocusDistance, setLensFocusDistance, "lensFocusDistance");
+    bindPathTracing(m_lensFocusMode, setLensFocusMode, "lensFocusMode");
+    bindPathTracing(m_lensAutofocusPoint, setLensAutofocusPoint, "lensAutofocusPoint");
+    bindPathTracing(m_lensAutofocusRegion, setLensAutofocusRegion, "lensAutofocusRegion");
+    bindPathTracing(m_lensAutofocusSpeed, setLensAutofocusSpeed, "lensAutofocusSpeed");
     bindPathTracing(m_lensMonochromatic, setLensMonochromatic, "lensMonochromatic");
-    bindPathTracing(m_lensStopScale, setLensStopScale, "lensStopScale");
+    bindPathTracing(m_lensFNumber, setLensFNumber, "lensFNumber");
     bindPathTracing(m_lensFieldMode, setLensFieldMode, "lensFieldMode");
     bindPathTracing(m_lensPolynomialDegree, setLensPolynomialDegree, "lensPolynomialDegree");
     m_lensFiles = br::lens::LensManager::ListLenses();
+    bindPathTracing(m_lensFlareEnabled, setLensFlareEnabled, "lensFlareEnabled");
+    bindPathTracing(m_lensFlareMaxGhosts, setLensFlareMaxGhosts, "lensFlareMaxGhosts");
+    bindPathTracing(m_lensFlareGridResolution, setLensFlareGridResolution, "lensFlareGridResolution");
+    bindPathTracing(m_lensFlareWavelengths, setLensFlareWavelengths, "lensFlareWavelengths");
+    bindPathTracing(m_lensFlareMaxLights, setLensFlareMaxLights, "lensFlareMaxLights");
+    bindPathTracing(m_lensFlareIntensity, setLensFlareIntensity, "lensFlareIntensity");
     setRayTracedPrimaryVisibilityMode = settingsManager.getSettingSetter<uint32_t>("rayTracedPrimaryVisibilityMode");
     m_rayTracedPrimaryVisibilityMode = settingsManager.getSettingGetter<uint32_t>("rayTracedPrimaryVisibilityMode")();
     observerSetting(m_rayTracedReflectionsEnabled, "enableRayTracedReflections");
@@ -1228,14 +1238,75 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
                 }
                 ImGui::EndCombo();
             }
-            if (ImGui::SliderFloat("Focus Distance (m)", &m_lensFocusDistance, 0.3f, 100.0f, "%.2f", ImGuiSliderFlags_Logarithmic)) {
-                setLensFocusDistance(m_lensFocusDistance);
-            }
-            if (ImGui::SliderFloat("Stop Scale", &m_lensStopScale, 0.05f, 1.0f, "%.2f")) {
-                setLensStopScale(m_lensStopScale);
+            // Focus is per frame (no rebuild); the f-number rebuilds the lens (a few seconds, off the render thread).
+            const auto lensStatus = br::lens::LensManager::Status();
+            int lensFocusMode = static_cast<int>(std::min<uint32_t>(m_lensFocusMode, 1u));
+            if (ImGui::Combo("Focus Mode", &lensFocusMode, "Manual\0Autofocus (continuous)\0")) {
+                m_lensFocusMode = static_cast<uint32_t>(lensFocusMode);
+                setLensFocusMode(m_lensFocusMode);
             }
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Multiplies the aperture stop's radius: 0.5 is two stops down.");
+                ImGui::SetTooltip("Autofocus measures the depth of the primary hits in a small region (the screen centre by default) every\n"
+                    "frame on the GPU and pulls focus to it smoothly. Focus changes never rebuild the lens.");
+            }
+            if (m_lensFocusMode == 0u) {
+                if (ImGui::SliderFloat("Focus Distance (m)", &m_lensFocusDistance, 0.3f, 100.0f, "%.2f", ImGuiSliderFlags_Logarithmic)) {
+                    setLensFocusDistance(m_lensFocusDistance);
+                }
+            }
+            else {
+                float point[2] = { m_lensAutofocusPoint.x, m_lensAutofocusPoint.y };
+                if (ImGui::SliderFloat2("AF Point (NDC)", point, -1.0f, 1.0f, "%.2f")) {
+                    m_lensAutofocusPoint = DirectX::XMFLOAT2(point[0], point[1]);
+                    setLensAutofocusPoint(m_lensAutofocusPoint);
+                }
+                if (ImGui::SliderFloat("AF Region", &m_lensAutofocusRegion, 0.005f, 0.5f, "%.3f", ImGuiSliderFlags_Logarithmic)) {
+                    setLensAutofocusRegion(m_lensAutofocusRegion);
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("The measured square's side, as a fraction of the frame height.");
+                }
+                if (ImGui::SliderFloat("AF Speed (1/s)", &m_lensAutofocusSpeed, 0.5f, 50.0f, "%.1f", ImGuiSliderFlags_Logarithmic)) {
+                    setLensAutofocusSpeed(m_lensAutofocusSpeed);
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("The focus spring's rate: about 5 / speed seconds to settle.");
+                }
+            }
+            const float wideOpen = static_cast<float>(lensStatus->wideOpenFNumber > 0.0 ? lensStatus->wideOpenFNumber : 1.0);
+            float fNumber = m_lensFNumber > wideOpen ? m_lensFNumber : wideOpen;
+            if (ImGui::SliderFloat("F-number", &fNumber, wideOpen, std::max(16.0f, wideOpen), "f/%.1f", ImGuiSliderFlags_Logarithmic)) {
+                m_lensFNumber = fNumber <= wideOpen * 1.001f ? 0.0f : fNumber;
+                setLensFNumber(m_lensFNumber);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Stops the lens down from wide open (f/%.2f). Rebuilds the lens, a few seconds off the render thread.", wideOpen);
+            }
+            if (lensStatus->active && lensStatus->focus.valid) {
+                const auto& focus = lensStatus->focus;
+                const auto distance = [](double metres, char* text, size_t size) {
+                    if (std::isfinite(metres)) std::snprintf(text, size, "%.2f m", metres);
+                    else std::snprintf(text, size, "infinity");
+                };
+                char current[32], target[32], measured[32];
+                distance(focus.focusDistanceM, current, sizeof(current));
+                distance(focus.targetDistanceM, target, sizeof(target));
+                if (focus.measuredDistanceM > 0.0) distance(focus.measuredDistanceM, measured, sizeof(measured));
+                else std::snprintf(measured, sizeof(measured), "none");
+                if (m_lensFocusMode == 1u) {
+                    ImGui::Text("Focus %s -> %s (measured %s)%s", current, target, measured, focus.settled ? "" : ", moving");
+                }
+                else {
+                    ImGui::Text("Focus %s (autofocus would pick %s)", current, measured);
+                }
+            }
+            // The autofocus region, outlined while the menu is open.
+            if (lensStatus->active && m_lensFocusMode == 1u) {
+                const ImVec2 display = ImGui::GetIO().DisplaySize;
+                const ImVec2 centre((m_lensAutofocusPoint.x * 0.5f + 0.5f) * display.x, (0.5f - m_lensAutofocusPoint.y * 0.5f) * display.y);
+                const float halfSize = std::max(0.5f * m_lensAutofocusRegion * display.y, 3.0f);
+                ImGui::GetForegroundDrawList()->AddRect(ImVec2(centre.x - halfSize, centre.y - halfSize), ImVec2(centre.x + halfSize, centre.y + halfSize),
+                    IM_COL32(255, 220, 64, 220), 0.0f, 0, 1.5f);
             }
             if (ImGui::Checkbox("Monochromatic (587.6 nm)", &m_lensMonochromatic)) {
                 setLensMonochromatic(m_lensMonochromatic);
@@ -1243,6 +1314,42 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Off traces one wavelength per sample (380-780 nm) for chromatic aberration: noisier, for accumulation.");
             }
+            ImGui::SeparatorText("Flares");
+            if (ImGui::Checkbox("Ghost Flares", &m_lensFlareEnabled)) {
+                setLensFlareEnabled(m_lensFlareEnabled);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Ghosts: light reflected twice inside the lens, traced through its surfaces and coatings from the sun and the\n"
+                    "brightest lights, and added after upscaling. Changing the counts below rebuilds the render graph.");
+            }
+            ImGui::BeginDisabled(!m_lensFlareEnabled);
+            int flareGhosts = static_cast<int>(m_lensFlareMaxGhosts);
+            if (ImGui::SliderInt("Ghosts", &flareGhosts, 1, 32)) {
+                m_lensFlareMaxGhosts = static_cast<uint32_t>(flareGhosts);
+                setLensFlareMaxGhosts(m_lensFlareMaxGhosts);
+            }
+            int flareGrid = static_cast<int>(m_lensFlareGridResolution);
+            if (ImGui::SliderInt("Grid", &flareGrid, 8, 128)) {
+                m_lensFlareGridResolution = static_cast<uint32_t>(flareGrid);
+                setLensFlareGridResolution(m_lensFlareGridResolution);
+            }
+            int flareWavelengths = static_cast<int>(m_lensFlareWavelengths);
+            if (ImGui::SliderInt("Wavelengths (spectral)", &flareWavelengths, 1, 8)) {
+                m_lensFlareWavelengths = static_cast<uint32_t>(flareWavelengths);
+                setLensFlareWavelengths(m_lensFlareWavelengths);
+            }
+            int flareLights = static_cast<int>(m_lensFlareMaxLights);
+            if (ImGui::SliderInt("Local Lights", &flareLights, 0, 7)) {
+                m_lensFlareMaxLights = static_cast<uint32_t>(flareLights);
+                setLensFlareMaxLights(m_lensFlareMaxLights);
+            }
+            if (ImGui::SliderFloat("Flare Intensity", &m_lensFlareIntensity, 0.0f, 1000.0f, "%.2f", ImGuiSliderFlags_Logarithmic)) {
+                setLensFlareIntensity(m_lensFlareIntensity);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("1 is physical: the ghosts' energy as the lens's coatings reflect it.");
+            }
+            ImGui::EndDisabled();
             ImGui::EndDisabled();
         }
         ImGui::Separator();

@@ -56,6 +56,7 @@
 #include "Runtime/Scheduling/TbbTaskService.h"
 #include <BasicRenderer/Streaming/RendererStateRequestService.h>
 #include "Camera/Lens/LensManager.h"
+#include "Camera/Lens/GhostFlareManager.h"
 
 void Renderer::SignalFence(rhi::Queue commandQueue, uint8_t frameIndexToSignal) {
     // Signal the fence
@@ -122,6 +123,8 @@ void Renderer::Cleanup() {
     // It holds the path tracer's accumulation buffer and dispatch arguments, which must go before the allocator does.
     m_pathTraceState.reset();
     // Its worker posts to the state graph and its published buffer is a graph version: both go before the graph does.
+    if (m_ghostFlareManager) m_ghostFlareManager->Shutdown();
+    m_ghostFlareManager.reset();
     if (m_lensManager) m_lensManager->Shutdown();
     m_lensManager.reset();
 	if (currentScene) {
@@ -690,6 +693,7 @@ void Renderer::Initialize(
         });
     m_pTerrainManager = TerrainManager::CreateUnique();
     m_lensManager = std::make_shared<br::lens::LensManager>(m_rendererStateRequests.get(), m_orgRuntime->Uploads());
+    m_ghostFlareManager = std::make_shared<br::lens::GhostFlareManager>(m_rendererStateRequests.get(), m_orgRuntime->Uploads(), m_lensManager);
 	m_pTerrainManager->SetRendererStateServices(
 		m_rendererStateRequests.get(),
 		currentRenderGraph ? m_orgRuntime->Uploads() : nullptr,

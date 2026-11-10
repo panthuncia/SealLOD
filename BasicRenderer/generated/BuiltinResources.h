@@ -136,6 +136,7 @@ struct Builtin {
     inline static constexpr std::string_view ClasPool = "Builtin::RayTracing::ClasPool";
     inline static constexpr std::string_view InstanceRows = "Builtin::RayTracing::InstanceRows";
     inline static constexpr std::string_view LensData = "Builtin::RayTracing::LensData";
+    inline static constexpr std::string_view LensFocus = "Builtin::RayTracing::LensFocus";
     inline static constexpr std::string_view MicromapArrays = "Builtin::RayTracing::MicromapArrays";
     inline static constexpr std::string_view SpecularAlbedo = "Builtin::RayTracing::SpecularAlbedo";
     inline static constexpr std::string_view SpecularHitDistance = "Builtin::RayTracing::SpecularHitDistance";

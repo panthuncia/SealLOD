@@ -18,6 +18,7 @@ LensBake info $L                                   # paraxial data, planes, dist
 LensBake rank $L --top 8                           # ghost paths by energy (CPU analysis; flares are not rendered)
 LensBake pupil $L --rays 1000000                   # the exact pupil's discs, light outside them, what the sampler rejects
 LensBake pupil $L --mono 1 --stop 0.5 --focus-m 1  #   ... at the d line, stopped down, focused at 1 m
+LensBake focuspupil $L --focus-nodes 8 --mono 1     # the exact pupil over the focus range, as LensManager builds it
 LensBake fitpoly $L --out lenses\double_gauss_50mm.brlens --degrees 5,7 --rows 4000000 --manifest lenses\MANIFEST.json
 LensBake eval lenses\double_gauss_50mm.brlens $L --count 200000   # a .brlens against exact transport, fresh rays
 ```
@@ -27,6 +28,14 @@ LensBake eval lenses\double_gauss_50mm.brlens $L --count 200000   # a .brlens ag
   region's bounding box widened by `--margin` (10%) and reports, per interval, the exact sampler's acceptance (rays in the
   region that clear the lens), the smallest disc's (sampling one disc and rejecting outside the others), and passing rays
   outside the region (must be 0). `--rims 0` turns the element rims' clipping off (the stop only).
+- **`focuspupil`** builds the exact pupil over the focus range as `LensManager` does for per-frame focus
+  (`ComputeFocusedPupilDiscs` at `--focus-nodes` planes uniform in the focus shift from infinity to `--near-m` 0.3 m,
+  `--between` 1 plane checked between focus nodes), reports its build time, then measures `--rays` random rays per node
+  interval at focus coordinates `--offsets` (0, 0.25, 0.5, 0.75) of every focus interval and at the `--check-m` distances
+  (0.8, 2.2, 7 m; with `--compare 1` against a single-focus build there): acceptance and passing rays outside the region
+  (must be 0; the exit code is 3 otherwise). It also checks K from the normalization table and the interpolated distortion
+  table against exact values at the check distances (`--k-accuracy 1` adds the grid's own error; `--k-curve 1` prints K
+  along the range) and the focus breathing over the range.
 - **`fitpoly`** traces `--rows` exact rays uniform over the backward transmission domain (`DefaultSamplingDomain`: sensor
   disk 1.1x the image circle, sensor plane from infinity focus to `--min-focus-mm` 300, rear square 1.05x the last
   semi-aperture, wavelengths importance-sampled over 380-780 nm), fits each degree by least squares (`FitPolynomial`:
@@ -56,8 +65,9 @@ python scripts/lens/compare_lens_images.py --self-test
 - Variants: `chart` (2 m slanted-edge squares, checkerboards of 8/16/32/64 cells, Siemens star, plus slanted 2x2
   checkers near the four frame corners for lateral CA), `bokeh` (1.5 cm emissive spheres on a 7x5 grid at 1.5, 3
   and 12 m, out to the frame edges), `flare` (a 5000-radiance disc at 50 m near the top-right edge over a dim
-  ground), `furnace` (an inward-facing, double-sided emissive sphere of radius 10 m around the camera), `all`
-  (chart + bokeh). Output defaults to `models/lens_tests/<variant>.glb`; `models/` is git-ignored.
+  ground), `furnace` (an inward-facing, double-sided emissive sphere of radius 10 m around the camera), `focus` (charts a
+  quarter of the frame height across at `--focus-depths` 2.2, 0.8, 1.5, 4 and 7 m, placed at `--focus-positions`: the centre
+  and the four quadrants at NDC (+-0.5, +-0.5), for autofocus), `all` (chart + bokeh). Output defaults to `models/lens_tests/<variant>.glb`; `models/` is git-ignored.
 - Placement is relative to `--camera-origin` (default `-3,5,1`, the demo's start pose) looking down -Z, metres,
   Y up. Frame-edge content uses `--fov-deg 80 --aspect 1.777`; change them to match the lens's field of view.
   `--write-camera` writes a matching `demo_camera_state.json` (identity rotation looks down -Z).

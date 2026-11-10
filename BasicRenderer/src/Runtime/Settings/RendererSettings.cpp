@@ -365,8 +365,11 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<uint64_t>("pathTracingCameraModelHash", 0ull);
     // The physical camera lens (LensManager, SARP's docs/lens_simulation.md). Mode 0 pinhole, 1 explicit (traced surface by surface),
     // 2 polynomial (the .brlens beside the prescription, of lensPolynomialDegree 5 or 7). The file is a name in lenses/ without
-    // .lens.json. The focus distance is in metres from the front vertex, which sits at the camera. Stop scale multiplies the
-    // aperture stop's radius (stopping down).
+    // .lens.json. The f-number stops the lens down from wide open (0, or anything below the lens's own, is wide open); it rebuilds
+    // the lens. Focus is per frame and never rebuilds: lensFocusMode 0 manual focuses at lensFocusDistance (metres from the front
+    // vertex, which sits at the camera), 1 autofocus measures the primary hits' depth over lensAutofocusRegion (a fraction of the
+    // frame height) around lensAutofocusPoint (NDC, +y up; the centre by default) and follows it at lensAutofocusSpeed (the
+    // critically damped spring's rate, 1/s). Manual by default, so reference captures keep a fixed focus.
     const auto lensEnvironmentFloat = [](const char* name, float fallback) {
         const char* value = std::getenv(name);
         return value ? static_cast<float>(std::atof(value)) : fallback;
@@ -375,13 +378,27 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<uint32_t>("lensMode", pathTracingEnvironmentNumber("SARP_LENS_MODE", 0u));
     settingsManager.registerSetting<std::string>("lensFile", lensFile ? std::string(lensFile) : std::string("double_gauss_50mm"));
     settingsManager.registerSetting<float>("lensFocusDistance", lensEnvironmentFloat("SARP_LENS_FOCUS_M", 3.0f));
+    settingsManager.registerSetting<uint32_t>("lensFocusMode", pathTracingEnvironmentNumber("SARP_LENS_FOCUS_MODE", 0u));
+    settingsManager.registerSetting<DirectX::XMFLOAT2>("lensAutofocusPoint", DirectX::XMFLOAT2(0.0f, 0.0f));
+    settingsManager.registerSetting<float>("lensAutofocusRegion", lensEnvironmentFloat("SARP_LENS_AF_REGION", 0.02f));
+    settingsManager.registerSetting<float>("lensAutofocusSpeed", lensEnvironmentFloat("SARP_LENS_AF_SPEED", 8.0f));
     settingsManager.registerSetting<bool>("lensMonochromatic", !ReadTruthyEnvironmentFlag("SARP_LENS_SPECTRAL"));
-    settingsManager.registerSetting<float>("lensStopScale", lensEnvironmentFloat("SARP_LENS_STOP_SCALE", 1.0f));
+    settingsManager.registerSetting<float>("lensFNumber", lensEnvironmentFloat("SARP_LENS_F_NUMBER", 0.0f));
     settingsManager.registerSetting<uint32_t>("lensPolynomialDegree", pathTracingEnvironmentNumber("SARP_LENS_POLYNOMIAL_DEGREE", 5u));
     // 0 remap: a camera field wider than the lens covers is fitted to its covered field (the frame's corners at the covered
     // image radius, exit rays widened to the camera's field), so the whole frame is lit. 1 physical: the sensor is sized by
     // the camera's vertical field through the lens, and the frame vignettes to black past what the lens covers.
     settingsManager.registerSetting<uint32_t>("lensFieldMode", pathTracingEnvironmentNumber("SARP_LENS_FIELD_MODE", 0u));
+    // The lens's ghost flares (GhostFlareManager, SARP's docs/lens_simulation.md "Ghost flares"), whenever a lens is on: the
+    // brightest two-reflection paths (max ghosts), a lattice of grid x grid cells per source, ghost and wavelength
+    // (wavelengths: spectral lenses only), the sun and up to max lights local lights. Intensity 1 is physical. All but the
+    // intensity rebuild the graph (they size its buffers); off, the flare passes aren't in it.
+    settingsManager.registerSetting<bool>("lensFlareEnabled", pathTracingEnvironmentNumber("SARP_LENS_FLARE", 1u) != 0u);
+    settingsManager.registerSetting<uint32_t>("lensFlareMaxGhosts", pathTracingEnvironmentNumber("SARP_LENS_FLARE_GHOSTS", 8u));
+    settingsManager.registerSetting<uint32_t>("lensFlareGridResolution", pathTracingEnvironmentNumber("SARP_LENS_FLARE_GRID", 64u));
+    settingsManager.registerSetting<uint32_t>("lensFlareWavelengths", pathTracingEnvironmentNumber("SARP_LENS_FLARE_WAVELENGTHS", 3u));
+    settingsManager.registerSetting<uint32_t>("lensFlareMaxLights", pathTracingEnvironmentNumber("SARP_LENS_FLARE_LIGHTS", 3u));
+    settingsManager.registerSetting<float>("lensFlareIntensity", lensEnvironmentFloat("SARP_LENS_FLARE_INTENSITY", 1.0f));
     settingsManager.registerSetting<bool>("pathTracingSunOnly", ReadTruthyEnvironmentFlag("SARP_RT_PT_SUN_ONLY"));
     // Opacity micromaps for alpha-tested foliage, as the preprocessor baked them (its --opacity-micromap-level sets their
     // subdivision), read when the BVH is first created. SARP_RT_OMM=0 turns them off.
@@ -873,6 +890,11 @@ void Renderer::SetSettings() {
         }));
     // Accumulating averages samples itself, so it doesn't want Ray Reconstruction's denoising. The path trace pass makes its
     // accumulation buffer when the graph is built.
+    // The ghost flares' passes and buffer sizes (LensFlarePasses.h) are fixed when the graph is built.
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("lensFlareEnabled", [this](const bool&) { rebuildRenderGraph = true; }));
+    for (const char* name : { "lensFlareMaxGhosts", "lensFlareGridResolution", "lensFlareWavelengths", "lensFlareMaxLights" }) {
+        m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(name, [this](const uint32_t&) { rebuildRenderGraph = true; }));
+    }
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("pathTracingAccumulate", [this](const bool&) {
         if (m_pathTracing) {
             SelectPathTracingUpscaler(true);

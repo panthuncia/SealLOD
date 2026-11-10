@@ -655,18 +655,39 @@ private:
     uint32_t m_lensMode = 0u;
     std::string m_lensFile;
     float m_lensFocusDistance = 3.0f;
+    uint32_t m_lensFocusMode = 0u;
+    DirectX::XMFLOAT2 m_lensAutofocusPoint{ 0.0f, 0.0f };
+    float m_lensAutofocusRegion = 0.02f;
+    float m_lensAutofocusSpeed = 8.0f;
     bool m_lensMonochromatic = true;
-    float m_lensStopScale = 1.0f;
+    float m_lensFNumber = 0.0f; // 0: wide open
     uint32_t m_lensFieldMode = 0u;
     uint32_t m_lensPolynomialDegree = 5u;
     std::vector<std::string> m_lensFiles;
     std::function<void(uint32_t)> setLensMode;
     std::function<void(std::string)> setLensFile;
     std::function<void(float)> setLensFocusDistance;
+    std::function<void(uint32_t)> setLensFocusMode;
+    std::function<void(DirectX::XMFLOAT2)> setLensAutofocusPoint;
+    std::function<void(float)> setLensAutofocusRegion;
+    std::function<void(float)> setLensAutofocusSpeed;
     std::function<void(bool)> setLensMonochromatic;
-    std::function<void(float)> setLensStopScale;
+    std::function<void(float)> setLensFNumber;
     std::function<void(uint32_t)> setLensFieldMode;
     std::function<void(uint32_t)> setLensPolynomialDegree;
+    // The lens's ghost flares (GhostFlareManager).
+    bool m_lensFlareEnabled = true;
+    uint32_t m_lensFlareMaxGhosts = 8u;
+    uint32_t m_lensFlareGridResolution = 64u;
+    uint32_t m_lensFlareWavelengths = 3u;
+    uint32_t m_lensFlareMaxLights = 3u;
+    float m_lensFlareIntensity = 1.0f;
+    std::function<void(bool)> setLensFlareEnabled;
+    std::function<void(uint32_t)> setLensFlareMaxGhosts;
+    std::function<void(uint32_t)> setLensFlareGridResolution;
+    std::function<void(uint32_t)> setLensFlareWavelengths;
+    std::function<void(uint32_t)> setLensFlareMaxLights;
+    std::function<void(float)> setLensFlareIntensity;
 
     bool m_jitterEnabled = true;
     std::function<bool()> getJitterEnabled;
