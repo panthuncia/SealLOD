@@ -17,7 +17,7 @@
 #include <spdlog/spdlog.h>
 #include <tree_sitter/api.h>
 
-#include "Pipeline/ShaderCompilation/ShaderArtifactCache.h"
+#include "Pipeline/ShaderCompilation/RendererShaderStore.h"
 #include "Utilities/Utilities.h"
 #include "Utilities/HashMix.h"
 #include "Runtime/Device/DeviceManager.h"
@@ -37,23 +37,14 @@ namespace {
     // The same, for arguments only SPIR-V receives. A change here leaves cached DXIL valid.
     constexpr uint64_t kSpirvCompilerArgumentFingerprint = 1u;
 
-    // Live optimization jobs must observe source edits immediately. The ordinary
-    // runtime path still uses the artifact cache; only the worker servicing an
-    // explicit pso.recompile request bypasses cache reads.
-    thread_local bool g_bypassShaderArtifactCache = false;
-
-    bool ShaderCacheDiagnosticsEnabled()
-    {
-        static const bool enabled = [] {
-            const char* value = std::getenv("SARP_SHADER_CACHE_DIAGNOSTICS");
-            return value && value[0] != '\0' && value[0] != '0';
-        }();
-        return enabled;
-    }
+    // Set while a reload or a live recompile builds. The store validates every artifact against the files it read, so
+    // a reload needs no bypass: it only starts a new generation, so edited files are read again. A reload with
+    // BR_SHADER_DUMP_DIR set compiles past the store, since a dump needs a compile.
+    thread_local bool g_shaderReload = false;
 
     // BR_SHADER_DUMP_DIR: every compile writes the source DXC compiled (preprocessed and BRSL-rewritten,
-    // so self-contained), its arguments and, for DXIL, the disassembly. A pso.recompile bypasses the
-    // artifact cache, so hot-reloading a pipeline dumps it. scripts/dxil_stats.py summarizes a dump.
+    // so self-contained), its arguments and, for DXIL, the disassembly. A pso.recompile compiles past the
+    // shader store while this is set, so hot-reloading a pipeline dumps it. scripts/dxil_stats.py summarizes a dump.
     const std::filesystem::path* ShaderDumpDirectory()
     {
         static const std::optional<std::filesystem::path> directory = []() -> std::optional<std::filesystem::path> {
@@ -110,18 +101,17 @@ namespace {
         normalize(resources.optionalResourceDescriptorSlots);
     }
 
-    // Live recompiles neither read nor write the shader cache. Its key is the source tree hash taken
-    // at process start, so a candidate compiled from edited source would otherwise be saved under that
-    // key and load as the real shader on the next launch if the tree is unchanged by then.
-    class ScopedShaderArtifactCacheBypass {
+    // A reload (pso.recompile, a global rebuild): later requests read the source files again.
+    class ScopedShaderReload {
     public:
-        ScopedShaderArtifactCacheBypass()
-            : m_previous(g_bypassShaderArtifactCache) {
-            g_bypassShaderArtifactCache = true;
+        ScopedShaderReload()
+            : m_previous(g_shaderReload) {
+            g_shaderReload = true;
+            br::shaderstore::BeginGeneration();
         }
 
-        ~ScopedShaderArtifactCacheBypass() {
-            g_bypassShaderArtifactCache = m_previous;
+        ~ScopedShaderReload() {
+            g_shaderReload = m_previous;
         }
 
     private:
@@ -130,16 +120,11 @@ namespace {
 }
 
 namespace {
-shadercache::BinaryFormat GetShaderBinaryFormat(rhi::Backend backend)
+uint8_t GetShaderStoreFormat(rhi::Backend backend)
 {
     return backend == rhi::Backend::Vulkan
-        ? shadercache::BinaryFormat::Spirv
-        : shadercache::BinaryFormat::Dxil;
-}
-
-bool IsSpirvFormat(shadercache::BinaryFormat binaryFormat)
-{
-    return binaryFormat == shadercache::BinaryFormat::Spirv;
+        ? br::shaderstore::kFormatBundleSpirv
+        : br::shaderstore::kFormatBundleDxil;
 }
 
 constexpr std::wstring_view kValidationSkipEntryPoints[] = {
@@ -177,210 +162,14 @@ uint64_t HashStringStable(std::string_view value)
     return HashBytesStable(value.data(), value.size());
 }
 
-uint64_t HashFileContentStable(const std::filesystem::path& path)
-{
-    constexpr uint64_t kOffset = 14695981039346656037ull;
-    constexpr uint64_t kPrime = 1099511628211ull;
-
-    std::ifstream input(path, std::ios::binary);
-    if (!input) {
-        return 0;
-    }
-
-    uint64_t hash = kOffset;
-    uint64_t size = 0;
-    std::array<char, 64 * 1024> buffer{};
-    while (input) {
-        input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
-        const std::streamsize count = input.gcount();
-        for (std::streamsize index = 0; index < count; ++index) {
-            hash ^= static_cast<uint8_t>(buffer[static_cast<size_t>(index)]);
-            hash *= kPrime;
-        }
-        size += static_cast<uint64_t>(count);
-    }
-    hash ^= size;
-    hash *= kPrime;
-    return hash;
-}
-
-uint64_t ComputeLoadedDxcompilerIdentityHash()
-{
-    wchar_t modulePath[MAX_PATH] = {};
-    HMODULE dxcompilerModule = GetModuleHandleW(L"dxcompiler.dll");
-    if (dxcompilerModule == nullptr ||
-        GetModuleFileNameW(dxcompilerModule, modulePath, MAX_PATH) == 0) {
-        spdlog::warn("Unable to identify loaded dxcompiler.dll for shader cache fingerprinting.");
-        return 0;
-    }
-
-    // The offline preprocessor and the deployed renderer load byte-identical
-    // copies of DXC from different directories.  Paths and copy timestamps are
-    // deployment properties, not compiler identities, and made every offline
-    // artifact unreachable at runtime.  Hash the compiler binary once instead.
-    return HashFileContentStable(std::filesystem::path(modulePath));
-}
-
-uint64_t HashPreprocessedBuffer(const DxcBuffer& buffer)
-{
-    const char* source = static_cast<const char*>(buffer.Ptr);
-    const size_t sourceSize = GetNormalizedShaderSourceSize(source, buffer.Size);
-    return HashBytesStable(source, sourceSize);
-}
-
-uint64_t HashCanonicalPreprocessedBuffer(const DxcBuffer& buffer)
-{
-    const char* source = static_cast<const char*>(buffer.Ptr);
-    const std::string canonicalSource = CanonicalizePreprocessedShaderSourceForHash(source, buffer.Size);
-    return HashBytesStable(canonicalSource.data(), canonicalSource.size());
-}
-
-size_t GetCanonicalPreprocessedBufferSize(const DxcBuffer& buffer)
-{
-    const char* source = static_cast<const char*>(buffer.Ptr);
-    return CanonicalizePreprocessedShaderSourceForHash(source, buffer.Size).size();
-}
-
-std::string NormalizePathUtf8(const std::filesystem::path& path)
-{
-    return NormalizeCacheSourcePath(ws2s(path.wstring()));
-}
-
-uint64_t ComputeShaderSourceTreeIdentityHash()
-{
-    // Shader artifacts are addressed by their compile recipe plus one content
-    // digest for the complete source tree. This lets runtime cache hits happen
-    // before DXC preprocessing. The former preprocessed-source identity forced
-    // every nominal cache hit to preprocess every include again, accounting for
-    // multi-second "Compile*PSO" tasks after an offline preprocessing run.
-	uint64_t seed = 0;
-	std::size_t sourceCount = 0;
-	std::error_code ec;
-	for (const std::wstring_view rootName : { L"shaders", L"SARPShaders", L"NVSL" }) {
-		const auto shaderRoot = std::filesystem::weakly_canonical(
-			std::filesystem::current_path() / rootName, ec);
-		if (ec || !std::filesystem::is_directory(shaderRoot, ec)) return 0;
-
-		std::vector<std::pair<std::string, std::filesystem::path>> sources;
-		for (std::filesystem::recursive_directory_iterator it(shaderRoot, ec), end;
-			!ec && it != end; it.increment(ec)) {
-			if (!it->is_regular_file(ec)) continue;
-			const auto extension = it->path().extension().wstring();
-			if (extension != L".hlsl" && extension != L".hlsli" && extension != L".h") continue;
-			const auto relative = NormalizePathUtf8(std::filesystem::relative(it->path(), shaderRoot, ec));
-			if (ec) return 0;
-			sources.emplace_back(relative, it->path());
-		}
-		if (ec) return 0;
-		std::ranges::sort(sources, {}, &std::pair<std::string, std::filesystem::path>::first);
-
-		util::hash_combine_u64(seed, HashStringStable(ws2s(std::wstring(rootName))));
-		for (const auto& [relative, path] : sources) {
-			util::hash_combine_u64(seed, HashStringStable(relative));
-			util::hash_combine_u64(seed, HashFileContentStable(path));
-		}
-		util::hash_combine_u64(seed, sources.size());
-		sourceCount += sources.size();
-	}
-	if (ShaderCacheDiagnosticsEnabled()) {
-		spdlog::info("Shader cache source identity roots='shaders,SARPShaders,NVSL' files={} identity=0x{:X}",
-			sourceCount, seed);
-	}
-    return seed;
-}
-
-uint64_t GetShaderSourceTreeIdentityHash()
-{
-    static const uint64_t identity = ComputeShaderSourceTreeIdentityHash();
-    return identity;
-}
-
-// Artifacts are reused across runs only because their keys carry the source tree's content digest. Without one (a
-// shader root missing under the working directory) a key no longer changes with the sources, so the cache is neither
-// read nor written.
-bool ShaderArtifactCacheUsable()
-{
-    if (g_bypassShaderArtifactCache) return false;
-    static const bool hasSourceIdentity = [] {
-        if (GetShaderSourceTreeIdentityHash() != 0) return true;
-        spdlog::warn("Shader artifact cache disabled: no source tree digest (shaders, SARPShaders or NVSL missing under '{}')",
-            std::filesystem::current_path().string());
-        return false;
-    }();
-    return hasSourceIdentity;
-}
-
-void HashShaderDefines(uint64_t& seed, const std::vector<DxcDefine>& defines)
-{
-    util::hash_combine_u64(seed, defines.size());
-    for (const auto& define : defines) {
-        util::hash_combine_u64(seed, HashStringStable(ws2s(define.Name ? define.Name : L"")));
-        util::hash_combine_u64(seed, HashStringStable(ws2s(define.Value ? define.Value : L"")));
-    }
-}
-
-uint64_t BuildBundleIdentityHash(const ShaderInfoBundle& info)
-{
-    uint64_t seed = 0;
-    util::hash_combine_u64(seed, GetShaderSourceTreeIdentityHash());
-    util::hash_combine_u64(seed, info.enableDebugInfo ? 1u : 0u);
-    util::hash_combine_u64(seed, info.warningsAsErrors ? 1u : 0u);
-    HashShaderDefines(seed, info.defines);
-
-    auto hashSlot = [&](shadercache::BlobKind blobKind, const std::optional<ShaderInfo>& slot) {
-        util::hash_combine_u64(seed, static_cast<uint8_t>(blobKind));
-        util::hash_combine_u64(seed, slot.has_value() ? 1u : 0u);
-        if (!slot) {
-            return;
-        }
-
-        util::hash_combine_u64(seed, HashStringStable(NormalizeCacheSourcePath(ws2s(slot->filename))));
-        util::hash_combine_u64(seed, HashStringStable(ws2s(slot->entryPoint)));
-        util::hash_combine_u64(seed, HashStringStable(ws2s(slot->target)));
-        util::hash_combine_u64(seed, ShouldSkipValidationForEntryPoint(slot->entryPoint) ? 1u : 0u);
-    };
-
-    hashSlot(shadercache::BlobKind::Amplification, info.amplificationShader);
-    hashSlot(shadercache::BlobKind::Mesh, info.meshShader);
-    hashSlot(shadercache::BlobKind::Vertex, info.vertexShader);
-    hashSlot(shadercache::BlobKind::Pixel, info.pixelShader);
-    hashSlot(shadercache::BlobKind::Compute, info.computeShader);
-    return seed;
-}
-
-uint64_t BuildLibraryIdentityHash(
-    const ShaderLibraryInfo& info,
-    const std::vector<DxcDefine>& defines)
-{
-    uint64_t seed = 0;
-    util::hash_combine_u64(seed, GetShaderSourceTreeIdentityHash());
-    util::hash_combine_u64(seed, HashStringStable(NormalizeCacheSourcePath(ws2s(info.filename))));
-    util::hash_combine_u64(seed, HashStringStable(ws2s(info.target)));
-    HashShaderDefines(seed, defines);
-    return seed;
-}
-
-struct ShaderCompileFlightKey {
-    shadercache::BinaryFormat binaryFormat = shadercache::BinaryFormat::Dxil;
-    shadercache::ArtifactKind artifactKind = shadercache::ArtifactKind::Bundle;
-    uint64_t identityHash = 0;
-    uint64_t buildConfigHash = 0;
-
-    bool operator==(const ShaderCompileFlightKey&) const = default;
-};
-
-struct ShaderCompileFlightKeyHash {
-    size_t operator()(const ShaderCompileFlightKey& key) const noexcept {
-        uint64_t seed = 0;
-        util::hash_combine_u64(seed, static_cast<uint8_t>(key.binaryFormat));
-        util::hash_combine_u64(seed, static_cast<uint8_t>(key.artifactKind));
-        util::hash_combine_u64(seed, key.identityHash);
-        util::hash_combine_u64(seed, key.buildConfigHash);
-        return static_cast<size_t>(seed);
+// One compile in flight per variant: a second request for it waits, then finds the stored artifact.
+struct ShaderStoreHashKey {
+    size_t operator()(const org::services::ShaderStoreHash& key) const noexcept {
+        return static_cast<size_t>(key.low ^ (key.high * 0x9E3779B97F4A7C15ull));
     }
 };
 
-using ShaderCompileFlightRegistry = org::services::CompileFlightRegistry<ShaderCompileFlightKey, ShaderCompileFlightKeyHash>;
+using ShaderCompileFlightRegistry = org::services::CompileFlightRegistry<org::services::ShaderStoreHash, ShaderStoreHashKey>;
 
 ShaderCompileFlightRegistry& GetShaderCompileFlightRegistry()
 {
@@ -390,48 +179,22 @@ ShaderCompileFlightRegistry& GetShaderCompileFlightRegistry()
 
 class ShaderCompileFlightScope {
 public:
-    explicit ShaderCompileFlightScope(ShaderCompileFlightKey key)
+    explicit ShaderCompileFlightScope(org::services::ShaderStoreHash key)
         : m_key(key)
     {
     }
 
     ~ShaderCompileFlightScope()
     {
-        if (m_active) {
-            GetShaderCompileFlightRegistry().Complete(m_key);
-        }
+        GetShaderCompileFlightRegistry().Complete(m_key);
     }
 
     ShaderCompileFlightScope(const ShaderCompileFlightScope&) = delete;
     ShaderCompileFlightScope& operator=(const ShaderCompileFlightScope&) = delete;
 
 private:
-    ShaderCompileFlightKey m_key;
-    bool m_active = true;
+    org::services::ShaderStoreHash m_key;
 };
-
-uint64_t ComputeShaderCacheBuildConfigHash(shadercache::BinaryFormat binaryFormat)
-{
-    uint64_t seed = 0;
-    util::hash_combine_u64(seed, shadercache::kSchemaVersion);
-    util::hash_combine_u64(seed, static_cast<uint8_t>(binaryFormat));
-    util::hash_combine_u64(seed, kBRSLPreprocessVersion);
-    util::hash_combine_u64(seed, kShaderCompilerArgumentFingerprint);
-    if (binaryFormat == shadercache::BinaryFormat::Spirv) {
-        util::hash_combine_u64(seed, kSpirvCompilerArgumentFingerprint);
-    }
-#if WRITE_DEBUG_FILES
-    util::hash_combine_u64(seed, 1u);
-#else
-    util::hash_combine_u64(seed, 0u);
-#endif
-    util::hash_combine_u64(seed, 1u); // warnings-as-errors is always enabled in the current DXC path
-
-    static const uint64_t compilerIdentityHash = ComputeLoadedDxcompilerIdentityHash();
-    util::hash_combine_u64(seed, compilerIdentityHash);
-
-    return seed;
-}
 
 //void LogFailedShaderSource(
 //    const std::wstring& filename,
@@ -530,130 +293,460 @@ std::string MakeRasterPSOKeyId(std::string_view family, const RasterPSOKey& key)
         ".wire=" + (key.wireframe ? "1" : "0");
 }
 
-void AppendBundleBlob(
-    shadercache::CacheData& cacheData,
-    shadercache::BlobKind kind,
-    const std::wstring& entryPoint,
-    const std::wstring& target,
-    ID3DBlob* blob)
+ShaderBundle MakeShaderBundle(const br::shaderstore::BundleArtifact& artifact, IDxcUtils* utils)
 {
-    if (!blob) {
-        return;
-    }
-    cacheData.blobs.push_back(shadercache::CachedShaderBlob{
-        .kind = kind,
-        .entryPoint = ws2s(entryPoint),
-        .target = ws2s(target),
-        .bytecode = CopyBlobBytes(blob),
-    });
-}
-
-std::optional<ShaderBundle> TryLoadShaderBundleFromCache(
-    const shadercache::CacheKey& cacheKey,
-    uint64_t buildConfigHash,
-    IDxcUtils* utils)
-{
-    std::optional<shadercache::CacheData> cacheData = shadercache::TryLoad(cacheKey, buildConfigHash);
-    if (!cacheData.has_value()) {
-        return std::nullopt;
-    }
-
     ShaderBundle bundle;
-    bundle.resourceDescriptorSlots = cacheData->resourceDescriptorSlots;
-    NormalizeRuntimeResourceIdentifiers(bundle.resourceDescriptorSlots);
-    bundle.resourceIDsHash = cacheData->resourceIDsHash;
-
-    for (const shadercache::CachedShaderBlob& blob : cacheData->blobs) {
-        Microsoft::WRL::ComPtr<ID3DBlob> reconstructedBlob;
-        if (!CreateBlobFromBytes(utils, blob.bytecode, reconstructedBlob)) {
-            spdlog::warn("Shader cache blob reconstruction failed; treating as miss.");
-            return std::nullopt;
+    for (const std::string& id : artifact.mandatoryIds) {
+        bundle.resourceDescriptorSlots.mandatoryResourceDescriptorSlots.push_back(ResolveRuntimeResourceIdentifier(id));
+    }
+    for (const std::string& id : artifact.optionalIds) {
+        bundle.resourceDescriptorSlots.optionalResourceDescriptorSlots.push_back(ResolveRuntimeResourceIdentifier(id));
+    }
+    bundle.resourceIDsHash = artifact.resourceIdsHash;
+    for (const auto& stage : artifact.stages) {
+        Microsoft::WRL::ComPtr<ID3DBlob> blob;
+        if (!CreateBlobFromBytes(utils, stage.bytecode, blob)) {
+            throw std::runtime_error("Shader store: could not create a blob for stored bytecode");
         }
-
-        switch (blob.kind) {
-        case shadercache::BlobKind::Vertex:
-            bundle.vertexShader = std::move(reconstructedBlob);
-            break;
-        case shadercache::BlobKind::Pixel:
-            bundle.pixelShader = std::move(reconstructedBlob);
-            break;
-        case shadercache::BlobKind::Amplification:
-            bundle.amplificationShader = std::move(reconstructedBlob);
-            break;
-        case shadercache::BlobKind::Mesh:
-            bundle.meshShader = std::move(reconstructedBlob);
-            break;
-        case shadercache::BlobKind::Compute:
-            bundle.computeShader = std::move(reconstructedBlob);
-            break;
-        default:
-            spdlog::warn("Unexpected shader cache blob kind {} in bundle cache.", static_cast<uint32_t>(blob.kind));
-            return std::nullopt;
+        switch (stage.kind) {
+        case br::shaderstore::StageKind::Vertex: bundle.vertexShader = std::move(blob); break;
+        case br::shaderstore::StageKind::Pixel: bundle.pixelShader = std::move(blob); break;
+        case br::shaderstore::StageKind::Amplification: bundle.amplificationShader = std::move(blob); break;
+        case br::shaderstore::StageKind::Mesh: bundle.meshShader = std::move(blob); break;
+        case br::shaderstore::StageKind::Compute: bundle.computeShader = std::move(blob); break;
+        case br::shaderstore::StageKind::Library:
+            throw std::runtime_error("Shader store: a library artifact answered a bundle request");
         }
     }
-
     return bundle;
 }
 
-std::optional<ShaderLibraryBundle> TryLoadShaderLibraryFromCache(
-    const shadercache::CacheKey& cacheKey,
-    uint64_t buildConfigHash,
-    IDxcUtils* utils)
-{
-    std::optional<shadercache::CacheData> cacheData = shadercache::TryLoad(cacheKey, buildConfigHash);
-    if (!cacheData.has_value()) {
-        return std::nullopt;
+// Reads includes through the store, so every path DXC asks for is recorded, including those that do not exist: adding
+// such a file later can change what an include finds. DXC tries the including file's folder, then each -I folder.
+class StoreIncludeHandler final : public IDxcIncludeHandler {
+public:
+    StoreIncludeHandler(IDxcUtils& utils, org::services::ShaderIncludeTracker& includes)
+        : m_utils(utils), m_includes(includes) {}
+    virtual ~StoreIncludeHandler() = default;
+    // Lives on the stack for one DXC call.
+    ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
+    ULONG STDMETHODCALLTYPE Release() override { return 1; }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID id, void** object) override {
+        if (!object) return E_POINTER;
+        if (id == __uuidof(IDxcIncludeHandler) || id == __uuidof(IUnknown)) {
+            *object = static_cast<IDxcIncludeHandler*>(this);
+            return S_OK;
+        }
+        *object = nullptr;
+        return E_NOINTERFACE;
+    }
+    HRESULT STDMETHODCALLTYPE LoadSource(LPCWSTR fileName, IDxcBlob** source) override {
+        if (!source) return E_POINTER;
+        *source = nullptr;
+        std::filesystem::path path(fileName);
+        // Generated code (br::shaderstore::SetGeneratedSource) is found by file name in any folder, without a dependency:
+        // the request's defines name it, hash included.
+        if (const auto generated = br::shaderstore::GeneratedSource(path.filename().string())) {
+            ComPtr<IDxcBlobEncoding> blob;
+            const HRESULT result = m_utils.CreateBlob(generated->data(), static_cast<UINT32>(generated->size()), CP_UTF8, &blob);
+            if (FAILED(result)) return result;
+            m_generated.push_back(generated);
+            *source = blob.Detach();
+            return S_OK;
+        }
+        // Relative to the folder the shader paths are relative to, not to whatever the working directory is.
+        if (path.is_relative()) path = br::shaderstore::SourceRoot() / path;
+        const std::string* bytes = m_includes.Open(path);
+        if (!bytes) return E_FAIL;
+        std::string_view text(*bytes);
+        if (text.size() >= 3 && std::memcmp(text.data(), "\xEF\xBB\xBF", 3) == 0) text.remove_prefix(3);
+        ComPtr<IDxcBlobEncoding> blob;
+        const HRESULT result = m_utils.CreateBlob(text.data(), static_cast<UINT32>(text.size()), CP_UTF8, &blob);
+        if (FAILED(result)) return result;
+        *source = blob.Detach();
+        return S_OK;
     }
 
-    if (cacheData->blobs.size() != 1 || cacheData->blobs.front().kind != shadercache::BlobKind::Library) {
-        spdlog::warn("Shader library cache entry is malformed; treating as miss.");
-        return std::nullopt;
+private:
+    IDxcUtils& m_utils;
+    org::services::ShaderIncludeTracker& m_includes;
+    std::vector<std::shared_ptr<const std::string>> m_generated; // kept alive for the DXC call
+};
+
+// Reads files without recording them, for a compile that bypasses the store.
+class DirectIncludes final : public org::services::ShaderIncludeTracker {
+public:
+    const std::string* Open(const std::filesystem::path& path) override {
+        const auto key = path.lexically_normal().wstring();
+        if (const auto found = m_files.find(key); found != m_files.end()) return found->second.get();
+        std::ifstream input(path, std::ios::binary);
+        std::unique_ptr<std::string> bytes;
+        if (input) bytes = std::make_unique<std::string>((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        return m_files.emplace(key, std::move(bytes)).first->second.get();
     }
 
-    ShaderLibraryBundle bundle;
-    bundle.resourceDescriptorSlots = cacheData->resourceDescriptorSlots;
-    NormalizeRuntimeResourceIdentifiers(bundle.resourceDescriptorSlots);
-    bundle.resourceIDsHash = cacheData->resourceIDsHash;
-    if (!CreateBlobFromBytes(utils, cacheData->blobs.front().bytecode, bundle.libraryBlob)) {
-        spdlog::warn("Shader library cache blob reconstruction failed; treating as miss.");
-        return std::nullopt;
-    }
+private:
+    std::unordered_map<std::wstring, std::unique_ptr<std::string>> m_files;
+};
 
-    return bundle;
-}
-
-shadercache::CacheData BuildBundleCacheData(const ShaderInfoBundle& info, const ShaderBundle& bundle,
-    uint64_t buildConfigHash, shadercache::BinaryFormat binaryFormat)
+std::string StoreSourcePath(const std::wstring& filename)
 {
-    shadercache::CacheData cacheData;
-    cacheData.buildConfigHash = buildConfigHash;
-    cacheData.binaryFormat = binaryFormat;
-    cacheData.artifactKind = shadercache::ArtifactKind::Bundle;
-    cacheData.resourceDescriptorSlots = bundle.resourceDescriptorSlots;
-    cacheData.resourceIDsHash = bundle.resourceIDsHash;
-
-    AppendBundleBlob(cacheData, shadercache::BlobKind::Vertex, info.vertexShader ? info.vertexShader->entryPoint : L"", info.vertexShader ? info.vertexShader->target : L"", bundle.vertexShader.Get());
-    AppendBundleBlob(cacheData, shadercache::BlobKind::Pixel, info.pixelShader ? info.pixelShader->entryPoint : L"", info.pixelShader ? info.pixelShader->target : L"", bundle.pixelShader.Get());
-    AppendBundleBlob(cacheData, shadercache::BlobKind::Amplification, info.amplificationShader ? info.amplificationShader->entryPoint : L"", info.amplificationShader ? info.amplificationShader->target : L"", bundle.amplificationShader.Get());
-    AppendBundleBlob(cacheData, shadercache::BlobKind::Mesh, info.meshShader ? info.meshShader->entryPoint : L"", info.meshShader ? info.meshShader->target : L"", bundle.meshShader.Get());
-    AppendBundleBlob(cacheData, shadercache::BlobKind::Compute, info.computeShader ? info.computeShader->entryPoint : L"", info.computeShader ? info.computeShader->target : L"", bundle.computeShader.Get());
-    return cacheData;
-}
-
-shadercache::CacheData BuildLibraryCacheData(const ShaderLibraryInfo& info, const ShaderLibraryBundle& bundle,
-    uint64_t buildConfigHash, shadercache::BinaryFormat binaryFormat)
-{
-    shadercache::CacheData cacheData;
-    cacheData.buildConfigHash = buildConfigHash;
-    cacheData.binaryFormat = binaryFormat;
-    cacheData.artifactKind = shadercache::ArtifactKind::Library;
-    cacheData.resourceDescriptorSlots = bundle.resourceDescriptorSlots;
-    cacheData.resourceIDsHash = bundle.resourceIDsHash;
-    AppendBundleBlob(cacheData, shadercache::BlobKind::Library, L"", info.target, bundle.libraryBlob.Get());
-    return cacheData;
+    std::string path = ws2s(std::filesystem::path(filename).lexically_normal().generic_wstring());
+    std::ranges::transform(path, path.begin(), [](unsigned char c) { return static_cast<char>(c < 0x80 ? std::tolower(c) : c); });
+    return path;
 }
 
 } // namespace
+
+// What the store runs when no stored artifact is valid: DXC preprocessing with every file read through the store, the
+// BRSL resource rewrite, then DXC. The text the store keys an artifact on is the rewritten source of every stage and
+// the resource slots they share, so two requests share an artifact exactly when DXC would compile the same text.
+class PSOManagerShaderBuild final : public org::services::ShaderVariantBuild {
+public:
+    struct Slot {
+        br::shaderstore::StageKind kind;
+        ShaderInfo info;
+        std::string finalSource;
+    };
+
+    PSOManagerShaderBuild(PSOManager& manager, std::vector<Slot> slots, const std::vector<DxcDefine>& defines, bool emitSpirv, bool library)
+        : m_manager(manager), m_slots(std::move(slots)), m_defines(defines), m_emitSpirv(emitSpirv), m_library(library) {}
+
+    org::services::ShaderPreprocessOutput Preprocess(const std::string*, org::services::ShaderIncludeTracker& includes) override {
+        org::services::ShaderPreprocessOutput output;
+        try {
+            m_artifact = {};
+            if (m_library) PreprocessLibrary(includes);
+            else PreprocessBundle(includes);
+            output.text = KeyText();
+            output.succeeded = true;
+        } catch (const std::bad_alloc&) {
+            output.transientFailure = true;
+            output.diagnostics = "out of memory while preprocessing";
+        } catch (const std::exception& error) {
+            output.diagnostics = error.what();
+        }
+        return output;
+    }
+
+    org::services::ShaderCompileOutput Compile(const std::string*, const org::services::ShaderPreprocessOutput&, org::services::ShaderIncludeTracker&) override {
+        org::services::ShaderCompileOutput output;
+        try {
+            m_artifact.stages.clear();
+            for (const Slot& slot : m_slots) {
+                const DxcBuffer buffer{ slot.finalSource.data(), slot.finalSource.size(), 0 };
+                Microsoft::WRL::ComPtr<ID3DBlob> blob;
+                m_manager.CompileShader(slot.info.filename, slot.info.entryPoint, slot.info.target, buffer, m_defines, m_emitSpirv, blob);
+                m_artifact.stages.push_back({ slot.kind, CopyBlobBytes(blob.Get()) });
+            }
+            output.binary = br::shaderstore::EncodeBundle(m_artifact);
+            output.succeeded = true;
+        } catch (const std::bad_alloc&) {
+            output.transientFailure = true;
+            output.diagnostics = "out of memory while compiling";
+        } catch (const std::exception& error) {
+            output.diagnostics = error.what();
+        }
+        return output;
+    }
+
+private:
+    void PreprocessBundle(org::services::ShaderIncludeTracker& includes) {
+        std::vector<Microsoft::WRL::ComPtr<ID3DBlob>> preprocessed;
+        std::vector<PreparedShaderSource> prepared;
+        std::unordered_set<std::string> usedMandatoryIDs;
+        std::unordered_set<std::string> usedOptionalIDs;
+        for (const Slot& slot : m_slots) {
+            auto& blob = preprocessed.emplace_back(m_manager.PreprocessShaderSource(
+                slot.info.filename, slot.info.entryPoint, slot.info.target, m_defines, m_emitSpirv, includes));
+            const DxcBuffer buffer{ blob->GetBufferPointer(), blob->GetBufferSize(), 0 };
+            auto& source = prepared.emplace_back(PrepareShaderSourceForEntryPoint(buffer, ws2s(slot.info.entryPoint)));
+            usedMandatoryIDs.insert(source.mandatoryIDs.begin(), source.mandatoryIDs.end());
+            usedOptionalIDs.insert(source.optionalIDs.begin(), source.optionalIDs.end());
+        }
+
+        // A resource referenced through both mandatory and optional code paths is
+        // mandatory for the combined pipeline. Keep one canonical root-constant
+        // slot; otherwise the optional replacement overwrites the shader macro
+        // while both entries remain in the CPU binding array.
+        for (const auto& mandatoryID : usedMandatoryIDs) {
+            usedOptionalIDs.erase(mandatoryID);
+        }
+        m_artifact.mandatoryIds.assign(usedMandatoryIDs.begin(), usedMandatoryIDs.end());
+        m_artifact.optionalIds.assign(usedOptionalIDs.begin(), usedOptionalIDs.end());
+        std::sort(m_artifact.mandatoryIds.begin(), m_artifact.mandatoryIds.end());
+        std::sort(m_artifact.optionalIds.begin(), m_artifact.optionalIds.end());
+
+        const size_t descriptorSlotCount = m_artifact.mandatoryIds.size() + m_artifact.optionalIds.size();
+        if (descriptorSlotCount > org::shaderapi::kNumResourceDescriptorIndicesRootConstants) {
+            throw std::runtime_error(
+                "Shader preprocessing requires " + std::to_string(descriptorSlotCount) +
+                " descriptor index root constants, but only " +
+                std::to_string(org::shaderapi::kNumResourceDescriptorIndicesRootConstants) +
+                " are available.");
+        }
+
+        std::unordered_map<std::string, std::string> replacementMap;
+        uint32_t nextIndex = 0;
+        for (const auto* ids : { &m_artifact.mandatoryIds, &m_artifact.optionalIds }) {
+            for (const std::string& entry : *ids) {
+                replacementMap[entry] = "ResourceDescriptorIndex" + std::to_string(nextIndex++);
+            }
+        }
+
+        for (size_t index = 0; index < m_slots.size(); ++index) {
+            Slot& slot = m_slots[index];
+            slot.finalSource = FinalizePreparedShaderSource(prepared[index], replacementMap);
+            if (prepared[index].diagnostics.usedFallbackRewrite) {
+                spdlog::warn(
+                    "Shader preprocess fallback used for {} ({}): {}",
+                    ws2s(slot.info.entryPoint),
+                    ws2s(slot.info.filename),
+                    FormatShaderPreprocessDiagnostics(prepared[index].diagnostics));
+            }
+            if (slot.finalSource.empty()) {
+                slot.finalSource.assign(static_cast<const char*>(preprocessed[index]->GetBufferPointer()), preprocessed[index]->GetBufferSize());
+            }
+        }
+
+        std::vector<std::string> combinedIds = m_artifact.mandatoryIds;
+        combinedIds.insert(combinedIds.end(), m_artifact.optionalIds.begin(), m_artifact.optionalIds.end());
+        m_artifact.resourceIdsHash = hash_list(combinedIds);
+    }
+
+    void PreprocessLibrary(org::services::ShaderIncludeTracker& includes) {
+        Slot& slot = m_slots.front();
+        const auto blob = m_manager.PreprocessShaderSource(slot.info.filename, L"", slot.info.target, m_defines, m_emitSpirv, includes);
+        const DxcBuffer buffer{ blob->GetBufferPointer(), blob->GetBufferSize(), 0 };
+        PreprocessedLibraryResult libPP = PreprocessShaderLibrary(buffer);
+        if (libPP.diagnostics.usedFallbackRewrite) {
+            spdlog::warn(
+                "Shader preprocess fallback used for library {}: {}",
+                ws2s(slot.info.filename),
+                FormatShaderPreprocessDiagnostics(libPP.diagnostics));
+        }
+        const size_t descriptorSlotCount = libPP.mandatoryIDs.size() + libPP.optionalIDs.size();
+        if (descriptorSlotCount > org::shaderapi::kNumResourceDescriptorIndicesRootConstants) {
+            throw std::runtime_error(
+                "Shader library preprocessing requires " + std::to_string(descriptorSlotCount) +
+                " descriptor index root constants, but only " +
+                std::to_string(org::shaderapi::kNumResourceDescriptorIndicesRootConstants) +
+                " are available.");
+        }
+        slot.finalSource = std::move(libPP.finalSource);
+        m_artifact.mandatoryIds = std::move(libPP.mandatoryIDs);
+        m_artifact.optionalIds = std::move(libPP.optionalIDs);
+        m_artifact.resourceIdsHash = libPP.resourceIDsHash;
+    }
+
+    // Everything the stored artifact holds, as text: each stage's rewritten source and the slots they share.
+    std::string KeyText() const {
+        std::string text;
+        for (const Slot& slot : m_slots) {
+            text += "#brsl-stage " + std::to_string(static_cast<unsigned>(slot.kind)) + " " + ws2s(slot.info.entryPoint) + " " + ws2s(slot.info.target) + "\n";
+            text += slot.finalSource;
+            text += "\n";
+        }
+        text += "#brsl-mandatory";
+        for (const std::string& id : m_artifact.mandatoryIds) text += " " + id;
+        text += "\n#brsl-optional";
+        for (const std::string& id : m_artifact.optionalIds) text += " " + id;
+        text += "\n#brsl-ids " + std::to_string(m_artifact.resourceIdsHash) + "\n";
+        return text;
+    }
+
+    PSOManager& m_manager;
+    std::vector<Slot> m_slots;
+    const std::vector<DxcDefine>& m_defines;
+    bool m_emitSpirv;
+    bool m_library;
+    br::shaderstore::BundleArtifact m_artifact;
+};
+
+namespace {
+
+struct ShaderStoreKeys {
+    org::services::ShaderStoreHash variant;
+    org::services::ShaderStoreHash config;
+    // The request's recipe. The store checks it as the variant's root; every real source file is a dependency.
+    std::string recipe;
+    std::string label;
+};
+
+// The variant key is everything that names the request: the BRSL rewrite's version, DXC's arguments and identity, the
+// stages and the defines in order. Include folders are left out: they are absolute, and the dependency record covers
+// what they found. The config key is what two requests must share to share an artifact, once their texts match.
+ShaderStoreKeys MakeShaderStoreKeys(
+    const std::vector<PSOManagerShaderBuild::Slot>& slots,
+    const std::vector<DxcDefine>& defines,
+    uint8_t format,
+    bool library,
+    bool requestDebugInfo,
+    bool requestWarningsAsErrors)
+{
+    org::services::ShaderKeyBuilder config;
+    config.Add(std::string_view("BasicRenderer.BRSL"))
+        .Add(static_cast<uint64_t>(br::shaderstore::kBundleLayoutVersion))
+        .Add(kShaderCompilerArgumentFingerprint)
+        .Add(format == br::shaderstore::kFormatBundleSpirv ? kSpirvCompilerArgumentFingerprint : uint64_t{ 0 })
+        .Add(br::shaderstore::CompilerIdentity())
+        .Add(static_cast<uint64_t>(format))
+#if WRITE_DEBUG_FILES
+        .Add(uint64_t{ 1 })
+#else
+        .Add(uint64_t{ 0 })
+#endif
+        .Add(uint64_t{ 1 }) // warnings-as-errors is always on in the DXC path
+        .Add(static_cast<uint64_t>(library));
+    for (const auto& slot : slots) {
+        config.Add(static_cast<uint64_t>(slot.kind)).Add(std::wstring_view(slot.info.entryPoint)).Add(std::wstring_view(slot.info.target))
+            .Add(static_cast<uint64_t>(ShouldSkipValidationForEntryPoint(slot.info.entryPoint)));
+    }
+
+    ShaderStoreKeys keys;
+    keys.config = config.Finish();
+    std::string& recipe = keys.recipe;
+    for (const auto& slot : slots) {
+        recipe += std::to_string(static_cast<unsigned>(slot.kind)) + "\x1f" + StoreSourcePath(slot.info.filename) + "\x1f" +
+            ws2s(slot.info.entryPoint) + "\x1f" + ws2s(slot.info.target) + "\n";
+    }
+    for (const auto& define : defines) {
+        recipe += "-D" + ws2s(define.Name ? define.Name : L"") + "\x1f" + ws2s(define.Value ? define.Value : L"") + "\n";
+    }
+    org::services::ShaderKeyBuilder variant;
+    variant.Add(keys.config)
+        .Add(static_cast<uint64_t>(kBRSLPreprocessVersion))
+        .Add(static_cast<uint64_t>(requestDebugInfo))
+        .Add(static_cast<uint64_t>(requestWarningsAsErrors))
+        .Add(std::string_view(recipe));
+    keys.variant = variant.Finish();
+
+    const auto& first = slots.front().info;
+    keys.label = ws2s(first.filename) + (first.entryPoint.empty() ? std::string{} : ":" + ws2s(first.entryPoint));
+    if (slots.size() > 1) keys.label += " (+" + std::to_string(slots.size() - 1) + " stages)";
+    return keys;
+}
+
+struct StoredShaders {
+    std::vector<std::byte> binary;
+    // Set when the bytecode came from the store rather than this compile: the artifact a rejecting device should drop.
+    org::services::ShaderStoreHash storedKey;
+};
+
+StoredShaders ResolveThroughShaderStore(const ShaderStoreKeys& keys, PSOManagerShaderBuild& build, uint8_t format)
+{
+    br::shaderstore::NoteRequest();
+    if (g_shaderReload && ShaderDumpDirectory()) {
+        DirectIncludes includes;
+        auto preprocessed = build.Preprocess(nullptr, includes);
+        if (!preprocessed.succeeded) throw std::runtime_error(preprocessed.diagnostics);
+        auto compiled = build.Compile(nullptr, preprocessed, includes);
+        if (!compiled.succeeded) throw std::runtime_error(compiled.diagnostics);
+        return { std::move(compiled.binary), {} };
+    }
+
+    while (!GetShaderCompileFlightRegistry().TryBecomeOwnerOrWait(keys.variant)) {
+    }
+    ShaderCompileFlightScope flight(keys.variant);
+
+    org::services::ShaderVariantRequest request;
+    request.variantKey = keys.variant;
+    request.compileConfigKey = keys.config;
+    // RelWithDebInfo embeds debug info, but its source is the preprocessed text, which holds no comments. Sharing
+    // across texts that differ only in line markers lets a comment edit reuse an artifact whose line table is off by
+    // the lines it added, until that shader next compiles. Recompiling every shader that includes an edited header
+    // was the problem this cache exists to fix.
+    request.debug = false;
+    request.format = format;
+    request.rootBytes = std::as_bytes(std::span(keys.recipe));
+    request.hasRootBytes = true;
+    request.build = &build;
+    auto result = br::shaderstore::Store().Resolve(request);
+    if (br::shaderstore::DiagnosticsEnabled() && result.outcome != org::services::ShaderStoreOutcome::Hit) {
+        spdlog::info("Shader store {}: {} (miss: {}{}{}) artifact={}", keys.label, br::shaderstore::OutcomeName(result.outcome),
+            br::shaderstore::MissName(result.miss), result.changedFile.empty() ? "" : ", changed ", result.changedFile, result.compileKey.ToHex());
+    }
+    if (result.outcome == org::services::ShaderStoreOutcome::Failed) {
+        if (result.failureFromCache) {
+            spdlog::error("Shader build of {} failed before with these same sources and is not retried until one changes:\n{}", keys.label, result.diagnostics);
+        }
+        throw std::runtime_error(result.diagnostics.empty() ? "Shader build of " + keys.label + " failed" : result.diagnostics);
+    }
+    StoredShaders stored{ std::move(result.binary), {} };
+    if (result.outcome != org::services::ShaderStoreOutcome::Compiled) stored.storedKey = result.compileKey;
+    return stored;
+}
+
+br::shaderstore::BundleArtifact DecodeStoredShaders(const StoredShaders& stored, const std::string& label)
+{
+    br::shaderstore::BundleArtifact artifact;
+    if (!br::shaderstore::DecodeBundle(stored.binary, artifact)) {
+        if (stored.storedKey) br::shaderstore::Store().RemoveArtifact(stored.storedKey);
+        throw std::runtime_error("Shader store: the artifact for " + label + " is not a valid bundle");
+    }
+    return artifact;
+}
+
+} // namespace
+
+// A device rejected bytecode the store returned: drop that artifact, so the next request builds it from source.
+bool PSOManager::DiscardStoredShaders(uint64_t storeKeyHigh, uint64_t storeKeyLow)
+{
+    const org::services::ShaderStoreHash key{ storeKeyHigh, storeKeyLow };
+    if (!key) return false;
+    spdlog::warn("Shader store: a device rejected stored artifact {}; it is deleted and builds again", key.ToHex());
+    br::shaderstore::Store().RemoveArtifact(key);
+    return true;
+}
+
+Microsoft::WRL::ComPtr<ID3DBlob> PSOManager::PreprocessShaderSource(
+    const std::wstring& filename,
+    const std::wstring& entryPoint,
+    const std::wstring& target,
+    const std::vector<DxcDefine>& defines,
+    bool emitSpirv,
+    org::services::ShaderIncludeTracker& includes)
+{
+    const std::filesystem::path& root = br::shaderstore::SourceRoot();
+    const std::filesystem::path fullPath = root / filename;
+    // Read through the store, so the root file is a dependency like any include. Copied into a blob, not
+    // IDxcUtils::LoadFile: for a file that starts with a UTF-8 byte order mark (an editor's or PowerShell's), releasing
+    // the blob LoadFile returned corrupted the heap. The mark is dropped.
+    const std::string* bytes = includes.Open(fullPath);
+    if (!bytes) {
+        throw std::runtime_error("Shader source file not found: " + fullPath.string());
+    }
+    std::string_view text(*bytes);
+    if (text.size() >= 3 && std::memcmp(text.data(), "\xEF\xBB\xBF", 3) == 0) text.remove_prefix(3);
+    ValidateUtf8OrThrow(text, "Shader source file");
+    ComPtr<IDxcBlobEncoding> sourceBlob;
+    ThrowIfFailed(pUtils->CreateBlob(text.data(), static_cast<UINT32>(text.size()), CP_UTF8, &sourceBlob));
+    const DxcBuffer source{ sourceBlob->GetBufferPointer(), sourceBlob->GetBufferSize(), 0 };
+
+    ShaderCompileOptions opts;
+    opts.entryPoint = entryPoint;
+    opts.target = target;
+    opts.defines = defines;
+    opts.emitSpirv = emitSpirv;
+#if WRITE_DEBUG_FILES
+    opts.enableDebugInfo = true;
+#endif
+    opts.warningsAsErrors = true;
+
+    std::vector<std::wstring> ownedArgs;
+    const auto shaderDir = root / L"shaders";
+    auto args = BuildArguments(opts, shaderDir, ownedArgs);
+    args.push_back(L"-P"); // Preprocess only
+
+    StoreIncludeHandler includeHandler(*pUtils.Get(), includes);
+    auto result = InvokeCompile(source, args, &includeHandler, filename, entryPoint, target);
+    Microsoft::WRL::ComPtr<ID3DBlob> preprocessed;
+    result->GetOutput(DXC_OUT_HLSL, IID_PPV_ARGS(&preprocessed), nullptr);
+    if (!preprocessed) {
+        throw std::runtime_error("DXC produced no preprocessed text for " + ws2s(filename));
+    }
+    return preprocessed;
+}
 
 void PSOManager::initialize() {
     createRootSignature();
@@ -713,6 +806,8 @@ void PSOManager::Cleanup() {
     m_pendingMaterialEvalPSOs.clear();
     m_rayTracingPSOCache.clear();
     m_pendingRayTracingPSOs.clear();
+    m_onDemandComputePSOCache.clear();
+    m_pendingOnDemandComputePSOs.clear();
     m_livePipelines.clear();
     m_liveJobs.clear();
     m_pendingLivePublications.clear();
@@ -1073,6 +1168,7 @@ org::PipelineState PSOManager::CreatePSO(UINT psoFlags, MaterialCompileFlags mat
     rhi::PipelinePtr pso; 
 	auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), pso);
     if (Failed(result)) {
+        DiscardStoredShaders(compiledBundle.storeKeyHigh, compiledBundle.storeKeyLow);
         throw std::runtime_error("Failed to create PSO (RHI)");
     }
 
@@ -1138,6 +1234,7 @@ org::PipelineState PSOManager::CreateShadowPSO(UINT psoFlags, MaterialCompileFla
     rhi::PipelinePtr pso;
 	auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), pso);
     if (Failed(result)) {
+        DiscardStoredShaders(compiledBundle.storeKeyHigh, compiledBundle.storeKeyLow);
         throw std::runtime_error("Failed to create Shadow PSO (RHI)");
     }
 
@@ -1210,6 +1307,7 @@ org::PipelineState PSOManager::CreatePrePassPSO(UINT psoFlags, MaterialCompileFl
     rhi::PipelinePtr pso;
 	auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), pso);
     if (Failed(result)) {
+        DiscardStoredShaders(compiledBundle.storeKeyHigh, compiledBundle.storeKeyLow);
         throw std::runtime_error("Failed to create PrePass PSO");
     }
 
@@ -1276,6 +1374,7 @@ org::PipelineState PSOManager::CreateVisibilityBufferPSO(UINT psoFlags, Material
     rhi::PipelinePtr pso;
 	auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), pso);
     if (Failed(result)) {
+        DiscardStoredShaders(compiledBundle.storeKeyHigh, compiledBundle.storeKeyLow);
         throw std::runtime_error("Failed to create PrePass PSO");
     }
 
@@ -1323,6 +1422,7 @@ org::PipelineState PSOManager::CreateClusterLODRasterPSO(
     rhi::PipelinePtr pso;
     auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), pso);
     if (Failed(result)) {
+        DiscardStoredShaders(compiledBundle.storeKeyHigh, compiledBundle.storeKeyLow);
         throw std::runtime_error("Failed to create Mesh PrePass PSO");
     }
 
@@ -1369,6 +1469,7 @@ org::PipelineState PSOManager::CreateClusterLODVirtualShadowRasterPSO(
     rhi::PipelinePtr pso;
     auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), pso);
     if (Failed(result)) {
+        DiscardStoredShaders(compiledBundle.storeKeyHigh, compiledBundle.storeKeyLow);
         throw std::runtime_error("Failed to create CLod virtual shadow raster PSO");
     }
 
@@ -1413,6 +1514,7 @@ org::PipelineState PSOManager::CreateClusterLODDeepVisibilityRasterPSO(
     rhi::PipelinePtr pso;
     auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), pso);
     if (Failed(result)) {
+        DiscardStoredShaders(compiledBundle.storeKeyHigh, compiledBundle.storeKeyLow);
         throw std::runtime_error("Failed to create CLod deep visibility raster PSO");
     }
 
@@ -1467,6 +1569,7 @@ org::PipelineState PSOManager::CreateClusterLODAVBOITRasterPSO(
     rhi::PipelinePtr pso;
     auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), pso);
     if (Failed(result)) {
+        DiscardStoredShaders(compiledBundle.storeKeyHigh, compiledBundle.storeKeyLow);
         throw std::runtime_error("Failed to create CLod AVBOIT raster PSO");
     }
 
@@ -1523,6 +1626,7 @@ org::PipelineState PSOManager::CreateClusterLODAVBOITOccupancyPSO(
     rhi::PipelinePtr pso;
     auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), pso);
     if (Failed(result)) {
+        DiscardStoredShaders(compiledBundle.storeKeyHigh, compiledBundle.storeKeyLow);
         throw std::runtime_error("Failed to create CLod AVBOIT occupancy PSO");
     }
 
@@ -1613,6 +1717,7 @@ org::PipelineState PSOManager::CreateClusterLODAVBOITShadePSO(
     rhi::PipelinePtr pso;
     auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), pso);
     if (Failed(result)) {
+        DiscardStoredShaders(compiledBundle.storeKeyHigh, compiledBundle.storeKeyLow);
         throw std::runtime_error("Failed to create CLod AVBOIT shading PSO");
     }
 
@@ -1696,6 +1801,7 @@ org::PipelineState PSOManager::CreatePPLLPSO(UINT psoFlags, MaterialCompileFlags
     rhi::PipelinePtr pso;
     auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), pso);
     if (Failed(result)) {
+        DiscardStoredShaders(compiledBundle.storeKeyHigh, compiledBundle.storeKeyLow);
         throw std::runtime_error("Failed to create PPLL PSO");
     }
 
@@ -1908,6 +2014,13 @@ org::PipelineState PSOManager::BuildComputePipeline(const ComputeRecipe& recipe,
     auto dev = DeviceManager::GetInstance().GetDevice();
     rhi::PipelinePtr pso;
     auto result = dev.CreatePipeline(items, (uint32_t)std::size(items), pso);
+    if (Failed(result) && DiscardStoredShaders(compiled.storeKeyHigh, compiled.storeKeyLow)) {
+        // Built from source once more: a stored artifact the device rejects must not fail the pipeline.
+        compiled = CompileShaders(sib);
+        soCS.bytecode = rhi::DXIL(compiled.computeShader.Get());
+        const rhi::PipelineStreamItem retryItems[] = { rhi::Make(soLayout), rhi::Make(soCS) };
+        result = dev.CreatePipeline(retryItems, (uint32_t)std::size(retryItems), pso);
+    }
     if (Failed(result)) {
         throw std::runtime_error("Failed to create compute PSO (RHI)");
     }
@@ -1985,8 +2098,8 @@ org::PipelineState PSOManager::BuildRayTracingPipeline(const RayTracingPipelineR
     std::vector<DxcDefine> defines;
     defines.reserve(recipe.defines.size());
     for (const auto& [name, value] : recipe.defines) defines.push_back({ name.c_str(), value.c_str() });
-    const ShaderLibraryBundle library = CompileShaderLibrary(ShaderLibraryInfo(recipe.libraryPath, recipe.target), defines);
-    const rhi::ShaderBinary bytecode = rhi::DXIL(library.libraryBlob.Get());
+    ShaderLibraryBundle library = CompileShaderLibrary(ShaderLibraryInfo(recipe.libraryPath, recipe.target), defines);
+    rhi::ShaderBinary bytecode = rhi::DXIL(library.libraryBlob.Get());
 
     std::vector<rhi::SubobjShader> shaders;
     shaders.reserve(recipe.shaders.size());
@@ -2023,7 +2136,15 @@ org::PipelineState PSOManager::BuildRayTracingPipeline(const RayTracingPipelineR
     const rhi::PipelineStreamItem items[] = { rhi::Make(description) };
 
     rhi::PipelinePtr pso;
-    if (Failed(DeviceManager::GetInstance().GetDevice().CreatePipeline(items, static_cast<uint32_t>(std::size(items)), pso))) {
+    auto created = DeviceManager::GetInstance().GetDevice().CreatePipeline(items, static_cast<uint32_t>(std::size(items)), pso);
+    if (Failed(created) && DiscardStoredShaders(library.storeKeyHigh, library.storeKeyLow)) {
+        // Built from source once more: a stored artifact the device rejects must not fail the pipeline.
+        library = CompileShaderLibrary(ShaderLibraryInfo(recipe.libraryPath, recipe.target), defines);
+        bytecode = rhi::DXIL(library.libraryBlob.Get());
+        for (auto& shader : shaders) shader.bytecode = bytecode;
+        created = DeviceManager::GetInstance().GetDevice().CreatePipeline(items, static_cast<uint32_t>(std::size(items)), pso);
+    }
+    if (Failed(created)) {
         throw std::runtime_error("Failed to create ray tracing pipeline '" + recipe.debugName + "'");
     }
     if (!recipe.debugName.empty()) pso->SetName(recipe.debugName.c_str());
@@ -2064,10 +2185,45 @@ org::PipelineState PSOManager::MakeRayTracingPipeline(RayTracingPipelineRecipe r
     entry.state = pipeline;
     entry.shaderPaths.push_back(ws2s(recipe.libraryPath));
     entry.rayTracingRecipeHash = recipeHash;
+    entry.rebuildWithDefines = [this, recipe](const std::map<std::wstring, std::wstring>& overrides) {
+        RayTracingPipelineRecipe modified = recipe;
+        for (const auto& [name, value] : overrides) {
+            auto it = std::find_if(modified.defines.begin(), modified.defines.end(), [&name](const auto& define) { return define.first == name; });
+            if (it != modified.defines.end()) it->second = value;
+            else modified.defines.emplace_back(name, value);
+        }
+        return BuildRayTracingPipeline(modified);
+    };
     entry.rebuild = [this, recipe = std::move(recipe)]() { return BuildRayTracingPipeline(recipe); };
     entry.generations.push_back(pipeline.GetPayload());
     m_livePipelines.emplace(std::move(id), std::move(entry));
     return pipeline;
+}
+
+const org::PipelineState* PSOManager::TryGetComputePipeline(const std::wstring& shaderPath, const std::wstring& entryPoint,
+    const std::vector<std::pair<std::wstring, std::wstring>>& defines, const std::string& debugName)
+{
+    uint64_t key = 14695981039346656037ull;
+    const auto mix = [&key](std::wstring_view text) {
+        for (const wchar_t c : text) key = (key ^ static_cast<uint64_t>(c)) * 1099511628211ull;
+        key = (key ^ 0xFFFFull) * 1099511628211ull;
+    };
+    mix(shaderPath);
+    mix(entryPoint);
+    for (const auto& [name, value] : defines) {
+        mix(name);
+        mix(value);
+    }
+    return TryGetOrRequestPipelineState(
+        &PSOManager::m_onDemandComputePSOCache,
+        &PSOManager::m_pendingOnDemandComputePSOs,
+        key,
+        "PSOManager::CompileOnDemandComputePSO",
+        [this, shaderPath, entryPoint, defines, debugName]() {
+            std::vector<DxcDefine> dxcDefines;
+            for (const auto& [name, value] : defines) dxcDefines.push_back({ name.c_str(), value.c_str() });
+            return MakeComputePipeline(GetComputeRootSignature().GetHandle(), shaderPath.c_str(), entryPoint.c_str(), dxcDefines, debugName.c_str());
+        });
 }
 
 const org::PipelineState* PSOManager::TryGetRayTracingPipeline(const RayTracingPipelineRecipe& recipe)
@@ -2406,43 +2562,6 @@ std::vector<DxcDefine> PSOManager::GetShaderDefines(UINT psoFlags, MaterialCompi
     return defines;
 }
 
-void PSOManager::GetPreprocessedBlob(
-    const std::wstring& filename,
-    const std::wstring& entryPoint,
-    const std::wstring& target,
-    std::vector<DxcDefine> defines,
-    Microsoft::WRL::ComPtr<ID3DBlob>& outBlob,
-    bool emitSpirv) {
-
-    auto exePath = std::filesystem::path(GetExePath());
-    auto fullPath = exePath / filename;
-    auto shaderDir = exePath / L"shaders";
-
-    PSOManager::SourceData srcBuf;
-    LoadSource(fullPath, srcBuf);
-    auto includeHandler = CreateIncludeHandler();
-
-    ShaderCompileOptions opts;
-    opts.entryPoint = entryPoint;
-    opts.target = target;
-    opts.defines = std::move(defines);
-    opts.emitSpirv = emitSpirv;
-#if WRITE_DEBUG_FILES
-    opts.enableDebugInfo = true;
-#endif
-    opts.warningsAsErrors = true;
-
-    std::vector<std::wstring> ownedArgs;
-    auto args = BuildArguments(opts, shaderDir, ownedArgs);
-
-    args.push_back(L"-P"); // Preprocess only
-    auto preProcessedResult = InvokeCompile(
-        srcBuf.buffer, args, includeHandler.Get(), filename, entryPoint, target
-    );
-
-    preProcessedResult->GetOutput(DXC_OUT_HLSL, IID_PPV_ARGS(&outBlob), nullptr);
-}
-
 void pruneUnusedCodeForSlot(
 	std::string& inOutSource,
     const std::optional<ShaderInfo>& slot)
@@ -2489,142 +2608,56 @@ std::string rewriteResourceDescriptorIndexCallsForSlot(
 	);
 }
 
-void PSOManager::CompileShaderForSlot(
-    const std::optional<ShaderInfo>& slot,
-    const std::vector<DxcDefine>& defines,
-    const DxcBuffer& buffer,
-    bool emitSpirv,
-    Microsoft::WRL::ComPtr<ID3DBlob>& outBlob)
-{
-    if (!slot)
-        return;
-    //DxcBuffer ppBuffer = {};
-    //Microsoft::WRL::ComPtr<ID3DBlob> preprocessedBlob;
-    //PreprocessShaderSlot(slot, defines, preprocessedBlob, ppBuffer);
-    CompileShader(
-        slot->filename,
-        slot->entryPoint,
-        slot->target,
-        buffer,
-        defines,
-        emitSpirv,
-        outBlob
-    );
+namespace {
+void RecordShaderLibrary(const ShaderLibraryInfo& info, const std::vector<DxcDefine>& defines);
 }
 
 ShaderLibraryBundle PSOManager::CompileShaderLibrary(const ShaderLibraryInfo& libraryInfo, const std::vector<DxcDefine>& defines) {
-	const shadercache::BinaryFormat binaryFormat = GetShaderBinaryFormat(DeviceManager::GetInstance().GetBackend());
-	const bool emitSpirv = IsSpirvFormat(binaryFormat);
-    Microsoft::WRL::ComPtr<ID3DBlob> outBlob;
+	const rhi::Backend backend = DeviceManager::GetInstance().GetBackend();
+	if (backend == rhi::Backend::D3D12) RecordShaderLibrary(libraryInfo, defines);
+	return CompileShaderLibraryForBackend(libraryInfo, defines, backend);
+}
 
-    const uint64_t buildConfigHash = ComputeShaderCacheBuildConfigHash(binaryFormat);
-    const shadercache::CacheKey cacheKey{
-        .binaryFormat = binaryFormat,
-        .artifactKind = shadercache::ArtifactKind::Library,
-        .identityHash = BuildLibraryIdentityHash(libraryInfo, defines),
-    };
-    const ShaderCompileFlightKey flightKey{
-        .binaryFormat = cacheKey.binaryFormat,
-        .artifactKind = cacheKey.artifactKind,
-        .identityHash = cacheKey.identityHash,
-        .buildConfigHash = buildConfigHash,
-    };
-    if (!ShaderArtifactCacheUsable()) {
-        spdlog::info(
-            "Shader live reload: bypassing library artifact cache identity=0x{:X}",
-            cacheKey.identityHash);
-    }
-    bool cacheLookupLogged = false;
-    for (;;) {
-        if (ShaderArtifactCacheUsable()) {
-            std::optional<ShaderLibraryBundle> cachedBundle =
-                TryLoadShaderLibraryFromCache(cacheKey, buildConfigHash, pUtils.Get());
-            if (ShaderCacheDiagnosticsEnabled() && !cacheLookupLogged) {
-                cacheLookupLogged = true;
-                spdlog::info("Shader library cache lookup file='{}' target='{}' identity=0x{:X} build=0x{:X} result={}",
-                    ws2s(libraryInfo.filename), ws2s(libraryInfo.target), cacheKey.identityHash,
-                    buildConfigHash, cachedBundle ? "hit" : "miss");
-            }
-            if (cachedBundle) return *cachedBundle;
-        }
-        if (GetShaderCompileFlightRegistry().TryBecomeOwnerOrWait(flightKey)) {
-            break;
-        }
-    }
-    ShaderCompileFlightScope flightScope(flightKey);
+ShaderLibraryBundle PSOManager::CompileShaderLibraryForBackend(const ShaderLibraryInfo& libraryInfo, const std::vector<DxcDefine>& defines, rhi::Backend backend) {
+	const uint8_t format = GetShaderStoreFormat(backend);
+	const bool emitSpirv = format == br::shaderstore::kFormatBundleSpirv;
 
-	// Cache misses alone pay preprocessing/BRSL rewrite/compilation. Offline
-	// preprocessing writes the same recipe-addressed artifact used above.
-    DxcBuffer dxcPreprocessBuff{};
-    GetPreprocessedBlob(
-        libraryInfo.filename,
-        L"",
-        libraryInfo.target,
-        defines,
-		outBlob,
-		emitSpirv
-	);
-    dxcPreprocessBuff.Ptr = outBlob->GetBufferPointer();
-    dxcPreprocessBuff.Size = outBlob->GetBufferSize();
-    dxcPreprocessBuff.Encoding = 0;
-
-    // Compile BRSL info
-    PreprocessedLibraryResult libPP = PreprocessShaderLibrary(dxcPreprocessBuff);
-    if (libPP.diagnostics.usedFallbackRewrite) {
-        spdlog::warn(
-            "Shader preprocess fallback used for library {}: {}",
-            ws2s(libraryInfo.filename),
-            FormatShaderPreprocessDiagnostics(libPP.diagnostics));
-    }
-
-    const size_t descriptorSlotCount = libPP.mandatoryIDs.size() + libPP.optionalIDs.size();
-    if (descriptorSlotCount > org::shaderapi::kNumResourceDescriptorIndicesRootConstants) {
-        throw std::runtime_error(
-            "Shader library preprocessing requires " + std::to_string(descriptorSlotCount) +
-            " descriptor index root constants, but only " +
-            std::to_string(org::shaderapi::kNumResourceDescriptorIndicesRootConstants) +
-            " are available.");
-    }
-
-    DxcBuffer finalBuf = dxcPreprocessBuff;
-    finalBuf.Ptr = libPP.finalSource.data();
-    finalBuf.Size = libPP.finalSource.size();
-
-    // compile as a library target (lib_6_8) without entry point
-    CompileShader(libraryInfo.filename, /*entryPoint*/ L"", libraryInfo.target, finalBuf, defines, emitSpirv, outBlob);
-
-	std::vector<org::ResourceIdentifier> mandatoryResourceDescriptors;
-    for (const auto& idStr : libPP.mandatoryIDs) {
-		mandatoryResourceDescriptors.push_back(ResolveRuntimeResourceIdentifier(idStr));
-    }
-	std::vector<org::ResourceIdentifier> optionalResourceDescriptors;
-    for (const auto& idStr : libPP.optionalIDs) {
-        optionalResourceDescriptors.push_back(ResolveRuntimeResourceIdentifier(idStr));
+	std::vector<PSOManagerShaderBuild::Slot> slots;
+	slots.push_back({ br::shaderstore::StageKind::Library, ShaderInfo(libraryInfo.filename, L"", libraryInfo.target), {} });
+	const ShaderStoreKeys keys = MakeShaderStoreKeys(slots, defines, format, true, false, true);
+	// A miss alone pays preprocessing, the BRSL rewrite and compilation (as a library target, without an entry point).
+	PSOManagerShaderBuild build(*this, std::move(slots), defines, emitSpirv, true);
+	const StoredShaders stored = ResolveThroughShaderStore(keys, build, format);
+	const br::shaderstore::BundleArtifact artifact = DecodeStoredShaders(stored, keys.label);
+	if (artifact.stages.size() != 1 || artifact.stages.front().kind != br::shaderstore::StageKind::Library) {
+		if (stored.storedKey) br::shaderstore::Store().RemoveArtifact(stored.storedKey);
+		throw std::runtime_error("Shader store: the artifact for library " + keys.label + " holds no library");
 	}
 
-    ShaderLibraryBundle bundle;
-	bundle.libraryBlob = outBlob;
-    bundle.resourceDescriptorSlots = {mandatoryResourceDescriptors, optionalResourceDescriptors};
-	bundle.resourceIDsHash = libPP.resourceIDsHash;
-
-    const shadercache::CacheData cacheData = BuildLibraryCacheData(libraryInfo, bundle, buildConfigHash, binaryFormat);
-    if (ShaderArtifactCacheUsable()) {
-        shadercache::Save(cacheKey, cacheData);
-    }
+	ShaderLibraryBundle bundle;
+	if (!CreateBlobFromBytes(pUtils.Get(), artifact.stages.front().bytecode, bundle.libraryBlob)) {
+		throw std::runtime_error("Shader store: could not create a blob for library " + keys.label);
+	}
+	for (const std::string& id : artifact.mandatoryIds) {
+		bundle.resourceDescriptorSlots.mandatoryResourceDescriptorSlots.push_back(ResolveRuntimeResourceIdentifier(id));
+	}
+	for (const std::string& id : artifact.optionalIds) {
+		bundle.resourceDescriptorSlots.optionalResourceDescriptorSlots.push_back(ResolveRuntimeResourceIdentifier(id));
+	}
+	bundle.resourceIDsHash = artifact.resourceIdsHash;
+	bundle.storeKeyHigh = stored.storedKey.high;
+	bundle.storeKeyLow = stored.storedKey.low;
 	return bundle;
-
 }
 
 
 // ---------------------------------------------------------------------------
 // The compile manifest: every shader bundle a run compiles for D3D12, one line each, so an offline tool can compile the
-// same bundles again after the sources change (PSOManager::PrecompileRecordedShaderBundles). Artifact keys carry the
-// whole shader tree's digest, so an edit to any shader leaves every runtime-only variant (terrain material evaluation, the
-// graph's pass pipelines) to compile at runtime otherwise, for seconds. A line is the recipe, not the sources: it names
-// files, entries, targets, defines and flags.
+// same bundles again after the sources change (PSOManager::PrecompileRecordedShaderBundles). The variants only the
+// runtime requests (terrain material evaluation, the graph's pass pipelines) would otherwise rebuild at runtime after an
+// edit to a file they read. A line is the recipe, not the sources: it names files, entries, targets, defines and flags.
 namespace {
 
-constexpr wchar_t kShaderBundleManifestFile[] = L"compiled_bundles.txt";
 constexpr char kManifestField = '\t';
 constexpr char kManifestPart = '\x1f';
 constexpr char kManifestDefine = '\x1e';
@@ -2651,6 +2684,23 @@ std::string SerializeShaderBundle(const ShaderInfoBundle& info)
     return line;
 }
 
+std::string SerializeDefines(const std::vector<DxcDefine>& defines)
+{
+    std::string text;
+    for (const auto& define : defines) {
+        text += ws2s(define.Name ? define.Name : L"") + kManifestPart + ws2s(define.Value ? define.Value : L"") + kManifestDefine;
+    }
+    return text;
+}
+
+// A ray tracing library's line: "lib", its file, its target and its defines.
+constexpr char kManifestLibrary[] = "lib";
+
+std::string SerializeShaderLibrary(const ShaderLibraryInfo& info, const std::vector<DxcDefine>& defines)
+{
+    return std::string(kManifestLibrary) + kManifestField + ws2s(info.filename) + kManifestField + ws2s(info.target) + kManifestField + SerializeDefines(defines);
+}
+
 std::vector<std::string> SplitManifest(const std::string& text, char separator)
 {
     std::vector<std::string> parts;
@@ -2667,11 +2717,39 @@ std::vector<std::string> SplitManifest(const std::string& text, char separator)
 struct RecordedShaderBundle {
     ShaderInfoBundle bundle;
     std::vector<std::wstring> strings;
+    // Set for a library's line: then only bundle.defines is used.
+    std::optional<ShaderLibraryInfo> library;
 };
+
+// Fills recorded's defines from a manifest field. False if the field is malformed.
+bool ParseManifestDefines(const std::string& field, RecordedShaderBundle& recorded)
+{
+    std::vector<std::pair<std::string, std::string>> defines;
+    for (const auto& entry : SplitManifest(field, kManifestDefine)) {
+        if (entry.empty()) continue;
+        const auto parts = SplitManifest(entry, kManifestPart);
+        if (parts.size() != 2) return false;
+        defines.emplace_back(parts[0], parts[1]);
+    }
+    recorded.strings.reserve(defines.size() * 2);
+    for (const auto& [name, value] : defines) {
+        recorded.strings.push_back(s2ws(name));
+        recorded.strings.push_back(s2ws(value));
+    }
+    for (std::size_t index = 0; index < defines.size(); ++index) {
+        recorded.bundle.defines.push_back({ recorded.strings[index * 2].c_str(), recorded.strings[index * 2 + 1].c_str() });
+    }
+    return true;
+}
 
 std::unique_ptr<RecordedShaderBundle> ParseShaderBundle(const std::string& line)
 {
     const auto fields = SplitManifest(line, kManifestField);
+    if (fields.size() == 4 && fields[0] == kManifestLibrary) {
+        auto recorded = std::make_unique<RecordedShaderBundle>();
+        recorded->library.emplace(s2ws(fields[1]), s2ws(fields[2]));
+        return ParseManifestDefines(fields[3], *recorded) ? std::move(recorded) : nullptr;
+    }
     if (fields.size() != 8) return nullptr;
     auto recorded = std::make_unique<RecordedShaderBundle>();
     auto& bundle = recorded->bundle;
@@ -2685,28 +2763,14 @@ std::unique_ptr<RecordedShaderBundle> ParseShaderBundle(const std::string& line)
     }
     bundle.enableDebugInfo = fields[5] == "1";
     bundle.warningsAsErrors = fields[6] == "1";
-    std::vector<std::pair<std::string, std::string>> defines;
-    for (const auto& entry : SplitManifest(fields[7], kManifestDefine)) {
-        if (entry.empty()) continue;
-        const auto parts = SplitManifest(entry, kManifestPart);
-        if (parts.size() != 2) return nullptr;
-        defines.emplace_back(parts[0], parts[1]);
-    }
-    recorded->strings.reserve(defines.size() * 2);
-    for (const auto& [name, value] : defines) {
-        recorded->strings.push_back(s2ws(name));
-        recorded->strings.push_back(s2ws(value));
-    }
-    for (std::size_t index = 0; index < defines.size(); ++index) {
-        bundle.defines.push_back({ recorded->strings[index * 2].c_str(), recorded->strings[index * 2 + 1].c_str() });
-    }
+    if (!ParseManifestDefines(fields[7], *recorded)) return nullptr;
     return recorded;
 }
 
 std::filesystem::path ShaderBundleManifestPath()
 {
-    // Beside the DXIL artifacts (shadercache::GetCacheDirectory).
-    return std::filesystem::path(GetCacheFilePath(kShaderBundleManifestFile, L"shaders/dxil"));
+    // <cache root>/shaders, beside the store's folder.
+    return br::shaderstore::ManifestPath();
 }
 
 struct ShaderBundleManifest {
@@ -2723,9 +2787,8 @@ ShaderBundleManifest& GetShaderBundleManifest()
 
 // Appends the bundle's line the first time a process compiles it. Lines another run wrote are read first, so a line is
 // written once per manifest.
-void RecordShaderBundle(const ShaderInfoBundle& info)
+void RecordManifestLine(std::string line)
 {
-    auto line = SerializeShaderBundle(info);
     auto& manifest = GetShaderBundleManifest();
     std::scoped_lock lock(manifest.mutex);
     const auto path = ShaderBundleManifestPath();
@@ -2739,6 +2802,24 @@ void RecordShaderBundle(const ShaderInfoBundle& info)
     if (!manifest.lines.insert(line).second) return;
     std::ofstream out(path, std::ios::binary | std::ios::app);
     if (out) out << line << '\n';
+}
+
+// A request that includes generated code (a define names it) can't be compiled again offline, where it doesn't exist.
+bool IncludesGeneratedSource(const std::vector<DxcDefine>& defines)
+{
+    return std::ranges::any_of(defines, [](const DxcDefine& define) {
+        return define.Value && std::wstring_view(define.Value).find(L"generated/") != std::wstring_view::npos;
+    });
+}
+
+void RecordShaderBundle(const ShaderInfoBundle& info)
+{
+    if (!IncludesGeneratedSource(info.defines)) RecordManifestLine(SerializeShaderBundle(info));
+}
+
+void RecordShaderLibrary(const ShaderLibraryInfo& info, const std::vector<DxcDefine>& defines)
+{
+    if (!IncludesGeneratedSource(defines)) RecordManifestLine(SerializeShaderLibrary(info, defines));
 }
 
 } // namespace
@@ -2761,7 +2842,8 @@ std::size_t PSOManager::PrecompileRecordedShaderBundles(const std::function<void
         const auto recorded = ParseShaderBundle(lines[index]);
         if (recorded) {
             try {
-                CompileShadersForBackend(recorded->bundle, rhi::Backend::D3D12);
+                if (recorded->library) CompileShaderLibraryForBackend(*recorded->library, recorded->bundle.defines, rhi::Backend::D3D12);
+                else CompileShadersForBackend(recorded->bundle, rhi::Backend::D3D12);
                 keep[index] = 1;
             }
             catch (const std::exception& error) {
@@ -2794,207 +2876,32 @@ ShaderBundle PSOManager::CompileShaders(const ShaderInfoBundle& info) {
 ShaderBundle PSOManager::CompileShadersForBackend(const ShaderInfoBundle& info, rhi::Backend backend) {
 	if (backend == rhi::Backend::Null)
 		throw std::runtime_error("Shader compilation requested for an unavailable backend");
-	const shadercache::BinaryFormat binaryFormat = GetShaderBinaryFormat(backend);
-	const bool emitSpirv = IsSpirvFormat(binaryFormat);
-    if (info.vertexShader && info.meshShader) 
+	const uint8_t format = GetShaderStoreFormat(backend);
+	const bool emitSpirv = format == br::shaderstore::kFormatBundleSpirv;
+    if (info.vertexShader && info.meshShader)
 		throw std::runtime_error("Cannot compile both vertex and mesh shaders in the same bundle");
 	if (info.computeShader && (info.meshShader || info.amplificationShader || info.vertexShader || info.pixelShader))
 		throw std::runtime_error("Cannot compile compute shader with other shader types in the same bundle");
 	if (backend == rhi::Backend::D3D12) RecordShaderBundle(info);
 
-    const uint64_t buildConfigHash = ComputeShaderCacheBuildConfigHash(binaryFormat);
-    const shadercache::CacheKey cacheKey{
-        .binaryFormat = binaryFormat,
-        .artifactKind = shadercache::ArtifactKind::Bundle,
-        .identityHash = BuildBundleIdentityHash(info),
-    };
-    const bool logMaterialEvalCache =
-        info.computeShader.has_value()
-        && info.computeShader->filename == L"shaders/VisUtilEvaluate.hlsl";
-    const ShaderCompileFlightKey flightKey{
-        .binaryFormat = cacheKey.binaryFormat,
-        .artifactKind = cacheKey.artifactKind,
-        .identityHash = cacheKey.identityHash,
-        .buildConfigHash = buildConfigHash,
-    };
-    if (!ShaderArtifactCacheUsable()) {
-        spdlog::info(
-            "Shader live reload: bypassing bundle artifact cache identity=0x{:X}",
-            cacheKey.identityHash);
-    }
-    bool cacheLookupLogged = false;
-    for (;;) {
-        if (ShaderArtifactCacheUsable()) {
-            std::optional<ShaderBundle> cachedBundle =
-                TryLoadShaderBundleFromCache(cacheKey, buildConfigHash, pUtils.Get());
-            if (ShaderCacheDiagnosticsEnabled() && !cacheLookupLogged) {
-                cacheLookupLogged = true;
-                const auto& slot = info.computeShader ? info.computeShader :
-                    (info.meshShader ? info.meshShader :
-                    (info.vertexShader ? info.vertexShader : info.pixelShader));
-                spdlog::info("Shader bundle cache lookup file='{}' entry='{}' defines={} identity=0x{:X} build=0x{:X} result={}",
-                    slot ? ws2s(slot->filename) : std::string{},
-                    slot ? ws2s(slot->entryPoint) : std::string{}, info.defines.size(),
-                    cacheKey.identityHash, buildConfigHash, cachedBundle ? "hit" : "miss");
-            }
-            if (cachedBundle) return *cachedBundle;
-        }
-        if (GetShaderCompileFlightRegistry().TryBecomeOwnerOrWait(flightKey)) {
-            break;
-        }
-    }
-    ShaderCompileFlightScope flightScope(flightKey);
-    if (logMaterialEvalCache) {
-        spdlog::debug("VisUtil material eval shader artifact cache miss; compiling identity=0x{:X}", cacheKey.identityHash);
-    }
+	// The order the stages were always preprocessed and compiled in.
+	std::vector<PSOManagerShaderBuild::Slot> slots;
+	const auto addSlot = [&](br::shaderstore::StageKind kind, const std::optional<ShaderInfo>& shader) {
+		if (shader) slots.push_back({ kind, *shader, {} });
+	};
+	addSlot(br::shaderstore::StageKind::Amplification, info.amplificationShader);
+	addSlot(br::shaderstore::StageKind::Mesh, info.meshShader);
+	addSlot(br::shaderstore::StageKind::Pixel, info.pixelShader);
+	addSlot(br::shaderstore::StageKind::Vertex, info.vertexShader);
+	addSlot(br::shaderstore::StageKind::Compute, info.computeShader);
+	if (slots.empty()) throw std::runtime_error("Shader compilation requested for a bundle with no stages");
 
-	Microsoft::WRL::ComPtr<ID3DBlob> preprocessedAmplificationShader;
-	DxcBuffer amplificationBuffer = {};
-	Microsoft::WRL::ComPtr<ID3DBlob> preprocessedMeshShader;
-	DxcBuffer meshBuffer = {};
-	Microsoft::WRL::ComPtr<ID3DBlob> preprocessedPixelShader;
-	DxcBuffer pixelBuffer = {};
-	Microsoft::WRL::ComPtr<ID3DBlob> preprocessedVertexShader;
-	DxcBuffer vertexBuffer = {};
-	Microsoft::WRL::ComPtr<ID3DBlob> preprocessedComputeShader;
-	DxcBuffer computeBuffer = {};
-
-    PreprocessShaderSlot(info.amplificationShader, info.defines, preprocessedAmplificationShader, amplificationBuffer, emitSpirv);
-    PreprocessShaderSlot(info.meshShader, info.defines, preprocessedMeshShader, meshBuffer, emitSpirv);
-    PreprocessShaderSlot(info.pixelShader, info.defines, preprocessedPixelShader, pixelBuffer, emitSpirv);
-    PreprocessShaderSlot(info.vertexShader, info.defines, preprocessedVertexShader, vertexBuffer, emitSpirv);
-    PreprocessShaderSlot(info.computeShader, info.defines, preprocessedComputeShader, computeBuffer, emitSpirv);
-
-    auto prepareSlot = [&](const std::optional<ShaderInfo>& slot, const DxcBuffer& buffer)
-        -> std::optional<PreparedShaderSource>
-        {
-            if (!slot) {
-                return std::nullopt;
-            }
-
-            return PrepareShaderSourceForEntryPoint(buffer, ws2s(slot->entryPoint));
-        };
-
-    std::optional<PreparedShaderSource> preparedAmplification = prepareSlot(info.amplificationShader, amplificationBuffer);
-    std::optional<PreparedShaderSource> preparedMesh = prepareSlot(info.meshShader, meshBuffer);
-    std::optional<PreparedShaderSource> preparedPixel = prepareSlot(info.pixelShader, pixelBuffer);
-    std::optional<PreparedShaderSource> preparedVertex = prepareSlot(info.vertexShader, vertexBuffer);
-    std::optional<PreparedShaderSource> preparedCompute = prepareSlot(info.computeShader, computeBuffer);
-
-    std::unordered_set<std::string> usedMandatoryIDs;
-    std::unordered_set<std::string> usedOptionalIDs;
-    auto collectPreparedIDs = [&](const std::optional<PreparedShaderSource>& prepared) {
-        if (!prepared.has_value()) {
-            return;
-        }
-
-        usedMandatoryIDs.insert(prepared->mandatoryIDs.begin(), prepared->mandatoryIDs.end());
-        usedOptionalIDs.insert(prepared->optionalIDs.begin(), prepared->optionalIDs.end());
-        };
-
-    collectPreparedIDs(preparedAmplification);
-    collectPreparedIDs(preparedMesh);
-    collectPreparedIDs(preparedPixel);
-    collectPreparedIDs(preparedVertex);
-    collectPreparedIDs(preparedCompute);
-
-    // A resource referenced through both mandatory and optional code paths is
-    // mandatory for the combined pipeline. Keep one canonical root-constant
-    // slot; otherwise the optional replacement overwrites the shader macro
-    // while both entries remain in the CPU binding array.
-    for (const auto& mandatoryID : usedMandatoryIDs) {
-        usedOptionalIDs.erase(mandatoryID);
-    }
-
-	std::unordered_map<std::string, std::string> replacementMap;
-	uint32_t nextIndex = 0;
-    ShaderBundle bundle = {};
-    std::vector<std::string> usedMandatoryResourceIDsVec(usedMandatoryIDs.begin(), usedMandatoryIDs.end());
-    std::vector<std::string> usedOptionalResourceIDsVec(usedOptionalIDs.begin(), usedOptionalIDs.end());
-    std::sort(usedMandatoryResourceIDsVec.begin(), usedMandatoryResourceIDsVec.end());
-    std::sort(usedOptionalResourceIDsVec.begin(), usedOptionalResourceIDsVec.end());
-
-    const size_t descriptorSlotCount = usedMandatoryResourceIDsVec.size() + usedOptionalResourceIDsVec.size();
-    if (descriptorSlotCount > org::shaderapi::kNumResourceDescriptorIndicesRootConstants) {
-        throw std::runtime_error(
-            "Shader preprocessing requires " + std::to_string(descriptorSlotCount) +
-            " descriptor index root constants, but only " +
-            std::to_string(org::shaderapi::kNumResourceDescriptorIndicesRootConstants) +
-            " are available.");
-    }
-
-    for (const std::string& entry : usedMandatoryResourceIDsVec) {
-		bundle.resourceDescriptorSlots.mandatoryResourceDescriptorSlots.push_back(ResolveRuntimeResourceIdentifier(entry));
-		replacementMap[entry] = "ResourceDescriptorIndex" + std::to_string(nextIndex++);
-    }
-
-    for (const std::string& entry : usedOptionalResourceIDsVec) {
-        bundle.resourceDescriptorSlots.optionalResourceDescriptorSlots.push_back(ResolveRuntimeResourceIdentifier(entry));
-        replacementMap[entry] = "ResourceDescriptorIndex" + std::to_string(nextIndex++);
-    }
-
-    auto finalizePreparedSource = [&](
-        const std::optional<ShaderInfo>& slot,
-        std::optional<PreparedShaderSource>& prepared) -> std::string {
-        if (!slot || !prepared.has_value()) {
-            return {};
-        }
-
-        std::string finalSource = FinalizePreparedShaderSource(*prepared, replacementMap);
-        if (prepared->diagnostics.usedFallbackRewrite) {
-            spdlog::warn(
-                "Shader preprocess fallback used for {} ({}): {}",
-                ws2s(slot->entryPoint),
-                ws2s(slot->filename),
-                FormatShaderPreprocessDiagnostics(prepared->diagnostics));
-        }
-        return finalSource;
-        };
-
-	auto newAmplification = finalizePreparedSource(info.amplificationShader, preparedAmplification);
-    auto newMesh = finalizePreparedSource(info.meshShader, preparedMesh);
-    auto newPixel = finalizePreparedSource(info.pixelShader, preparedPixel);
-    auto newVertex = finalizePreparedSource(info.vertexShader, preparedVertex);
-	auto newCompute = finalizePreparedSource(info.computeShader, preparedCompute);
-
-    if (!newAmplification.empty()) {
-        amplificationBuffer.Ptr = newAmplification.data();
-        amplificationBuffer.Size = newAmplification.size();
-	}
-    if (!newMesh.empty()) {
-        meshBuffer.Ptr = newMesh.data();
-        meshBuffer.Size = newMesh.size();
-    }
-    if (!newPixel.empty()) {
-        pixelBuffer.Ptr = newPixel.data();
-        pixelBuffer.Size = newPixel.size();
-    }
-    if (!newVertex.empty()) {
-        vertexBuffer.Ptr = newVertex.data();
-        vertexBuffer.Size = newVertex.size();
-	}
-    if (!newCompute.empty()) {
-        computeBuffer.Ptr = newCompute.data();
-        computeBuffer.Size = newCompute.size();
-	}
-
-	CompileShaderForSlot(info.amplificationShader, info.defines, amplificationBuffer, emitSpirv, bundle.amplificationShader);
-	CompileShaderForSlot(info.meshShader, info.defines, meshBuffer, emitSpirv, bundle.meshShader);
-	CompileShaderForSlot(info.pixelShader, info.defines, pixelBuffer, emitSpirv, bundle.pixelShader);
-	CompileShaderForSlot(info.vertexShader, info.defines, vertexBuffer, emitSpirv, bundle.vertexShader);
-    CompileShaderForSlot(info.computeShader, info.defines, computeBuffer, emitSpirv, bundle.computeShader);
-
-    std::vector<std::string> combinedIds = {};
-	combinedIds.insert(combinedIds.end(), usedMandatoryResourceIDsVec.begin(), usedMandatoryResourceIDsVec.end());
-	combinedIds.insert(combinedIds.end(), usedOptionalResourceIDsVec.begin(), usedOptionalResourceIDsVec.end());
-
-	bundle.resourceIDsHash = hash_list(combinedIds);
-
-    const shadercache::CacheData cacheData = BuildBundleCacheData(info, bundle, buildConfigHash, binaryFormat);
-    if (ShaderArtifactCacheUsable()) {
-        shadercache::Save(cacheKey, cacheData);
-    }
-
+	const ShaderStoreKeys keys = MakeShaderStoreKeys(slots, info.defines, format, false, info.enableDebugInfo, info.warningsAsErrors);
+	PSOManagerShaderBuild build(*this, std::move(slots), info.defines, emitSpirv, false);
+	const StoredShaders stored = ResolveThroughShaderStore(keys, build, format);
+	ShaderBundle bundle = MakeShaderBundle(DecodeStoredShaders(stored, keys.label), pUtils.Get());
+	bundle.storeKeyHigh = stored.storedKey.high;
+	bundle.storeKeyLow = stored.storedKey.low;
 	return bundle;
 }
 
@@ -3009,8 +2916,9 @@ ShaderBundle PSOManager::CompileShaders(const ShaderInfoBundle& info, org::Backe
 }
 
 ShaderBundle PSOManager::CompileShadersForPipelineLibrary(const ShaderInfoBundle& info, org::BackendInstanceId backendInstance, bool bypassCache) {
+	// A reload reads the source files again; the store then answers only if none of them changed.
 	if (!bypassCache) return CompileShaders(info, backendInstance);
-	ScopedShaderArtifactCacheBypass bypass;
+	ScopedShaderReload reload;
 	return CompileShaders(info, backendInstance);
 }
 
@@ -3112,35 +3020,6 @@ void PSOManager::DumpCompiledShader(
         }
     }
     spdlog::info("Shader dump: {}", stem.string());
-}
-
-void PSOManager::LoadSource(const std::filesystem::path& path, PSOManager::SourceData& sd) {
-    if (!std::filesystem::exists(path)) {
-        throw std::runtime_error("Shader source file not found: " + path.string());
-    }
-    // Read here and copied into a blob, not IDxcUtils::LoadFile: for a file that starts with a UTF-8 byte order mark (an
-    // editor's or PowerShell's), releasing the blob LoadFile returned corrupted the heap. The mark is dropped.
-    std::ifstream input(path, std::ios::binary);
-    std::string bytes((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
-    if (!input && !input.eof()) {
-        throw std::runtime_error("Shader source file could not be read: " + path.string());
-    }
-    std::string_view text(bytes);
-    if (text.size() >= 3 && std::memcmp(text.data(), "\xEF\xBB\xBF", 3) == 0) text.remove_prefix(3);
-    ValidateUtf8OrThrow(text, "Shader source file");
-    ThrowIfFailed(pUtils->CreateBlob(text.data(), static_cast<UINT32>(text.size()), CP_UTF8, &sd.blob));
-
-    sd.buffer.Ptr = sd.blob->GetBufferPointer();
-    sd.buffer.Size = sd.blob->GetBufferSize();
-    sd.buffer.Encoding = 0; // see below
-}
-
-
-ComPtr<IDxcIncludeHandler> PSOManager::CreateIncludeHandler()
-{
-    ComPtr<IDxcIncludeHandler> handler;
-    ThrowIfFailed(pUtils->CreateDefaultIncludeHandler(&handler));
-    return handler;
 }
 
 std::vector<LPCWSTR> PSOManager::BuildArguments(
@@ -3587,6 +3466,8 @@ bool PSOManager::RebuildAllPipelines(std::string& error) {
     };
 
     error.clear();
+    // Every rebuild below validates against the files as they are now; unchanged shaders still come from the store.
+    br::shaderstore::BeginGeneration();
     std::vector<RebuildTarget> targets;
     {
         std::scoped_lock lock(m_cacheMutex, m_livePipelineMutex);
@@ -3611,6 +3492,7 @@ bool PSOManager::RebuildAllPipelines(std::string& error) {
         m_pendingClusterLODSoftwareRasterPSOs.clear();
         m_pendingMaterialEvalPSOs.clear();
         m_pendingRayTracingPSOs.clear();
+        m_pendingOnDemandComputePSOs.clear();
 
         targets.reserve(m_livePipelines.size());
         for (auto& [id, entry] : m_livePipelines) {
@@ -3840,7 +3722,10 @@ uint64_t PSOManager::RequestRecompile(const std::string& pipelineId, br::diagnos
         recipe = entryIt->second.computeRecipe;
         rebuild = entryIt->second.rebuild;
         supportsDefineOverrides = entryIt->second.supportsDefineOverrides;
-        if (!supportsDefineOverrides && !options.defineOverrides.empty()) {
+        if (!options.defineOverrides.empty() && entryIt->second.rebuildWithDefines) {
+            // Ray tracing: rebuild the recipe with the overrides applied.
+            rebuild = [rebuildWithDefines = entryIt->second.rebuildWithDefines, overrides = options.defineOverrides]() { return rebuildWithDefines(overrides); };
+        } else if (!supportsDefineOverrides && !options.defineOverrides.empty()) {
             entryIt->second.compiling = false;
             throw std::runtime_error("Define overrides are only supported for directly registered compute pipelines");
         }
@@ -3869,7 +3754,9 @@ uint64_t PSOManager::RequestRecompile(const std::string& pipelineId, br::diagnos
                 }
             }
             try {
-                ScopedShaderArtifactCacheBypass bypassCache;
+                // The candidate reads the source files again. What it builds is stored under what it read, so an
+                // edited candidate can never stand in for the unedited shader on a later launch.
+                ScopedShaderReload reload;
                 org::PipelineState candidate = supportsDefineOverrides
                     ? BuildComputePipeline(recipe, &options)
                     : rebuild();

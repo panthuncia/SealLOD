@@ -53,6 +53,7 @@
 #include "BasicRenderer/Assets/MaterialTextureStreaming.h"
 #include "Lighting/Environment/RenderPasses/SkyboxRenderPass.h"
 #include "Lighting/PathTracing/RenderPasses/PathTracePass.h"
+#include "Camera/Lens/RenderPasses/LensSelfTestPass.h"
 #include "Lighting/Environment/RenderPasses/EnvironmentFilterPass.h"
 #include "Diagnostics/RenderPasses/DebugSpheresPass.h"
 #include "Diagnostics/RenderPasses/DebugSkeletonPass.h"
@@ -139,6 +140,22 @@
 #include "BasicRenderer/Diagnostics/TerrainRvtTelemetry.h"
 
 namespace {
+}
+
+Renderer::PathTracingAccumulation Renderer::GetPathTracingAccumulation() const {
+    PathTracingAccumulation result;
+    if (const auto state = m_pathTraceState) {
+        std::scoped_lock lock(state->mutex);
+        result.buffer = state->accumulation;
+        result.framesSinceRestart = state->accumulatedFrames;
+        result.restarts = state->accumulationRestarts;
+    }
+    return result;
+}
+
+std::string Renderer::HandleLensControl(const std::string& command, const std::string& requestJson) {
+    if (!m_lensManager) throw std::runtime_error("the renderer has no lens manager");
+    return m_lensManager->HandleControl(command, requestJson);
 }
 
 void Renderer::CreateRenderGraph() {
@@ -291,6 +308,7 @@ void Renderer::CreateRenderGraph() {
     newGraph->RegisterProvider(m_pTerrainManager.get());
 	newGraph->RegisterProvider(m_pSkeletonManager.get());
     newGraph->RegisterProvider(&m_coreResourceProvider);
+    if (m_lensManager) newGraph->RegisterProvider(m_lensManager.get());
     newGraph->PrepareExtensionsForBuild();
     }
     probeGraphBuildPhase("CreateRenderGraph after PrepareExtensionsForBuild");
@@ -352,6 +370,7 @@ void Renderer::CreateRenderGraph() {
             m_materialEvaluationInputs.reyesTessTableTriangles = std::move(resource);
         });
     }
+    m_pathTraceState.reset();
     br::pipeline::PipelineBuildContext buildContext(
         *newGraph,
         m_pipelineRecipe.Bindings(),
@@ -521,12 +540,17 @@ void Renderer::CreateRenderGraph() {
             }
             case PathTracing: {
                 auto pathTraceState = MakePathTraceState();
+                m_pathTraceState = pathTraceState;
                 newGraph->BuildPass<PathTraceArgsPass>("PathTraceArgsPass", pathTraceState);
                 newGraph->SetPassTechnique("PathTraceArgsPass", "Ray Tracing::Path Tracing");
                 newGraph->BuildPass<PathTracePass>("PathTracePass", pathTraceState, m_clodRayTracingSystem, m_pMeshManager ? m_pMeshManager->GetCLodSlabResourceGroup() : nullptr,
                     m_pipelineRecipe.Contains<br::pipeline::TerrainRvtTechnique>(),
-                    UpscalingManager::GetInstance().GetCurrentUpscalingMode() == UpscalingMode::DLSSRayReconstruction);
+                    UpscalingManager::GetInstance().GetCurrentUpscalingMode() == UpscalingMode::DLSSRayReconstruction, m_lensManager);
                 newGraph->SetPassTechnique("PathTracePass", "Ray Tracing::Path Tracing");
+                if (m_lensManager) {
+                    newGraph->BuildPass<LensSelfTestPass>("LensSelfTestPass", m_lensManager);
+                    newGraph->SetPassTechnique("LensSelfTestPass", "Ray Tracing::Path Tracing");
+                }
                 break;
             }
             case Exposure: {

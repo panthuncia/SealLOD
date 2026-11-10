@@ -1,6 +1,7 @@
 #include <BasicRenderer/Scene/Scene.h>
 #include "Render/RenderGraph/RenderGraph.h"
 #include "Diagnostics/Menu/Menu.h"
+#include "Camera/Lens/LensManager.h"
 
 Menu& Menu::GetInstance() {
     static Menu instance;
@@ -750,6 +751,14 @@ void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     bindPathTracing(m_pathTracingOpacityMicromapTwoState, setPathTracingOpacityMicromapTwoState, "pathTracingOpacityMicromapTwoState");
     bindPathTracing(m_pathTracingAccumulate, setPathTracingAccumulate, "pathTracingAccumulate");
     bindPathTracing(m_pathTracingSunOnly, setPathTracingSunOnly, "pathTracingSunOnly");
+    bindPathTracing(m_lensMode, setLensMode, "lensMode");
+    bindPathTracing(m_lensFile, setLensFile, "lensFile");
+    bindPathTracing(m_lensFocusDistance, setLensFocusDistance, "lensFocusDistance");
+    bindPathTracing(m_lensMonochromatic, setLensMonochromatic, "lensMonochromatic");
+    bindPathTracing(m_lensStopScale, setLensStopScale, "lensStopScale");
+    bindPathTracing(m_lensFieldMode, setLensFieldMode, "lensFieldMode");
+    bindPathTracing(m_lensPolynomialDegree, setLensPolynomialDegree, "lensPolynomialDegree");
+    m_lensFiles = br::lens::LensManager::ListLenses();
     setRayTracedPrimaryVisibilityMode = settingsManager.getSettingSetter<uint32_t>("rayTracedPrimaryVisibilityMode");
     m_rayTracedPrimaryVisibilityMode = settingsManager.getSettingGetter<uint32_t>("rayTracedPrimaryVisibilityMode")();
     observerSetting(m_rayTracedReflectionsEnabled, "enableRayTracedReflections");
@@ -941,6 +950,38 @@ void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
         .build();
 }
 
+// What the upscaler actually ran, and why it isn't what was asked for: a Ray Reconstruction request that fell back to DLSS
+// after its optimal settings failed (retried with backoff), and evaluations Streamline skipped (GPU memory pressure).
+static void DrawUpscalerHealth(bool always) {
+    const UpscalingManager::Status status = UpscalingManager::GetInstance().GetStatus();
+    const ImVec4 warning(1.0f, 0.65f, 0.25f, 1.0f);
+    const bool skippingNow = status.consecutiveFailures != 0;
+    if (always || status.rayReconstructionSettingsFailed || status.failedEvaluations != 0) {
+        const auto evaluated = static_cast<int>(status.evaluated);
+        const char* name = evaluated >= 0 && evaluated < static_cast<int>(std::size(UpscalingModeNames)) ? UpscalingModeNames[evaluated] : "?";
+        if (skippingNow) {
+            ImGui::TextColored(warning, "Upscaler: %s skipped (%llu frames in a row)", name, static_cast<unsigned long long>(status.consecutiveFailures));
+        }
+        else if (status.rayReconstructionSettingsFailed) {
+            ImGui::TextColored(warning, "Upscaler: %s (Ray Reconstruction unavailable)", name);
+        }
+        else {
+            ImGui::TextDisabled("Upscaler: %s", name);
+        }
+    }
+    if (status.rayReconstructionSettingsFailed) {
+        ImGui::TextColored(warning, "  Ray Reconstruction settings failed %llu times; retry in %.0f s",
+            static_cast<unsigned long long>(status.rayReconstructionSettingsFailures), status.rayReconstructionRetrySeconds);
+    }
+    if (status.failedEvaluations != 0) {
+        ImGui::TextColored(skippingNow ? warning : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled),
+            "  %llu evaluations skipped (%llu for GPU memory), last at frame %llu; shown instead: input %llu, DLSS SR %llu, black %llu",
+            static_cast<unsigned long long>(status.failedEvaluations), static_cast<unsigned long long>(status.outOfMemorySkips),
+            static_cast<unsigned long long>(status.lastFailedFrame), static_cast<unsigned long long>(status.fallbackCopies),
+            static_cast<unsigned long long>(status.fallbackSuperResolution), static_cast<unsigned long long>(status.fallbackClears));
+    }
+}
+
 void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
     m_sceneOverlapStatus = context.sceneOverlapStatus;
 	// A platform window/context may exist while the renderer backend is
@@ -1105,6 +1146,8 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
                 ImGui::SetTooltip("Unavailable: path tracing %s.", deviceManager.GetPathTracingUnsupportedReason().c_str());
             }
         }
+        // With path tracing, which upscaler runs decides whether the image is denoised: always say which.
+        DrawUpscalerHealth(m_pathTracingEnabled);
         if (m_pathTracingEnabled && ImGui::CollapsingHeader("Path Tracing Options")) {
             int bounces = static_cast<int>(m_pathTracingMaxBounces);
             ImGui::SetNextItemWidth(160.0f);
@@ -1147,6 +1190,60 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Direct sun only, without sky, emission or local lights: for comparing against raster.");
             }
+            ImGui::SeparatorText("Camera Lens");
+            int lensMode = static_cast<int>(std::min<uint32_t>(m_lensMode, 2u));
+            if (ImGui::Combo("Lens", &lensMode, "Pinhole\0Explicit (traced)\0Polynomial\0")) {
+                m_lensMode = static_cast<uint32_t>(lensMode);
+                setLensMode(m_lensMode);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Explicit traces every primary ray through the lens's surfaces: depth of field, vignetting, distortion and\n"
+                    "chromatic aberration (in spectral mode). Polynomial replaces the trace with the lens's fitted polynomial (its\n"
+                    ".brlens): the explicit lens's look for less. Field Mode decides what a camera FOV wider than the lens covers does.");
+            }
+            if (m_lensMode == 2u) {
+                int degreeIndex = m_lensPolynomialDegree == 5u ? 0 : 1;
+                if (ImGui::Combo("Polynomial Degree", &degreeIndex, "5 (faster)\0" "7 (closest)\0")) {
+                    m_lensPolynomialDegree = degreeIndex == 0 ? 5u : 7u;
+                    setLensPolynomialDegree(m_lensPolynomialDegree);
+                }
+            }
+            ImGui::BeginDisabled(m_lensMode == 0u);
+            int lensFieldMode = static_cast<int>(std::min<uint32_t>(m_lensFieldMode, 1u));
+            if (ImGui::Combo("Field Mode", &lensFieldMode, "Remap to camera FOV\0Physical\0")) {
+                m_lensFieldMode = static_cast<uint32_t>(lensFieldMode);
+                setLensFieldMode(m_lensFieldMode);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Remap fits a camera field wider than the lens covers to its covered field, and widens the rays leaving the\n"
+                    "lens to the camera's: the frame stays lit, with the lens's distortion, depth of field and vignetting relative to it.\n"
+                    "Physical sizes the sensor by the camera's FOV through the lens: past its image circle the frame vignettes to black.");
+            }
+            if (ImGui::BeginCombo("Lens File", m_lensFile.c_str())) {
+                for (const auto& name : m_lensFiles) {
+                    if (ImGui::Selectable(name.c_str(), name == m_lensFile)) {
+                        m_lensFile = name;
+                        setLensFile(m_lensFile);
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            if (ImGui::SliderFloat("Focus Distance (m)", &m_lensFocusDistance, 0.3f, 100.0f, "%.2f", ImGuiSliderFlags_Logarithmic)) {
+                setLensFocusDistance(m_lensFocusDistance);
+            }
+            if (ImGui::SliderFloat("Stop Scale", &m_lensStopScale, 0.05f, 1.0f, "%.2f")) {
+                setLensStopScale(m_lensStopScale);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Multiplies the aperture stop's radius: 0.5 is two stops down.");
+            }
+            if (ImGui::Checkbox("Monochromatic (587.6 nm)", &m_lensMonochromatic)) {
+                setLensMonochromatic(m_lensMonochromatic);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Off traces one wavelength per sample (380-780 nm) for chromatic aberration: noisier, for accumulation.");
+            }
+            ImGui::EndDisabled();
         }
         ImGui::Separator();
 

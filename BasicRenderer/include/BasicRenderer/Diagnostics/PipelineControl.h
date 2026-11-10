@@ -58,5 +58,8 @@ std::optional<LiveJobInfo> GetLiveJob(std::uint64_t jobId);
 std::uint64_t RequestRecompile(const std::string& pipelineId, RecompileOptions options = {});
 std::uint64_t RequestActivation(const std::string& pipelineId, std::uint64_t generation);
 std::size_t ReloadCLodWorkGraphs();
+// The shader store's state as a JSON object: the batch summary line (hits, absorbed, compiled, misses by reason, the
+// first changed file), its folder, index and artifact sizes. For the control pipe's shadercache.stats.
+std::string DescribeShaderStore();
 
 } // namespace br::diagnostics

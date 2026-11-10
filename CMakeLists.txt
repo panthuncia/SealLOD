@@ -399,6 +399,7 @@ add_subdirectory("Plugins/ProceduralWind")
 
 add_subdirectory("CLodCacheTool")
 add_subdirectory("CLodEval")
+add_subdirectory("LensCore")
 add_subdirectory("CLodCapture")
 if(BASICRENDERER_BUILD_BRNIFLY)
   add_subdirectory("BRNifly")

@@ -13,6 +13,7 @@
 #include "include/pathTracingBsdf.hlsli"
 #include "include/pathTracingLights.hlsli"
 #include "include/pathTracingWatch.hlsli"
+#include "include/lens/lensCamera.hlsli"
 
 // Cost breakdown only (PATH_TRACE_EXPERIMENT, pathTracingHit.hlsli): 3 skips every alpha test, 5 those of hierarchy roots'
 // instances (merged geometry, whose templates have a material palette), treating the candidate as opaque.
@@ -74,14 +75,77 @@ float PathTraceLuminance(float3 color)
     return dot(color, float3(0.2126f, 0.7152f, 0.0722f));
 }
 
+// Camera rays through the lens drawn per pixel and frame, of which one is traced (PathTraceLensCameraRay): for Ray
+// Reconstruction, and when accumulating. Each candidate costs a full lens transport and its share of the scene's rays
+// (about 2.8 ms at 2560x1600 through the double Gauss): see SARP's docs/lens_simulation.md.
+#ifndef PATH_TRACE_LENS_CANDIDATES
+#define PATH_TRACE_LENS_CANDIDATES 1
+#endif
+#ifndef PATH_TRACE_LENS_ACCUMULATE_CANDIDATES
+#define PATH_TRACE_LENS_ACCUMULATE_CANDIDATES 1
+#endif
+
+// A primary ray through the physical lens, resampled from candidateCount candidates by their weights' luminance (resampled
+// importance sampling with the camera weight as the target). The traced ray's weight is
+// w_s * (sum of luminances / N) / luminance(w_s): an unbiased estimate of the pixel's lens response for any N, whose spread
+// is that of the N-sample average rather than of one sample. The exact pupil sampler (lensCamera.hlsli) leaves about 2-4%
+// of candidates blocked, so one is enough for Ray Reconstruction: its halo around bright edges, which came from blocked
+// candidates flickering, is +1% on the test chart (+8% with 14% blocked). False only when every candidate is blocked.
+bool PathTraceLensCameraRay(Camera camera, float2 pixelPosition, float2 resolution, uint candidateCount, inout PathRng rng, out RayDesc ray,
+    out float3 weight)
+{
+    ray = (RayDesc)0;
+    weight = 0.0f.xxx;
+    float total = 0.0f;
+    float selectedTarget = 0.0f;
+    [loop]
+    for (uint candidate = 0u; candidate < candidateCount; ++candidate) {
+        const float2 pupilSample = PathRngNext2(rng);
+        const float wavelengthSample = PathRngNext1(rng);
+        const float selection = PathRngNext1(rng);
+        RayDesc candidateRay;
+        float3 candidateWeight;
+        if (!LensCameraRay(camera, pixelPosition, resolution, pupilSample, wavelengthSample, candidateRay, candidateWeight)) continue;
+        // Luminance is Y, which no wavelength's response makes negative.
+        const float target = PathTraceLuminance(candidateWeight);
+        if (!(target > 0.0f)) continue;
+        total += target;
+        if (selection * total < target) {
+            ray = candidateRay;
+            weight = candidateWeight;
+            selectedTarget = target;
+        }
+    }
+    if (!(selectedTarget > 0.0f)) return false;
+    weight *= total / (float(candidateCount) * selectedTarget);
+    return true;
+}
+
+// The physical lens's motion: both view-space directions through its chief-ray mapping, as pinhole motion projects both
+// positions through the unjittered matrices. A defocused point gets its in-focus position's motion.
+float2 PathTraceLensMotion(Camera camera, float3 currentView, float3 previousView)
+{
+    StructuredBuffer<float4> data = LensData();
+    const LensHeader header = LensLoadHeader(data);
+    if (!header.valid) return 0.0f.xx;
+    const float2 current = LensProjectViewDirection(data, header, LensSensorHalfExtent(data, header, camera.unjitteredProjection), currentView);
+    const float2 previous = LensProjectViewDirection(data, header, LensSensorHalfExtent(data, header, camera.prevUnjitteredProjection), previousView);
+    return current - previous;
+}
+
 void PathTraceWritePrimaryMiss(uint2 pixel, float3 direction, Camera camera)
 {
     const float3 currentView = normalize(mul(float4(direction, 0.0f), camera.view).xyz);
-    const float4 currentClip = mul(float4(currentView, 1.0f), camera.unjitteredProjection);
     const float3 previousView = normalize(mul(float4(direction, 0.0f), camera.prevView).xyz);
-    const float4 previousClip = mul(float4(previousView, 1.0f), camera.prevUnjitteredProjection);
     RWTexture2D<float2> motion = ResourceDescriptorHeap[CLOD_RT_PT_MOTION_UAV];
-    motion[pixel] = currentClip.xy / max(abs(currentClip.w), 1e-6f) - previousClip.xy / max(abs(previousClip.w), 1e-6f);
+    if ((CLOD_RT_PT_FLAGS & CLOD_RT_PT_FLAG_LENS) != 0u) {
+        motion[pixel] = PathTraceLensMotion(camera, currentView, previousView);
+    }
+    else {
+        const float4 currentClip = mul(float4(currentView, 1.0f), camera.unjitteredProjection);
+        const float4 previousClip = mul(float4(previousView, 1.0f), camera.prevUnjitteredProjection);
+        motion[pixel] = currentClip.xy / max(abs(currentClip.w), 1e-6f) - previousClip.xy / max(abs(previousClip.w), 1e-6f);
+    }
     RWTexture2D<float> projectedDepth = ResourceDescriptorHeap[CLOD_RT_PT_PROJECTED_DEPTH_UAV];
     projectedDepth[pixel] = 0.0f;
     if (CLOD_RT_PT_SPECULAR_HIT_UAV != CLOD_RT_PT_NO_DESCRIPTOR) {
@@ -104,15 +168,40 @@ void PathTraceRayGen()
 
     // Nothing else jitters when accumulating without an upscaler, and every sample must land somewhere new in the pixel.
     const float2 subpixel = (flags & CLOD_RT_PT_FLAG_ACCUMULATE) != 0u ? PathRngNext2(rng) : 0.5f.xx;
-    const RayDesc primary = CLodRtCameraRayAt(camera, float2(pixel) + subpixel, float2(DispatchRaysDimensions().xy));
+    RayDesc primary;
+    float3 primaryWeight = 1.0f.xxx;
+    bool lensBlocked = false;
+    bool guidesOnly = false;
+    if ((flags & CLOD_RT_PT_FLAG_LENS) != 0u) {
+        // Through the physical lens (lensCamera.hlsli: its surfaces, or its polynomial). A pixel whose candidates the lens all
+        // stops carries nothing, as it would on film: the pixel's average over samples is what vignetting looks like.
+        const uint candidates = (flags & CLOD_RT_PT_FLAG_ACCUMULATE) != 0u ? PATH_TRACE_LENS_ACCUMULATE_CANDIDATES : PATH_TRACE_LENS_CANDIDATES;
+        lensBlocked = !PathTraceLensCameraRay(camera, float2(pixel) + subpixel, float2(DispatchRaysDimensions().xy), candidates, rng, primary,
+            primaryWeight);
+        if (lensBlocked) {
+            primary = CLodRtCameraRayAt(camera, float2(pixel) + subpixel, float2(DispatchRaysDimensions().xy));
+            primaryWeight = 0.0f.xxx;
+            // Ray Reconstruction reads the primary hit's guides. A blocked pixel that wrote the miss guides (projected depth 0)
+            // told it the pixel was sky, at random a third of the pixels each frame, and its output came out 30% dark (0.71 of
+            // the accumulated image on the lens chart). The pinhole ray's surface, at zero radiance, says it is dark here.
+            // Accumulation has no guides to feed, so it writes the miss guides and traces nothing.
+            guidesOnly = (flags & CLOD_RT_PT_FLAG_ACCUMULATE) == 0u;
+            if (!guidesOnly) {
+                PathTraceWritePrimaryMiss(pixel, primary.Direction, camera);
+            }
+        }
+    }
+    else {
+        primary = CLodRtCameraRayAt(camera, float2(pixel) + subpixel, float2(DispatchRaysDimensions().xy));
+    }
 
     RayDesc ray = primary;
     float3 radiance = 0.0f.xxx;
-    float3 throughput = 1.0f.xxx;
+    float3 throughput = primaryWeight;
     float coneWidth = 0.0f;
     const float pixelSpread = CLodRtPixelConeSpread(camera, float(perFrame.screenResY));
     float coneSpread = pixelSpread;
-    const uint maxBounces = CLOD_RT_PT_MAX_BOUNCES;
+    const uint maxBounces = lensBlocked ? (guidesOnly ? 1u : 0u) : CLOD_RT_PT_MAX_BOUNCES;
     // Pixel watch: the bounce that added most, and how the primary hit went.
     const bool watch = PathWatchEnabled();
     float watchTopLuminance = -1.0f;
@@ -152,7 +241,7 @@ void PathTraceRayGen()
 
         float3 contribution = payload.emitted;
         bool watchShadowVisible = false;
-        if (payload.shadowTMax > 0.0f && PATH_TRACE_EXPERIMENT != 2) {
+        if (payload.shadowTMax > 0.0f && PATH_TRACE_EXPERIMENT != 2 && !guidesOnly) {
             RayDesc shadowRay;
             shadowRay.Origin = payload.nextOrigin;
             shadowRay.Direction = PathTraceUnpackDirection(payload.shadowDirection);
@@ -230,6 +319,11 @@ void PathTraceRayGen()
         coneSpread = payload.coneSpread;
     }
 
+    if (guidesOnly && CLOD_RT_PT_SPECULAR_HIT_UAV != CLOD_RT_PT_NO_DESCRIPTOR) {
+        // No bounce was traced to say how far the reflection is.
+        RWTexture2D<float> specularHit = ResourceDescriptorHeap[CLOD_RT_PT_SPECULAR_HIT_UAV];
+        specularHit[pixel] = camera.zFar;
+    }
     if (any(isnan(radiance)) || any(isinf(radiance))) {
         radiance = 0.0f.xxx;
         if (watch) PathWatchCount(CLOD_RT_WATCH_NON_FINITE);
@@ -313,7 +407,17 @@ void PathTraceWritePrimarySurface(uint2 pixel, CLodPathHitSurface hit, FragmentI
     const float3 materialNormal = normalize(hit.materialInputs.normalWS);
     normalRoughness[pixel] = float4(flipNormal ? -materialNormal : materialNormal, saturate(hit.materialInputs.roughness));
     RWTexture2D<float2> motion = ResourceDescriptorHeap[CLOD_RT_PT_MOTION_UAV];
-    motion[pixel] = hit.motionVector;
+    if ((CLOD_RT_PT_FLAGS & CLOD_RT_PT_FLAG_LENS) != 0u) {
+        // The previous view-space direction from pinhole motion (which carries object motion), then both through the lens.
+        const float3 currentView = mul(float4(worldPosition, 1.0f), camera.view).xyz;
+        const float4 currentClip = mul(float4(currentView, 1.0f), camera.unjitteredProjection);
+        const float2 previousNdc = currentClip.xy / max(abs(currentClip.w), 1e-6f) - hit.motionVector;
+        const float3 previousView = float3(previousNdc.x / camera.prevUnjitteredProjection[0][0], previousNdc.y / camera.prevUnjitteredProjection[1][1], -1.0f);
+        motion[pixel] = PathTraceLensMotion(camera, currentView, previousView);
+    }
+    else {
+        motion[pixel] = hit.motionVector;
+    }
 
     // The same reverse-Z value raster's depth copy writes, from view depth.
     const float viewDepth = -mul(float4(worldPosition, 1.0f), camera.view).z;

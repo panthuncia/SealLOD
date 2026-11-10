@@ -1,7 +1,7 @@
 #include <BasicRenderer/Assets/ShaderArtifactCompilation.h>
 
 #include "Pipeline/PipelineState/PSOManager.h"
-#include "Pipeline/ShaderCompilation/ShaderArtifactCache.h"
+#include "Pipeline/ShaderCompilation/RendererShaderStore.h"
 #include "Runtime/Settings/SettingsManager.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "BasicRenderer/Pipeline/ShaderVariantRequestService.h"
@@ -45,8 +45,7 @@ std::size_t br::assets::PrecompileRecordedShaderArtifacts()
 	return PSOManager::GetInstance().PrecompileRecordedShaderBundles();
 }
 
-br::assets::ShaderArtifactPruneSummary br::assets::PruneUnusedShaderArtifacts(std::chrono::hours maxAge)
+std::string br::assets::FinishShaderArtifactBatch(std::string_view batch)
 {
-	const auto result = shadercache::PruneUnused(maxAge);
-	return { result.examined, result.removed, result.bytesRemoved };
+	return br::shaderstore::FinishBatch(batch);
 }

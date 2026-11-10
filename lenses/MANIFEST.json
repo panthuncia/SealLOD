@@ -1,0 +1,96 @@
+{
+  "format": "brlens-manifest",
+  "lenses": {
+    "double_gauss_50mm": {
+      "accuracy": [
+        {
+          "angle_max_arcmin": 0.9594314417154138,
+          "angle_mean_arcmin": 0.08838698433946053,
+          "angle_p99_arcmin": 0.37992478432640003,
+          "degree": 5,
+          "fit_seconds": 0.5274854,
+          "position_mean_mm": 0.0014394353831987832,
+          "position_p99_mm": 0.005053284642443643,
+          "terms": 126,
+          "throughput_mean_abs": 5.9731343427595655e-05,
+          "throughput_p99_abs": 0.00024898740041590095,
+          "valid_rays": 138934
+        },
+        {
+          "angle_max_arcmin": 0.12850647532761716,
+          "angle_mean_arcmin": 0.00846912249885427,
+          "angle_p99_arcmin": 0.03682555054359851,
+          "degree": 7,
+          "fit_seconds": 2.9220278,
+          "position_mean_mm": 0.00013026915558042376,
+          "position_p99_mm": 0.00044714632341701256,
+          "terms": 330,
+          "throughput_mean_abs": 6.494705754709907e-06,
+          "throughput_p99_abs": 2.471279414362204e-05,
+          "valid_rays": 138934
+        }
+      ],
+      "brlens": "double_gauss_50mm.brlens",
+      "brlens_bytes": 9130,
+      "brlens_crc32": 558161692,
+      "brlens_version": 3,
+      "eval": {
+        "count": 400000,
+        "seed": 9000001
+      },
+      "fit": {
+        "method": "normal equations, equilibrated, Cholesky, one refinement step (double)",
+        "min_focus_mm": 300.0,
+        "rows": 4000000,
+        "seed": 101
+      },
+      "source_hash": "e0afcd005a06e241"
+    },
+    "wide_22mm": {
+      "accuracy": [
+        {
+          "angle_max_arcmin": 3.4565782572249706,
+          "angle_mean_arcmin": 0.27883825715403177,
+          "angle_p99_arcmin": 0.9846874158970771,
+          "degree": 5,
+          "fit_seconds": 0.5418686,
+          "position_mean_mm": 0.0039964113073065795,
+          "position_p99_mm": 0.015619567672992222,
+          "terms": 126,
+          "throughput_mean_abs": 0.0002189188579364207,
+          "throughput_p99_abs": 0.0009500799829852413,
+          "valid_rays": 18499
+        },
+        {
+          "angle_max_arcmin": 0.593561958946911,
+          "angle_mean_arcmin": 0.042417915825893555,
+          "angle_p99_arcmin": 0.16837243225063625,
+          "degree": 7,
+          "fit_seconds": 2.8372105,
+          "position_mean_mm": 0.0005546609278669295,
+          "position_p99_mm": 0.0019245552046087532,
+          "terms": 330,
+          "throughput_mean_abs": 4.104787710500471e-05,
+          "throughput_p99_abs": 0.00016152922270817882,
+          "valid_rays": 18499
+        }
+      ],
+      "brlens": "wide_22mm.brlens",
+      "brlens_bytes": 9129,
+      "brlens_crc32": 558161692,
+      "brlens_version": 3,
+      "eval": {
+        "count": 400000,
+        "seed": 9000001
+      },
+      "fit": {
+        "method": "normal equations, equilibrated, Cholesky, one refinement step (double)",
+        "min_focus_mm": 300.0,
+        "rows": 4000000,
+        "seed": 101
+      },
+      "source_hash": "69ab821af5f766d9"
+    }
+  },
+  "version": 2
+}

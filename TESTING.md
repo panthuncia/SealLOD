@@ -32,6 +32,101 @@ experiments without restarting the process. `clod.mode.set` accepts
 contains no skinned geometry; the default general variant remains
 skinned-capable.
 
+`pathtracing.get` and `pathtracing.set` switch path tracing at runtime.
+`pathtracing.set` takes optional `enabled` and `accumulate` booleans
+(`accumulate` is the `pathTracingAccumulate` setting, the reference-image mode,
+and rebuilds the graph). Both report `enabled`, `supported`, `accumulate`,
+`accumulating` (the current graph has the accumulation buffer),
+`accumulated_frames` (frames since the last accumulation restart) and
+`accumulation_restarts`.
+
+Accumulation restarts when the scene's ray-tracing state, the path-tracing
+settings, the camera's view or unjittered projection (FOV, aspect, near plane),
+or the `pathTracingCameraModelHash` setting changes. Jitter does not restart it.
+Code that changes how primary rays are generated (a lens model) sets
+`pathTracingCameraModelHash` to a hash of that state.
+
+### HDR capture
+
+`capture.hdr` writes one frame's linear radiance as an RGBA32F DDS
+(`DXGI_FORMAT_R32G32B32A32_FLOAT`, one mip, no tonemapping):
+
+```powershell
+StatisticalSamplingControl.exe --pipe <name> --json pathtracing.set '{"enabled":true,"accumulate":true}'
+StatisticalSamplingControl.exe --pipe <name> --json capture.hdr '{"path":"D:/captures/ref.dds","spp":1024}'
+```
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `path` | required | Output file. Relative paths resolve against the demo's working directory; parent directories are created. The file is written as `<path>.partial` and renamed, so a file at `path` is always complete. |
+| `target` | `accumulation` when path tracing is accumulating, else `hdr` | `accumulation`: the path tracer's accumulation buffer at render resolution. `hdr`: `Builtin::PostProcessing::UpscaledHDR` as `TonemappingPass` reads it, at output resolution, after the upscaler and before bloom and tonemapping. |
+| `spp` | `0` | Samples per pixel to wait for. `0` captures the next frame. Anything above 0 needs accumulation on. |
+| `timeout_seconds` | `300` | The job fails after this long. |
+
+For `accumulation`, rgb is already the average radiance (the shader keeps a
+running mean), so nothing needs dividing; alpha is the per-pixel sample count.
+For `hdr`, alpha is whatever the target holds.
+
+The reply carries a `job_id` (at or above 2^48, apart from pipeline jobs).
+`StatisticalSamplingControl` polls `job.status` until it ends unless `--async`
+is passed. `job.status` on a capture job returns `job` with `state`
+(`waiting`, `reading`, `published` or `failed`), `error`, `path`, `target`,
+`spp_requested`, `width`, `height`, `samples_min` and `samples_max` (the
+alpha range read back), `reads` and `frames_since_restart`.
+
+With `spp`, the job waits until the path tracer has prepared that many frames
+since its last restart, then reads the buffer after the whole frame. If the
+alpha read back is still below `spp` (a restart it did not see, or frames
+counted before the pipeline could trace), it waits and reads again. The image
+can therefore hold a few more samples than requested, by up to the frames in
+flight; `samples_min` and `samples_max` say how many it holds. Keep the camera
+still while waiting: any restart starts the count again.
+
+### Upscaler state
+
+`upscaler.get` reports what the upscaler does: `setting` (the `upscalingMode`
+setting), `graph` (the mode the current graph was built with), `evaluated`
+(what the last upscaling pass ran), `quality`, `render_resolution`, and the
+failure counters: `failed_evaluations`, `out_of_memory_skips` (Streamline
+skipped for GPU memory pressure), `consecutive_failures`, `last_failed_frame`,
+`fallback` (what failed frames showed: `input_copies`, `dlss_sr`, `cleared`),
+and `ray_reconstruction_settings_failed`, `ray_reconstruction_settings_failures`
+and `ray_reconstruction_retry_seconds` (Ray Reconstruction's optimal settings
+failed, so graphs use DLSS until a retry). `upscaler.set` takes optional
+`quality` (0 DLAA to 4 Ultra Performance) and `ray_reconstruction` (bool), as the
+menu sets them. `upscaler.simulate_failure` takes `out_of_memory_frames` and
+`settings_failures` and makes that many evaluations or settings requests fail;
+`BASICRENDERER_SIMULATE_DLSS_FAILURE=oom=N,settings=M` does the same at startup.
+See SARP's `docs/path_tracing.md`, "When Ray Reconstruction can't run".
+
+A sampling run turns Streamline off (`BASICRENDERER_DISABLE_STREAMLINE=1`),
+because NVPerf replay needs the device-level sampling session to itself, so
+DLSS and Ray Reconstruction are unavailable under `--sampling-config` by
+default. `BASICRENDERER_SAMPLING_KEEP_STREAMLINE=1` keeps Streamline for a run
+whose configuration doesn't use NVPerf (only `render_graph_gpu_time` metrics),
+so the upscaler commands above and path tracing with Ray Reconstruction can be
+tested through the control pipe.
+
+### Lens, camera and shader store
+
+`lens.get`, `lens.set`, `lens.selftest` and `lens.selftest.status` control the
+path tracer's physical camera lens: `lens.set` takes `mode` (`pinhole`,
+`explicit` or `polynomial`), `file`, `focus_m`, `monochromatic`, `stop_scale`,
+`field_mode` (`remap` or `physical`) and `polynomial_degree` (5 or 7); the lens
+builds off the render thread, so poll `lens.get` until its `state` is
+`explicit` or `polynomial`. `lens.selftest` starts a GPU-against-CPU parity test
+of the published lens and `lens.selftest.status` returns its report (`passed`).
+SARP's `docs/lens_simulation.md` describes every field.
+
+`camera.set` takes an optional `fov_deg` (the primary camera's vertical field of
+view, in (1, 170)) and reports `fov_deg` and `aspect`. A lens covers only its
+design field, so lens tests narrow it first.
+
+`shadercache.stats` returns `shader_store`: the shader store's batch summary
+line, its folder, hit, compile and miss counts (misses by reason, and the first
+changed file), and its index and artifact sizes. See SARP's
+`docs/preprocessing.md`.
+
 ## CLOD virtual-shadow CPU benchmark
 
 For repeatable CLOD virtual-shadow CPU measurements, run:

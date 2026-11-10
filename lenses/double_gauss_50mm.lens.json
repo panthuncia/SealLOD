@@ -1,0 +1,21 @@
+{
+	"name": "double_gauss_50mm",
+	"source": "Double-Gauss f/2, 22 deg half field; Tronnier, US patent 2,673,491, via Smith, Modern Lens Design p. 312, scaled from 100 mm to 50 mm (as in pbrt's dgauss.50mm.dat). The source gives nd only: vd values are ASSUMED from the nearest catalogue glass (N-BAF10, SF15, F5, N-SSK5, SF1).",
+	"nominalFocalLengthMm": 50.0,
+	"nominalFNumber": 2.0,
+	"imageCircleRadiusMm": 20.2,
+	"defaultCoating": true,
+	"surfaces": [
+		{ "radius": 29.475, "thickness": 3.76, "semiAperture": 12.6, "medium": { "nd": 1.670, "vd": 47.1, "name": "~N-BAF10" } },
+		{ "radius": 84.83, "thickness": 0.12, "semiAperture": 12.6, "medium": "air" },
+		{ "radius": 19.275, "thickness": 4.025, "semiAperture": 11.5, "medium": { "nd": 1.670, "vd": 47.1, "name": "~N-BAF10" } },
+		{ "radius": 40.77, "thickness": 3.275, "semiAperture": 11.5, "medium": { "nd": 1.699, "vd": 30.1, "name": "~SF15" } },
+		{ "radius": 12.75, "thickness": 5.705, "semiAperture": 9.0, "medium": "air" },
+		{ "stop": true, "thickness": 4.5, "semiAperture": 8.55 },
+		{ "radius": -14.495, "thickness": 1.18, "semiAperture": 8.5, "medium": { "nd": 1.603, "vd": 38.0, "name": "~F5" } },
+		{ "radius": 40.77, "thickness": 6.065, "semiAperture": 10.0, "medium": { "nd": 1.658, "vd": 50.9, "name": "~N-SSK5" } },
+		{ "radius": -20.385, "thickness": 0.19, "semiAperture": 10.0, "medium": "air" },
+		{ "radius": 437.065, "thickness": 3.22, "semiAperture": 10.0, "medium": { "nd": 1.717, "vd": 29.6, "name": "~SF1" } },
+		{ "radius": -39.73, "thickness": "paraxial", "semiAperture": 10.0, "medium": "air" }
+	]
+}

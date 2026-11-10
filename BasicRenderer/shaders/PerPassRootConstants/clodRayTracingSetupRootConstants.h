@@ -302,6 +302,7 @@
 #define CLOD_RT_PT_FLAG_RESTART_ACCUMULATION 64u // What rays see changed this frame.
 #define CLOD_RT_PT_FLAG_OMM_2_STATE_SECONDARY 128u // Bounce and shadow rays take unknown micro-triangles' baked guess instead of running any-hit.
 #define CLOD_RT_PT_FLAG_OMM_2_STATE_PRIMARY 256u
+#define CLOD_RT_PT_FLAG_LENS 512u // Primary rays through the physical lens (Builtin::RayTracing::LensData, lensCamera.hlsli).
 
 // Pixel watch (SARP_RT_PIXEL_WATCH): path traced pixels and hits that look wrong, with what made them, for the CPU to log.
 // A header of counters, then CLOD_RT_WATCH_RECORDS records of each kind. A kind's counter is its record cursor too: only the

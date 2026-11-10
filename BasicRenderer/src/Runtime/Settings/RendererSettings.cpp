@@ -23,6 +23,7 @@
 #include "PostProcessing/ToneMapping/TonemapTypes.h"
 #include "Utilities/Utilities.h"
 #include "Runtime/Settings/RendererSettingsHelpers.h"
+#include <nlohmann/json.hpp>
 
 namespace {
 constexpr const char* CLodVisibilityTelemetryDebugSettingName = "clodVisibilityTelemetryDebug";
@@ -77,6 +78,69 @@ void Renderer::SelectPathTracingUpscaler(bool pathTracing) {
         settings.getSettingSetter<UpscalingMode>("upscalingMode")(*m_upscalingModeBeforePathTracing);
         m_upscalingModeBeforePathTracing.reset();
     }
+}
+
+std::string Renderer::DescribeUpscaler() const {
+    const auto status = UpscalingManager::GetInstance().GetStatus();
+    const auto name = [](UpscalingMode mode) { return std::string(UpscalingModeNames[static_cast<int>(mode)]); };
+    auto& settings = SettingsManager::GetInstance();
+    const auto renderResolution = settings.getSettingGetter<DirectX::XMUINT2>("renderResolution")();
+    nlohmann::json reply = {
+        { "setting", name(settings.getSettingGetter<UpscalingMode>("upscalingMode")()) },
+        { "requested", name(status.requested) },
+        { "current", name(status.current) },
+        { "effective", name(status.effective) },
+        { "graph", name(status.graph) },
+        { "evaluated", name(status.evaluated) },
+        { "ray_reconstruction", status.evaluated == UpscalingMode::DLSSRayReconstruction },
+        { "dlss_supported", status.dlssSupported },
+        { "ray_reconstruction_supported", status.rayReconstructionSupported },
+        { "ray_reconstruction_guides_available", status.rayReconstructionGuidesAvailable },
+        { "mode_before_path_tracing", m_upscalingModeBeforePathTracing ? name(*m_upscalingModeBeforePathTracing) : std::string() },
+        { "path_tracing", m_pathTracing },
+        { "accumulate", settings.getSettingGetter<bool>("pathTracingAccumulate")() },
+        { "render_resolution", { renderResolution.x, renderResolution.y } },
+        { "quality", static_cast<int>(settings.getSettingGetter<UpscaleQualityMode>("upscalingQualityMode")()) },
+        { "evaluated_frame", status.evaluatedFrame },
+        { "evaluations", status.evaluations },
+        { "failed_evaluations", status.failedEvaluations },
+        { "out_of_memory_skips", status.outOfMemorySkips },
+        { "last_failed_frame", status.lastFailedFrame },
+        { "consecutive_failures", status.consecutiveFailures },
+        { "fallback", {
+            { "input_copies", status.fallbackCopies },
+            { "dlss_sr", status.fallbackSuperResolution },
+            { "cleared", status.fallbackClears } } },
+        { "ray_reconstruction_settings_failed", status.rayReconstructionSettingsFailed },
+        { "ray_reconstruction_settings_failures", status.rayReconstructionSettingsFailures },
+        { "ray_reconstruction_retry_seconds", status.rayReconstructionRetrySeconds },
+    };
+    return reply.dump();
+}
+
+void Renderer::SimulateUpscalerFailures(uint32_t outOfMemoryFrames, uint32_t settingsFailures) {
+    UpscalingManager::GetInstance().SimulateFailures(outOfMemoryFrames, settingsFailures);
+}
+
+void Renderer::ReconfigureUpscalerIfRequested() {
+    if (!UpscalingManager::GetInstance().TakeReconfigureRequest()) {
+        return;
+    }
+    // As a change of upscaling mode does it.
+    m_preFrameDeferredFunctions.defer([this]() {
+        StallPipeline();
+        UpscalingManager::GetInstance().Shutdown();
+        UpscalingManager::GetInstance().InitFFX();
+        UpscalingManager::GetInstance().Setup();
+        FFXManager::GetInstance().Shutdown();
+        FFXManager::GetInstance().InitFFX();
+        CreateTextures();
+        const auto ingestionConfiguration = CaptureSceneIngestionConfiguration();
+        m_sceneRenderBridge.ResyncPrimaryCameraDepth(m_sceneIngestionServices,
+            ingestionConfiguration.renderResolution.x, ingestionConfiguration.renderResolution.y,
+            PrimaryCameraLodHeight(ingestionConfiguration));
+        rebuildRenderGraph = true;
+    });
 }
 
 void Renderer::SetSettings() {
@@ -296,6 +360,28 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<uint32_t>("pathTracingReorderMode", pathTracingEnvironmentNumber("SARP_RT_PT_REORDER", 2u));
     // Averages samples while the camera is still: the reference image, with nothing biased left on.
     settingsManager.registerSetting<bool>("pathTracingAccumulate", ReadTruthyEnvironmentFlag("SARP_RT_PT_ACCUMULATE"));
+    // A hash of whatever else shapes primary rays (a physical lens's file, focus and wavelength mode). Accumulation restarts
+    // when it changes, as it does for the camera's view and projection. 0 is the pinhole camera.
+    settingsManager.registerSetting<uint64_t>("pathTracingCameraModelHash", 0ull);
+    // The physical camera lens (LensManager, SARP's docs/lens_simulation.md). Mode 0 pinhole, 1 explicit (traced surface by surface),
+    // 2 polynomial (the .brlens beside the prescription, of lensPolynomialDegree 5 or 7). The file is a name in lenses/ without
+    // .lens.json. The focus distance is in metres from the front vertex, which sits at the camera. Stop scale multiplies the
+    // aperture stop's radius (stopping down).
+    const auto lensEnvironmentFloat = [](const char* name, float fallback) {
+        const char* value = std::getenv(name);
+        return value ? static_cast<float>(std::atof(value)) : fallback;
+    };
+    const char* lensFile = std::getenv("SARP_LENS_FILE");
+    settingsManager.registerSetting<uint32_t>("lensMode", pathTracingEnvironmentNumber("SARP_LENS_MODE", 0u));
+    settingsManager.registerSetting<std::string>("lensFile", lensFile ? std::string(lensFile) : std::string("double_gauss_50mm"));
+    settingsManager.registerSetting<float>("lensFocusDistance", lensEnvironmentFloat("SARP_LENS_FOCUS_M", 3.0f));
+    settingsManager.registerSetting<bool>("lensMonochromatic", !ReadTruthyEnvironmentFlag("SARP_LENS_SPECTRAL"));
+    settingsManager.registerSetting<float>("lensStopScale", lensEnvironmentFloat("SARP_LENS_STOP_SCALE", 1.0f));
+    settingsManager.registerSetting<uint32_t>("lensPolynomialDegree", pathTracingEnvironmentNumber("SARP_LENS_POLYNOMIAL_DEGREE", 5u));
+    // 0 remap: a camera field wider than the lens covers is fitted to its covered field (the frame's corners at the covered
+    // image radius, exit rays widened to the camera's field), so the whole frame is lit. 1 physical: the sensor is sized by
+    // the camera's vertical field through the lens, and the frame vignettes to black past what the lens covers.
+    settingsManager.registerSetting<uint32_t>("lensFieldMode", pathTracingEnvironmentNumber("SARP_LENS_FIELD_MODE", 0u));
     settingsManager.registerSetting<bool>("pathTracingSunOnly", ReadTruthyEnvironmentFlag("SARP_RT_PT_SUN_ONLY"));
     // Opacity micromaps for alpha-tested foliage, as the preprocessor baked them (its --opacity-micromap-level sets their
     // subdivision), read when the BVH is first created. SARP_RT_OMM=0 turns them off.

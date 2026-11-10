@@ -3,6 +3,7 @@
 #include <utility>
 
 #include "Pipeline/PipelineState/PSOManager.h"
+#include "Pipeline/ShaderCompilation/RendererShaderStore.h"
 #include "VirtualGeometry/Culling/RenderPasses/WorkGraphCullingPass.h"
 
 std::uint64_t br::diagnostics::GetPipelineEpoch()
@@ -42,4 +43,9 @@ std::uint64_t br::diagnostics::RequestActivation(
 std::size_t br::diagnostics::ReloadCLodWorkGraphs()
 {
 	return WorkGraphCullingPass::ReloadAllWorkGraphs();
+}
+
+std::string br::diagnostics::DescribeShaderStore()
+{
+	return br::shaderstore::DescribeJson();
 }

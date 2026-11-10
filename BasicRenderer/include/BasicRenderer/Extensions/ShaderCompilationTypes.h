@@ -51,11 +51,18 @@ struct ShaderBundle {
     Microsoft::WRL::ComPtr<ID3DBlob> computeShader;
 	org::PipelineResources resourceDescriptorSlots;
 	uint64_t resourceIDsHash = 0;
+	// The shader store artifact this bytecode was read from; zero when it was compiled for this request. A device that
+	// rejects the bytecode hands it to PSOManager::DiscardStoredShaders.
+	uint64_t storeKeyHigh = 0;
+	uint64_t storeKeyLow = 0;
 };
 
 struct ShaderLibraryBundle {
     Microsoft::WRL::ComPtr<ID3DBlob> libraryBlob;
     org::PipelineResources resourceDescriptorSlots;
     uint64_t resourceIDsHash = 0;
+    // As ShaderBundle's.
+    uint64_t storeKeyHigh = 0;
+    uint64_t storeKeyLow = 0;
 };
 

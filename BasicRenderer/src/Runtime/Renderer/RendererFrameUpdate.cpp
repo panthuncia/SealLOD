@@ -122,6 +122,8 @@
 #include "BasicRenderer/Pipeline/RasterBucketFlags.h"
 #include "Assets/GeometryProcessing/Reyes/ObjectReyesAtlasTelemetry.h"
 #include "BasicRenderer/Diagnostics/TerrainRvtTelemetry.h"
+#include "Camera/Lens/LensManager.h"
+#include "Pipeline/ShaderCompilation/RendererShaderStore.h"
 
 
 void Renderer::Update(float elapsedSeconds) {
@@ -146,6 +148,10 @@ void Renderer::Update(float elapsedSeconds) {
 	}
 	PSOManager::GetInstance().PublishPendingLivePipelines(std::move(pipelineRetirementPoints));
 	PSOManager::GetInstance().CollectRetiredLivePipelines();
+	// One log line per batch of shader requests (startup, a reload), once nothing waits on a compile: what they cost.
+	if (br::shaderstore::HasUnreportedRequests() && GetPendingShaderCompileCount() == 0) {
+		br::shaderstore::FinishBatchWhenSettled();
+	}
 
     BeginFrameTaskGraphCapture();
 
@@ -171,6 +177,9 @@ void Renderer::Update(float elapsedSeconds) {
     if (!IsSceneReadyForFrame()) {
         return;
     }
+
+    // O(1) unless a lens self-test is reading back: the lens itself is built and published off this thread.
+    if (m_lensManager) m_lensManager->OnFrame(currentRenderGraph);
 
     if (m_shaderReloadRequested) {
         runCapturedStage("ShaderReload", [&]() {
@@ -228,6 +237,7 @@ void Renderer::Update(float elapsedSeconds) {
             RunAnimationUpdateStage(elapsedSeconds);
         }
     });
+    ReconfigureUpscalerIfRequested();
     // Flush deferred functions before rebuilding the render graph so that
     // deferred state changes (e.g. environment creation from SetEnvironmentInternal)
     // are visible when the graph is constructed.

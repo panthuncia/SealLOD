@@ -142,12 +142,42 @@ public:
             .normalRoughness = data.normalRoughness.get(),
             .specularHitDistance = data.specularHitDistance.get(),
         };
-        data.service->Evaluate(recording.Commands(), data.camera,
+        const bool written = data.service->Evaluate(recording.Commands(), data.camera,
             data.frameNumber, data.deltaTime, inputs);
         recording.RestoreDescriptorHeaps();
+        if (!written && data.service->Backend() == rhi::Backend::D3D12 && data.output) {
+            ClearOutput(recording.Commands(), *data.output);
+        }
     }
 
 private:
+    // DLSS didn't run (UpscalingManager::HandleFailedEvaluation) and nothing could stand in for it: the output is aliased, so
+    // black rather than whatever the memory held. After RestoreDescriptorHeaps, since Streamline may have bound its own. The
+    // output is declared as legacy interop, left in the common state.
+    static void ClearOutput(rhi::CommandList& commands, org::PixelBuffer& output) {
+        rhi::TextureBarrier barrier{};
+        barrier.texture = output.GetAPIResource().GetHandle();
+        barrier.range = { 0, 1, 0, 1 };
+        barrier.beforeSync = rhi::ResourceSyncState::All;
+        barrier.afterSync = rhi::ResourceSyncState::ClearUnorderedAccessView;
+        barrier.beforeAccess = rhi::ResourceAccessType::Common;
+        barrier.afterAccess = rhi::ResourceAccessType::UnorderedAccessClear;
+        barrier.beforeLayout = rhi::ResourceLayout::Common;
+        barrier.afterLayout = rhi::ResourceLayout::UnorderedAccess;
+        rhi::BarrierBatch batch{};
+        batch.textures = { &barrier };
+        commands.Barriers(batch);
+        rhi::UavClearInfo info{};
+        info.resource = output.GetAPIResource();
+        info.shaderVisible = output.GetUAVShaderVisibleInfo(0).slot;
+        info.cpuVisible = output.GetUAVNonShaderVisibleInfo(0).slot;
+        commands.ClearUavFloat(info, {});
+        std::swap(barrier.beforeSync, barrier.afterSync);
+        barrier.afterSync = rhi::ResourceSyncState::All;
+        std::swap(barrier.beforeAccess, barrier.afterAccess);
+        std::swap(barrier.beforeLayout, barrier.afterLayout);
+        commands.Barriers(batch);
+    }
 
     std::shared_ptr<org::PixelBuffer> m_pHDRTarget;
     std::shared_ptr<org::PixelBuffer> m_pMotionVectors;

@@ -1,0 +1,7 @@
+{
+	"_comment": "Sellmeier coefficients from the Schott catalogue (C in um^2). Glasses known only by nd/vd use a Cauchy fit through nd and nF - nC.",
+	"glasses": {
+		"N-BK7": { "sellmeier": { "B": [1.03961212, 0.231792344, 1.01046945], "C": [0.00600069867, 0.0200179144, 103.560653] } },
+		"N-SF5": { "sellmeier": { "B": [1.52481889, 0.187085527, 1.42729015], "C": [0.011254756, 0.0588995392, 129.141675] } }
+	}
+}

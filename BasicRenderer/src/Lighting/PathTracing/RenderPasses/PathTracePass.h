@@ -8,6 +8,7 @@
 #include <optional>
 
 #include "BuiltinResources.h"
+#include "Camera/Lens/LensManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "Render/PassBuilders.h"
 #include "Render/PipelineState.h"
@@ -31,27 +32,60 @@ struct PathTraceState {
     std::shared_ptr<org::Buffer> arguments;
     std::mutex mutex;
     std::shared_ptr<const br::render::CLodRtShaderTable> table;
-    // What accumulated samples depend on besides the camera. Averaging across a change would keep what is no longer there.
-    // The settings that change the image are in the last entry.
-    std::array<uint64_t, 6> accumulationScene{};
+    // What accumulated samples depend on. Averaging across a change would keep what is no longer there. The settings that
+    // change the image are in entry 5, the camera's view and unjittered projection in 6, and pathTracingCameraModelHash
+    // (whatever else shapes primary rays, such as a lens) mixed with tableCodeHash in 7.
+    std::array<uint64_t, 8> accumulationScene{};
+    // Frames traced since the last restart: the accumulation buffer's alpha once they have executed. Read under mutex.
     uint64_t accumulatedFrames = 0u;
+    uint64_t accumulationRestarts = 0u;
+    // RGBA32F, rgb the running average and a the sample count. Null unless pathTracingAccumulate was on at graph build.
+    std::shared_ptr<org::PixelBuffer> accumulation;
+    // The physical lens, whose published state's shader defines (a polynomial lens's generated code) join the recipe.
+    std::shared_ptr<br::lens::LensManager> lens;
+    // The table this frame's passes use (the arguments pass and the trace pass must agree), chosen once per frame, and a
+    // hash of the lens code the table's pipeline was compiled with (0: none), which accumulation depends on.
+    uint64_t tableFrame = ~0ull;
+    uint64_t tableCodeHash = 0u;
+    std::shared_ptr<const br::render::CLodRtShaderTable> frameTable;
 
-    // Null until the library has compiled on its worker.
-    std::shared_ptr<const br::render::CLodRtShaderTable> CurrentTable() {
-        auto& manager = PSOManager::GetInstance();
-        const org::PipelineState* pipeline = manager.TryGetRayTracingPipeline(recipe);
-        if (!pipeline) {
-            return nullptr;
-        }
+    // The table for this frame. The pipeline the published lens needs compiles on a worker: until it exists the last table
+    // stays (its shader traces the surfaces for a polynomial it wasn't compiled with). Null until any has compiled.
+    std::shared_ptr<const br::render::CLodRtShaderTable> CurrentTable(uint64_t frame) {
         std::scoped_lock lock(mutex);
+        if (frame == tableFrame) return frameTable;
+        tableFrame = frame;
+        auto& manager = PSOManager::GetInstance();
+        RayTracingPipelineRecipe wanted = recipe;
+        std::wstring code;
+        if (lens) {
+            const auto published = lens->Published();
+            for (auto& define : br::lens::LensManager::ShaderDefines(*published)) wanted.defines.push_back(std::move(define));
+            code = published->polynomialInclude;
+        }
+        const org::PipelineState* pipeline = manager.TryGetRayTracingPipeline(wanted);
+        if (!pipeline && table) {
+            frameTable = table;
+            return frameTable;
+        }
+        if (!pipeline && !code.empty()) {
+            pipeline = manager.TryGetRayTracingPipeline(recipe);
+            code.clear();
+        }
+        if (!pipeline) {
+            frameTable = nullptr;
+            return frameTable;
+        }
         if (!table || !table->IsCurrent(*pipeline)) {
             auto& device = DeviceManager::GetInstance();
             table = br::render::CLodRtShaderTable::Create(device.GetDevice(), device.GetRayTracingFeatures(), *pipeline,
                 { recipe.GroupNames(), "PathTraceRayGen", { "PathTraceRadianceMiss", "PathTraceShadowMiss" },
                     { "PathTraceGeneralRadiance", "PathTraceGeneralShadow", "PathTraceTerrainRadiance", "PathTraceTerrainShadow" } },
                 "Path trace shader table");
+            tableCodeHash = code.empty() ? 0u : std::hash<std::wstring>{}(code);
         }
-        return table;
+        frameTable = table;
+        return frameTable;
     }
 };
 
@@ -118,7 +152,7 @@ public:
         PathTraceArgsFrameData frame{};
         const auto* context = preparation.preparationData ? preparation.preparationData->Get<UpdateContext>() : nullptr;
         if (!context) return frame;
-        if (const auto table = m_state->CurrentTable()) {
+        if (const auto table = m_state->CurrentTable(context->frameNumber)) {
             frame.arguments = table->DispatchArguments(context->renderResolution.x, context->renderResolution.y);
         }
         return frame;
@@ -146,6 +180,7 @@ private:
 
 struct PathTraceFrameData {
     std::shared_ptr<br::render::CLodRayTracingSystem> system;
+    std::shared_ptr<const br::lens::LensPublishedState> lens; // The physical lens this frame traces through; inactive is a pinhole.
     std::shared_ptr<const br::render::CLodRtShaderTable> table;
     uint32_t frame = 0u;
     uint32_t maxBounces = 2u;
@@ -167,8 +202,10 @@ struct PathTraceBindings {
 class PathTracePass : public org::TypedRenderGraphPass<PathTracePass, PathTraceFrameData, PathTraceBindings> {
 public:
     PathTracePass(std::shared_ptr<PathTraceState> state, std::shared_ptr<br::render::CLodRayTracingSystem> system, std::shared_ptr<org::ResourceGroup> slabs,
-        bool terrainRvt, bool rayReconstruction)
-        : m_state(std::move(state)), m_system(std::move(system)), m_slabs(std::move(slabs)), m_terrainRvt(terrainRvt), m_rayReconstruction(rayReconstruction) {
+        bool terrainRvt, bool rayReconstruction, std::shared_ptr<br::lens::LensManager> lens = {})
+        : m_state(std::move(state)), m_system(std::move(system)), m_slabs(std::move(slabs)), m_terrainRvt(terrainRvt), m_rayReconstruction(rayReconstruction),
+          m_lens(std::move(lens)) {
+        if (m_lens) m_state->lens = m_lens;
         if (SettingsManager::GetInstance().getSettingGetter<bool>("pathTracingAccumulate")()) {
             const auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
             org::TextureDescription description;
@@ -178,6 +215,7 @@ public:
             description.imageDimensions.emplace_back(resolution.x, resolution.y, 0, 0);
             m_accumulation = org::PixelBuffer::CreateSharedUnmaterialized(description);
             m_accumulation->SetName("Path trace accumulation");
+            m_state->accumulation = m_accumulation;
         }
     }
 
@@ -197,6 +235,8 @@ public:
             Builtin::Terrain::Regions, Builtin::Terrain::WeightBlocks,
             Builtin::OpenPBR::FuzzLTC, Builtin::OpenPBR::IdealMetalEnergyComplement, Builtin::OpenPBR::IdealMetalAverageEnergyComplement,
             Builtin::OpenPBR::OpaqueDielectricAverageEnergyComplement, Builtin::Noise::BlueNoise2D);
+        // The physical lens (LensManager), declared whether or not it is on: the graph validates every name a shader uses.
+        builder.ShaderResource(Builtin::RayTracing::LensData);
         builder.ShaderResource(Builtin::OpenPBR::OpaqueDielectricEnergyComplement,
             org::SrvView{ static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull) });
         if (m_slabs) builder.ShaderResource(ResourceGroupResolver(m_slabs));
@@ -235,7 +275,7 @@ public:
         const auto* context = preparation.preparationData ? preparation.preparationData->Get<UpdateContext>() : nullptr;
         if (!context) return frame;
         frame.system = context->clodRayTracingSystem;
-        frame.table = m_state->CurrentTable();
+        frame.table = m_state->CurrentTable(context->frameNumber);
         frame.frame = static_cast<uint32_t>(context->frameNumber);
         auto& settings = SettingsManager::GetInstance();
         frame.maxBounces = settings.getSettingGetter<uint32_t>("pathTracingMaxBounces")();
@@ -246,19 +286,45 @@ public:
         const uint32_t twoState = settings.getSettingGetter<uint32_t>("pathTracingOpacityMicromapTwoState")();
         if (twoState >= 1u) frame.flags |= CLOD_RT_PT_FLAG_OMM_2_STATE_SECONDARY;
         if (twoState >= 2u) frame.flags |= CLOD_RT_PT_FLAG_OMM_2_STATE_PRIMARY;
-        if (frame.system) {
+        if (m_lens) {
+            // One atomic load: the lens is built and uploaded off this thread, and only a GPU-ready revision gets here.
+            frame.lens = m_lens->Published();
+            if (frame.lens->Active()) frame.flags |= CLOD_RT_PT_FLAG_LENS;
+            if (context->hasPrimaryCamera) m_lens->NoteCamera(context->primaryCamera.fov, context->primaryCamera.aspect);
+        }
+        if (frame.system && frame.table) {
             const auto& stats = frame.system->GetStats();
-            const std::array<uint64_t, 6> scene = { stats.instances, stats.clustersInBvh, stats.clasBuildsTotal, stats.clasFreedTotal,
-                context->materialTextureStreamingStats.totalResidentBytes, (uint64_t(frame.maxBounces) << 32u) | frame.flags };
+            // The unjittered projection: a jittering upscaler moves the jittered one every frame, and the ray generator's own
+            // subpixel offset already spreads accumulated samples over the pixel. The view is also compared on the GPU; it is
+            // here too so that accumulatedFrames counts what the buffer's alpha does.
+            const uint64_t camera = context->hasPrimaryCamera
+                ? HashCameraMatrices(context->primaryCamera.info.view, context->primaryCamera.info.unjitteredProjection) : 0u;
+            std::array<uint64_t, 8> scene = { stats.instances, stats.clustersInBvh, stats.clasBuildsTotal, stats.clasFreedTotal,
+                context->materialTextureStreamingStats.totalResidentBytes, (uint64_t(frame.maxBounces) << 32u) | frame.flags,
+                camera, settings.getSettingGetter<uint64_t>("pathTracingCameraModelHash")() };
             std::scoped_lock lock(m_state->mutex);
+            scene[7] ^= m_state->tableCodeHash; // CurrentTable writes it under the same mutex.
             if (scene != m_state->accumulationScene) {
                 m_state->accumulationScene = scene;
                 m_state->accumulatedFrames = 0u;
+                ++m_state->accumulationRestarts;
                 frame.flags |= CLOD_RT_PT_FLAG_RESTART_ACCUMULATION;
             }
             ++m_state->accumulatedFrames;
         }
         return frame;
+    }
+
+    static uint64_t HashCameraMatrices(const DirectX::XMMATRIX& view, const DirectX::XMMATRIX& projection) {
+        // FNV-1a over the matrices' bits: any change at all restarts, and an unchanged camera rebuilds the same bits.
+        uint64_t hash = 14695981039346656037ull;
+        for (const DirectX::XMMATRIX* matrix : { &view, &projection }) {
+            const auto* bytes = reinterpret_cast<const unsigned char*>(matrix);
+            for (size_t index = 0; index < sizeof(DirectX::XMMATRIX); ++index) {
+                hash = (hash ^ bytes[index]) * 1099511628211ull;
+            }
+        }
+        return hash;
     }
 
     static void Record(const PathTraceBindings& bindings, const PathTraceFrameData& frame, org::PassRecordContext& recording) {
@@ -303,4 +369,5 @@ private:
     bool m_terrainRvt = false;
     bool m_rayReconstruction = false;
     std::shared_ptr<org::PixelBuffer> m_accumulation;
+    std::shared_ptr<br::lens::LensManager> m_lens;
 };

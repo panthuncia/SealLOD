@@ -651,6 +651,22 @@ private:
     std::function<void(uint32_t)> setPathTracingOpacityMicromapTwoState;
     std::function<void(bool)> setPathTracingAccumulate;
     std::function<void(bool)> setPathTracingSunOnly;
+    // The physical lens (LensManager). The lens list is read from lenses/ when the menu is built.
+    uint32_t m_lensMode = 0u;
+    std::string m_lensFile;
+    float m_lensFocusDistance = 3.0f;
+    bool m_lensMonochromatic = true;
+    float m_lensStopScale = 1.0f;
+    uint32_t m_lensFieldMode = 0u;
+    uint32_t m_lensPolynomialDegree = 5u;
+    std::vector<std::string> m_lensFiles;
+    std::function<void(uint32_t)> setLensMode;
+    std::function<void(std::string)> setLensFile;
+    std::function<void(float)> setLensFocusDistance;
+    std::function<void(bool)> setLensMonochromatic;
+    std::function<void(float)> setLensStopScale;
+    std::function<void(uint32_t)> setLensFieldMode;
+    std::function<void(uint32_t)> setLensPolynomialDegree;
 
     bool m_jitterEnabled = true;
     std::function<bool()> getJitterEnabled;

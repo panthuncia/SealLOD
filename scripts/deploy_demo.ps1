@@ -8,13 +8,13 @@
       - the exe, from the build output (the runtime directory's copy can be stale);
       - every DLL beside it (D3D12 Agility SDK in D3D\, Streamline and DLSS in NVSL\, DirectStorage, FidelityFX, DXC,
         Slang, TBB, PIX, USD and its plugin info in usd\), the Nsight Perf host DLL, and the MSVC runtime, app-local;
-      - the shader sources (compiled at run time), built-in textures and environment textures;
-      - a warm shader cache: cache\shaders, seeded from this build's and any scene cache's (see -ShaderCacheSeed).
+      - the shader sources (compiled at run time), built-in textures, environment textures and lens prescriptions;
+      - a warm shader cache: cache\shaders\store, seeded from this build's and any scene cache's (see -ShaderCacheSeed).
     The build's runtime directory links most of these to the source tree; the copy follows the links.
 
-    The shader cache keys its entries by a digest of shaders\, SARPShaders\ and NVSL\, and turns itself off when one of
-    them is missing: then every launch compiles every shader again. All three are deployed as exact copies, so entries
-    compiled by this build are valid in the deployment.
+    The shader store (org::services::ShaderStore) keeps a shader while every file its build read still has the same
+    contents, with paths relative to the exe's folder. shaders\ and SARPShaders\ are deployed as exact copies, so what
+    this build compiled is valid in the deployment.
 
     No models folder is deployed, so the demo starts with an empty scene. Load a scene with Scene Explorer's
     "Load Folder" (for example D:\Caches\zorah, a folder of *.brscene.json scene caches) or "Load Model" (a file).
@@ -36,11 +36,12 @@
     with cmake --build.
 
 .PARAMETER NoShaderCache
-    Don't seed cache\shaders. The first launch, and the first time each scene's materials show, then compile shaders.
+    Don't seed cache\shaders\store. The first launch, and the first time each scene's materials show, then compile shaders.
 
 .PARAMETER ShaderCacheSeed
-    Further cache roots whose shaders\ folder seeds the deployment's. The build's own cache is always used. Default:
-    D:\Caches\zorah, where Zorah's material shaders were compiled.
+    Further cache roots whose shaders\store seeds the deployment's. The build's own cache is always used, and gives the
+    index if it has one. A store's index cannot be merged, so the others add only artifacts: a request they answer
+    preprocesses but does not compile. Default: D:\Caches\zorah, where Zorah's material shaders were compiled.
 
 .PARAMETER IncludeSymbols
     Also copy BasicRenderer.pdb (about 600 MB), for symbolized crash stacks in logs\.
@@ -155,25 +156,32 @@ else {
 }
 
 # The Agility SDK (D3D12SDKPath .\D3D\), Streamline plugins (NVSL\ beside the exe), USD's plugin info, shader sources
-# (shaders\ and SARPShaders\: with NVSL\, what the shader cache's digest covers), built-in and environment textures.
-foreach ($name in 'D3D', 'NVSL', 'usd', 'shaders', 'SARPShaders', 'BuiltinTextures', 'textures') { Copy-RuntimeDirectory $name }
+# (shaders\ and SARPShaders\, which the shader store's records name), built-in and environment textures, and the path
+# tracer's lens prescriptions (lenses\, which LensManager reads beside the exe).
+foreach ($name in 'D3D', 'NVSL', 'usd', 'shaders', 'SARPShaders', 'BuiltinTextures', 'textures', 'lenses') { Copy-RuntimeDirectory $name }
 
 # CompiledShaders\ is a folder the demo writes, not the cache it reads; earlier deploys copied it.
 $stale = Join-Path $Destination 'CompiledShaders'
 if (Test-Path $stale) { Remove-Item -Recurse -Force $stale }
 
-# Seed the shader cache: entries are keyed by the shader sources' digest and their compile recipe, so other caches'
-# entries from this build are valid here, and others' are never used. Newer files already there are kept.
+# Seed the shader store. The first store with an index gives it (index.a, index.b, when newer than the deployment's);
+# every seed adds its artifacts (cas\, named by their contents, so the same name is the same artifact). A request the
+# index does not cover finds its artifact after preprocessing and does not compile.
 if (-not $NoShaderCache) {
-    $target = Join-Path $Destination 'cache\shaders'
+    $target = Join-Path $Destination 'cache\shaders\store'
+    $hasIndex = $false
     foreach ($root in @((Join-Path $runtime 'cache')) + $ShaderCacheSeed) {
-        $source = Join-Path $root 'shaders'
+        $source = Join-Path $root 'shaders\store'
         if (-not (Test-Path $source)) { continue }
-        Write-Host "Seeding the shader cache from $source"
-        & robocopy $source $target /E /XO /NFL /NDL /NJH /NJS /NP /R:2 /W:1 | Out-Null
+        Write-Host "Seeding the shader store from $source"
+        $files = if ($hasIndex) { @('/XF', 'index.a', 'index.b') } else { @() }
+        & robocopy $source $target /E /XO @files /NFL /NDL /NJH /NJS /NP /R:2 /W:1 | Out-Null
         if ($LASTEXITCODE -ge 8) { throw "robocopy of $source failed with exit code $LASTEXITCODE" }
         $global:LASTEXITCODE = 0
+        $hasIndex = $hasIndex -or (Test-Path (Join-Path $source 'index.a')) -or (Test-Path (Join-Path $source 'index.b'))
     }
+    $manifest = Join-Path $runtime 'cache\shaders\compiled_bundles.txt'
+    if (Test-Path $manifest) { Copy-RuntimeFile $manifest (Join-Path $Destination 'cache\shaders\compiled_bundles.txt') }
 }
 
 # A previous deploy's models would make the demo load Bistro at start.

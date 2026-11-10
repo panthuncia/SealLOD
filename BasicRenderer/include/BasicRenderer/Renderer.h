@@ -60,6 +60,8 @@
 struct ID3D12Resource;
 class Scene;
 class CLodVirtualShadowFrameTelemetryState;
+struct PathTraceState;
+namespace br::lens { class LensManager; }
 namespace org {
 class DynamicResource;
 class ExternalTextureResource;
@@ -157,6 +159,22 @@ public:
     const br::render::SceneIngestionServices& GetSceneIngestionServices() const { return m_sceneIngestionServices; }
     uint64_t GetTotalFramesRendered() const { return m_totalFramesRendered; }
     org::RenderGraph* GetRenderGraph() { return currentRenderGraph; }
+    // The path tracer's accumulation, for capturing a reference image. buffer is null unless the current graph path traces
+    // with pathTracingAccumulate on. framesSinceRestart counts frames prepared since the last restart, so it can lead the
+    // buffer's alpha (the sample count the GPU wrote) by the frames in flight; restarts counts restarts since graph build.
+    struct PathTracingAccumulation {
+        std::shared_ptr<org::PixelBuffer> buffer; // RGBA32F: rgb the running average, a the sample count
+        uint64_t framesSinceRestart = 0;
+        uint64_t restarts = 0;
+    };
+    PathTracingAccumulation GetPathTracingAccumulation() const;
+    // The physical camera lens's control commands (lens.get, lens.set, lens.selftest, lens.selftest.status): a JSON
+    // request, a JSON reply. Throws std::exception on a bad request. See SARP's docs/lens_simulation.md.
+    std::string HandleLensControl(const std::string& command, const std::string& requestJson);
+    // upscaler.get: the upscaling mode requested, the one the current graph runs and what its last evaluation ran, as JSON.
+    std::string DescribeUpscaler() const;
+    // upscaler.simulate_failure: see UpscalingManager::SimulateFailures.
+    void SimulateUpscalerFailures(uint32_t outOfMemoryFrames, uint32_t settingsFailures);
     // Reads the primary view's visibility and visible clusters from one frame, so a tool can say what
     // drew each pixel. done runs on a readback thread. Returns false, without calling it, if the frame
     // has no such resources yet. Each call copies both resources, so this is not for every frame.
@@ -393,6 +411,8 @@ private:
     void MaybeRequestObjectReyesAtlasTelemetry();
     void MaybeRequestTerrainRvtTelemetry();
     void ApplyWindowResolutionPreset(WindowResolutionPreset preset);
+    // Sets the upscaler up again and rebuilds the graph when UpscalingManager asks: a Ray Reconstruction retry.
+    void ReconfigureUpscalerIfRequested();
 
     void StallPipeline();
 
@@ -415,6 +435,8 @@ private:
 	bool m_screenSpaceReflections = false;
     bool m_rayTracedReflections = false;
     bool m_pathTracing = false;
+    std::shared_ptr<PathTraceState> m_pathTraceState; // The current graph's, when it path traces.
+    std::shared_ptr<br::lens::LensManager> m_lensManager; // The path tracer's physical lens.
     // What switching path tracing off goes back to. A successful replacement clears the rollback copy, so it can't serve.
     std::optional<br::pipeline::PipelineRecipe> m_rasterRecipeBeforePathTracing;
     // The upscaler raster used, for when path tracing (which selects DLSS Ray Reconstruction) is switched off.

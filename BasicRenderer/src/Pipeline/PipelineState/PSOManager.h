@@ -122,6 +122,9 @@ struct RayTracingPipelineRecipe {
     std::vector<std::string> GroupNames() const;
 };
 
+namespace org::services { class ShaderIncludeTracker; }
+class PSOManagerShaderBuild;
+
 class PSOManager {
 public:
 
@@ -170,8 +173,8 @@ public:
     uint64_t PipelineCacheGeneration() const noexcept { return m_asyncPSOGeneration.load(std::memory_order_acquire); }
     // On-demand variants (TryGetOrRequestPipelineState) requested and not yet compiled, queued ones included.
     uint32_t PendingAsyncPipelineCount() const noexcept { return m_asyncPSOsPending.load(std::memory_order_acquire); }
-    // Compiles, into the artifact cache, every D3D12 bundle runs have recorded (the compile manifest beside the DXIL
-    // artifacts), dropping those that no longer compile. For an offline tool after the shader sources change. Returns how
+    // Resolves through the shader store every D3D12 bundle runs have recorded (the compile manifest beside the store),
+    // dropping those that no longer compile. For an offline tool after the shader sources change. Returns how
     // many compiled; progress gets (done, total).
     std::size_t PrecompileRecordedShaderBundles(const std::function<void(std::size_t, std::size_t)>& progress = {});
 
@@ -182,6 +185,10 @@ public:
     // The same, on a shader-compile worker: returns null until the state object exists. Creating one can stall for long
     // enough that a frame must not wait on it.
     const org::PipelineState* TryGetRayTracingPipeline(const RayTracingPipelineRecipe& recipe);
+    // A compute pipeline on the compute root signature, compiled on a shader-compile worker on first request: null until it
+    // exists. For a pass whose defines follow runtime state (the lens self-test's generated polynomial include).
+    const org::PipelineState* TryGetComputePipeline(const std::wstring& shaderPath, const std::wstring& entryPoint,
+        const std::vector<std::pair<std::wstring, std::wstring>>& defines, const std::string& debugName);
 
     std::shared_ptr<const void> CaptureLayoutOwner(rhi::PipelineLayoutHandle layout) const;
     const rhi::PipelineLayout& GetRootSignature();
@@ -206,20 +213,16 @@ public:
 	std::vector<DxcDefine> GetRasterShaderDefines(MaterialRasterFlags materialRasterFlags);
 	ShaderBundle CompileShaders(const ShaderInfoBundle& shaderInfoBundle);
 	ShaderBundle CompileShaders(const ShaderInfoBundle& shaderInfoBundle, org::BackendInstanceId backendInstance);
-	// For org::PipelineLibrary's builds. A reload asks past the artifact cache.
+	// For org::PipelineLibrary's builds. A reload reads the source files again before asking the shader store.
 	ShaderBundle CompileShadersForPipelineLibrary(const ShaderInfoBundle& shaderInfoBundle, org::BackendInstanceId backendInstance, bool bypassCache);
 	void PrecompileMaterialEvalShaderArtifact(MaterialCompileFlags materialCompileFlags);
 	void PrecompileShaderArtifact(const ShaderVariantRequest& request);
 	void PrecompileShaderBundleArtifact(const ShaderInfoBundle& shaderInfoBundle);
 	ShaderLibraryBundle CompileShaderLibrary(const ShaderLibraryInfo& libraryInfo, const std::vector<DxcDefine>& defines = {});
 
-    void GetPreprocessedBlob(
-        const std::wstring& filename,
-        const std::wstring& entryPoint,
-        const std::wstring& target,
-        std::vector<DxcDefine> defines,
-        Microsoft::WRL::ComPtr<ID3DBlob>& outBlob,
-        bool emitSpirv = false);
+    // A device rejected bytecode the shader store returned (ShaderBundle::storeKey*): the artifact is deleted, so the
+    // next request builds it from source. False if the bytecode was not from the store.
+    static bool DiscardStoredShaders(uint64_t storeKeyHigh, uint64_t storeKeyLow);
 
 private:
     // The permutation caches' compute pipelines (deferred shading, software raster, ...), primary device only. Passes declare
@@ -253,6 +256,8 @@ private:
         org::PipelineState state;
         ComputeRecipe computeRecipe;
         std::function<org::PipelineState()> rebuild;
+        // Ray tracing pipelines: the recipe rebuilt with define overrides (added, or replacing a define of the same name).
+        std::function<org::PipelineState(const std::map<std::wstring, std::wstring>&)> rebuildWithDefines;
         std::vector<std::string> shaderPaths;
         uint64_t rayTracingRecipeHash = 0;
         bool supportsDefineOverrides = false;
@@ -330,6 +335,7 @@ private:
     std::unordered_map<unsigned int, org::PipelineState> m_clusterLODDeepVisibilityResolvePSOCache;
     std::unordered_map<MaterialCompileFlags, org::PipelineState> m_materialEvalPSOCache;
     std::unordered_map<uint64_t, org::PipelineState> m_rayTracingPSOCache;
+    std::unordered_map<uint64_t, org::PipelineState> m_onDemandComputePSOCache;
 
     std::unordered_set<RasterPSOKey> m_pendingClusterLODRasterPSOs;
     std::unordered_set<RasterPSOKey> m_pendingClusterLODVirtualShadowRasterPSOs;
@@ -340,6 +346,7 @@ private:
     std::unordered_set<uint64_t> m_pendingClusterLODSoftwareRasterPSOs;
     std::unordered_set<MaterialCompileFlags> m_pendingMaterialEvalPSOs;
     std::unordered_set<uint64_t> m_pendingRayTracingPSOs;
+    std::unordered_set<uint64_t> m_pendingOnDemandComputePSOs;
 
 	std::unordered_map<unsigned int, org::PipelineState> m_deferredPSOCache;
 
@@ -496,12 +503,6 @@ private:
         return nullptr;
     }
 
-    void CompileShaderForSlot(
-        const std::optional<ShaderInfo>& slot,
-        const std::vector<DxcDefine>& defines,
-		const DxcBuffer& buffer,
-        bool emitSpirv,
-        Microsoft::WRL::ComPtr<ID3DBlob>& outBlob);
     void CompileShader(const std::wstring& filename, 
         const std::wstring& entryPoint, 
         const std::wstring& target, 
@@ -510,13 +511,10 @@ private:
         bool emitSpirv,
         Microsoft::WRL::ComPtr<ID3DBlob>& shaderBlob);
 	ShaderBundle CompileShadersForBackend(const ShaderInfoBundle& info, rhi::Backend backend);
+	ShaderLibraryBundle CompileShaderLibraryForBackend(const ShaderLibraryInfo& libraryInfo, const std::vector<DxcDefine>& defines, rhi::Backend backend);
 
     void createRootSignature();
     rhi::BlendState GetBlendDesc(MaterialCompileFlags materialCompileFlags);
-
-    void LoadSource(const std::filesystem::path& path, PSOManager::SourceData& sd);
-
-    ComPtr<IDxcIncludeHandler> CreateIncludeHandler();
 
     std::vector<LPCWSTR> BuildArguments(
         const ShaderCompileOptions& opts,
@@ -549,31 +547,16 @@ private:
         const std::filesystem::path& outDir,
         const std::wstring& baseName);
 
-    template<typename BlobT>
-    void PreprocessShaderSlot(
-        const std::optional<ShaderInfo>& slot,
+    // DXC preprocessing of one root, reading the root and every include through the shader store's tracker.
+    Microsoft::WRL::ComPtr<ID3DBlob> PreprocessShaderSource(
+        const std::wstring& filename,
+        const std::wstring& entryPoint,
+        const std::wstring& target,
         const std::vector<DxcDefine>& defines,
-        Microsoft::WRL::ComPtr<BlobT>& outBlob,
-        DxcBuffer& outBuf,
-        bool emitSpirv)
-    {
-        if (!slot)
-            return;
+        bool emitSpirv,
+        org::services::ShaderIncludeTracker& includes);
 
-        GetPreprocessedBlob(
-            slot->filename,
-            slot->entryPoint,
-            slot->target,
-            defines,
-            outBlob,
-            emitSpirv
-        );
-
-        outBuf.Ptr = outBlob->GetBufferPointer();
-        outBuf.Size = outBlob->GetBufferSize();
-        outBuf.Encoding = 0;
-    }
-
+    friend class PSOManagerShaderBuild;
 };
 
 inline PSOManager& PSOManager::GetInstance() {

@@ -30,7 +30,7 @@ public:
     DirectX::XMUINT2 RenderResolution() const noexcept { return m_renderResolution; }
     DirectX::XMUINT2 OutputResolution() const noexcept { return m_outputResolution; }
 
-    void Evaluate(rhi::CommandList& commands, const Components::Camera& camera,
+    bool Evaluate(rhi::CommandList& commands, const Components::Camera& camera,
         std::uint64_t frameNumber, double deltaTime, const UpscalingInputs& inputs) const;
 
 private:

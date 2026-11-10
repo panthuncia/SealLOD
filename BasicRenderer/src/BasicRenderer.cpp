@@ -49,6 +49,15 @@
 #include <BasicRenderer/Extensions/SettingAccess.h>
 #include <BasicRenderer/Diagnostics/PipelineControl.h>
 #include <streambuf>
+#include <array>
+#include <chrono>
+#include <cstring>
+#include <limits>
+#include <mutex>
+#include <DirectXPackedVector.h>
+#include "Render/Runtime/IReadbackService.h"
+#include "Render/Runtime/IStatisticsService.h"
+#include "Resources/ReadbackRequest.h"
 
 class spdlog_streambuf : public std::streambuf {
 public:
@@ -703,6 +712,270 @@ std::string DemoSamplingSignature(const br::telemetry::sampling::ReadinessSnapsh
     return output.str();
 }
 
+namespace {
+
+// capture.hdr: one frame's radiance as an RGBA32F DDS, from the path tracer's accumulation buffer or the HDR colour that
+// tonemapping reads. Like pso.recompile it answers with a job id; job.status reports it.
+class DemoHdrCaptures {
+public:
+    // Apart from the pipeline jobs' ids, so job.status can tell them apart.
+    static constexpr std::uint64_t kFirstJobId = 1ull << 48;
+
+    std::uint64_t Request(Renderer& renderer, const nlohmann::json& document)
+    {
+        const auto& pathField = document.at("path");
+        if (!pathField.is_string() || pathField.get_ref<const std::string&>().empty()) {
+            throw std::runtime_error("capture.hdr 'path' must be a non-empty string");
+        }
+        const auto accumulation = renderer.GetPathTracingAccumulation();
+        const std::string target = document.value("target", accumulation.buffer ? std::string("accumulation") : std::string("hdr"));
+        if (target != "accumulation" && target != "hdr") throw std::runtime_error("capture.hdr 'target' must be 'accumulation' or 'hdr'");
+        const std::uint64_t spp = document.value("spp", std::uint64_t{ 0 });
+        if ((target == "accumulation" || spp > 0u) && !accumulation.buffer) {
+            throw std::runtime_error("path tracing is not accumulating: set enablePathTracing and pathTracingAccumulate first");
+        }
+        const double timeoutSeconds = document.value("timeout_seconds", 300.0);
+        if (!(timeoutSeconds > 0.0)) throw std::runtime_error("capture.hdr 'timeout_seconds' must be positive");
+
+        auto job = std::make_shared<Job>();
+        job->id = m_nextId++;
+        job->path = std::filesystem::absolute(std::filesystem::path(pathField.get<std::string>()));
+        job->accumulation = target == "accumulation";
+        job->spp = spp;
+        job->deadline = std::chrono::steady_clock::now()
+            + std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(timeoutSeconds));
+        if (job->path.has_parent_path()) std::filesystem::create_directories(job->path.parent_path());
+        std::scoped_lock lock(m_mutex);
+        m_jobs.emplace(job->id, job);
+        return job->id;
+    }
+
+    std::optional<nlohmann::json> Status(std::uint64_t id)
+    {
+        std::shared_ptr<Job> job;
+        {
+            std::scoped_lock lock(m_mutex);
+            const auto found = m_jobs.find(id);
+            if (found == m_jobs.end()) return std::nullopt;
+            job = found->second;
+        }
+        std::scoped_lock lock(job->mutex);
+        return nlohmann::json{
+            { "id", job->id }, { "kind", "capture.hdr" }, { "state", StateName(job->state) }, { "error", job->error },
+            { "path", job->path.string() }, { "target", job->accumulation ? "accumulation" : "hdr" },
+            { "spp_requested", job->spp }, { "width", job->width }, { "height", job->height },
+            { "samples_min", job->samplesMin }, { "samples_max", job->samplesMax }, { "reads", job->reads },
+            { "frames_since_restart", job->framesSinceRestart },
+        };
+    }
+
+    // Each frame, on the thread that renders: starts the readbacks of the jobs whose samples are in, and expires the rest.
+    void Pump(Renderer& renderer)
+    {
+        std::vector<std::shared_ptr<Job>> jobs;
+        {
+            std::scoped_lock lock(m_mutex);
+            for (const auto& [id, job] : m_jobs) jobs.push_back(job);
+        }
+        const auto now = std::chrono::steady_clock::now();
+        for (const auto& job : jobs) {
+            std::scoped_lock lock(job->mutex);
+            if (job->state == State::Published || job->state == State::Failed) continue;
+            if (now >= job->deadline) {
+                Fail(*job, job->state == State::Reading ? "timed out waiting for the readback" :
+                    "timed out with " + std::to_string(job->framesSinceRestart) + " of " + std::to_string(job->spp) + " samples");
+                continue;
+            }
+            if (job->state != State::Waiting) continue;
+            try {
+                StartRead(renderer, job);
+            } catch (const std::exception& exception) {
+                Fail(*job, exception.what());
+            }
+        }
+    }
+
+private:
+    enum class State { Waiting, Reading, Published, Failed };
+
+    struct Job {
+        std::mutex mutex;
+        std::uint64_t id = 0;
+        std::filesystem::path path;
+        bool accumulation = true;
+        std::uint64_t spp = 0;
+        std::chrono::steady_clock::time_point deadline;
+        State state = State::Waiting;
+        std::string error;
+        std::uint32_t width = 0, height = 0;
+        float samplesMin = 0.0f, samplesMax = 0.0f;
+        std::uint64_t framesSinceRestart = 0;
+        std::uint32_t reads = 0;
+    };
+
+    static const char* StateName(State state)
+    {
+        switch (state) {
+        case State::Waiting: return "waiting";
+        case State::Reading: return "reading";
+        case State::Published: return "published";
+        case State::Failed: return "failed";
+        }
+        return "unknown";
+    }
+
+    static void Fail(Job& job, std::string error)
+    {
+        job.state = State::Failed;
+        job.error = std::move(error);
+        spdlog::error("capture.hdr {} '{}': {}", job.id, job.path.string(), job.error);
+    }
+
+    // Called with job->mutex held.
+    static void StartRead(Renderer& renderer, const std::shared_ptr<Job>& job)
+    {
+        auto* graph = renderer.GetRenderGraph();
+        if (!graph) return; // Between graphs; try next frame.
+        auto* readbacks = graph->GetReadbackService();
+        if (!readbacks) throw std::runtime_error("the render graph has no readback service");
+        const auto accumulation = renderer.GetPathTracingAccumulation();
+        job->framesSinceRestart = accumulation.framesSinceRestart;
+        if (job->accumulation || job->spp > 0u) {
+            // A graph rebuild (an accumulation toggle) has no buffer until it is built.
+            if (!accumulation.buffer || accumulation.framesSinceRestart < job->spp) return;
+        }
+        auto callback = [job](org::ReadbackCaptureResult&& result) { OnRead(job, std::move(result)); };
+        job->state = State::Reading;
+        ++job->reads;
+        if (job->accumulation) {
+            // Not aliased (it is the history), so it can be read after the whole graph without interrupting it.
+            readbacks->RequestReadbackCaptureAfterGraph(accumulation.buffer.get(), org::RangeSpec{}, std::move(callback));
+            return;
+        }
+        // The upscaled HDR colour aliases, so it is read where tonemapping reads it, after the upscaler's write: output
+        // resolution, without bloom (tonemapping adds that).
+        constexpr const char* kAnchor = "TonemappingPass";
+        if (const auto* statistics = graph->GetStatisticsService()) {
+            const auto& names = statistics->GetPassNames();
+            if (!names.empty() && std::ranges::find(names, std::string(kAnchor)) == names.end()) {
+                throw std::runtime_error("the render graph has no TonemappingPass to read the HDR colour at");
+            }
+        }
+        auto hdr = graph->RequestResourcePtr(org::ResourceIdentifier{ Builtin::PostProcessing::UpscaledHDR }, true);
+        if (!hdr) throw std::runtime_error("the render graph has no Builtin::PostProcessing::UpscaledHDR");
+        readbacks->RequestReadbackCapture(kAnchor, hdr.get(), org::RangeSpec{}, std::move(callback));
+    }
+
+    static void OnRead(const std::shared_ptr<Job>& job, org::ReadbackCaptureResult&& result)
+    {
+        std::scoped_lock lock(job->mutex);
+        if (job->state != State::Reading) return;
+        try {
+            std::vector<float> pixels = ToRgba32F(result);
+            job->width = result.width;
+            job->height = result.height;
+            if (job->accumulation) {
+                // The shader keeps rgb as the running average, so the radiance needs no division; alpha is the count.
+                const auto [minimum, maximum] = SampleRange(pixels);
+                job->samplesMin = minimum;
+                job->samplesMax = maximum;
+                if (job->spp > 0u && minimum < static_cast<float>(job->spp)) {
+                    // A restart the counter did not see, or frames counted that never traced: wait for more and read again.
+                    job->state = State::Waiting;
+                    return;
+                }
+            }
+            WriteRgba32FDds(job->path, result.width, result.height, pixels);
+            job->state = State::Published;
+            spdlog::info("capture.hdr {}: wrote {}x{} {} to '{}' (samples {}..{})", job->id, result.width, result.height,
+                job->accumulation ? "accumulation" : "hdr", job->path.string(), job->samplesMin, job->samplesMax);
+        } catch (const std::exception& exception) {
+            Fail(*job, exception.what());
+        }
+    }
+
+    static std::pair<float, float> SampleRange(const std::vector<float>& pixels)
+    {
+        float minimum = std::numeric_limits<float>::max(), maximum = 0.0f;
+        for (std::size_t index = 3; index < pixels.size(); index += 4) {
+            minimum = std::min(minimum, pixels[index]);
+            maximum = std::max(maximum, pixels[index]);
+        }
+        return { pixels.empty() ? 0.0f : minimum, maximum };
+    }
+
+    static std::vector<float> ToRgba32F(const org::ReadbackCaptureResult& result)
+    {
+        if (result.layouts.empty()) throw std::runtime_error("texture readback has no footprint");
+        std::size_t bytesPerPixel = 0;
+        switch (result.format) {
+        case rhi::Format::R32G32B32A32_Float: bytesPerPixel = 16; break;
+        case rhi::Format::R16G16B16A16_Float: bytesPerPixel = 8; break;
+        default: throw std::runtime_error("capture.hdr target has an unsupported format " + std::to_string(static_cast<int>(result.format)));
+        }
+        const auto& layout = result.layouts.front();
+        const std::size_t tightPitch = static_cast<std::size_t>(result.width) * bytesPerPixel;
+        const std::size_t rowPitch = static_cast<std::size_t>(layout.rowPitch);
+        const std::size_t offset = static_cast<std::size_t>(layout.offset);
+        // The footprint's total size does not pad the last row.
+        if (result.height == 0 || rowPitch < tightPitch || offset + rowPitch * (result.height - 1) + tightPitch > result.data.size()) {
+            throw std::runtime_error("texture readback footprint does not match its data");
+        }
+        std::vector<float> pixels(static_cast<std::size_t>(result.width) * result.height * 4u);
+        for (std::uint32_t row = 0; row < result.height; ++row) {
+            const std::byte* source = result.data.data() + offset + rowPitch * row;
+            float* destination = pixels.data() + static_cast<std::size_t>(row) * result.width * 4u;
+            if (bytesPerPixel == 16) {
+                std::memcpy(destination, source, tightPitch);
+            } else {
+                for (std::size_t channel = 0; channel < static_cast<std::size_t>(result.width) * 4u; ++channel) {
+                    DirectX::PackedVector::HALF half;
+                    std::memcpy(&half, source + channel * sizeof(half), sizeof(half));
+                    destination[channel] = DirectX::PackedVector::XMConvertHalfToFloat(half);
+                }
+            }
+        }
+        return pixels;
+    }
+
+    // Written beside the target and renamed over it, so a file at the path is always a whole one.
+    static void WriteRgba32FDds(const std::filesystem::path& path, std::uint32_t width, std::uint32_t height, const std::vector<float>& pixels)
+    {
+        constexpr std::uint32_t kCaps = 0x1, kHeight = 0x2, kWidth = 0x4, kPitch = 0x8, kPixelFormat = 0x1000, kMipCount = 0x20000;
+        constexpr std::uint32_t kFourCc = 0x4, kCapsTexture = 0x1000, kDimensionTexture2D = 3;
+        std::array<std::uint32_t, 31> header{};
+        header[0] = 124;
+        header[1] = kCaps | kHeight | kWidth | kPitch | kPixelFormat | kMipCount;
+        header[2] = height;
+        header[3] = width;
+        header[4] = width * 16u;
+        header[6] = 1; // mip count
+        header[18] = 32; // pixel format size
+        header[19] = kFourCc;
+        header[20] = 0x30315844; // "DX10"
+        header[26] = kCapsTexture;
+        const std::array<std::uint32_t, 5> dx10{ static_cast<std::uint32_t>(DXGI_FORMAT_R32G32B32A32_FLOAT), kDimensionTexture2D, 0, 1, 0 };
+        auto temporary = path;
+        temporary += ".partial";
+        {
+            std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+            output.write("DDS ", 4);
+            output.write(reinterpret_cast<const char*>(header.data()), sizeof(header));
+            output.write(reinterpret_cast<const char*>(dx10.data()), sizeof(dx10));
+            output.write(reinterpret_cast<const char*>(pixels.data()), static_cast<std::streamsize>(pixels.size() * sizeof(float)));
+            output.flush();
+            if (!output) throw std::runtime_error("failed to write " + temporary.string());
+        }
+        std::filesystem::rename(temporary, path);
+    }
+
+    std::mutex m_mutex;
+    std::unordered_map<std::uint64_t, std::shared_ptr<Job>> m_jobs;
+    std::uint64_t m_nextId = kFirstJobId;
+};
+
+} // namespace
+
 class DemoStatisticalSamplingRun {
 public:
     bool Initialize(
@@ -777,6 +1050,7 @@ public:
     {
         if (!m_configuration) return;
         PumpControlRequests(renderer, hwnd);
+        m_hdrCaptures.Pump(renderer);
         if (m_finished) return;
         switch (m_phase) {
         case Phase::Warmup:
@@ -801,7 +1075,7 @@ public:
                 spdlog::info("BasicRenderer sampling: readiness stable for {} frames after {} ms; deterministic settling started",
                     m_readyStableFrames, m_readinessDurationMs);
             } else if (ElapsedMs() >= m_configuration->readinessTimeoutMs) {
-                Finish("failed", "timed out waiting for stable readiness", hwnd, 8);
+                Finish(renderer, "failed", "timed out waiting for stable readiness", hwnd, 8);
             }
             break;
         }
@@ -834,7 +1108,7 @@ private:
         m_captureReadiness = BuildDemoSamplingReadiness(renderer);
         m_captureSignature = DemoSamplingSignature(m_captureReadiness);
         if (!br::telemetry::nvperf::ArmCapture(m_nextOrdinal, error)) {
-            Finish("failed", "failed to arm NVPerf: " + error, hwnd, 3);
+            Finish(renderer, "failed", "failed to arm NVPerf: " + error, hwnd, 3);
             return;
         }
         m_phase = Phase::Capturing;
@@ -845,7 +1119,7 @@ private:
     {
         auto capture = br::telemetry::nvperf::TakeCaptureResult();
         if (!capture) {
-            Finish("failed", "NVPerf completed without a capture result", hwnd, 4);
+            Finish(renderer, "failed", "NVPerf completed without a capture result", hwnd, 4);
             return;
         }
 
@@ -873,7 +1147,7 @@ private:
         const auto* graph = renderer.GetRenderGraph();
         const auto* service = graph ? graph->GetStatisticsService() : nullptr;
         if (!service) {
-            Finish("failed", "render graph statistics service is unavailable", hwnd, 6);
+            Finish(renderer, "failed", "render graph statistics service is unavailable", hwnd, 6);
             return;
         }
         const auto& names = service->GetPassNames();
@@ -901,7 +1175,7 @@ private:
         if (sampleSerial <= m_lastRenderGraphSampleSerial) {
             if (std::chrono::steady_clock::now() - m_startedAt >
                 std::chrono::milliseconds(m_configuration->readinessTimeoutMs)) {
-                Finish("failed", "timed out waiting for fresh render-graph GPU timestamps", hwnd, 7);
+                Finish(renderer, "failed", "timed out waiting for fresh render-graph GPU timestamps", hwnd, 7);
             }
             return;
         }
@@ -933,18 +1207,22 @@ private:
 
         if (accepted >= m_configuration->minimumSamples &&
             br::telemetry::sampling::AllRequiredTargetsConverged(*m_configuration, m_summaries)) {
-            Finish("complete", "all required targets converged", hwnd, 0);
+            Finish(renderer, "complete", "all required targets converged", hwnd, 0);
         } else if (accepted >= m_configuration->maximumSamples) {
-            Finish("complete", "maximum accepted sample count reached", hwnd, 0);
+            Finish(renderer, "complete", "maximum accepted sample count reached", hwnd, 0);
         } else if (m_samples.size() >= static_cast<std::size_t>(m_configuration->maximumSamples) * 3u) {
-            Finish("failed", "maximum capture attempts reached", hwnd, 5);
+            Finish(renderer, "failed", "maximum capture attempts reached", hwnd, 5);
         } else if (m_usesNvPerf) {
             ArmNextCapture(renderer, hwnd);
         }
     }
 
-    void Finish(const char* status, std::string reason, HWND hwnd, int exitCode)
+    void Finish(Renderer& renderer, const char* status, std::string reason, HWND hwnd, int exitCode)
     {
+        // Back to normal frames: deterministic mode (frame time 0) changes what temporal passes such as Ray
+        // Reconstruction produce, so it must not outlive the run.
+        renderer.SetDeterministicSamplingMode(false);
+        br::telemetry::nvperf::SetStreamingSuppressed(false);
         m_finished = true;
         m_finalized = true;
         m_stoppingReason = reason;
@@ -976,6 +1254,7 @@ private:
     std::chrono::steady_clock::time_point m_startedAt{};
     std::filesystem::path m_configurationPath;
     br::telemetry::sampling::ControlServer m_controlServer;
+    DemoHdrCaptures m_hdrCaptures;
     std::string m_readinessSignature;
     std::string m_stoppingReason;
     std::uint32_t m_phaseFrames{ 0 };
@@ -1157,7 +1436,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         }
         // Streamline may open its own NVIDIA device-level sampling session.
         // NVPerf replay capture requires exclusive ownership of that context.
-        _putenv_s("BASICRENDERER_DISABLE_STREAMLINE", "1");
+        // BASICRENDERER_SAMPLING_KEEP_STREAMLINE=1 keeps it (and so DLSS and Ray
+        // Reconstruction) for a control-pipe run whose config doesn't use NVPerf.
+        const char* keepStreamline = std::getenv("BASICRENDERER_SAMPLING_KEEP_STREAMLINE");
+        if (statisticalSampling.UsesNvPerf() || !keepStreamline || keepStreamline[0] != '1') {
+            _putenv_s("BASICRENDERER_DISABLE_STREAMLINE", "1");
+        }
         // Device creation happens after sampling configuration is loaded. Mirror
         // environment-triggered NVPerf startup so diagnostics builds do not enable
         // the D3D12 debug layer, which makes Queue_BeginSession invalid.
@@ -1739,6 +2023,9 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                     response["profile_active"] = !m_finished;
                     response["experiment_id"] = m_experimentId;
                     response["pipeline_epoch"] = br::diagnostics::GetPipelineEpoch();
+                } else if (command == "shadercache.stats") {
+                    // The shader store's batch summary and sizes.
+                    response["shader_store"] = nlohmann::json::parse(br::diagnostics::DescribeShaderStore());
                 } else if (command == "pso.list") {
                     response["pipelines"] = nlohmann::json::array();
                     for (const auto& pipeline : br::diagnostics::ListPipelines()) {
@@ -1779,6 +2066,57 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                     response["job_id"] = br::diagnostics::RequestActivation(
                         request->document.at("pipeline_id").get<std::string>(),
                         request->document.at("generation").get<std::uint64_t>());
+                } else if (command == "capture.hdr") {
+                    response["job_id"] = m_hdrCaptures.Request(renderer, request->document);
+                } else if (command == "lens.get" || command == "lens.set" || command == "lens.selftest" || command == "lens.selftest.status") {
+                    // The physical lens (SARP's docs/lens_simulation.md). lens.set takes mode, file, focus_m, monochromatic, stop_scale,
+                    // field_mode ("remap" or "physical") and polynomial_degree; the lens builds off this thread, so lens.get's
+                    // "state" says when it is in use.
+                    response["lens"] = nlohmann::json::parse(renderer.HandleLensControl(command, request->document.dump()));
+                } else if (command == "upscaler.get") {
+                    // What upscaler runs: "evaluated" is what the last frame's upscaling pass ran, "graph" the mode the graph
+                    // was built with, "setting" the upscalingMode setting. A path traced frame should say DLSS Ray
+                    // Reconstruction in all three unless pathTracingAccumulate is on.
+                    response["upscaler"] = nlohmann::json::parse(renderer.DescribeUpscaler());
+                } else if (command == "upscaler.set") {
+                    // The menu's upscaler settings, for repeated toggling in tests: "quality" 0 DLAA, 1 Quality, 2 Balanced,
+                    // 3 Performance, 4 Ultra Performance; "ray_reconstruction" true or false (DLSS otherwise). Each change sets
+                    // the upscaler up again and rebuilds the graph before the next frame.
+                    if (request->document.contains("quality")) {
+                        const uint32_t quality = request->document.at("quality").get<uint32_t>();
+                        if (quality > static_cast<uint32_t>(UpscaleQualityMode::UltraPerformance)) throw std::runtime_error("quality is 0-4");
+                        br::extensions::MakeSettingSetter<UpscaleQualityMode>("upscalingQualityMode")(static_cast<UpscaleQualityMode>(quality));
+                    }
+                    if (request->document.contains("ray_reconstruction")) {
+                        SettingsManager::GetInstance().getSettingSetter<UpscalingMode>("upscalingMode")(request->document.at("ray_reconstruction").get<bool>()
+                            ? UpscalingMode::DLSSRayReconstruction : UpscalingMode::DLSS);
+                    }
+                    response["upscaler"] = nlohmann::json::parse(renderer.DescribeUpscaler());
+                } else if (command == "upscaler.simulate_failure") {
+                    // Debug: the next out_of_memory_frames DLSS evaluations act as if Streamline reported GPU memory pressure, and
+                    // the next settings_failures requests for Ray Reconstruction's optimal settings fail (the first right away,
+                    // through a reconfiguration). upscaler.get shows what happened.
+                    renderer.SimulateUpscalerFailures(request->document.value("out_of_memory_frames", 0u),
+                        request->document.value("settings_failures", 0u));
+                    response["upscaler"] = nlohmann::json::parse(renderer.DescribeUpscaler());
+                } else if (command == "camera.set") {
+                    // The primary camera's vertical field of view: a lens covers only its design field.
+                    auto& scene = renderer.GetCurrentScene();
+                    if (!scene) throw std::runtime_error("no scene");
+                    const auto* camera = scene->GetPrimaryCamera().try_get<Components::Camera>();
+                    if (!camera) throw std::runtime_error("no primary camera");
+                    if (request->document.contains("fov_deg")) {
+                        const float fovDegrees = request->document.at("fov_deg").get<float>();
+                        if (!(fovDegrees > 1.0f && fovDegrees < 170.0f)) throw std::runtime_error("camera.set 'fov_deg' must be in (1, 170)");
+                        scene->SetCameraProjection(fovDegrees * (XM_PI / 180.0f), camera->aspect, camera->zNear, camera->zFar);
+                        camera = scene->GetPrimaryCamera().try_get<Components::Camera>();
+                    }
+                    response["fov_deg"] = camera->fov * (180.0f / XM_PI);
+                    response["aspect"] = camera->aspect;
+                } else if (command == "job.status" && request->document.at("job_id").get<std::uint64_t>() >= DemoHdrCaptures::kFirstJobId) {
+                    const auto job = m_hdrCaptures.Status(request->document.at("job_id").get<std::uint64_t>());
+                    if (!job) throw std::runtime_error("unknown capture job");
+                    response["job"] = *job;
                 } else if (command == "job.status") {
                     const auto job = br::diagnostics::GetLiveJob(
                         request->document.at("job_id").get<std::uint64_t>());
@@ -1858,8 +2196,19 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                     // The menu's switch, for switching at runtime without it. It takes effect at the next frame.
                     if (command == "pathtracing.set") {
                         if (!m_finished) throw std::runtime_error("cannot switch path tracing while profiling is active");
-                        br::extensions::MakeSettingSetter<bool>("enablePathTracing")(request->document.at("enabled").get<bool>());
+                        if (request->document.contains("enabled")) {
+                            br::extensions::MakeSettingSetter<bool>("enablePathTracing")(request->document.at("enabled").get<bool>());
+                        }
+                        // Rebuilds the graph, with the accumulation buffer, when path tracing is on.
+                        if (request->document.contains("accumulate")) {
+                            br::extensions::MakeSettingSetter<bool>("pathTracingAccumulate")(request->document.at("accumulate").get<bool>());
+                        }
                     }
+                    response["accumulate"] = br::extensions::MakeSettingGetter<bool>("pathTracingAccumulate")();
+                    const auto accumulation = renderer.GetPathTracingAccumulation();
+                    response["accumulating"] = accumulation.buffer != nullptr;
+                    response["accumulated_frames"] = accumulation.framesSinceRestart;
+                    response["accumulation_restarts"] = accumulation.restarts;
                     const auto& deviceManager = br::DeviceManager::GetInstance();
                     response["enabled"] = br::extensions::MakeSettingGetter<bool>("enablePathTracing")();
                     response["supported"] = deviceManager.GetPathTracingSupported();
@@ -2016,7 +2365,7 @@ void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hw
                     response["stopping_reason"] = m_stoppingReason;
                 } else if (command == "profile.cancel") {
                     if (m_finished) throw std::runtime_error("no profiling experiment is active");
-                    Finish("cancelled", "cancelled by control request", hwnd, 0);
+                    Finish(renderer, "cancelled", "cancelled by control request", hwnd, 0);
                 } else if (command == "shutdown") {
                     PostMessage(hwnd, WM_CLOSE, 0, 0);
                 } else {

@@ -49,10 +49,10 @@ void UpscalingGenerationService::RegisterRayReconstructionGuides(org::RenderGrap
     registerGuide(Builtin::RayTracing::SpecularHitDistance, "RR Specular Hit Distance", rhi::Format::R32_Float, 1);
 }
 
-void UpscalingGenerationService::Evaluate(rhi::CommandList& commands,
+bool UpscalingGenerationService::Evaluate(rhi::CommandList& commands,
     const Components::Camera& camera, std::uint64_t frameNumber,
     double deltaTime, const UpscalingInputs& inputs) const {
-    UpscalingManager::GetInstance().EvaluateCaptured(m_mode, commands, &camera, frameNumber,
+    return UpscalingManager::GetInstance().EvaluateCaptured(m_mode, commands, &camera, frameNumber,
         deltaTime, inputs);
 }
 

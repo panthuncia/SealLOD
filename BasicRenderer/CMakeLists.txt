@@ -257,6 +257,8 @@ set(SOURCES
     "src/Runtime/Renderer/RendererSceneSync.cpp"
     "src/Runtime/Renderer/RendererSceneIngestion.cpp"
     "src/Runtime/Renderer/RendererSceneApi.cpp"
+    # src/Camera
+    "src/Camera/Lens/LensManager.cpp"
     # src/Animation
     "src/Animation/Playback/AnimationClip.cpp"
     "src/Animation/Playback/AnimationController.cpp"
@@ -350,7 +352,8 @@ set(SOURCES
     "src/Pipeline/PipelineState/OrgPipelineCompiler.cpp"
     "src/Pipeline/PipelineState/PSOManager.cpp"
     "src/Runtime/Resources/ResourceManager.cpp"
-    "src/Pipeline/ShaderCompilation/ShaderArtifactCache.cpp"
+    "src/Pipeline/ShaderCompilation/RendererShaderStore.h"
+    "src/Pipeline/ShaderCompilation/RendererShaderStore.cpp"
     "src/Runtime/Scheduling/GraphSchedulerAdapter.h"
     "src/Runtime/Scheduling/GraphSchedulerAdapter.cpp"
     # src/Mesh
@@ -572,6 +575,11 @@ if(EXISTS "${BASICRENDERER_REPO_ROOT}/geometry-central/CMakeLists.txt" AND NOT T
 endif()
 
 add_library(${PROJECT_NAME} STATIC ${SOURCES})
+# The physical lens's CPU reference (prescriptions, exact tracing, pupil and distortion tables): LensManager builds the
+# path tracer's lens data with it. lenses/ is linked beside the runtime like shaders/ (below); the source directory is the
+# last place LensManager looks.
+target_link_libraries(${PROJECT_NAME} PRIVATE LensCore)
+target_compile_definitions(${PROJECT_NAME} PRIVATE BASICRENDERER_LENS_SOURCE_DIR="${BASICRENDERER_REPO_ROOT}/lenses")
 include(${BASICRENDERER_REPO_ROOT}/ORGModuleServices/cmake/AsyncStateGraph.cmake)
 target_link_libraries(${PROJECT_NAME} PRIVATE ORGModuleServices::AsyncStateGraph)
 add_library(BasicRendererHeaders INTERFACE)
@@ -791,6 +799,7 @@ set_target_properties(${BASICRENDERER_DEMO_TARGET} PROPERTIES
 add_executable(ShaderPreprocessTests "tests/ShaderPreprocessTests.cpp")
 add_executable(SkeletonArtifactCacheTests "tests/SkeletonArtifactCacheTests.cpp")
 add_executable(PipelineRecipeTests "tests/PipelineRecipeTests.cpp")
+add_executable(RendererShaderStoreTests "tests/RendererShaderStoreTests.cpp")
 add_executable(MaterialEvalVariantTests "tests/MaterialEvalVariantTests.cpp")
 add_executable(MaterialOwnershipGuardTests "tests/MaterialOwnershipGuardTests.cpp")
 add_executable(VirtualShadowBudgetTests "tests/VirtualShadowBudgetTests.cpp")
@@ -1061,6 +1070,13 @@ add_symlink_or_copy_per_config(
     "${SHADERS_DEST_DIR}"
     TRUE  # IS_DIRECTORY
     "shaders"
+)
+
+add_symlink_or_copy_per_config(
+    "${BASICRENDERER_REPO_ROOT}/lenses"
+    "${BASICRENDERER_OUTPUT_ROOT}/lenses"
+    TRUE  # IS_DIRECTORY
+    "lenses"
 )
 
 set(MODELS_SRC_DIR "${BASICRENDERER_ASSETS_ROOT}/models")
@@ -1859,6 +1875,9 @@ PRIVATE
 target_link_libraries(SkeletonArtifactCacheTests PRIVATE ${PROJECT_NAME})
 target_include_directories(SkeletonArtifactCacheTests PRIVATE "${BASICRENDERER_SOURCE_ROOT}/src")
 target_link_libraries(PipelineRecipeTests PRIVATE ${PROJECT_NAME})
+target_link_libraries(RendererShaderStoreTests PRIVATE ${PROJECT_NAME})
+target_include_directories(RendererShaderStoreTests PRIVATE "${BASICRENDERER_SOURCE_ROOT}/src")
+target_compile_features(RendererShaderStoreTests PRIVATE cxx_std_23)
 target_include_directories(PipelineRecipeTests PRIVATE "${BASICRENDERER_SOURCE_ROOT}/src")
 target_link_libraries(MaterialEvalVariantTests PRIVATE ${PROJECT_NAME})
 target_include_directories(MaterialEvalVariantTests PRIVATE "${BASICRENDERER_SOURCE_ROOT}/src")
@@ -1888,6 +1907,7 @@ add_test(NAME RendererBuildInputAudit
 add_test(NAME ShaderPreprocessTests COMMAND ShaderPreprocessTests)
 add_test(NAME SkeletonArtifactCacheTests COMMAND SkeletonArtifactCacheTests)
 add_test(NAME PipelineRecipeTests COMMAND PipelineRecipeTests)
+add_test(NAME RendererShaderStoreTests COMMAND RendererShaderStoreTests)
 add_test(NAME MaterialEvalVariantTests COMMAND MaterialEvalVariantTests)
 add_test(NAME MaterialOwnershipGuardTests COMMAND MaterialOwnershipGuardTests)
 add_test(NAME VirtualShadowBudgetTests COMMAND VirtualShadowBudgetTests)
@@ -1911,6 +1931,7 @@ if(WIN32)
         ShaderPreprocessTests
         SkeletonArtifactCacheTests
         PipelineRecipeTests
+        RendererShaderStoreTests
         MaterialEvalVariantTests
         VirtualShadowBudgetTests
         BoundedSpscQueueTests

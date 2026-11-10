@@ -1,0 +1,13 @@
+{
+	"name": "doublet_100mm",
+	"source": "Cemented achromat, Thorlabs AC254-100-A published prescription (N-BK7 / N-SF5), with a stop 1 mm in front.",
+	"nominalFocalLengthMm": 100.0,
+	"imageCircleRadiusMm": 8.0,
+	"defaultCoating": true,
+	"surfaces": [
+		{ "stop": true, "thickness": 1.0, "semiAperture": 12.0 },
+		{ "radius": 62.75, "thickness": 4.0, "semiAperture": 12.7, "medium": { "glass": "N-BK7" } },
+		{ "radius": -45.71, "thickness": 2.5, "semiAperture": 12.7, "medium": { "glass": "N-SF5" } },
+		{ "radius": -128.23, "thickness": "paraxial", "semiAperture": 12.7, "medium": "air" }
+	]
+}

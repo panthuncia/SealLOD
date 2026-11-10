@@ -69,6 +69,28 @@ namespace {
         }
     }
 
+    // BASICRENDERER_SIMULATE_DLSS_FAILURE="oom=N,settings=M": see UpscalingManager::SimulateFailures.
+    void ReadSimulatedFailuresFromEnvironment(uint32_t& outOfMemoryFrames, uint32_t& settingsFailures) {
+        char* value = nullptr;
+        size_t len = 0;
+        if (_dupenv_s(&value, &len, "BASICRENDERER_SIMULATE_DLSS_FAILURE") != 0 || value == nullptr) {
+            return;
+        }
+        const std::string text(value);
+        free(value);
+        const auto read = [&](const char* key) -> uint32_t {
+            const size_t at = text.find(key);
+            if (at == std::string::npos) return 0u;
+            return static_cast<uint32_t>(std::strtoul(text.c_str() + at + std::strlen(key), nullptr, 10));
+        };
+        outOfMemoryFrames = read("oom=");
+        settingsFailures = read("settings=");
+    }
+
+    int64_t SteadyNowNs() {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+
     // In renderer world units, which are Skyrim units in SARP (about 14 m). Well
     // above what a player or the benchmark flight covers in one frame, even at low
     // frame rates. Cuts shorter than this need RequestHistoryReset.
@@ -255,6 +277,60 @@ void UpscalingManager::InitializeAdapter()
 	m_rayReconstructionSupported = backend == rhi::Backend::D3D12
 		&& CheckStreamlineFeatureSupport(dev, backend, sl::kFeatureDLSS_RR);
 	spdlog::info("UpscalingManager: DLSS Ray Reconstruction supported: {}", m_rayReconstructionSupported);
+	uint32_t outOfMemoryFrames = 0;
+	uint32_t settingsFailures = 0;
+	ReadSimulatedFailuresFromEnvironment(outOfMemoryFrames, settingsFailures);
+	if (outOfMemoryFrames != 0 || settingsFailures != 0) {
+		SimulateFailures(outOfMemoryFrames, settingsFailures);
+	}
+}
+
+void UpscalingManager::SimulateFailures(uint32_t outOfMemoryFrames, uint32_t settingsFailures) {
+    m_simulatedOutOfMemoryFrames.store(outOfMemoryFrames, std::memory_order_relaxed);
+    m_simulatedSettingsFailures.store(settingsFailures, std::memory_order_relaxed);
+    spdlog::warn("UpscalingManager: simulating {} DLSS evaluations skipped for GPU memory pressure and {} failed "
+        "slDLSSDGetOptimalSettings calls", outOfMemoryFrames, settingsFailures);
+    if (settingsFailures != 0) {
+        // Setup runs only when something reconfigures the upscaler: make that happen.
+        m_reconfigureNow.store(true, std::memory_order_relaxed);
+    }
+}
+
+bool UpscalingManager::TakeSimulatedOutOfMemory() {
+    uint32_t remaining = m_simulatedOutOfMemoryFrames.load(std::memory_order_relaxed);
+    while (remaining != 0) {
+        if (m_simulatedOutOfMemoryFrames.compare_exchange_weak(remaining, remaining - 1, std::memory_order_relaxed)) return true;
+    }
+    return false;
+}
+
+bool UpscalingManager::TakeSimulatedSettingsFailure() {
+    uint32_t remaining = m_simulatedSettingsFailures.load(std::memory_order_relaxed);
+    while (remaining != 0) {
+        if (m_simulatedSettingsFailures.compare_exchange_weak(remaining, remaining - 1, std::memory_order_relaxed)) return true;
+    }
+    return false;
+}
+
+bool UpscalingManager::TakeReconfigureRequest() {
+    if (m_reconfigureNow.exchange(false, std::memory_order_relaxed)) {
+        return true;
+    }
+    const int64_t due = m_reconfigureAtNs.load(std::memory_order_relaxed);
+    if (due == 0 || SteadyNowNs() < due) {
+        return false;
+    }
+    // Only one caller takes it; Setup schedules the next one if the retry fails too.
+    int64_t expected = due;
+    if (!m_reconfigureAtNs.compare_exchange_strong(expected, 0, std::memory_order_relaxed)) {
+        return false;
+    }
+    if (m_upscalingMode != UpscalingMode::DLSSRayReconstruction || !m_rayReconstructionSettingsFailed.load(std::memory_order_relaxed)) {
+        return false; // Switched away from Ray Reconstruction, or something else already set it up again.
+    }
+    spdlog::info("UpscalingManager: retrying DLSS Ray Reconstruction (optimal settings failed {} times so far)",
+        m_rayReconstructionSettingsFailures.load(std::memory_order_relaxed));
+    return true;
 }
 
 void UpscalingManager::ProxyDevice() { // TODO: RHI now handles this internally
@@ -381,22 +457,48 @@ bool UpscalingManager::InitSL() {
 void UpscalingManager::Setup() {
     SyncSettingsFromSettingsManager();
     auto outputRes = m_getOutputRes();
+    m_superResolutionOptionsSet = false; // The DLSS SR fallback's options follow the output size.
+    // Every Setup asks for Ray Reconstruction again, whether or not the last one could get its settings.
+    m_rayReconstructionSettingsFailed.store(false, std::memory_order_relaxed);
     UpscalingMode effectiveMode = ResolveEffectiveUpscalingMode(GetCurrentUpscalingMode(), m_dlssSupported, m_rayReconstructionSupported);
     sl::DLSSDOptimalSettings rayReconstructionSettings{};
     if (effectiveMode == UpscalingMode::DLSSRayReconstruction) {
         const sl::DLSSDOptions options = MakeRayReconstructionOptions(m_upscaleQualityMode, outputRes);
-        if (SL_FAILED(result, slDLSSDGetOptimalSettings(options, rayReconstructionSettings)) ||
-            rayReconstructionSettings.optimalRenderWidth == 0 || rayReconstructionSettings.optimalRenderHeight == 0) {
-            spdlog::warn("UpscalingManager: slDLSSDGetOptimalSettings failed with result {}", static_cast<int32_t>(result));
-            m_rayReconstructionSupported = false;
+        const bool simulated = TakeSimulatedSettingsFailure();
+        const sl::Result result = simulated ? sl::Result::eErrorInvalidParameter : slDLSSDGetOptimalSettings(options, rayReconstructionSettings);
+        if (result != sl::Result::eOk || rayReconstructionSettings.optimalRenderWidth == 0 || rayReconstructionSettings.optimalRenderHeight == 0) {
+            // A failure here can be transient (GPU memory pressure, a reconfiguration in flight). It used to clear the adapter's
+            // Ray Reconstruction support for good: the menu hid its checkbox and every graph after used DLSS SR, which handles
+            // path tracing's noise badly. Now graphs use DLSS SR only until a retry gets the settings: 2 s later, doubling to
+            // 32 s while it keeps failing.
+            const uint64_t failures = m_rayReconstructionSettingsFailures.fetch_add(1, std::memory_order_relaxed) + 1;
+            const double delay = m_rayReconstructionRetryDelaySeconds;
+            m_rayReconstructionRetryDelaySeconds = std::min(m_rayReconstructionRetryDelaySeconds * 2.0, 32.0);
+            m_rayReconstructionSettingsFailed.store(true, std::memory_order_relaxed);
+            m_reconfigureAtNs.store(SteadyNowNs() + static_cast<int64_t>(delay * 1e9), std::memory_order_relaxed);
+            spdlog::warn("UpscalingManager: slDLSSDGetOptimalSettings failed with result {}{} ({} failures so far); using DLSS until a "
+                "retry in {:.0f} s", static_cast<int32_t>(result), simulated ? " (simulated)" : "", failures, delay);
             effectiveMode = ResolveEffectiveUpscalingMode(UpscalingMode::DLSS, m_dlssSupported, false);
         }
+        else {
+            if (m_rayReconstructionRetryDelaySeconds != 2.0) {
+                spdlog::info("UpscalingManager: DLSS Ray Reconstruction is back ({} failed optimal-settings requests in all)",
+                    m_rayReconstructionSettingsFailures.load(std::memory_order_relaxed));
+            }
+            m_rayReconstructionRetryDelaySeconds = 2.0;
+            m_reconfigureAtNs.store(0, std::memory_order_relaxed);
+        }
+    }
+    else if (m_upscalingMode != UpscalingMode::DLSSRayReconstruction) {
+        m_reconfigureAtNs.store(0, std::memory_order_relaxed);
+        m_rayReconstructionRetryDelaySeconds = 2.0;
     }
     if (m_upscalingMode == UpscalingMode::DLSSRayReconstruction && effectiveMode != UpscalingMode::DLSSRayReconstruction) {
         spdlog::warn(
-            "UpscalingManager: DLSS Ray Reconstruction is unavailable (supported={}, pipeline writes guides={}); using {}",
+            "UpscalingManager: DLSS Ray Reconstruction is unavailable (supported={}, pipeline writes guides={}, optimal settings failed={}); using {}",
             m_rayReconstructionSupported,
             m_rayReconstructionGuidesAvailable,
+            m_rayReconstructionSettingsFailed.load(std::memory_order_relaxed),
             UpscalingModeNames[static_cast<int>(effectiveMode)]);
     }
     switch (effectiveMode)
@@ -483,7 +585,7 @@ void UpscalingManager::Setup() {
     }
 }
 
-void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Components::Camera* camera, uint64_t frameNumber, const UpscalingInputs& inputs, bool rayReconstruction) {
+bool UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Components::Camera* camera, uint64_t frameNumber, const UpscalingInputs& inputs, bool rayReconstruction) {
     org::PixelBuffer* pHDRTarget = inputs.color;
     org::PixelBuffer* pUpscaledHDRTarget = inputs.output;
     org::PixelBuffer* pDepthTexture = inputs.depth;
@@ -491,15 +593,14 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
     const rhi::Backend backend = DeviceManager::GetInstance().GetBackend();
     if (backend != rhi::Backend::D3D12 && backend != rhi::Backend::Vulkan) {
         spdlog::warn("UpscalingManager::EvaluateDLSS called on unsupported backend {}; skipping.", static_cast<uint32_t>(backend));
-        return;
+        return false;
     }
 
     sl::FrameToken* frameToken = nullptr;
     const uint32_t streamlineFrameIndex = static_cast<uint32_t>(frameNumber);
     if (SL_FAILED(result, slGetNewFrameToken(frameToken, &streamlineFrameIndex)) || frameToken == nullptr)
     {
-        spdlog::error("Failed to get Streamline frame token for frame {}", frameNumber);
-        return;
+        return HandleFailedEvaluation(commandList, frameNumber, inputs, rayReconstruction, false, "no Streamline frame token", 0, FailedOutput::Undefined);
     }
 
     auto myViewport = sl::ViewportHandle(0); // 0 is the default viewport
@@ -508,21 +609,14 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
 
     if (rayReconstruction) {
         if (!inputs.diffuseAlbedo || !inputs.specularAlbedo || !inputs.normalRoughness || !inputs.specularHitDistance) {
-            if (!m_reportedRayReconstructionFailure) {
-                m_reportedRayReconstructionFailure = true;
-                spdlog::error("DLSS Ray Reconstruction skipped because a guide resource is missing");
-            }
-            return;
+            return HandleFailedEvaluation(commandList, frameNumber, inputs, true, false, "a guide resource is missing", 0, FailedOutput::Undefined);
         }
         sl::DLSSDOptions rayReconstructionOptions = MakeRayReconstructionOptions(m_upscaleQualityMode, outputRes);
         StoreFloat4x4(camera->info.view, rayReconstructionOptions.worldToCameraView);
         StoreFloat4x4(camera->info.viewInverse, rayReconstructionOptions.cameraViewToWorld);
         if (SL_FAILED(result, slDLSSDSetOptions(myViewport, rayReconstructionOptions))) {
-            if (!m_reportedRayReconstructionFailure) {
-                m_reportedRayReconstructionFailure = true;
-                spdlog::error("slDLSSDSetOptions failed with result {}", static_cast<int32_t>(result));
-            }
-            return;
+            return HandleFailedEvaluation(commandList, frameNumber, inputs, true, false, "slDLSSDSetOptions failed", static_cast<int32_t>(result),
+                FailedOutput::Undefined);
         }
         // Ray reconstruction's own allocations are invisible to the render graph's memory accounting.
         static uint32_t stateQueries = 0u;
@@ -612,8 +706,8 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
             !MakeStreamlineVulkanTextureResource(device, pUpscaledHDRTarget, colorOutView, VK_IMAGE_LAYOUT_GENERAL, colorOut) ||
             !MakeStreamlineVulkanTextureResource(device, pDepthTexture, depthView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, depth) ||
             !MakeStreamlineVulkanTextureResource(device, pMotionVectors, motionVectorView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, mvec)) {
-            spdlog::error("DLSS evaluation skipped because Vulkan Streamline resource metadata could not be resolved.");
-            return;
+            return HandleFailedEvaluation(commandList, frameNumber, inputs, rayReconstruction, false,
+                "Vulkan Streamline resource metadata could not be resolved", 0, FailedOutput::Undefined);
         }
     }
     else {
@@ -639,34 +733,25 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
             sl::ResourceTag{ &mvec, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eValidUntilPresent, &renderExtent },
         };
         if (SL_FAILED(result, slSetTagForFrame(*frameToken, myViewport, tags, _countof(tags), nativeCommandList))) {
-            spdlog::error("Failed to tag Vulkan DLSS resources!");
-            return;
+            return HandleFailedEvaluation(commandList, frameNumber, inputs, rayReconstruction, false, "tagging Vulkan resources failed",
+                static_cast<int32_t>(result), FailedOutput::Undefined);
         }
 
         const sl::BaseStructure* evaluateInputs[] = { &myViewport };
         const auto evaluateResult = [&] {
             BT_ZONE_SCOPE("UpscalingManager::EvaluateDLSS::slEvaluateFeature");
+            if (TakeSimulatedOutOfMemory()) return sl::Result::eWarnOutOfVRAM;
             return slEvaluateFeature(sl::kFeatureDLSS, *frameToken, evaluateInputs, _countof(evaluateInputs), nativeCommandList);
         }();
+        bool written = true;
         if (SL_FAILED(result, evaluateResult))
         {
-            if (result == sl::Result::eWarnOutOfVRAM) {
-                if (!m_reportedDlssOutOfMemory) {
-                    m_reportedDlssOutOfMemory = true;
-                    spdlog::warn("DLSS skipped because Streamline reported GPU memory pressure at frame {}", frameNumber);
-                }
-            } else {
-                spdlog::error(
-                    "DLSS evaluation failed: result={} frame={} colorIn={} colorOut={} depth={} motionVectors={}",
-                    static_cast<int32_t>(result),
-                    frameNumber,
-                    static_cast<const void*>(pHDRTarget),
-                    static_cast<const void*>(pUpscaledHDRTarget),
-                    static_cast<const void*>(pDepthTexture),
-                    static_cast<const void*>(pMotionVectors));
-            }
+            // The Vulkan graph declares no copy access here: the output is only counted and logged.
+            HandleFailedEvaluation(commandList, frameNumber, inputs, rayReconstruction, result == sl::Result::eWarnOutOfVRAM,
+                "slEvaluateFeature failed", static_cast<int32_t>(result), FailedOutput::LeaveUndefined);
+            written = false;
         }
-        else if (resetHistory)
+        else if (NoteSuccessfulEvaluation(frameNumber, rayReconstruction); resetHistory)
         {
             m_resetUpscalerHistory = false;
             spdlog::info(
@@ -691,6 +776,7 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
         rhi::BarrierBatch streamlineOutputBatch{};
         streamlineOutputBatch.textures = { &streamlineOutputBarrier };
         commandList.Barriers(streamlineOutputBatch);
+        return written;
     }
     else
     {
@@ -721,27 +807,44 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
         const sl::Feature evaluatedFeature = rayReconstruction ? sl::kFeatureDLSS_RR : sl::kFeatureDLSS;
         const auto evaluateResult = [&] {
             BT_ZONE_SCOPE("UpscalingManager::EvaluateDLSS::slEvaluateFeature");
+            if (TakeSimulatedOutOfMemory()) return sl::Result::eWarnOutOfVRAM;
             return slEvaluateFeature(evaluatedFeature, *frameToken, evaluateInputs, evaluateInputCount, nativeCommandList);
         }();
         if (SL_FAILED(result, evaluateResult))
         {
-            if (result == sl::Result::eWarnOutOfVRAM) {
-                if (!m_reportedDlssOutOfMemory) {
-                    m_reportedDlssOutOfMemory = true;
-                    spdlog::warn("DLSS skipped because Streamline reported GPU memory pressure at frame {}", frameNumber);
+            // Nothing was written to the output, which is aliased. Where the sizes differ, DLSS SR may still fit: it needs a
+            // fraction of Ray Reconstruction's memory (643 MiB at 2560x1600).
+            bool superResolutionWrote = false;
+            const bool sameSize = pHDRTarget->GetWidth() == pUpscaledHDRTarget->GetWidth() && pHDRTarget->GetHeight() == pUpscaledHDRTarget->GetHeight();
+            if (rayReconstruction && !sameSize && m_dlssSupported) {
+                if (!m_superResolutionOptionsSet) {
+                    sl::DLSSOptions superResolutionOptions{};
+                    superResolutionOptions.mode = ToSLQualityMode(m_upscaleQualityMode);
+                    superResolutionOptions.outputWidth = outputRes.x;
+                    superResolutionOptions.outputHeight = outputRes.y;
+                    superResolutionOptions.colorBuffersHDR = sl::Boolean::eTrue;
+                    superResolutionOptions.useAutoExposure = sl::Boolean::eTrue;
+                    m_superResolutionOptionsSet = slDLSSSetOptions(myViewport, superResolutionOptions) == sl::Result::eOk;
                 }
-            } else {
-                spdlog::error(
-                    "DLSS evaluation failed: result={} frame={} colorIn={} colorOut={} depth={} motionVectors={}",
-                    static_cast<int32_t>(result),
-                    frameNumber,
-                    static_cast<const void*>(pHDRTarget),
-                    static_cast<const void*>(pUpscaledHDRTarget),
-                    static_cast<const void*>(pDepthTexture),
-                    static_cast<const void*>(pMotionVectors));
+                // This frame's constants are already set (a second slSetConstants is eErrorDuplicatedConstants), so SR's history
+                // isn't reset: frames it last saw may show through, which is still better than nothing or black.
+                sl::Result superResolutionResult = sl::Result::eErrorNotInitialized;
+                if (m_superResolutionOptionsSet) {
+                    superResolutionResult = slEvaluateFeature(sl::kFeatureDLSS, *frameToken, evaluateInputs, kUpscaleOnlyInputCount, nativeCommandList);
+                    superResolutionWrote = superResolutionResult == sl::Result::eOk;
+                }
+                static bool reportedSuperResolution = false;
+                if (!superResolutionWrote && !reportedSuperResolution) {
+                    reportedSuperResolution = true;
+                    spdlog::warn("DLSS SR fallback did not run: options set {}, evaluate result {}", m_superResolutionOptionsSet,
+                        static_cast<int32_t>(superResolutionResult));
+                }
             }
+            return HandleFailedEvaluation(commandList, frameNumber, inputs, rayReconstruction, result == sl::Result::eWarnOutOfVRAM,
+                "slEvaluateFeature failed", static_cast<int32_t>(result),
+                superResolutionWrote ? FailedOutput::SuperResolution : FailedOutput::Undefined);
         }
-        else if (resetHistory)
+        else if (NoteSuccessfulEvaluation(frameNumber, rayReconstruction); resetHistory)
         {
             m_resetUpscalerHistory = false;
             spdlog::info(
@@ -757,6 +860,7 @@ void UpscalingManager::EvaluateDLSS(rhi::CommandList& commandList, const Compone
             // IMPORTANT: Host is responsible for restoring state on the command list used
             //restoreState(myCmdList); ??
         }
+        return true;
     }
 }
 
@@ -915,32 +1019,118 @@ void UpscalingManager::EvaluateNone(rhi::CommandList& commandList, const Compone
     }
 }
 
-void UpscalingManager::Evaluate(rhi::CommandList& commandList, const Components::Camera* camera, uint64_t frameNumber, double elapsedSeconds, const UpscalingInputs& inputs) {
-    SyncSettingsFromSettingsManager();
-    const UpscalingMode effectiveMode = ResolveEffectiveUpscalingMode(GetCurrentUpscalingMode(), m_dlssSupported, m_rayReconstructionSupported);
-    EvaluateCaptured(effectiveMode, commandList, camera, frameNumber, elapsedSeconds, inputs);
+bool UpscalingManager::HandleFailedEvaluation(rhi::CommandList& commandList, uint64_t frameNumber, const UpscalingInputs& inputs,
+    bool rayReconstruction, bool outOfMemory, const char* reason, int32_t result, FailedOutput output) {
+    const uint64_t failures = m_failedEvaluations.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (outOfMemory) m_outOfMemorySkips.fetch_add(1, std::memory_order_relaxed);
+    m_lastFailedFrame.store(frameNumber, std::memory_order_relaxed);
+    const uint64_t consecutive = m_consecutiveFailures.fetch_add(1, std::memory_order_relaxed) + 1;
+
+    // A defined image in place of the one that wasn't made, so nothing downstream reads the aliased output's old contents.
+    bool written = output == FailedOutput::SuperResolution;
+    const char* fallback = written ? "DLSS SR" : "nothing";
+    if (output == FailedOutput::SuperResolution) {
+        m_fallbackSuperResolution.fetch_add(1, std::memory_order_relaxed);
+    }
+    else if (output == FailedOutput::Undefined && DeviceManager::GetInstance().GetBackend() == rhi::Backend::D3D12 && inputs.color && inputs.output
+        && inputs.color->GetWidth() == inputs.output->GetWidth() && inputs.color->GetHeight() == inputs.output->GetHeight()) {
+        // The pass declares both as legacy interop in the common state, as it does for no upscaling, which copies the same way.
+        EvaluateNone(commandList, nullptr, inputs);
+        m_fallbackCopies.fetch_add(1, std::memory_order_relaxed);
+        written = true;
+        fallback = "the input, copied";
+    }
+    else if (output == FailedOutput::Undefined) {
+        m_fallbackClears.fetch_add(1, std::memory_order_relaxed);
+        fallback = "black (cleared by the pass)";
+    }
+
+    // At most one line every 5 s, with what happened since the last.
+    const auto now = std::chrono::steady_clock::now();
+    if (failures == 1 || now - m_lastFailureLog >= std::chrono::seconds(5)) {
+        const char* feature = rayReconstruction ? "DLSS Ray Reconstruction" : "DLSS";
+        if (outOfMemory) {
+            spdlog::warn("{} skipped at frame {} because Streamline reported GPU memory pressure; output: {}. {} failed evaluations in "
+                "all ({} since the last report, {} for memory), {} in a row", feature, frameNumber, fallback, failures,
+                failures - m_failuresAtLastLog, m_outOfMemorySkips.load(std::memory_order_relaxed), consecutive);
+        }
+        else {
+            spdlog::error("{} evaluation failed at frame {}: {} (result {}); output: {}. {} failed evaluations in all ({} since the last "
+                "report), {} in a row", feature, frameNumber, reason, result, fallback, failures, failures - m_failuresAtLastLog, consecutive);
+        }
+        m_lastFailureLog = now;
+        m_failuresAtLastLog = failures;
+    }
+    return written;
 }
 
-void UpscalingManager::EvaluateCaptured(UpscalingMode mode, rhi::CommandList& commandList,
+void UpscalingManager::NoteSuccessfulEvaluation(uint64_t frameNumber, bool rayReconstruction) {
+    const uint64_t skipped = m_consecutiveFailures.exchange(0, std::memory_order_relaxed);
+    if (skipped == 0) return;
+    spdlog::info("{} evaluated again at frame {} after {} failed evaluations in a row", rayReconstruction ? "DLSS Ray Reconstruction" : "DLSS",
+        frameNumber, skipped);
+    if (skipped > 1) {
+        // Its history is more than a frame old, and this frame's motion vectors only reach back one.
+        m_resetUpscalerHistory = true;
+    }
+}
+
+UpscalingManager::Status UpscalingManager::GetStatus() const {
+    Status status;
+    status.requested = m_upscalingMode;
+    status.current = GetCurrentUpscalingMode();
+    status.effective = ResolveEffectiveUpscalingMode(status.current, m_dlssSupported, m_rayReconstructionSupported);
+    status.graph = m_lastGraphMode.load(std::memory_order_relaxed);
+    status.evaluated = m_lastEvaluatedMode.load(std::memory_order_relaxed);
+    status.dlssSupported = m_dlssSupported;
+    status.rayReconstructionSupported = m_rayReconstructionSupported;
+    status.rayReconstructionGuidesAvailable = m_rayReconstructionGuidesAvailable;
+    status.evaluatedFrame = m_lastEvaluatedFrame.load(std::memory_order_relaxed);
+    status.evaluations = m_evaluations.load(std::memory_order_relaxed);
+    status.failedEvaluations = m_failedEvaluations.load(std::memory_order_relaxed);
+    status.outOfMemorySkips = m_outOfMemorySkips.load(std::memory_order_relaxed);
+    status.lastFailedFrame = m_lastFailedFrame.load(std::memory_order_relaxed);
+    status.consecutiveFailures = m_consecutiveFailures.load(std::memory_order_relaxed);
+    status.fallbackCopies = m_fallbackCopies.load(std::memory_order_relaxed);
+    status.fallbackSuperResolution = m_fallbackSuperResolution.load(std::memory_order_relaxed);
+    status.fallbackClears = m_fallbackClears.load(std::memory_order_relaxed);
+    status.rayReconstructionSettingsFailed = m_rayReconstructionSettingsFailed.load(std::memory_order_relaxed);
+    status.rayReconstructionSettingsFailures = m_rayReconstructionSettingsFailures.load(std::memory_order_relaxed);
+    if (const int64_t due = m_reconfigureAtNs.load(std::memory_order_relaxed); due != 0) {
+        status.rayReconstructionRetrySeconds = std::max(0.0, static_cast<double>(due - SteadyNowNs()) * 1e-9);
+    }
+    return status;
+}
+
+bool UpscalingManager::Evaluate(rhi::CommandList& commandList, const Components::Camera* camera, uint64_t frameNumber, double elapsedSeconds, const UpscalingInputs& inputs) {
+    SyncSettingsFromSettingsManager();
+    const UpscalingMode effectiveMode = ResolveEffectiveUpscalingMode(GetCurrentUpscalingMode(), m_dlssSupported, m_rayReconstructionSupported);
+    return EvaluateCaptured(effectiveMode, commandList, camera, frameNumber, elapsedSeconds, inputs);
+}
+
+bool UpscalingManager::EvaluateCaptured(UpscalingMode mode, rhi::CommandList& commandList,
     const Components::Camera* camera, uint64_t frameNumber, double elapsedSeconds,
     const UpscalingInputs& inputs) {
     std::scoped_lock evaluateLock(m_evaluateMutex);
     const UpscalingMode effectiveMode = ResolveEffectiveUpscalingMode(mode, m_dlssSupported, m_rayReconstructionSupported);
+    m_lastGraphMode.store(mode, std::memory_order_relaxed);
+    m_lastEvaluatedMode.store(effectiveMode, std::memory_order_relaxed);
+    m_lastEvaluatedFrame.store(frameNumber, std::memory_order_relaxed);
+    m_evaluations.fetch_add(1, std::memory_order_relaxed);
     switch (effectiveMode)
     {
 	    case UpscalingMode::None:
             EvaluateNone(commandList, camera, inputs);
 			break;
         case UpscalingMode::DLSS:
-			EvaluateDLSS(commandList, camera, frameNumber, inputs, false);
-            break;
+			return EvaluateDLSS(commandList, camera, frameNumber, inputs, false);
         case UpscalingMode::DLSSRayReconstruction:
-			EvaluateDLSS(commandList, camera, frameNumber, inputs, true);
-            break;
+			return EvaluateDLSS(commandList, camera, frameNumber, inputs, true);
         case UpscalingMode::FSR3:
 			EvaluateFSR3(commandList, camera, elapsedSeconds, inputs);
             break;
 	}
+    return true;
 }
 
 void UpscalingManager::Shutdown() {
