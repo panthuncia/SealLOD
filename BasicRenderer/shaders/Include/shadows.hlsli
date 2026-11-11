@@ -1636,4 +1636,170 @@ float calculateDirectionalVSMShadowDetailed(float2 pixelCoords, float3 fragPosWo
     return shadow;
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// Spot and point lights. A light's faces are perspective virtual shadow maps (LocalShadowSelection.h); firstSlice is its
+// LightInfo::shadowViewInfoIndex, the first slice of its first face. Each face's mip 0 fills its first slice and mips
+// 1-7 share its second. A receiver looks in the mip its pixel footprint selects, the one page marking requested
+// (CLodVirtualShadowLocalSelectMip), then coarser ones down to the last, which marking always requests.
+
+// The face of a cube that a direction from the light falls in: +X, -X, +Y, -Y, +Z, -Z.
+uint CLodVirtualShadowCubeFace(float3 lightToPoint)
+{
+    const float3 a = abs(lightToPoint);
+    if (a.x >= a.y && a.x >= a.z)
+    {
+        return lightToPoint.x >= 0.0f ? 0u : 1u;
+    }
+    if (a.y >= a.z)
+    {
+        return lightToPoint.y >= 0.0f ? 2u : 3u;
+    }
+    return lightToPoint.z >= 0.0f ? 4u : 5u;
+}
+
+// The face uv and view depth of a world position in a face, false when the face does not see it.
+bool CLodVirtualShadowProjectToLocalFace(
+    float3 positionWS,
+    CLodVirtualShadowCompactShadowCameraInfo faceCamera,
+    out float2 faceUv,
+    out float viewDepth)
+{
+    const float4 clip = mul(float4(positionWS, 1.0f), faceCamera.viewProjection);
+    faceUv = float2(clip.x / max(clip.w, 1.0e-8f) * 0.5f + 0.5f, 0.5f - clip.y / max(clip.w, 1.0e-8f) * 0.5f);
+    viewDepth = clip.w;
+    return clip.w > 0.0f && clip.z >= 0.0f && clip.z <= clip.w && all(faceUv >= 0.0f) && all(faceUv <= 1.0f);
+}
+
+// Depth stored at a face texel of one mip: kCLodVirtualShadowMissingDepth when its page is not resident with content.
+// cachedPageCoord and cachedPageEntry hold the last page looked up (0xFFFFFFFF before the first): filter taps mostly share
+// a page, and reusing its entry saves a dependent page table load per tap.
+uint CLodVirtualShadowLoadLocalFaceDepth(
+    uint faceFirstSlice,
+    uint mip,
+    float2 faceUv,
+    CLodVirtualShadowClipmapInfo faceInfo,
+    Texture2DArray<uint> pageTable,
+    Texture2D<uint> physicalPages,
+    inout uint2 cachedPageCoord,
+    inout uint cachedPageEntry)
+{
+    const float2 canvasUv = CLodVirtualShadowLocalMipCanvasUv(faceUv, mip);
+    const uint2 pageCoord = min((uint2)(canvasUv * (float)kCLodVirtualShadowMaxPageTableResolution),
+        (kCLodVirtualShadowMaxPageTableResolution - 1u).xx);
+    if (any(pageCoord != cachedPageCoord))
+    {
+        cachedPageCoord = pageCoord;
+        cachedPageEntry = pageTable.Load(int4(pageCoord, faceFirstSlice + CLodVirtualShadowLocalMipSliceOffset(mip), 0));
+    }
+    if (!CLodVirtualShadowPageEntryHasSampleableContent(cachedPageEntry))
+    {
+        return kCLodVirtualShadowMissingDepth;
+    }
+    const uint2 texel = CLodVirtualShadowVirtualTexelCoordsFromUv(canvasUv, kCLodVirtualShadowFixedVirtualResolution);
+    const uint2 atlasPixel = CLodVirtualShadowPhysicalAtlasPixel(
+        cachedPageEntry & kCLodVirtualShadowPhysicalPageIndexMask, texel, faceInfo.physicalAtlasPagesWide);
+    return physicalPages.Load(int3(atlasPixel, 0));
+}
+
+// Occlusion (0 lit, 1 shadowed) of a receiver by a spot or point light's virtual shadow map. pixelWorldSize is the
+// receiver's screen pixel width in the world. A bilinear-weighted 2x2 comparison softens the edge over a texel.
+float CLodVirtualShadowLookupLocalOcclusion(
+    LightInfo light,
+    uint firstSlice,
+    float3 positionWS,
+    float3 normalWS,
+    float pixelWorldSize)
+{
+    if (firstSlice < kCLodVirtualShadowFirstLocalSlice || firstSlice >= kCLodVirtualShadowMaxSliceCount)
+    {
+        return 0.0f;
+    }
+    StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Shadows::CLodClipmapInfo)];
+    StructuredBuffer<CLodVirtualShadowCompactShadowCameraInfo> shadowCameras =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Shadows::CLodCompactShadowCameras)];
+    Texture2DArray<uint> pageTable = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Shadows::CLodPageTable)];
+    Texture2D<uint> physicalPages = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Shadows::CLodPhysicalPages)];
+
+    const CLodVirtualShadowClipmapInfo firstInfo = clipmapInfos[firstSlice];
+    if (!CLodVirtualShadowClipmapIsValid(firstInfo) || !CLodVirtualShadowClipmapIsLocal(firstInfo))
+    {
+        return 0.0f;
+    }
+    const float3 lightPosition = float3(firstInfo.worldOriginX, firstInfo.worldOriginY, firstInfo.worldOriginZ);
+    const uint face = (firstInfo.flags & kCLodVirtualShadowClipmapCubeFlag) != 0u
+        ? CLodVirtualShadowCubeFace(positionWS - lightPosition)
+        : 0u;
+    const uint faceFirstSlice = firstSlice + face * kCLodVirtualShadowLocalSlicesPerFace;
+    if (faceFirstSlice >= kCLodVirtualShadowMaxSliceCount)
+    {
+        return 0.0f;
+    }
+    const CLodVirtualShadowClipmapInfo faceInfo = clipmapInfos[faceFirstSlice];
+    const CLodVirtualShadowCompactShadowCameraInfo faceCamera = shadowCameras[faceFirstSlice];
+    if (!CLodVirtualShadowClipmapIsValid(faceInfo))
+    {
+        return 0.0f;
+    }
+
+    float2 faceUv;
+    float viewDepth;
+    if (!CLodVirtualShadowProjectToLocalFace(positionWS, faceCamera, faceUv, viewDepth))
+    {
+        return 0.0f;
+    }
+    const uint selectedMip = CLodVirtualShadowLocalSelectMip(
+        CLodVirtualShadowLocalContinuousMip(pixelWorldSize, faceInfo.texelWorldSize * viewDepth, faceInfo.directionalLodBias));
+
+    [loop]
+    for (uint mip = selectedMip; mip < kCLodVirtualShadowLocalMipCount; ++mip)
+    {
+        // Offset along the normal by a texel and a half, so a surface does not compare against its own depth.
+        const float texelWorldSize = faceInfo.texelWorldSize * viewDepth * exp2((float)mip);
+        float2 offsetUv;
+        float offsetDepth;
+        if (!CLodVirtualShadowProjectToLocalFace(positionWS + normalWS * (1.5f * texelWorldSize), faceCamera, offsetUv, offsetDepth))
+        {
+            offsetUv = faceUv;
+            offsetDepth = viewDepth;
+        }
+        // A bilinear-weighted 2x2 comparison: the edge softens over one texel, as the hardware's comparison filter would.
+        const float mipResolution = (float)(kCLodVirtualShadowFixedVirtualResolution >> mip);
+        const float2 texelPosition = offsetUv * mipResolution - 0.5f;
+        const float2 baseTexel = floor(texelPosition);
+        const float2 fraction = texelPosition - baseTexel;
+        const float depthBias = texelWorldSize;
+        uint2 cachedPageCoord = 0xFFFFFFFFu.xx;
+        uint cachedPageEntry = 0u;
+        float shadowedWeight = 0.0f;
+        float sampleWeight = 0.0f;
+        [unroll]
+        for (uint tap = 0u; tap < 4u; ++tap)
+        {
+            const float2 corner = float2(tap & 1u, tap >> 1u);
+            const float2 tapUv = saturate((baseTexel + corner + 0.5f) / mipResolution);
+            const float2 axisWeights = lerp(1.0f - fraction, fraction, corner);
+            const uint depthBits = CLodVirtualShadowLoadLocalFaceDepth(
+                faceFirstSlice, mip, tapUv, faceInfo, pageTable, physicalPages, cachedPageCoord, cachedPageEntry);
+            if (depthBits == kCLodVirtualShadowMissingDepth)
+            {
+                continue;
+            }
+            const float weight = axisWeights.x * axisWeights.y;
+            sampleWeight += weight;
+            if (depthBits != kCLodVirtualShadowClearedDepth &&
+                offsetDepth - depthBias > CLodVirtualShadowDecodeDepth(depthBits, faceInfo))
+            {
+                shadowedWeight += weight;
+            }
+        }
+        if (sampleWeight <= 0.0f)
+        {
+            continue; // Not resident at this mip: fall back to a coarser one.
+        }
+        return shadowedWeight / sampleWeight;
+    }
+    return 0.0f;
+}
+
 #endif //__SHADOWS_HLSLI__

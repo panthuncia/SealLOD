@@ -189,6 +189,8 @@ void VirtualShadowMapInvalidatePagesPass::Record(const VirtualShadowMapInvalidat
     constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_DIRTY_FLAGS_DESCRIPTOR_INDEX] = recording.Index(bindings.dirtyFlags);
     constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_PAGE_METADATA_DESCRIPTOR_INDEX] = recording.Index(bindings.pageMetadata);
     constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_CLIPMAP_COUNT] = CLodVirtualShadowMaxSupportedClipmapCount;
+    constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_LOCAL_FACE_COUNT] =
+        g_clodVirtualShadowActiveLocalFaceCount.load(std::memory_order_relaxed);
     constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_PAGE_TABLE_RESOLUTION] = frame.pageTableResolution;
     constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_PAGE_VIEW_INFO_DESCRIPTOR_INDEX] = recording.Index(bindings.pageViewInfo);
     constants[CLOD_VIRTUAL_SHADOW_INVALIDATE_STATS_DESCRIPTOR_INDEX] = recording.Index(bindings.stats);

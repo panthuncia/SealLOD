@@ -657,6 +657,7 @@ struct CLodReplayBufferState
     uint reyesDiceWriteCount;
     uint reyesSplitDropped;
     uint reyesDiceDropped;
+    uint shadowWorkDropped; // CLodNoteVirtualShadowWorkDropped
 };
 
 struct CLodViewDepthSRVIndex

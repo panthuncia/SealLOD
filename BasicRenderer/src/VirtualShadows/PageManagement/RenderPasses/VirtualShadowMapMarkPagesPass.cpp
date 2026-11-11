@@ -1,4 +1,7 @@
 #include "VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapMarkPagesPass.h"
+
+#include <bit>
+
 #include "Render/PassBuilders.h"
 
 #include "Runtime/Device/DeviceManager.h"
@@ -37,6 +40,8 @@ VirtualShadowMapMarkPagesBindings VirtualShadowMapMarkPagesPass::Declare(org::Pa
     declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     auto* builder = &declaration;
     builder->ShaderResource(Builtin::Shadows::CLodCompactMainCamera);
+    // Local light faces' slice rows and cameras.
+    builder->ShaderResource(Builtin::Shadows::CLodCompactShadowCameras, Builtin::Shadows::CLodClipmapInfo);
     org::CommandSignatureDesc signature;
     signature.args = {{.kind = rhi::IndirectArgKind::Dispatch}};
     signature.byteStride = sizeof(CLodReyesDispatchIndirectCommand);
@@ -79,7 +84,10 @@ VirtualShadowMarkFrameData VirtualShadowMapMarkPagesPass::Prepare(
     const auto* context = preparation.preparationData->Get<UpdateContext>();
     if (m_receiverSubpageMode != CLodVirtualShadowReceiverSubpageModeOff && !bindings.receiverMask)
         throw std::logic_error("receiver subpage mode requires a declared mask");
-    return {context->renderResolution.x, context->renderResolution.y, m_activeClipmapCount, m_receiverSubpageMode};
+    return {context->renderResolution.x, context->renderResolution.y, m_activeClipmapCount, m_receiverSubpageMode,
+        g_clodVirtualShadowActiveLocalFaceCount.load(std::memory_order_relaxed),
+        SettingsManager::GetInstance().getSettingGetter<float>(CLodLocalVirtualShadowLodBiasSettingName)(),
+        CLodVirtualShadowActiveSliceCount()};
 }
 
 void VirtualShadowMapMarkPagesPass::Record(const VirtualShadowMapMarkPagesBindings& bindings,
@@ -88,20 +96,24 @@ void VirtualShadowMapMarkPagesPass::Record(const VirtualShadowMapMarkPagesBindin
     auto& commands = recording.Commands();
     br::render::MiscConstants clearMask{};
     clearMask[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] = recording.Index(bindings.mask);
-    clearMask[CLOD_CLEAR_UINT_BUFFER_COUNT] = CLodVirtualShadowMaxMarkedBlockCount;
+    // Only active slices are ever marked.
+    const uint32_t markedBlockCount = frame.sliceCount * CLodVirtualShadowMaxBlocksPerClipmap;
+    clearMask[CLOD_CLEAR_UINT_BUFFER_COUNT] = markedBlockCount;
     const bool receiver = frame.receiverSubpageMode != CLodVirtualShadowReceiverSubpageModeOff;
 
     recording.BindComputePipeline(bindings.clearPipeline);
     br::render::PushMiscConstants(recording, clearMask);
-    commands.Dispatch((CLodVirtualShadowMaxMarkedBlockCount + 63u) / 64u, 1u, 1u);
+    commands.Dispatch((markedBlockCount + 63u) / 64u, 1u, 1u);
     if (receiver) {
         br::render::MiscConstants clearReceiver = clearMask;
         clearReceiver[CLOD_CLEAR_UINT_BUFFER_DESCRIPTOR_INDEX] = recording.Index(*bindings.receiverMask);
-        clearReceiver[CLOD_CLEAR_UINT_BUFFER_COUNT] = CLodVirtualShadowMaxReceiverPageCount;
+        const uint32_t receiverPageCount = frame.sliceCount *
+            CLodVirtualShadowMaxPageTableResolution * CLodVirtualShadowMaxPageTableResolution;
+        clearReceiver[CLOD_CLEAR_UINT_BUFFER_COUNT] = receiverPageCount;
         recording.BindComputePipeline(frame.receiverSubpageMode == CLodVirtualShadowReceiverSubpageMode8x8
             ? bindings.clearUint2Pipeline : bindings.clearPipeline);
         br::render::PushMiscConstants(recording, clearReceiver);
-        commands.Dispatch((CLodVirtualShadowMaxReceiverPageCount + 63u) / 64u, 1u, 1u);
+        commands.Dispatch((receiverPageCount + 63u) / 64u, 1u, 1u);
         recording.BindComputePipeline(bindings.clearPipeline);
     }
     br::render::MiscConstants clearCount = clearMask;
@@ -126,5 +138,7 @@ void VirtualShadowMapMarkPagesPass::Record(const VirtualShadowMapMarkPagesBindin
     mark[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_COUNT_DESCRIPTOR_INDEX] = recording.Index(bindings.count);
     mark[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_RECEIVER_MASK_DESCRIPTOR_INDEX] = bindings.receiverMask ? recording.Index(*bindings.receiverMask) : 0u;
     mark[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_RECEIVER_MASK_ENABLED] = frame.receiverSubpageMode;
+    mark[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_LOCAL_FACE_COUNT] = frame.localFaceCount;
+    mark[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_LOCAL_LOD_BIAS_AS_UINT] = std::bit_cast<uint32_t>(frame.localLodBias);
     br::render::DispatchComputeIndirect(recording, bindings.markPipeline, mark, bindings.commandSignature, bindings.indirectArgs);
 }

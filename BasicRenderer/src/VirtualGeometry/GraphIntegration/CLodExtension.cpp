@@ -2413,7 +2413,8 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
         outPasses,
         shadowClearDirtyBitsAfterPassName);
     spdlog::info("CLod structural gather: caster raster passes complete; structural tail begin after='{}'", shadowClearDirtyBitsAfterPassName);
-    CLodShadowVariant::AppendStructuralTail(*this, traits, outPasses, shadowClearDirtyBitsAfterPassName);
+    CLodShadowVariant::AppendStructuralTail(*this, traits, outPasses, shadowClearDirtyBitsAfterPassName,
+        useReyesForThisVariant && !disableReyesTessellation && !useWorkGraphReyesVisibility);
     spdlog::info("CLod structural gather: structural tail complete");
     appendLinearDepthDownsamplePass(2u);
 

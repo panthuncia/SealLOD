@@ -116,9 +116,11 @@ uint CLodPredictedPhysicalPageIndex(CLodVirtualShadowPredictedRawPage page)
     return page.physicalClipmapVirtualLow & 0x3fffu;
 }
 
+// The slice: 5 bits here, the high 3 in virtualHighAndInstance bits 1-3 (the instance starts at bit 4).
 uint CLodPredictedClipmapIndex(CLodVirtualShadowPredictedRawPage page)
 {
-    return (page.physicalClipmapVirtualLow >> 14u) & 0x1fu;
+    return ((page.physicalClipmapVirtualLow >> 14u) & 0x1fu) |
+        (((page.virtualHighAndInstance >> 1u) & 0x7u) << 5u);
 }
 
 uint CLodPredictedVirtualAddress(CLodVirtualShadowPredictedRawPage page)
@@ -803,29 +805,6 @@ bool CLodProjectSphereToShadowUvBounds(float3 centerWS, float radiusWS, CLodVirt
     return true;
 }
 
-bool CLodFindVirtualShadowClipmapByShadowView(
-    uint shadowViewId,
-    StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos,
-    out uint outClipmapIndex,
-    out CLodVirtualShadowClipmapInfo outClipmapInfo)
-{
-    [unroll]
-    for (uint clipmapIndex = 0u; clipmapIndex < CLodVirtualShadowMaxSupportedClipmapCount; ++clipmapIndex)
-    {
-        const CLodVirtualShadowClipmapInfo clipmapInfo = clipmapInfos[clipmapIndex];
-        if (CLodVirtualShadowClipmapIsValid(clipmapInfo) && clipmapInfo.shadowCameraBufferIndex == shadowViewId)
-        {
-            outClipmapIndex = clipmapIndex;
-            outClipmapInfo = clipmapInfo;
-            return true;
-        }
-    }
-
-    outClipmapIndex = 0u;
-    outClipmapInfo = (CLodVirtualShadowClipmapInfo)0;
-    return false;
-}
-
 uint CLodVirtualShadowWrappedVirtualAddress(uint2 wrappedPageCoords, uint pageTableResolution)
 {
     return wrappedPageCoords.x + wrappedPageCoords.y * pageTableResolution;
@@ -860,7 +839,8 @@ void CLodAppendVirtualShadowPredictedRawPage(
             ((virtualAddress & 0x1fffu) << 19u);
         rawPage.virtualHighAndInstance =
             ((virtualAddress >> 13u) & 1u) |
-            (perMeshInstanceBufferIndex << 1u);
+            (((clipmapIndex >> 5u) & 0x7u) << 1u) |
+            (perMeshInstanceBufferIndex << 4u);
         rawPage.allocationGeneration =
             CLodVirtualShadowPhysicalPageAllocationGeneration(pageMeta.z);
         rawPage.contentGeneration = pageMeta.y;
@@ -882,6 +862,112 @@ bool CLodTrySetPredictedPageBit(RWStructuredBuffer<uint> bitsetWords, uint key)
     uint previousWord = 0u;
     InterlockedOr(bitsetWords[wordIndex], bitMask, previousWord);
     return (previousWord & bitMask) == 0u;
+}
+
+// A sphere's uv bounds in a local light face, false when the face cannot see it. Bounds that reach behind the face's
+// near plane cover the whole face.
+bool CLodProjectSphereToLocalFaceUvBounds(
+    float3 centerWS,
+    float radiusWS,
+    CLodVirtualShadowCompactShadowCameraInfo faceCamera,
+    out float2 uvMin,
+    out float2 uvMax)
+{
+    uvMin = 0.0f.xx;
+    uvMax = 1.0f.xx;
+    float2 ndcMin = 1.0e30f.xx;
+    float2 ndcMax = -1.0e30f.xx;
+    [unroll]
+    for (uint cornerIndex = 0u; cornerIndex < 8u; ++cornerIndex)
+    {
+        const float3 cornerOffset = float3(
+            (cornerIndex & 1u) != 0u ? radiusWS : -radiusWS,
+            (cornerIndex & 2u) != 0u ? radiusWS : -radiusWS,
+            (cornerIndex & 4u) != 0u ? radiusWS : -radiusWS);
+        const float4 clip = mul(float4(centerWS + cornerOffset, 1.0f), faceCamera.viewProjection);
+        if (clip.w <= 1.0e-6f || clip.z < 0.0f)
+        {
+            return true;
+        }
+        ndcMin = min(ndcMin, clip.xy / clip.w);
+        ndcMax = max(ndcMax, clip.xy / clip.w);
+    }
+    if (ndcMax.x < -1.0f || ndcMin.x > 1.0f || ndcMax.y < -1.0f || ndcMin.y > 1.0f)
+    {
+        return false;
+    }
+    ndcMin = clamp(ndcMin, -1.0f.xx, 1.0f.xx);
+    ndcMax = clamp(ndcMax, -1.0f.xx, 1.0f.xx);
+    uvMin = float2(ndcMin.x * 0.5f + 0.5f, 0.5f - ndcMax.y * 0.5f);
+    uvMax = float2(ndcMax.x * 0.5f + 0.5f, 0.5f - ndcMin.y * 0.5f);
+    return true;
+}
+
+// Invalidates the pages a sphere touches in every mip of every local light face within the light's range.
+void CLodInvalidateLocalFacesSphere(
+    float3 centerWS,
+    float radiusWS,
+    uint localFaceCount,
+    uint frameIndex,
+    uint reasonFlags,
+    StructuredBuffer<CLodVirtualShadowCompactShadowCameraInfo> shadowCameras,
+    StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos,
+    RWTexture2DArray<uint> pageTable,
+    RWStructuredBuffer<uint> dirtyFlags,
+    RWStructuredBuffer<uint4> pageMetadata,
+    RWStructuredBuffer<float4> directionalPageViewInfo,
+    RWStructuredBuffer<CLodVirtualShadowStats> statsBuffer)
+{
+    [loop]
+    for (uint face = 0u; face < min(localFaceCount, kCLodVirtualShadowMaxLocalFaceCount); ++face)
+    {
+        const uint slice = kCLodVirtualShadowFirstLocalSlice + face * kCLodVirtualShadowLocalSlicesPerFace;
+        const CLodVirtualShadowClipmapInfo info = clipmapInfos[slice];
+        if (!CLodVirtualShadowClipmapIsValid(info) || !CLodVirtualShadowClipmapIsLocal(info))
+        {
+            continue;
+        }
+        const float3 lightPosition = float3(info.worldOriginX, info.worldOriginY, info.worldOriginZ);
+        if (distance(centerWS, lightPosition) > info.depthNear + info.depthRange + radiusWS)
+        {
+            continue;
+        }
+        float2 uvMin;
+        float2 uvMax;
+        if (!CLodProjectSphereToLocalFaceUvBounds(centerWS, radiusWS, shadowCameras[slice], uvMin, uvMax))
+        {
+            continue;
+        }
+        [loop]
+        for (uint mip = 0u; mip < kCLodVirtualShadowLocalMipCount; ++mip)
+        {
+            const uint pages = CLodVirtualShadowLocalMipPagesPerAxis(mip);
+            const uint2 origin = CLodVirtualShadowLocalMipPageOrigin(mip);
+            const uint2 pageMin = origin + min((uint2)(saturate(uvMin) * (float)pages), (pages - 1u).xx);
+            const uint2 pageMax = origin + min((uint2)(saturate(uvMax) * (float)pages), (pages - 1u).xx);
+            const uint layer = slice + CLodVirtualShadowLocalMipSliceOffset(mip);
+            [loop]
+            for (uint pageY = pageMin.y; pageY <= pageMax.y; ++pageY)
+            {
+                [loop]
+                for (uint pageX = pageMin.x; pageX <= pageMax.x; ++pageX)
+                {
+                    CLodInvalidateVirtualShadowWrappedPage(
+                        uint2(pageX, pageY),
+                        layer,
+                        kCLodVirtualShadowMaxPageTableResolution,
+                        frameIndex,
+                        0.0f.xxxx,
+                        pageTable,
+                        dirtyFlags,
+                        pageMetadata,
+                        directionalPageViewInfo,
+                        statsBuffer,
+                        reasonFlags);
+                }
+            }
+        }
+    }
 }
 
 void CLodInvalidateVirtualShadowSphere(
@@ -966,6 +1052,20 @@ void CLodInvalidateVirtualShadowSphere(
             }
         }
     }
+
+    CLodInvalidateLocalFacesSphere(
+        centerWS,
+        radiusWS,
+        CLOD_VIRTUAL_SHADOW_INVALIDATE_LOCAL_FACE_COUNT,
+        frameIndex,
+        reasonFlags,
+        shadowCameras,
+        clipmapInfos,
+        pageTable,
+        dirtyFlags,
+        pageMetadata,
+        directionalPageViewInfo,
+        statsBuffer);
 }
 
 bool CLodIsVisibleClusterOwnedByReyes(uint visibleClusterIndex, uint ownershipDescriptorIndex)
@@ -1178,7 +1278,7 @@ void CLodVirtualShadowClearPhysicalPagesCSMain(
         gCLodVirtualShadowCurrentViewTranslationZ = 0.0f;
         const uint4 dynamicMeta = pageMetadata[physicalPageIndex];
         if ((dynamicMeta.z & kCLodVirtualShadowPhysicalPageResidentFlag) != 0u &&
-            dynamicMeta.w < kCLodVirtualShadowClipmapCount &&
+            dynamicMeta.w < kCLodVirtualShadowMaxSliceCount &&
             dynamicMeta.x < CLOD_VIRTUAL_SHADOW_CLEAR_PAGE_TABLE_RESOLUTION *
                 CLOD_VIRTUAL_SHADOW_CLEAR_PAGE_TABLE_RESOLUTION)
         {
@@ -1361,7 +1461,7 @@ void CLodVirtualShadowComposePhysicalPagesCSMain(
         const uint physicalPageIndex = groupId.x;
         const uint4 meta = pageMetadata[physicalPageIndex];
         if ((meta.z & kCLodVirtualShadowPhysicalPageResidentFlag) != 0u &&
-            meta.w < kCLodVirtualShadowClipmapCount &&
+            meta.w < kCLodVirtualShadowMaxSliceCount &&
             meta.x < CLOD_VIRTUAL_SHADOW_COMPOSE_PAGE_TABLE_RESOLUTION *
                 CLOD_VIRTUAL_SHADOW_COMPOSE_PAGE_TABLE_RESOLUTION)
         {
@@ -1590,9 +1690,15 @@ void CLodVirtualShadowSetupCSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
             : 0.0f;
         const float effectiveDirectionalLodBias = baseDirectionalLodBias + smoothedPressureLodBias;
 
+        // The sun's clips only: local faces' slices have no mark data and their own bias.
+        const uint directionalClipCount = min(CLOD_VIRTUAL_SHADOW_SETUP_CLIPMAP_COUNT, kCLodVirtualShadowClipmapCount);
         [unroll]
-        for (uint clipmapIndex = 0u; clipmapIndex < CLOD_VIRTUAL_SHADOW_SETUP_CLIPMAP_COUNT; ++clipmapIndex)
+        for (uint clipmapIndex = 0u; clipmapIndex < kCLodVirtualShadowClipmapCount; ++clipmapIndex)
         {
+            if (clipmapIndex >= directionalClipCount)
+            {
+                break;
+            }
             CLodVirtualShadowClipmapInfo clipmapInfo = clipmapInfos[clipmapIndex];
             clipmapInfo.directionalLodBias = effectiveDirectionalLodBias;
             clipmapInfos[clipmapIndex] = clipmapInfo;
@@ -1801,7 +1907,7 @@ void CLodVirtualShadowDeduplicatePredictedPagesCSMain(uint3 dispatchThreadId : S
     const uint rawPhysicalPageIndex =
         CLodPredictedPhysicalPageIndex(rawPage);
     if (CLodPredictedClipmapIndex(rawPage) >=
-            kCLodVirtualShadowClipmapCount ||
+            kCLodVirtualShadowMaxSliceCount ||
         CLodPredictedVirtualAddress(rawPage) >=
             kCLodVirtualShadowPredictedPageEntriesPerClipmap)
     {
@@ -1884,6 +1990,37 @@ void CLodVirtualShadowDeduplicatePredictedPagesCSMain(uint3 dispatchThreadId : S
     InterlockedAdd(statsBuffer[0].readyUpgradePageCount, 1u);
 }
 
+uint CLodVirtualShadowLoadOptionalCounter(uint descriptorIndex)
+{
+    if (descriptorIndex == 0xFFFFFFFFu)
+    {
+        return 0u;
+    }
+    StructuredBuffer<uint> counter = ResourceDescriptorHeap[descriptorIndex];
+    return counter[0];
+}
+
+// Whether every caster that could reach an admitted page was rasterized this frame: no culling queue or buffer dropped
+// a record, no needed page was missing, no raster pass failed to load a cluster or dropped a block record, and no
+// Reyes queue overflowed. Then an admitted page that received no depth has nothing between the light and its depth
+// range there, and is complete as it is: cleared. Otherwise it stays dirty and is admitted again.
+bool CLodVirtualShadowFrameShadowWorkComplete(CLodVirtualShadowStats stats)
+{
+    StructuredBuffer<CLodReplayBufferState> replayState =
+        ResourceDescriptorHeap[CLOD_VIRTUAL_SHADOW_EXPAND_PREDICTED_PAGES_REPLAY_STATE_DESCRIPTOR_INDEX];
+    const CLodReplayBufferState replay = replayState[0];
+    return replay.nodeDropped == 0u &&
+        replay.meshletDropped == 0u &&
+        replay.reyesSplitDropped == 0u &&
+        replay.reyesDiceDropped == 0u &&
+        replay.shadowWorkDropped == 0u &&
+        stats.rasterWorkDroppedCount == 0u &&
+        stats.blockExpandedDroppedRecordCount == 0u &&
+        CLodVirtualShadowLoadOptionalCounter(CLOD_VIRTUAL_SHADOW_EXPAND_PREDICTED_PAGES_REYES_SPLIT_OVERFLOW_A_DESCRIPTOR_INDEX) == 0u &&
+        CLodVirtualShadowLoadOptionalCounter(CLOD_VIRTUAL_SHADOW_EXPAND_PREDICTED_PAGES_REYES_SPLIT_OVERFLOW_B_DESCRIPTOR_INDEX) == 0u &&
+        CLodVirtualShadowLoadOptionalCounter(CLOD_VIRTUAL_SHADOW_EXPAND_PREDICTED_PAGES_REYES_DICE_OVERFLOW_DESCRIPTOR_INDEX) == 0u;
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void CLodVirtualShadowStampRenderedPageGenerationsCSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
@@ -1916,7 +2053,29 @@ void CLodVirtualShadowStampRenderedPageGenerationsCSMain(uint3 dispatchThreadId 
 
     const uint resolution = kCLodVirtualShadowMaxPageTableResolution;
     const uint2 wrappedPageCoords = uint2(meta.x % resolution, meta.x / resolution);
-    const uint pageEntry = pageTable[uint3(wrappedPageCoords, meta.w)];
+    uint pageEntry = pageTable[uint3(wrappedPageCoords, meta.w)];
+
+    // A page is rendered when the frame rasterized every caster that could reach it, not when one wrote a texel: a
+    // page that casters' bounds reach but none of their triangles do (sky past a roof, beyond a light's range) would
+    // otherwise be admitted and rasterized every frame. Completed here, before this pass's fallback-dependency capture,
+    // so an empty page rendered while a coarser group stood in for a finer one is rerendered when the finer one
+    // arrives, as a written page is.
+    if ((pageEntry & (kCLodVirtualShadowAllocatedMask |
+            kCLodVirtualShadowAdmittedThisFrameMask |
+            kCLodVirtualShadowRerenderedThisFrameMask)) ==
+            (kCLodVirtualShadowAllocatedMask | kCLodVirtualShadowAdmittedThisFrameMask) &&
+        (pageEntry & kCLodVirtualShadowPhysicalPageIndexMask) == physicalPageIndex)
+    {
+        RWStructuredBuffer<CLodVirtualShadowStats> completionStats =
+            ResourceDescriptorHeap[CLOD_VIRTUAL_SHADOW_EXPAND_PREDICTED_PAGES_STATS_DESCRIPTOR_INDEX];
+        if (CLodVirtualShadowFrameShadowWorkComplete(completionStats[0]))
+        {
+            pageEntry |= kCLodVirtualShadowContentValidMask | kCLodVirtualShadowRerenderedThisFrameMask;
+            pageTable[uint3(wrappedPageCoords, meta.w)] = pageEntry;
+            InterlockedAdd(completionStats[0].emptyAdmittedCompletedCount, 1u);
+        }
+    }
+
     if ((pageEntry & (kCLodVirtualShadowAllocatedMask |
             kCLodVirtualShadowContentValidMask |
             kCLodVirtualShadowRerenderedThisFrameMask)) !=
@@ -1982,6 +2141,82 @@ groupshared CLodVirtualShadowClipmapInfo
 groupshared uint2 gCLodVirtualShadowExpansionPageMin;
 groupshared uint2 gCLodVirtualShadowExpansionPageExtent;
 groupshared uint gCLodVirtualShadowExpansionValid;
+// A local face candidate's face uv bounds (min.xy, max.xy).
+groupshared float4 gCLodVirtualShadowExpansionLocalUv;
+
+// Captures the pages of one page rectangle rendered this frame while a candidate's coarse group stood in for its finer
+// ones, so the finer group's arrival rerenders them. The group's 64 threads share the rectangle.
+void CLodVirtualShadowExpandCandidatePageRect(
+    CLodVirtualShadowPredictiveInvalidationCandidate candidate,
+    CLodVirtualShadowClipmapInfo clipmapInfo,
+    uint2 pageMin,
+    uint2 pageExtent,
+    uint groupThreadId,
+    RWTexture2DArray<uint> pageTable,
+    RWStructuredBuffer<uint4> pageMetadata,
+    RWStructuredBuffer<CLodVirtualShadowPredictedRawPage> rawPages,
+    RWStructuredBuffer<uint> rawPageCount)
+{
+    const uint pageCount = pageExtent.x * pageExtent.y;
+    for (uint pageOffset = groupThreadId;
+         pageOffset < pageCount;
+         pageOffset += 64u)
+    {
+        const uint pageOffsetY = pageOffset / pageExtent.x;
+        const uint pageOffsetX =
+            pageOffset - pageOffsetY * pageExtent.x;
+        uint pageX = pageMin.x + pageOffsetX;
+        uint pageY = pageMin.y + pageOffsetY;
+        pageX -= pageX >= clipmapInfo.pageTableResolution
+            ? clipmapInfo.pageTableResolution
+            : 0u;
+        pageY -= pageY >= clipmapInfo.pageTableResolution
+            ? clipmapInfo.pageTableResolution
+            : 0u;
+
+        const uint2 wrappedPageCoords = uint2(pageX, pageY);
+        const uint3 pageCoords = uint3(
+            wrappedPageCoords,
+            clipmapInfo.pageTableLayer);
+        const uint pageEntry = pageTable[pageCoords];
+        if ((pageEntry & (kCLodVirtualShadowAllocatedMask |
+                kCLodVirtualShadowContentValidMask |
+                kCLodVirtualShadowRerenderedThisFrameMask)) !=
+            (kCLodVirtualShadowAllocatedMask |
+                kCLodVirtualShadowContentValidMask |
+                kCLodVirtualShadowRerenderedThisFrameMask))
+        {
+            continue;
+        }
+        const uint physicalPageIndex =
+            pageEntry & kCLodVirtualShadowPhysicalPageIndexMask;
+        if (physicalPageIndex >=
+            CLOD_VIRTUAL_SHADOW_EXPAND_PREDICTED_PAGES_PHYSICAL_PAGE_COUNT)
+        {
+            continue;
+        }
+        const uint4 pageMeta = pageMetadata[physicalPageIndex];
+        const uint virtualAddress =
+            CLodVirtualShadowWrappedVirtualAddress(
+                wrappedPageCoords,
+                clipmapInfo.pageTableResolution);
+        if ((pageMeta.z & kCLodVirtualShadowPhysicalPageResidentFlag) == 0u ||
+            pageMeta.x != virtualAddress ||
+            pageMeta.w != clipmapInfo.pageTableLayer)
+        {
+            continue;
+        }
+        CLodAppendVirtualShadowPredictedRawPage(
+            wrappedPageCoords,
+            clipmapInfo,
+            candidate.sourceGroupGlobalIndex,
+            candidate.perMeshInstanceBufferIndex,
+            pageEntry,
+            pageMeta,
+            rawPages,
+            rawPageCount);
+    }
+}
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -2027,14 +2262,29 @@ void CLodVirtualShadowExpandPredictedPagesCSMain(
             gCLodVirtualShadowExpansionValid = 0u;
             const CLodVirtualShadowPredictiveInvalidationCandidate candidate =
                 candidates[candidateIndex];
-            const uint clipmapIndex = candidate.shadowClipmapIndex;
-            if (clipmapIndex < kCLodVirtualShadowClipmapCount)
+            const uint clipmapIndex = CLodVirtualShadowCandidateSlice(candidate.shadowClipmapIndex);
+            if (clipmapIndex < kCLodVirtualShadowMaxSliceCount)
             {
                 const CLodVirtualShadowClipmapInfo clipmapInfo =
                     clipmapInfos[clipmapIndex];
                 float2 uvMin;
                 float2 uvMax;
-                if (CLodVirtualShadowClipmapIsValid(clipmapInfo) &&
+                if (CLodVirtualShadowClipmapIsLocal(clipmapInfo))
+                {
+                    if (CLodVirtualShadowClipmapIsValid(clipmapInfo) &&
+                        CLodProjectSphereToLocalFaceUvBounds(
+                            candidate.worldCenterAndRadius.xyz,
+                            candidate.worldCenterAndRadius.w,
+                            shadowCameras[clipmapIndex],
+                            uvMin,
+                            uvMax))
+                    {
+                        gCLodVirtualShadowExpansionCandidate = candidate;
+                        gCLodVirtualShadowExpansionLocalUv = float4(saturate(uvMin), saturate(uvMax));
+                        gCLodVirtualShadowExpansionValid = 2u;
+                    }
+                }
+                else if (CLodVirtualShadowClipmapIsValid(clipmapInfo) &&
                     CLodProjectSphereToShadowUvBounds(
                         candidate.worldCenterAndRadius.xyz,
                         candidate.worldCenterAndRadius.w,
@@ -2064,70 +2314,40 @@ void CLodVirtualShadowExpandPredictedPagesCSMain(
         }
         GroupMemoryBarrierWithGroupSync();
 
-        if (gCLodVirtualShadowExpansionValid != 0u)
+        if (gCLodVirtualShadowExpansionValid == 1u)
         {
-            const CLodVirtualShadowPredictiveInvalidationCandidate candidate =
-                gCLodVirtualShadowExpansionCandidate;
-            const CLodVirtualShadowClipmapInfo clipmapInfo =
-                gCLodVirtualShadowExpansionClipmapInfo;
-            const uint2 pageMin = gCLodVirtualShadowExpansionPageMin;
-            const uint2 pageExtent = gCLodVirtualShadowExpansionPageExtent;
-            const uint pageCount = pageExtent.x * pageExtent.y;
-            for (uint pageOffset = groupThreadId;
-                 pageOffset < pageCount;
-                 pageOffset += 64u)
+            CLodVirtualShadowExpandCandidatePageRect(
+                gCLodVirtualShadowExpansionCandidate,
+                gCLodVirtualShadowExpansionClipmapInfo,
+                gCLodVirtualShadowExpansionPageMin,
+                gCLodVirtualShadowExpansionPageExtent,
+                groupThreadId,
+                pageTable,
+                pageMetadata,
+                rawPages,
+                rawPageCount);
+        }
+        else if (gCLodVirtualShadowExpansionValid == 2u)
+        {
+            // A local light face: the group stood in for its finer ones in the mips whose threshold wants them.
+            const uint firstSlice = CLodVirtualShadowCandidateSlice(gCLodVirtualShadowExpansionCandidate.shadowClipmapIndex);
+            const uint coarsestMip = CLodVirtualShadowCandidateCoarsestMip(gCLodVirtualShadowExpansionCandidate.shadowClipmapIndex);
+            const float4 faceUv = gCLodVirtualShadowExpansionLocalUv;
+            [loop]
+            for (uint mip = 0u; mip <= coarsestMip; ++mip)
             {
-                const uint pageOffsetY = pageOffset / pageExtent.x;
-                const uint pageOffsetX =
-                    pageOffset - pageOffsetY * pageExtent.x;
-                uint pageX = pageMin.x + pageOffsetX;
-                uint pageY = pageMin.y + pageOffsetY;
-                pageX -= pageX >= clipmapInfo.pageTableResolution
-                    ? clipmapInfo.pageTableResolution
-                    : 0u;
-                pageY -= pageY >= clipmapInfo.pageTableResolution
-                    ? clipmapInfo.pageTableResolution
-                    : 0u;
-
-                const uint2 wrappedPageCoords = uint2(pageX, pageY);
-                const uint3 pageCoords = uint3(
-                    wrappedPageCoords,
-                    clipmapInfo.pageTableLayer);
-                const uint pageEntry = pageTable[pageCoords];
-                if ((pageEntry & (kCLodVirtualShadowAllocatedMask |
-                        kCLodVirtualShadowContentValidMask |
-                        kCLodVirtualShadowRerenderedThisFrameMask)) !=
-                    (kCLodVirtualShadowAllocatedMask |
-                        kCLodVirtualShadowContentValidMask |
-                        kCLodVirtualShadowRerenderedThisFrameMask))
-                {
-                    continue;
-                }
-                const uint physicalPageIndex =
-                    pageEntry & kCLodVirtualShadowPhysicalPageIndexMask;
-                if (physicalPageIndex >=
-                    CLOD_VIRTUAL_SHADOW_EXPAND_PREDICTED_PAGES_PHYSICAL_PAGE_COUNT)
-                {
-                    continue;
-                }
-                const uint4 pageMeta = pageMetadata[physicalPageIndex];
-                const uint virtualAddress =
-                    CLodVirtualShadowWrappedVirtualAddress(
-                        wrappedPageCoords,
-                        clipmapInfo.pageTableResolution);
-                if ((pageMeta.z & kCLodVirtualShadowPhysicalPageResidentFlag) == 0u ||
-                    pageMeta.x != virtualAddress ||
-                    pageMeta.w != clipmapInfo.pageTableLayer)
-                {
-                    continue;
-                }
-                CLodAppendVirtualShadowPredictedRawPage(
-                    wrappedPageCoords,
-                    clipmapInfo,
-                    candidate.sourceGroupGlobalIndex,
-                    candidate.perMeshInstanceBufferIndex,
-                    pageEntry,
-                    pageMeta,
+                const uint pages = CLodVirtualShadowLocalMipPagesPerAxis(mip);
+                const uint2 origin = CLodVirtualShadowLocalMipPageOrigin(mip);
+                const uint2 pageMin = origin + min((uint2)(faceUv.xy * (float)pages), (pages - 1u).xx);
+                const uint2 pageMax = origin + min((uint2)(faceUv.zw * (float)pages), (pages - 1u).xx);
+                CLodVirtualShadowExpandCandidatePageRect(
+                    gCLodVirtualShadowExpansionCandidate,
+                    clipmapInfos[firstSlice + CLodVirtualShadowLocalMipSliceOffset(mip)],
+                    pageMin,
+                    pageMax - pageMin + 1u,
+                    groupThreadId,
+                    pageTable,
+                    pageMetadata,
                     rawPages,
                     rawPageCount);
             }
@@ -2327,6 +2547,172 @@ void CLodVirtualShadowAccumulateTileProjectedBoundsForClipmap(
     hasSample = true;
 }
 
+// Marks the 4x4-page blocks a page rectangle of one slice touches.
+void CLodVirtualShadowMarkPageRectBlocks(
+    uint slice,
+    uint2 pageMin,
+    uint2 pageMax,
+    RWStructuredBuffer<uint> markedBlockMasks,
+    RWStructuredBuffer<uint> markedBlockList,
+    RWStructuredBuffer<uint> markedBlockCountBuffer)
+{
+    const uint2 blockMin = CLodVirtualShadowBlockCoordFromPageCoord(pageMin);
+    const uint2 blockMax = CLodVirtualShadowBlockCoordFromPageCoord(pageMax);
+    [loop]
+    for (uint blockY = blockMin.y; blockY <= blockMax.y; ++blockY)
+    {
+        [loop]
+        for (uint blockX = blockMin.x; blockX <= blockMax.x; ++blockX)
+        {
+            const uint2 blockCoord = uint2(blockX, blockY);
+            const uint activeMask = CLodVirtualShadowBlockMaskForPageRect(
+                pageMin,
+                pageMax,
+                CLodVirtualShadowBlockOriginFromBlockCoord(blockCoord));
+            if (activeMask == 0u)
+            {
+                continue;
+            }
+            const uint blockLinearIndex = CLodVirtualShadowBlockLinearIndex(blockCoord, slice);
+            uint previousMask = 0u;
+            InterlockedOr(markedBlockMasks[blockLinearIndex], activeMask, previousMask);
+            if (previousMask == 0u)
+            {
+                uint blockListIndex = 0u;
+                InterlockedAdd(markedBlockCountBuffer[0], 1u, blockListIndex);
+                if (blockListIndex < kCLodVirtualShadowMaxMarkedBlockCount)
+                {
+                    markedBlockList[blockListIndex] = blockLinearIndex;
+                }
+            }
+        }
+    }
+}
+
+// Marks a face uv rectangle's pages at one mip of a local light face, padded half a page.
+void CLodVirtualShadowMarkLocalFaceUvRect(
+    uint slice,
+    uint mip,
+    float2 uvMin,
+    float2 uvMax,
+    RWStructuredBuffer<uint> markedBlockMasks,
+    RWStructuredBuffer<uint> markedBlockList,
+    RWStructuredBuffer<uint> markedBlockCountBuffer)
+{
+    const uint pages = CLodVirtualShadowLocalMipPagesPerAxis(mip);
+    const float uvPadding = 0.5f / (float)pages;
+    const float2 paddedMin = saturate(uvMin - uvPadding);
+    const float2 paddedMax = saturate(uvMax + uvPadding);
+    const uint2 origin = CLodVirtualShadowLocalMipPageOrigin(mip);
+    const uint2 pageMin = origin + min((uint2)(paddedMin * (float)pages), (pages - 1u).xx);
+    const uint2 pageMax = origin + min((uint2)(paddedMax * (float)pages), (pages - 1u).xx);
+    CLodVirtualShadowMarkPageRectBlocks(
+        slice + CLodVirtualShadowLocalMipSliceOffset(mip),
+        pageMin,
+        pageMax,
+        markedBlockMasks,
+        markedBlockList,
+        markedBlockCountBuffer);
+}
+
+// Requests pages of local light faces for one mark tile: for each face its corners and centre at the tile's nearest and
+// farthest depth reach, the mips those receivers select, padded half a page. Only receivers request pages, as for the
+// sun's clips: a page no receiver selects is never allocated or rendered.
+void CLodVirtualShadowMarkLocalFaceBlocks(
+    float2 tileUvMin,
+    float2 tileUvMax,
+    float2 tileUvCenter,
+    float minDepth,
+    float maxDepth,
+    CLodVirtualShadowMainCameraInfo mainCamera,
+    float screenHeight,
+    RWStructuredBuffer<uint> markedBlockMasks,
+    RWStructuredBuffer<uint> markedBlockList,
+    RWStructuredBuffer<uint> markedBlockCountBuffer)
+{
+    const uint faceCount = min(CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_LOCAL_FACE_COUNT, kCLodVirtualShadowMaxLocalFaceCount);
+    if (faceCount == 0u)
+    {
+        return;
+    }
+    StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Shadows::CLodClipmapInfo)];
+    StructuredBuffer<CLodVirtualShadowCompactShadowCameraInfo> shadowCameras =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Shadows::CLodCompactShadowCameras)];
+    const float lodBias = asfloat(CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_LOCAL_LOD_BIAS_AS_UINT);
+    // A screen pixel's world width per unit of view depth.
+    const float pixelWorldSizePerDepth = 2.0f * abs(mainCamera.projectionInverse[1][1]) / max(screenHeight, 1.0f);
+
+    float3 positions[10];
+    float depths[10];
+    const float2 sampleUvs[5] = { tileUvMin, float2(tileUvMax.x, tileUvMin.y), float2(tileUvMin.x, tileUvMax.y), tileUvMax, tileUvCenter };
+    [unroll]
+    for (uint i = 0u; i < 10u; ++i)
+    {
+        depths[i] = i < 5u ? minDepth : maxDepth;
+        positions[i] = CLodWorldSpaceFromScreenUv(sampleUvs[i % 5u], depths[i], mainCamera);
+    }
+
+    [loop]
+    for (uint face = 0u; face < faceCount; ++face)
+    {
+        const uint slice = kCLodVirtualShadowFirstLocalSlice + face * kCLodVirtualShadowLocalSlicesPerFace;
+        const CLodVirtualShadowClipmapInfo info = clipmapInfos[slice];
+        if (!CLodVirtualShadowClipmapIsValid(info) || !CLodVirtualShadowClipmapIsLocal(info))
+        {
+            continue;
+        }
+        const CLodVirtualShadowCompactShadowCameraInfo shadowCamera = shadowCameras[slice];
+        const float3 lightPosition = float3(info.worldOriginX, info.worldOriginY, info.worldOriginZ);
+        const float lightRange = info.depthNear + info.depthRange;
+
+        // The tile's receivers at its nearest and at its farthest depth are marked apart: a tile across a depth edge
+        // (a railing before a courtyard) has the two far apart in the light's view, and one rectangle spanning both,
+        // at every mip between their footprints, requests pages no receiver needs.
+        [unroll]
+        for (uint depthSet = 0u; depthSet < 2u; ++depthSet)
+        {
+            float2 uvMin = 1.0e30f.xx;
+            float2 uvMax = -1.0e30f.xx;
+            float mipMin = 1.0e30f;
+            float mipMax = -1.0e30f;
+            [unroll]
+            for (uint s = 0u; s < 5u; ++s)
+            {
+                const uint i = depthSet * 5u + s;
+                if (distance(positions[i], lightPosition) > lightRange)
+                {
+                    continue;
+                }
+                const float4 clip = mul(float4(positions[i], 1.0f), shadowCamera.viewProjection);
+                if (clip.w <= 0.0f || clip.z < 0.0f || clip.z > clip.w || abs(clip.x) > clip.w || abs(clip.y) > clip.w)
+                {
+                    continue;
+                }
+                const float2 faceUv = float2(clip.x / clip.w * 0.5f + 0.5f, 0.5f - clip.y / clip.w * 0.5f);
+                uvMin = min(uvMin, faceUv);
+                uvMax = max(uvMax, faceUv);
+                const float mip = CLodVirtualShadowLocalContinuousMip(
+                    pixelWorldSizePerDepth * depths[i], info.texelWorldSize * clip.w, lodBias);
+                mipMin = min(mipMin, mip);
+                mipMax = max(mipMax, mip);
+            }
+            if (mipMin > mipMax)
+            {
+                continue;
+            }
+            const uint finestMip = CLodVirtualShadowLocalSelectMip(mipMin);
+            const uint coarsestMip = CLodVirtualShadowLocalSelectMip(mipMax);
+            [loop]
+            for (uint mip = finestMip; mip <= coarsestMip; ++mip)
+            {
+                CLodVirtualShadowMarkLocalFaceUvRect(
+                    slice, mip, uvMin, uvMax, markedBlockMasks, markedBlockList, markedBlockCountBuffer);
+            }
+        }
+    }
+}
+
 [shader("compute")]
 [numthreads(128, 1, 1)]
 void CLodVirtualShadowMarkBlocksCSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
@@ -2355,10 +2741,6 @@ void CLodVirtualShadowMarkBlocksCSMain(uint3 dispatchThreadId : SV_DispatchThrea
     }
 
     const uint activeClipmapCount = CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_ACTIVE_CLIPMAP_COUNT;
-    if (activeClipmapCount == 0u)
-    {
-        return;
-    }
 
     const float2 screenSize = float2(CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_SCREEN_WIDTH, CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_SCREEN_HEIGHT);
     const uint2 tilePixelMin = uint2(tileWork.tileCoordX, tileWork.tileCoordY) * kCLodVirtualShadowMarkTileSize;
@@ -2372,6 +2754,22 @@ void CLodVirtualShadowMarkBlocksCSMain(uint3 dispatchThreadId : SV_DispatchThrea
 
     const CLodVirtualShadowMainCameraInfo mainCamera =
         CLodVirtualShadowMarkDepthCamera(compactMainCameraBuffer[0]);
+
+    CLodVirtualShadowMarkLocalFaceBlocks(
+        tileUvMin,
+        tileUvMax,
+        tileUvCenter,
+        minDepth,
+        maxDepth,
+        mainCamera,
+        screenSize.y,
+        markedBlockMasks,
+        markedBlockList,
+        markedBlockCountBuffer);
+    if (activeClipmapCount == 0u)
+    {
+        return;
+    }
 
     uint minClipmapIndex = activeClipmapCount - 1u;
     uint maxClipmapIndex = 0u;
@@ -2634,15 +3032,30 @@ void CLodVirtualShadowResolveMarkedBlocksCSMain(uint3 dispatchThreadId : SV_Disp
     uint2 blockCoord = uint2(0u, 0u);
     uint clipmapIndex = 0u;
     CLodVirtualShadowUnpackBlockLinearIndex(blockLinearIndex, blockCoord, clipmapIndex);
-    if (clipmapIndex >= CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_ACTIVE_CLIPMAP_COUNT)
+    CLodVirtualShadowMarkClipmapData clipmapData = (CLodVirtualShadowMarkClipmapData)0;
+    uint requestPriorityBase = CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_ACTIVE_CLIPMAP_COUNT;
+    if (clipmapIndex >= kCLodVirtualShadowFirstLocalSlice)
     {
-        return;
+        // A local light face's slice: its pages never scroll, so page table coordinates are the page's own.
+        if (clipmapIndex >= kCLodVirtualShadowMaxSliceCount)
+        {
+            return;
+        }
+        clipmapData.pageTableLayer = clipmapIndex;
+        clipmapData.pageTableResolution = kCLodVirtualShadowMaxPageTableResolution;
+        requestPriorityBase = clipmapIndex + 1u;
     }
-
-    const CLodVirtualShadowMarkClipmapData clipmapData = markClipmapDataBuffer[clipmapIndex];
-    if (!CLodVirtualShadowMarkClipmapIsValid(clipmapData))
+    else
     {
-        return;
+        if (clipmapIndex >= CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_ACTIVE_CLIPMAP_COUNT)
+        {
+            return;
+        }
+        clipmapData = markClipmapDataBuffer[clipmapIndex];
+        if (!CLodVirtualShadowMarkClipmapIsValid(clipmapData))
+        {
+            return;
+        }
     }
 
     const uint activeMask = markedBlockMasks[blockLinearIndex];
@@ -2676,7 +3089,7 @@ void CLodVirtualShadowResolveMarkedBlocksCSMain(uint3 dispatchThreadId : SV_Disp
                 clipmapData.pageTableLayer,
                 clipmapData.pageTableResolution,
                 CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_MAX_REQUEST_COUNT,
-                CLOD_VIRTUAL_SHADOW_RESOLVE_MARKED_BLOCKS_ACTIVE_CLIPMAP_COUNT,
+                requestPriorityBase,
                 CLodVirtualShadowPackAbsolutePageTag(
                     logicalPageCoord,
                     clipmapData.unwrappedPageOffsetX,
@@ -3094,7 +3507,7 @@ void CLodVirtualShadowBuildPageListsCSMain(uint3 dispatchThreadId : SV_DispatchT
         const uint ownerPageX = ownerVirtualAddress % CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_PAGE_TABLE_RESOLUTION;
         const uint ownerPageY = ownerVirtualAddress / CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_PAGE_TABLE_RESOLUTION;
         bool visitedThisFrame = false;
-        if (ownerClipmapIndex < kCLodVirtualShadowClipmapCount &&
+        if (ownerClipmapIndex < kCLodVirtualShadowMaxSliceCount &&
             ownerPageY < CLOD_VIRTUAL_SHADOW_BUILD_PAGE_LISTS_PAGE_TABLE_RESOLUTION)
         {
             const uint pageEntry = pageTable.Load(int4(ownerPageX, ownerPageY, ownerClipmapIndex, 0));
@@ -3387,6 +3800,26 @@ void CLodVirtualShadowAdmitPagesCSMain(uint3 dispatchThreadId : SV_DispatchThrea
     uint classTicket = 0u;
     if (upgrade)
     {
+        // A page rendered within the cooldown waits, still pending, without taking a ticket: the refinements that
+        // stream in meanwhile share its next render instead of each rendering it again.
+        const uint cooldownFrames = CLOD_VIRTUAL_SHADOW_ADMIT_UPGRADE_COOLDOWN_FRAMES;
+        if (cooldownFrames != 0u)
+        {
+            RWStructuredBuffer<uint4> pageMetadata =
+                ResourceDescriptorHeap[CLOD_VIRTUAL_SHADOW_ADMIT_PAGE_METADATA_DESCRIPTOR_INDEX];
+            ConstantBuffer<PerFrameBuffer> perFrameBuffer =
+                ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+            const uint physicalPageIndex = pageEntry & kCLodVirtualShadowPhysicalPageIndexMask;
+            // The frame the page was last cleared or rendered (CLodVirtualShadowClearPhysicalPagesCSMain, the stamp).
+            const uint lastRenderFrame = pageMetadata[physicalPageIndex].y & ~kCLodVirtualShadowClearEpochPendingMask;
+            const uint currentFrame = perFrameBuffer.frameIndex & ~kCLodVirtualShadowClearEpochPendingMask;
+            if (((currentFrame - lastRenderFrame) & ~kCLodVirtualShadowClearEpochPendingMask) < cooldownFrames)
+            {
+                InterlockedAdd(statsBuffer[0].upgradeCooldownDeferredPageCount, 1u);
+                InterlockedAnd(dirtyFlags[physicalPageIndex >> 5u], ~(1u << (physicalPageIndex & 31u)));
+                return;
+            }
+        }
         InterlockedAdd(statsBuffer[0].upgradeEligiblePageCount, 1u, classTicket);
         if (CLOD_VIRTUAL_SHADOW_ADMIT_UPGRADE_BUDGET != 0u &&
             classTicket >= CLOD_VIRTUAL_SHADOW_ADMIT_UPGRADE_BUDGET)
@@ -3496,7 +3929,7 @@ void CLodVirtualShadowBuildDirtyHierarchyCSMain(uint3 dispatchThreadId : SV_Disp
 [numthreads(8, 8, 1)]
 void CLodVirtualShadowClearDirtyBitsCSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
-    if (dispatchThreadId.z >= kCLodVirtualShadowClipmapCount ||
+    if (dispatchThreadId.z >= kCLodVirtualShadowMaxSliceCount ||
         dispatchThreadId.x >= CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_PAGE_TABLE_RESOLUTION ||
         dispatchThreadId.y >= CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_PAGE_TABLE_RESOLUTION)
     {

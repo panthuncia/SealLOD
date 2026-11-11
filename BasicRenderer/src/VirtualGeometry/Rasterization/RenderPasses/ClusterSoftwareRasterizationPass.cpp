@@ -278,6 +278,8 @@ ClusterSoftwareRasterBindings ClusterSoftwareRasterizationPass::Declare(org::Pas
     if (m_outputKind == CLodRasterOutputKind::VirtualShadow) {
         bindings.virtualShadow = true;
         builder->ShaderResource(Builtin::Shadows::CLodDirectionalPageViewInfo);
+        // A cluster that fails to load is counted there (rasterWorkDroppedCount).
+        builder->UnorderedAccess(Builtin::Shadows::CLodStats);
         if (m_telemetryBuffer) {
             bindings.telemetry = builder->UnorderedAccess(m_telemetryBuffer).View();
             bindings.hasTelemetry = true;

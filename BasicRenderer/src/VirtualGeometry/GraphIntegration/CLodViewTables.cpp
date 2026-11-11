@@ -62,7 +62,7 @@ std::vector<CLodViewRasterInfo> BuildCLodVisibilityViewRasterInfoRows(
         info.scissorMinX = 0;
         info.scissorMinY = 0;
         if (virtualShadow) {
-            if (view.shadow && view.lightType == Components::LightType::Directional) {
+            if (view.shadow) {
                 info.scissorMaxX = virtualResolution;
                 info.scissorMaxY = virtualResolution;
                 info.viewportScaleX = 1.0f;

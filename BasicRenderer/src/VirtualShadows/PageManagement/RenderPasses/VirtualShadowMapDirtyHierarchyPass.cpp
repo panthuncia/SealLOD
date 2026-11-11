@@ -47,6 +47,7 @@ void VirtualShadowMapDirtyHierarchyPass::Record(const VirtualShadowMapDirtyHiera
     const uint32_t mipCount = static_cast<uint32_t>(bindings.hierarchy.size());
     if (mipCount == 0) return;
     recording.BindComputePipeline(bindings.pipeline);
+    const uint32_t sliceCount = CLodVirtualShadowActiveSliceCount();
     for (uint32_t mip = 0; mip < mipCount; ++mip) {
         const bool pageTable = mip == 0; const uint32_t src = pageTable ? frame.pageTableResolution : (std::max)(frame.pageTableResolution >> (mip - 1u), 1u);
         const uint32_t dst = pageTable ? src : (src > 1u ? src >> 1u : 1u);
@@ -58,10 +59,10 @@ void VirtualShadowMapDirtyHierarchyPass::Record(const VirtualShadowMapDirtyHiera
         constants[CLOD_VIRTUAL_SHADOW_DIRTY_HIERARCHY_DEST_DESCRIPTOR_INDEX] = recording.Index(bindings.hierarchy[mip]);
         constants[CLOD_VIRTUAL_SHADOW_DIRTY_HIERARCHY_SOURCE_IS_PAGE_TABLE] = pageTable ? 1u : 0u;
         constants[CLOD_VIRTUAL_SHADOW_DIRTY_HIERARCHY_SOURCE_RESOLUTION] = src;
-        constants[CLOD_VIRTUAL_SHADOW_DIRTY_HIERARCHY_CLIPMAP_COUNT] = CLodVirtualShadowMaxSupportedClipmapCount;
+        constants[CLOD_VIRTUAL_SHADOW_DIRTY_HIERARCHY_CLIPMAP_COUNT] = sliceCount;
         constants[CLOD_VIRTUAL_SHADOW_DIRTY_HIERARCHY_CLIPMAP_INFO_DESCRIPTOR_INDEX] = recording.Index(bindings.clipmapInfo);
         br::render::PushMiscConstants(recording, constants);
         const uint32_t groups = (dst + 7u) / 8u;
-        recording.Commands().Dispatch(groups, groups, CLodVirtualShadowMaxSupportedClipmapCount);
+        recording.Commands().Dispatch(groups, groups, sliceCount);
     }
 }

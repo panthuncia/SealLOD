@@ -460,7 +460,8 @@ void CLodShadowVariant::AppendStructuralTail(
     CLodExtension& extension,
     const CLodVariantTraits& traits,
     std::vector<org::ExternalPassDesc>& outPasses,
-    const std::string& shadowClearDirtyBitsAfterPassName)
+    const std::string& shadowClearDirtyBitsAfterPassName,
+    bool reyesQueuesResetEachFrame)
 {
     if (traits.type != CLodExtensionType::Shadow || shadowClearDirtyBitsAfterPassName.empty()) {
         return;
@@ -481,7 +482,12 @@ void CLodShadowVariant::AppendStructuralTail(
             extension.m_shadowPageTableTexture,
             extension.m_shadowPageMetadataBuffer,
             extension.m_shadowDirectionalPageViewInfoBuffer,
-            extension.m_shadowConfiguredMaxPhysicalPageCount));
+            extension.m_shadowConfiguredMaxPhysicalPageCount,
+            extension.m_occlusionReplayStateBuffer,
+            reyesQueuesResetEachFrame
+                ? std::array<std::shared_ptr<org::Buffer>, 3>{extension.m_reyesSplitQueueOverflowBufferA,
+                      extension.m_reyesSplitQueueOverflowBufferB, extension.m_reyesDiceQueueOverflowBuffer}
+                : std::array<std::shared_ptr<org::Buffer>, 3>{}));
     spdlog::info("CLod shadow structural tail: construct {} complete", shadowExpandPredictedPagesPassName);
     shadowExpandPredictedPagesPassDesc.At(
         org::ExternalInsertPoint::After(shadowClearDirtyBitsAfterPassName));
@@ -1019,8 +1025,9 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
         .add<CLodVirtualShadowDirtyHierarchyTag>()
         .add<CLodExtensionTypeTag>(typeEntity);
 
+    // Slice rows, then view rows (CLodVirtualShadowClipInfoRowCount).
     extension.m_shadowClipmapInfoBuffer = CreateAliasedUnmaterializedStructuredBuffer(
-        CLodVirtualShadowMaxSupportedClipmapCount,
+        CLodVirtualShadowClipInfoRowCount,
         sizeof(CLodVirtualShadowClipmapInfo),
         true,
         false,
@@ -1053,8 +1060,9 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
         false);
     extension.m_shadowCompactMainCameraBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Compact Main Camera Buffer"));
 
+    // One per slice; both slices of a local face hold that face's camera.
     extension.m_shadowCompactShadowCameraBuffer = CreateAliasedUnmaterializedStructuredBuffer(
-        CLodVirtualShadowMaxSupportedClipmapCount,
+        CLodVirtualShadowMaxSliceCount,
         sizeof(CLodVirtualShadowCompactShadowCameraInfo),
         true,
         false,

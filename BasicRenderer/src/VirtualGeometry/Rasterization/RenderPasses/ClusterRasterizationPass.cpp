@@ -260,7 +260,7 @@ void ClusterRasterizationPass::Update(const org::UpdateExecutionContext& executi
     for (const auto& viewInfo : context.Views()) {
 
         if (m_outputKind == CLodRasterOutputKind::VirtualShadow) {
-            if (viewInfo.shadow && viewInfo.lightType == Components::LightType::Directional) {
+            if (viewInfo.shadow) {
                 totalViewPixels += static_cast<uint64_t>(maxViewWidth) * static_cast<uint64_t>(maxViewHeight);
             }
             continue;
@@ -299,7 +299,7 @@ void ClusterRasterizationPass::Update(const org::UpdateExecutionContext& executi
         info.scissorMinY = 0;
 
         if (m_outputKind == CLodRasterOutputKind::VirtualShadow) {
-            if (viewInfo.shadow && viewInfo.lightType == Components::LightType::Directional) {
+            if (viewInfo.shadow) {
                 info.scissorMaxX = maxViewWidth;
                 info.scissorMaxY = maxViewHeight;
                 info.viewportScaleX = 1.0f;

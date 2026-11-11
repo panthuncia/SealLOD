@@ -1623,6 +1623,35 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	    auto light = renderer.GetCurrentScene()->CreateDirectionalLightECS(L"light1", XMFLOAT3(1, 1, 1), 10.0, XMFLOAT3(-0.1, -0.5, -0.9));
         //auto light3 = renderer.GetCurrentScene()->CreateSpotLightECS(L"light3", XMFLOAT3(0, 10, 3), XMFLOAT3(1, 1, 1), 2000.0, {0, -1, 0}, .5, .8);
         //auto light1 = renderer.GetCurrentScene()->CreatePointLightECS(L"light1", XMFLOAT3(0, 1, 3), XMFLOAT3(1, 1, 1), 100.0);
+        // BASICRENDERER_DEMO_SHADOW_LIGHT=spot|point (or spot-unshadowed|point-unshadowed): a shadow-casting local light beside the camera, aimed where it looks,
+        // for checking spot and point light virtual shadow maps.
+        if (const char* demoShadowLight = std::getenv("BASICRENDERER_DEMO_SHADOW_LIGHT")) {
+            const XMVECTOR eye = XMLoadFloat3(&pos);
+            const XMVECTOR forward = XMVector3Normalize(XMVectorSubtract(XMLoadFloat3(&lookAt), eye));
+            XMFLOAT3 lightPosition;
+            XMStoreFloat3(&lightPosition, XMVectorAdd(eye, XMVectorSet(1.5f, 1.0f, 0.0f, 0.0f)));
+            XMFLOAT3 lightDirection;
+            XMStoreFloat3(&lightDirection, XMVector3Normalize(XMVectorAdd(forward, XMVectorSet(0.0f, -0.3f, 0.0f, 0.0f))));
+            // BASICRENDERER_DEMO_SHADOW_LIGHT_POSE="x,y,z,dx,dy,dz" places it instead (a remembered camera pose is not
+            // known here).
+            if (const char* pose = std::getenv("BASICRENDERER_DEMO_SHADOW_LIGHT_POSE")) {
+                float v[6] = {};
+                if (std::sscanf(pose, "%f,%f,%f,%f,%f,%f", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) == 6) {
+                    lightPosition = XMFLOAT3(v[0], v[1], v[2]);
+                    XMStoreFloat3(&lightDirection, XMVector3Normalize(XMVectorSet(v[3], v[4], v[5], 0.0f)));
+                }
+            }
+            if (std::string_view(demoShadowLight).starts_with("point")) {
+                // "point-unshadowed": the same light without shadows, for comparison.
+                renderer.GetCurrentScene()->CreatePointLightECS(L"demoShadowPoint", lightPosition, XMFLOAT3(1.0f, 0.8f, 0.6f), 3000.0f, 30.0f, 0.05f,
+                    std::string_view(demoShadowLight) != "point-unshadowed");
+            }
+            else {
+                // "spot-unshadowed": the same light without shadows, for comparison.
+                renderer.GetCurrentScene()->CreateSpotLightECS(L"demoShadowSpot", lightPosition, XMFLOAT3(1.0f, 0.8f, 0.6f), 2000.0f,
+                    lightDirection, 0.35f, 0.5f, 40.0f, 0.05f, std::string_view(demoShadowLight) != "spot-unshadowed");
+            }
+        }
     
         for (int i = 0; i < 0; i++) {
 		    auto point = getRandomPointInVolume(-20, 20, -2, 0, -20, 20);

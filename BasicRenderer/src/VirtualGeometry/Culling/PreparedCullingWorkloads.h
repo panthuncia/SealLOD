@@ -20,11 +20,8 @@ namespace br::render {
 
 inline ViewFilter PreparedCullViewFilter(bool useShadowCascadeViews) {
     if (!useShadowCascadeViews) return ViewFilter::PrimaryCameras();
-    auto filter = ViewFilter::Shadows();
-    filter.requireCascade = true;
-    filter.requireLightType = true;
-    filter.lightType = Components::LightType::Directional;
-    return filter;
+    // Every shadow view is a virtual shadow map view: the sun's clips and spot and point lights' faces.
+    return ViewFilter::Shadows();
 }
 
 // Shared, owned input for both hierarchical culling encoders. Building this

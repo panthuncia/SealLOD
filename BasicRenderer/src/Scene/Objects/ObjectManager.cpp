@@ -1893,8 +1893,8 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddObjectsBulk(const std:
 			auto& drawInfo = drawInfos[pendingDrawRecord.objectIndex];
 			auto& view = drawRecordViews[drawRecordViewIndex];
 			const auto drawRecordIndex = static_cast<unsigned int>(view->GetOffset() / sizeof(InstanceDrawRecordCB));
-			if (drawRecordIndex > 0xFFFFFFu) {
-				spdlog::warn("ObjectManager::AddObjectsBulk: instance draw record index {} exceeds packed visible-cluster 24-bit capacity", drawRecordIndex);
+			if (drawRecordIndex > PackedVisibleClusterInstanceMask) {
+				spdlog::warn("ObjectManager::AddObjectsBulk: instance draw record index {} exceeds packed visible-cluster 22-bit capacity", drawRecordIndex);
 			}
 			m_stats.maxDrawRecordIndex = std::max<std::uint64_t>(m_stats.maxDrawRecordIndex, drawRecordIndex);
 			const auto drawRecordGeneration = ActivateDrawRecord(drawRecordIndex);
@@ -3532,8 +3532,8 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::PublishStaticImportPacket
 					const auto drawRecordOffset =
 						drawRecordRange.offset + drawRecordOrdinal * sizeof(InstanceDrawRecordCB);
 					const auto drawRecordIndex = static_cast<unsigned int>(drawRecordOffset / sizeof(InstanceDrawRecordCB));
-					if (drawRecordIndex > 0xFFFFFFu) {
-						spdlog::warn("ObjectManager::PublishStaticImportPacket: instance draw record index {} exceeds packed visible-cluster 24-bit capacity", drawRecordIndex);
+					if (drawRecordIndex > PackedVisibleClusterInstanceMask) {
+						spdlog::warn("ObjectManager::PublishStaticImportPacket: instance draw record index {} exceeds packed visible-cluster 22-bit capacity", drawRecordIndex);
 					}
 					m_stats.maxDrawRecordIndex = std::max<std::uint64_t>(m_stats.maxDrawRecordIndex, drawRecordIndex);
 					const auto drawRecordGeneration = ActivateDrawRecordCPU(drawRecordIndex);

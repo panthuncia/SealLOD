@@ -15,5 +15,7 @@
 #define CLOD_VIRTUAL_SHADOW_ADMIT_APPLY_UPGRADES_ONLY UintRootConstant11
 #define CLOD_VIRTUAL_SHADOW_ADMIT_CLIPMAP_INFO_DESCRIPTOR_INDEX UintRootConstant12
 #define CLOD_VIRTUAL_SHADOW_ADMIT_SHADOW_CAMERAS_DESCRIPTOR_INDEX UintRootConstant13
+// Frames since a page was last rendered before an upgrade may render it again (0: no wait).
+#define CLOD_VIRTUAL_SHADOW_ADMIT_UPGRADE_COOLDOWN_FRAMES UintRootConstant14
 
 #endif

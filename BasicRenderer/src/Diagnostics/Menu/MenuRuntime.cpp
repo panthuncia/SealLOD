@@ -1560,6 +1560,29 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
         if (ImGui::Checkbox("Invalidate shadows on streaming upgrade", &m_clodDirectionalVirtualShadowPredictiveLodInvalidation)) {
             setCLodDirectionalVirtualShadowPredictiveLodInvalidation(m_clodDirectionalVirtualShadowPredictiveLodInvalidation);
         }
+        {
+            // Page render budgets per frame (0: unlimited) and the upgrade cooldown. Read by the admission passes
+            // each frame.
+            auto& settings = SettingsManager::GetInstance();
+            const auto uintSlider = [&](const char* label, const char* settingName, int maximum, const char* tooltip) {
+                int value = static_cast<int>(settings.getSettingGetter<uint32_t>(settingName)());
+                if (ImGui::SliderInt(label, &value, 0, maximum)) {
+                    settings.getSettingSetter<uint32_t>(settingName)(static_cast<uint32_t>(std::clamp(value, 0, maximum)));
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s", tooltip);
+                }
+            };
+            uintSlider("VSM Page Render Budget", CLodDirectionalVirtualShadowPageRenderBudgetSettingName, 4096,
+                "New and invalidated pages rendered per frame; the rest wait. 0 is unlimited.");
+            uintSlider("VSM Upgrade Page Budget", CLodDirectionalVirtualShadowUpgradePageRenderBudgetSettingName, 4096,
+                "Pages re-rendered per frame for streaming upgrades; the rest stay pending. 0 is unlimited.");
+            // Capped: at 30 frames, pages waited long enough for their refined groups to be streamed out, and the
+            // tail re-requested and re-rendered them indefinitely.
+            uintSlider("VSM Upgrade Cooldown (frames)", CLodVirtualShadowUpgradeCooldownFramesSettingName, 16,
+                "Frames a page waits after rendering before an upgrade renders it again. Pending upgrades are kept, "
+                "so refinements arriving meanwhile share one re-render. 0 disables.");
+        }
         if (ImGui::SliderFloat("Directional VSM Source Angle", &m_clodDirectionalVirtualShadowSourceAngleDegrees, 0.0f, 10.0f, "%.2f deg")) {
             m_clodDirectionalVirtualShadowSourceAngleDegrees = std::max(m_clodDirectionalVirtualShadowSourceAngleDegrees, 0.0f);
             setCLodDirectionalVirtualShadowSourceAngleDegrees(m_clodDirectionalVirtualShadowSourceAngleDegrees);

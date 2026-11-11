@@ -61,5 +61,5 @@ void VirtualShadowMapClearDirtyBitsPass::Record(const VirtualShadowMapClearDirty
     constants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_STATS_DESCRIPTOR_INDEX] = recording.Index(bindings.stats);
     constants[CLOD_VIRTUAL_SHADOW_CLEAR_DIRTY_BITS_DIRTY_FLAGS_DESCRIPTOR_INDEX] = recording.Index(bindings.dirtyFlags);
     const uint32_t groups = (frame.pageTableResolution + 7u) / 8u;
-    br::render::DispatchCompute(recording, bindings.pipeline, constants, groups, groups, CLodVirtualShadowMaxSupportedClipmapCount);
+    br::render::DispatchCompute(recording, bindings.pipeline, constants, groups, groups, CLodVirtualShadowActiveSliceCount());
 }

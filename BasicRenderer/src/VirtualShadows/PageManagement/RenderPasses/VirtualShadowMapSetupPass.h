@@ -22,6 +22,7 @@ struct VirtualShadowMapSetupBindings {
 };
 struct VirtualShadowMapSetupFrame {
     uint32_t pageTableResolution = 0;
+    uint32_t sliceCount = 0; // CLodVirtualShadowActiveSliceCount() when prepared
     uint32_t packedConfig0 = 0, packedConfig1 = 0;
     uint32_t packedFlags = 0;
     float autoBiasScale = 0.0f;
@@ -91,4 +92,13 @@ private:
     bool m_previousDirectionalLightDirectionValid = false;
     bool m_previousRenderResolutionValid = false;
     bool m_previousMarkCameraValid = false;
+    bool m_warnedViewRowOverflow = false;
+    // What each local light face rendered last frame. A face whose light or camera changed has its slices invalidated.
+    struct LocalFaceState {
+        bool valid = false;
+        uint32_t lightIndex = 0;
+        bool dynamicSkinned = false;
+        DirectX::XMFLOAT4X4 viewProjection{};
+    };
+    std::array<LocalFaceState, CLodVirtualShadowMaxLocalFaceCount> m_previousLocalFaces{};
 };

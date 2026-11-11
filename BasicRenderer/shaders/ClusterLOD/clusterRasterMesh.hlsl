@@ -67,6 +67,12 @@ void MSRecordClusterTelemetry(uint loadResult)
     }
 
     MSTelemetryAdd(WG_COUNTER_RASTER_MESH_SHADER_INIT_FAILED, 1u);
+#if CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
+    // The cluster's pages are not complete this frame: none may be taken as empty.
+    RWStructuredBuffer<CLodVirtualShadowStats> vsmStats =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Shadows::CLodStats)];
+    InterlockedAdd(vsmStats[0].rasterWorkDroppedCount, 1u);
+#endif
     if (loadResult == CLOD_RASTER_CLUSTER_ZERO_PAGE_SLAB)
     {
         MSTelemetryAdd(WG_COUNTER_RASTER_MESH_SHADER_INIT_FAILED_ZERO_PAGE_SLAB, 1u);
@@ -103,6 +109,9 @@ struct MSVertexContext
     uint visibleClusterIndex; // Written to the visibility buffer, so unsorted.
     uint shadowVsmPayload;
     float2 viewportScale;
+    // Where the view's [-1, 1] lands in the target, in units of its width: a local light face's mip is a
+    // rectangle of its slice's 16K canvas (CLodVirtualShadowLocalMipPageOrigin).
+    float2 viewportOffset;
 #if defined(PSO_ALPHA_TEST) || defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
     CLodUvStream uvStream0;
 #endif
@@ -111,10 +120,11 @@ struct MSVertexContext
 #endif
 };
 
-float4 MSApplyViewportScale(float4 clipPosition, float2 viewportScale)
+// Maps the view's [-1, 1] onto [offset, offset + scale] of the target (in target widths, y down).
+float4 MSApplyViewportScale(float4 clipPosition, float2 viewportScale, float2 viewportOffset)
 {
-    clipPosition.x = clipPosition.x * viewportScale.x + clipPosition.w * (viewportScale.x - 1.0f);
-    clipPosition.y = clipPosition.y * viewportScale.y + clipPosition.w * (1.0f - viewportScale.y);
+    clipPosition.x = clipPosition.x * viewportScale.x + clipPosition.w * (viewportScale.x - 1.0f + 2.0f * viewportOffset.x);
+    clipPosition.y = clipPosition.y * viewportScale.y + clipPosition.w * (1.0f - viewportScale.y - 2.0f * viewportOffset.y);
     return clipPosition;
 }
 
@@ -144,7 +154,7 @@ VisBufferPSInput MSBuildVertex(CLodRasterCluster cluster, MSVertexContext contex
     const float3x3 normalMatrix = (float3x3)normalMatrixBuffer[context.objectBuffer.normalMatrixBufferIndex].value;
 
     VisBufferPSInput result = (VisBufferPSInput)0;
-    result.position = MSApplyViewportScale(CLodRasterClipPosition(cluster, vertex.position), context.viewportScale);
+    result.position = MSApplyViewportScale(CLodRasterClipPosition(cluster, vertex.position), context.viewportScale, context.viewportOffset);
     result.linearDepth = CLodRasterLinearDepth(cluster, vertex.position);
     result.positionWorldSpace = mul(float4(vertex.position, 1.0f), context.objectBuffer.model).xyz;
     result.normalWorldSpace = normalize(mul(vertex.normal, normalMatrix));
@@ -185,7 +195,7 @@ VisBufferPSInput MSBuildVertex(CLodRasterCluster cluster, MSVertexContext contex
 #endif
 
     VisBufferPSInput result = (VisBufferPSInput)0;
-    result.position = MSApplyViewportScale(CLodRasterClipPosition(cluster, position), context.viewportScale);
+    result.position = MSApplyViewportScale(CLodRasterClipPosition(cluster, position), context.viewportScale, context.viewportOffset);
     result.linearDepth = CLodRasterLinearDepth(cluster, position);
 #if CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
     result.virtualShadowClipDistances = CLodVirtualShadowBuildBlockClipDistances(result.position, context.shadowVsmPayload);
@@ -213,6 +223,15 @@ MSVertexContext MSLoadVertexContext(
     context.visibleClusterIndex = visibleClusterIndex;
     context.shadowVsmPayload = CLodVisibleClusterVsmPayload(packedCluster);
     context.viewportScale = float2(viewRasterInfo.viewportScaleX, viewRasterInfo.viewportScaleY);
+#if CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
+    const uint localMip = CLodVisibleClusterVsmLocalMipFromPayload(context.shadowVsmPayload);
+    if (localMip < kCLodVirtualShadowLocalMipCount)
+    {
+        const float canvasPages = (float)kCLodVirtualShadowMaxPageTableResolution;
+        context.viewportScale = ((float)CLodVirtualShadowLocalMipPagesPerAxis(localMip) / canvasPages).xx;
+        context.viewportOffset = (float2)CLodVirtualShadowLocalMipPageOrigin(localMip) / canvasPages;
+    }
+#endif
 #if defined(PSO_ALPHA_TEST) || defined(CLOD_AVBOIT_FORWARD_TRANSPARENT)
     context.uvStream0 = CLodRasterLoadUvStream(cluster, 0u);
 #endif
@@ -259,11 +278,12 @@ uint MSFilterVirtualShadowTriangles(
 
     CLodVirtualShadowClipmapInfo clipmapInfo = (CLodVirtualShadowClipmapInfo)0;
     bool hasClipmapInfo = false;
-    const uint clipmapIndex = CLodVisibleClusterShadowClipmapIndex(packedCluster);
-    if (clipmapIndex < kCLodVirtualShadowClipmapCount)
+    StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos =
+        ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX];
+    const uint clipmapIndex = CLodVisibleClusterVsmSliceFromPayload(
+        CLodVisibleClusterVsmPayload(packedCluster), cluster.viewID, clipmapInfos);
+    if (clipmapIndex < kCLodVirtualShadowMaxSliceCount)
     {
-        StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos =
-            ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX];
         clipmapInfo = clipmapInfos[clipmapIndex];
         hasClipmapInfo = CLodVirtualShadowClipmapIsValid(clipmapInfo) && clipmapInfo.shadowCameraBufferIndex == cluster.viewID;
     }

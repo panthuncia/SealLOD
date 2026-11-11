@@ -758,6 +758,10 @@ void Renderer::Update(float elapsedSeconds) {
     // fragment intents that reference them by revision.
     std::vector<br::render::ArtifactIntent> frameIntents;
     std::shared_ptr<br::render::LightTableBuildInput> desiredLights;
+    if (m_pLightManager) {
+        BT_ZONE_SCOPE("Renderer::Update::LocalShadowSelection");
+        m_pLightManager->UpdateLocalShadows();
+    }
     if (m_pLightManager && m_rendererStateRequests) {
         BT_ZONE_SCOPE("Renderer::Update::CaptureFrameInputs::LightTables");
         const auto lightSourceRevision = (std::max<std::uint64_t>)(
@@ -785,6 +789,7 @@ void Renderer::Update(float elapsedSeconds) {
             shadow.viewIDs = viewInfo.viewIDs;
             desiredLights->directionalShadows.push_back(std::move(shadow));
         });
+        desiredLights->localShadows = m_pLightManager->CaptureLocalShadows();
         for (const auto& key : m_pLightManager->GetSupportedKeys()) {
             if (auto resource = m_pLightManager->ProvideResource(key))
                 desiredLights->retainedResources.push_back(std::move(resource));

@@ -3,7 +3,7 @@
 
 // Pure-compute frontiers are internal scratch data and do not have the work
 // graph ABI/stable-address requirements of replay records. Pack the fields that
-// already have renderer-wide bounds: draw indices use 24 bits, view IDs 8 bits,
+// already have renderer-wide bounds: draw indices use 22 bits, view IDs 10 bits,
 // page addresses remain exact. This scratch ABI can afford two uints for them.
 struct PureComputeTraverseNodeRecord
 {
@@ -25,7 +25,7 @@ struct PureComputeClusterRunRecord
 PureComputeTraverseNodeRecord PackPureComputeTraverseNodeRecord(TraverseNodeRecord record)
 {
     PureComputeTraverseNodeRecord packed;
-    packed.instanceAndView = (record.instanceIndex & 0x00ffffffu) | ((record.viewId & 0xffu) << 24u);
+    packed.instanceAndView = (record.instanceIndex & 0x003fffffu) | ((record.viewId & 0x3ffu) << 22u);
     packed.nodeIdPacked = record.nodeIdPacked;
     packed.assemblyTransformIndex = record.assemblyTransformIndex;
     return packed;
@@ -34,8 +34,8 @@ PureComputeTraverseNodeRecord PackPureComputeTraverseNodeRecord(TraverseNodeReco
 TraverseNodeRecord UnpackPureComputeTraverseNodeRecord(PureComputeTraverseNodeRecord packed)
 {
     TraverseNodeRecord record = (TraverseNodeRecord)0;
-    record.instanceIndex = packed.instanceAndView & 0x00ffffffu;
-    record.viewId = packed.instanceAndView >> 24u;
+    record.instanceIndex = packed.instanceAndView & 0x003fffffu;
+    record.viewId = packed.instanceAndView >> 22u;
     record.nodeIdPacked = packed.nodeIdPacked;
     record.assemblyTransformIndex = packed.assemblyTransformIndex;
     return record;
@@ -44,7 +44,7 @@ TraverseNodeRecord UnpackPureComputeTraverseNodeRecord(PureComputeTraverseNodeRe
 PureComputeClusterRunRecord PackPureComputeClusterRunRecord(CLodClusterRunRecord record)
 {
     PureComputeClusterRunRecord packed;
-    packed.instanceAndView = (record.instanceIndex & 0x00ffffffu) | ((record.viewId & 0xffu) << 24u);
+    packed.instanceAndView = (record.instanceIndex & 0x003fffffu) | ((record.viewId & 0x3ffu) << 22u);
     packed.groupIdPacked = record.groupIdPacked;
     packed.clusterIndexAndCount = record.clusterIndexAndCount;
     packed.pageSlabDescriptorIndex = record.pageSlabDescriptorIndex;
@@ -56,8 +56,8 @@ PureComputeClusterRunRecord PackPureComputeClusterRunRecord(CLodClusterRunRecord
 CLodClusterRunRecord UnpackPureComputeClusterRunRecord(PureComputeClusterRunRecord packed)
 {
     CLodClusterRunRecord record = (CLodClusterRunRecord)0;
-    record.instanceIndex = packed.instanceAndView & 0x00ffffffu;
-    record.viewId = packed.instanceAndView >> 24u;
+    record.instanceIndex = packed.instanceAndView & 0x003fffffu;
+    record.viewId = packed.instanceAndView >> 22u;
     record.groupIdPacked = packed.groupIdPacked;
     record.clusterIndexAndCount = packed.clusterIndexAndCount;
     record.pageSlabDescriptorIndex = packed.pageSlabDescriptorIndex;
@@ -196,6 +196,10 @@ void SeedPureComputeReplayNodesCS(const uint3 dispatchThreadID : SV_DispatchThre
     if (outputIndex < CLOD_WG_VISIBLE_CLUSTERS_CAPACITY)
     {
         outFrontier[outputIndex] = PackPureComputeTraverseNodeRecord(record);
+    }
+    else
+    {
+        CLodNoteVirtualShadowWorkDropped(1u);
     }
 }
 
@@ -526,6 +530,7 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
     uint outputIndex = 0u;
     InterlockedAdd(outCounter[0], 1u, outputIndex);
     if (outputIndex >= CLOD_WG_VISIBLE_CLUSTERS_CAPACITY) {
+        CLodNoteVirtualShadowWorkDropped(1u);
         return;
     }
 
@@ -754,6 +759,9 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
                         nextFrontier[outputIndex] = PackPureComputeTraverseNodeRecord(childRecord);
                         WGTelemetryAdd(WG_COUNTER_TRAVERSE_TRAVERSE_RECORDS, 1);
                     }
+                    else {
+                        CLodNoteVirtualShadowWorkDropped(1u);
+                    }
                 }
             }
         }
@@ -874,6 +882,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
         if (pageEntry.slabDescriptorIndex == 0u)
         {
             WGTelemetryAdd(WG_COUNTER_RASTER_MESH_SHADER_INIT_FAILED_ZERO_PAGE_SLAB, 1);
+            CLodNoteVirtualShadowWorkDropped(1u);
             return;
         }
         const uint sourceTag = UnpackSourceTag(rec.nodeIdPacked);
@@ -906,6 +915,9 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
                 outRecord.pageSlabByteOffset = pageEntry.slabByteOffset;
                 outRecord.assemblyTransformIndex = rec.assemblyTransformIndex;
                 clusterFrontier[outputIndex] = PackPureComputeClusterRunRecord(outRecord);
+            }
+            else {
+                CLodNoteVirtualShadowWorkDropped(1u);
             }
             meshletBase += chunkCount;
             remainingMeshlets -= chunkCount;
@@ -1057,6 +1069,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
             InterlockedAdd(nextCounter[0], 1u, outputIndex);
         }
         if (outputIndex >= CLOD_WG_VISIBLE_CLUSTERS_CAPACITY) {
+            CLodNoteVirtualShadowWorkDropped(1u);
             continue;
         }
 

@@ -14,5 +14,7 @@
 #define CLOD_VIRTUAL_SHADOW_INVALIDATE_BOUNDS_DESCRIPTOR_INDEX UintRootConstant10
 #define CLOD_VIRTUAL_SHADOW_INVALIDATE_BOUNDS_COUNT UintRootConstant11
 #define CLOD_VIRTUAL_SHADOW_INVALIDATE_ALL_ACTIVE_CLIPMAPS UintRootConstant12
+// Local light faces with slices this frame: a moved caster invalidates their pages too.
+#define CLOD_VIRTUAL_SHADOW_INVALIDATE_LOCAL_FACE_COUNT UintRootConstant13
 
 #endif // CLOD_VIRTUAL_SHADOW_INVALIDATE_ROOT_CONSTANTS_H

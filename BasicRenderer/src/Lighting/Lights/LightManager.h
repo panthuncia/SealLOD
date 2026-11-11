@@ -9,6 +9,7 @@
 #include <optional>
 #include <atomic>
 #include <cstddef>
+#include <array>
 #include <map>
 #include <set>
 
@@ -23,6 +24,8 @@
 #include <BasicRenderer/Extensions/Resources/DynamicStructuredBuffer.h>
 #include "BasicRenderer/Scene/Components.h"
 #include "BasicRenderer/Scene/RendererComponents.h"
+#include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
+#include "BasicRenderer/Streaming/LightStateArtifacts.h"
 
 namespace br::render { class IShadowViewService; }
 class SortedUnsignedIntBuffer;
@@ -57,6 +60,10 @@ public:
 	// Uploads a light's data, stamping its slot's generation over data.generation.
 	void UpdateLightBufferView(org::BufferView* view, const LightInfo& data);
     void UpdateLightViewInfo(flecs::entity light);
+	// Chooses which shadow-casting spot and point lights have virtual shadow map faces (LocalShadowSelection.h),
+	// creating and destroying their face views. Call once a frame, before the light tables are captured.
+	void UpdateLocalShadows();
+	std::vector<br::render::PublishedLocalShadowLight> CaptureLocalShadows();
 	unsigned int GetLightPagePoolSize() { return m_lightPagePoolSize; }
 	std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override;
 	std::vector<org::ResourceIdentifier> GetSupportedKeys() override;
@@ -90,7 +97,18 @@ private:
 	std::function<float()> getMaxShadowDistance;
 	std::function<float()> getDirectionalShadowSceneExtent;
 	std::function<float()> getDirectionalVirtualShadowSourceAngleDegrees;
+	std::function<uint32_t()> getLocalShadowMaxFaces;
 	br::render::IShadowViewService* m_shadowViews = nullptr;
+	// Spot and point lights with virtual shadow map faces, by light buffer index, and which faces are taken. Guarded
+	// by m_lightUpdateMutex: UpdateLightBufferView stamps each light's first slice from them.
+	struct LocalShadowAssignment {
+		uint64_t entityId = 0;
+		uint32_t firstFace = 0;
+		uint32_t faceCount = 0;
+		std::vector<uint64_t> viewIDs;
+	};
+	std::map<uint32_t, LocalShadowAssignment> m_localShadows;
+	std::array<bool, CLodVirtualShadowMaxLocalFaceCount> m_localFaceUsed{};
 	unsigned int m_lightPagePoolSize = 0;
 
 	std::mutex m_lightUpdateMutex;
@@ -101,4 +119,7 @@ private:
 	void RebuildDirectionalLightViewInfoBuffer(std::optional<uint64_t> excludedLightEntityId = std::nullopt);
 
 	void RemoveLightViewInfo(flecs::entity light);
+	// Drops a light's faces: destroys their views and frees the faces. The caller re-uploads the light.
+	void ReleaseLocalShadow(uint32_t lightIndex);
+	void UpdateLocalShadowFaceViews(const LocalShadowAssignment& assignment, const LightInfo& light);
 };

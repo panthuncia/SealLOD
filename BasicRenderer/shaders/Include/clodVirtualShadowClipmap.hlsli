@@ -4,6 +4,10 @@
 static const uint kCLodVirtualShadowClipmapValidFlag = 0x1u;
 static const uint kCLodVirtualShadowClipmapInvalidateFlag = 0x2u;
 static const uint kCLodVirtualShadowClipmapDynamicSkinnedFlag = 0x4u;
+// The slice belongs to a spot or point light face (a perspective map), not the sun's clipmap.
+static const uint kCLodVirtualShadowClipmapLocalFlag = 0x8u;
+// The local face is one of a cube's six (a point light, or a spot too wide for one face): +X, -X, +Y, -Y, +Z, -Z.
+static const uint kCLodVirtualShadowClipmapCubeFlag = 0x10u;
 static const uint kCLodVirtualShadowAllocatedMask = 0x80000000u;
 static const uint kCLodVirtualShadowDirtyMask = 0x40000000u;
 static const uint kCLodVirtualShadowContentValidMask = 0x20000000u;
@@ -30,6 +34,23 @@ uint CLodVirtualShadowPhysicalPageMetadataFlags(uint allocationGeneration, bool 
 }
 static const uint kCLodVirtualShadowDefaultClipmapCount = 22u;
 static const uint kCLodVirtualShadowClipmapCount = 22u;
+// Page-table slices. Each is a 16K canvas of 128x128 pages. The sun's clip i is slice i. Each spot or point light face
+// owns two more after them: mip 0 fills the first, mips 1-7 are packed into the second
+// (CLodVirtualShadowLocalMipPageOrigin). Page bookkeeping (blocks, receiver masks, page metadata owners) works per
+// slice: "clipmapIndex" there is a slice index.
+static const uint kCLodVirtualShadowMaxLocalFaceCount = 48u;
+static const uint kCLodVirtualShadowLocalSlicesPerFace = 2u;
+static const uint kCLodVirtualShadowLocalMipCount = 8u;
+static const uint kCLodVirtualShadowFirstLocalSlice = kCLodVirtualShadowClipmapCount;
+static const uint kCLodVirtualShadowMaxSliceCount =
+    kCLodVirtualShadowClipmapCount + kCLodVirtualShadowMaxLocalFaceCount * kCLodVirtualShadowLocalSlicesPerFace;
+// The view lookups' answer for a view that renders no slice.
+static const uint kCLodVirtualShadowInvalidSlice = kCLodVirtualShadowMaxSliceCount;
+// The clip info buffer holds one row per slice, then one view row per camera buffer index naming the slice that
+// camera renders (CLodVirtualShadowFindClipmapIndexForView).
+static const uint kCLodVirtualShadowMaxViewRowCount = 512u;
+static const uint kCLodVirtualShadowViewRowBase = kCLodVirtualShadowMaxSliceCount;
+static const uint kCLodVirtualShadowClipInfoRowCount = kCLodVirtualShadowViewRowBase + kCLodVirtualShadowMaxViewRowCount;
 static const uint CLodVirtualShadowDefaultClipmapCount = kCLodVirtualShadowDefaultClipmapCount;
 static const uint CLodVirtualShadowMaxSupportedClipmapCount = kCLodVirtualShadowClipmapCount;
 static const uint kCLodVirtualShadowPhysicalPageSize = 128u;
@@ -61,7 +82,7 @@ static const uint kCLodVirtualShadowReceiverSubpagesPerAxis = 4u;
 static const uint kCLodVirtualShadowMaxReceiverPageCount =
     kCLodVirtualShadowMaxPageTableResolution *
     kCLodVirtualShadowMaxPageTableResolution *
-    kCLodVirtualShadowClipmapCount;
+    kCLodVirtualShadowMaxSliceCount;
 static const uint kCLodVirtualShadowBlockPackedPhysicalPageIndexCount =
     (kCLodVirtualShadowBlockPagesPerAxis * kCLodVirtualShadowBlockPagesPerAxis) / 2u;
 static const uint kCLodVirtualShadowMaxBlocksPerAxis =
@@ -69,7 +90,7 @@ static const uint kCLodVirtualShadowMaxBlocksPerAxis =
 static const uint kCLodVirtualShadowMaxBlocksPerClipmap =
     kCLodVirtualShadowMaxBlocksPerAxis * kCLodVirtualShadowMaxBlocksPerAxis;
 static const uint kCLodVirtualShadowMaxMarkedBlockCount =
-    kCLodVirtualShadowMaxBlocksPerClipmap * kCLodVirtualShadowClipmapCount;
+    kCLodVirtualShadowMaxBlocksPerClipmap * kCLodVirtualShadowMaxSliceCount;
 
 struct CLodVirtualShadowClipmapInfo
 {
@@ -233,6 +254,13 @@ struct CLodVirtualShadowStats
     uint blockExpandedRequestedRecordCount;
     uint blockExpandedCommittedRecordCount;
     uint blockExpandedDroppedRecordCount;
+    // Raster work dropped this frame (a cluster or voxel page that failed to load): no empty completion this frame.
+    uint rasterWorkDroppedCount;
+    // Admitted pages that every caster reaching them left without depth, completed as empty
+    // (CLodVirtualShadowStampRenderedPageGenerationsCSMain).
+    uint emptyAdmittedCompletedCount;
+    // Upgrade pages waiting out CLOD_VIRTUAL_SHADOW_ADMIT_UPGRADE_COOLDOWN_FRAMES; still pending.
+    uint upgradeCooldownDeferredPageCount;
     uint setupWrappedClearedPageTableEntries[kCLodVirtualShadowClipmapCount];
     uint setupStaleDirtyClearedPageTableEntries[kCLodVirtualShadowClipmapCount];
     uint markResidentCleanHits[kCLodVirtualShadowClipmapCount];
@@ -295,45 +323,39 @@ bool CLodVirtualShadowClipmapIsValid(CLodVirtualShadowClipmapInfo clipmapInfo)
         clipmapInfo.shadowCameraBufferIndex != kInvalidShadowCameraIndex;
 }
 
-// The first valid clip that renders viewID, or kCLodVirtualShadowClipmapCount when none does. Reads each clip's camera
-// index, then the flags of the few that match it. The lookups used to unroll over every clip's whole info: each call
-// loaded the fields it used from every clip and held them in registers until the match was known.
-// Clip indices are below 32 (kCLodVirtualShadowClipmapCount), so the matches fit one word.
+// The view row of a camera buffer index: Valid in flags, and the first slice that camera renders in pageTableLayer
+// (VirtualShadowMapSetupPass writes them). A local face's mips 1-7 render into the slice after that one.
+uint CLodVirtualShadowViewRowIndex(uint viewID)
+{
+    return kCLodVirtualShadowViewRowBase + viewID;
+}
+
+uint CLodVirtualShadowSliceFromViewRow(uint flags, uint pageTableLayer)
+{
+    return (flags & kCLodVirtualShadowClipmapValidFlag) != 0u && pageTableLayer < kCLodVirtualShadowMaxSliceCount
+        ? pageTableLayer
+        : kCLodVirtualShadowInvalidSlice;
+}
+
+// The slice viewID renders (its first, for a local face), or kCLodVirtualShadowInvalidSlice when it renders none.
 uint CLodVirtualShadowFindClipmapIndexForView(uint viewID, StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos)
 {
-    if (viewID == kInvalidShadowCameraIndex)
+    if (viewID >= kCLodVirtualShadowMaxViewRowCount)
     {
-        return kCLodVirtualShadowClipmapCount;
+        return kCLodVirtualShadowInvalidSlice;
     }
+    const uint row = CLodVirtualShadowViewRowIndex(viewID);
+    return CLodVirtualShadowSliceFromViewRow(clipmapInfos[row].flags, clipmapInfos[row].pageTableLayer);
+}
 
-    uint matches = 0u;
-    [unroll]
-    for (uint candidateIndex = 0u; candidateIndex < kCLodVirtualShadowClipmapCount; ++candidateIndex)
+uint CLodVirtualShadowFindClipmapIndexForView(uint viewID, RWStructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos)
+{
+    if (viewID >= kCLodVirtualShadowMaxViewRowCount)
     {
-        matches |= clipmapInfos[candidateIndex].shadowCameraBufferIndex == viewID ? (1u << candidateIndex) : 0u;
+        return kCLodVirtualShadowInvalidSlice;
     }
-
-    if (matches == 0u)
-    {
-        return kCLodVirtualShadowClipmapCount;
-    }
-    const uint firstMatch = firstbitlow(matches);
-    if ((clipmapInfos[firstMatch].flags & kCLodVirtualShadowClipmapValidFlag) != 0u)
-    {
-        return firstMatch;
-    }
-    // An invalid clip that still names this camera: the later matches, in order.
-    matches &= matches - 1u;
-    [unroll]
-    for (uint laterIndex = 0u; laterIndex < kCLodVirtualShadowClipmapCount; ++laterIndex)
-    {
-        if (((matches >> laterIndex) & 1u) != 0u &&
-            (clipmapInfos[laterIndex].flags & kCLodVirtualShadowClipmapValidFlag) != 0u)
-        {
-            return laterIndex;
-        }
-    }
-    return kCLodVirtualShadowClipmapCount;
+    const uint row = CLodVirtualShadowViewRowIndex(viewID);
+    return CLodVirtualShadowSliceFromViewRow(clipmapInfos[row].flags, clipmapInfos[row].pageTableLayer);
 }
 
 bool CLodVirtualShadowTryGetClipmapInfoForView(
@@ -342,7 +364,7 @@ bool CLodVirtualShadowTryGetClipmapInfoForView(
     out CLodVirtualShadowClipmapInfo clipmapInfo)
 {
     const uint clipmapIndex = CLodVirtualShadowFindClipmapIndexForView(viewID, clipmapInfos);
-    if (clipmapIndex >= kCLodVirtualShadowClipmapCount)
+    if (clipmapIndex >= kCLodVirtualShadowMaxSliceCount)
     {
         clipmapInfo = (CLodVirtualShadowClipmapInfo)0;
         return false;
@@ -441,6 +463,103 @@ uint2 CLodVirtualShadowVirtualPageCoordsFromUv(float2 shadowUv, CLodVirtualShado
 bool CLodVirtualShadowClipmapUsesDynamicSkinnedCasters(CLodVirtualShadowClipmapInfo clipmapInfo)
 {
     return (clipmapInfo.flags & kCLodVirtualShadowClipmapDynamicSkinnedFlag) != 0u;
+}
+
+bool CLodVirtualShadowClipmapIsLocal(CLodVirtualShadowClipmapInfo clipmapInfo)
+{
+    return (clipmapInfo.flags & kCLodVirtualShadowClipmapLocalFlag) != 0u;
+}
+
+// A fallback candidate's shadowClipmapIndex: the slice in the low bits and, for a local face, the coarsest mip whose
+// pages need the refined group, plus one, in the high byte. Coarser mips' LOD threshold already accepts the group the
+// candidate stood in with, so upgrading their pages would redraw them for nothing. Zero there means every mip.
+static const uint kCLodVirtualShadowCandidateSliceMask = 0x00FFFFFFu;
+static const uint kCLodVirtualShadowCandidateMipShift = 24u;
+
+uint CLodVirtualShadowPackCandidateSlice(uint slice, uint coarsestMip)
+{
+    return (slice & kCLodVirtualShadowCandidateSliceMask) | ((min(coarsestMip, 7u) + 1u) << kCLodVirtualShadowCandidateMipShift);
+}
+
+uint CLodVirtualShadowCandidateSlice(uint packed)
+{
+    return packed & kCLodVirtualShadowCandidateSliceMask;
+}
+
+uint CLodVirtualShadowCandidateCoarsestMip(uint packed)
+{
+    const uint encoded = packed >> kCLodVirtualShadowCandidateMipShift;
+    return encoded == 0u ? 7u : encoded - 1u;
+}
+
+// Where a local face's mip lives: which of the face's two slices (0 or 1), and its page rectangle there. Mips 1-7 are
+// packed into the second slice at origins that are multiples of their own size, so no 4x4-page block, and no texel of
+// a dirty-hierarchy mip up to a mip's own top level, mixes two mips.
+uint CLodVirtualShadowLocalMipSliceOffset(uint mip)
+{
+    return mip == 0u ? 0u : 1u;
+}
+
+uint CLodVirtualShadowLocalMipPagesPerAxis(uint mip)
+{
+    return kCLodVirtualShadowMaxPageTableResolution >> min(mip, kCLodVirtualShadowLocalMipCount - 1u);
+}
+
+uint2 CLodVirtualShadowLocalMipPageOrigin(uint mip)
+{
+    if (mip <= 1u)
+    {
+        return uint2(0u, 0u);
+    }
+    if (mip >= kCLodVirtualShadowLocalMipCount - 1u)
+    {
+        // At (126, 0) the last mip's single page would share mip 6's block at (124, 0).
+        return uint2(kCLodVirtualShadowMaxPageTableResolution - 4u, 4u);
+    }
+    return uint2(kCLodVirtualShadowMaxPageTableResolution - (kCLodVirtualShadowMaxPageTableResolution >> (mip - 1u)), 0u);
+}
+
+// The mip a page of a local face's slice belongs to, or kCLodVirtualShadowLocalMipCount for a page no mip uses.
+uint CLodVirtualShadowLocalMipForSlicePage(uint sliceOffset, uint2 pageCoord)
+{
+    if (sliceOffset == 0u)
+    {
+        return 0u;
+    }
+    [unroll]
+    for (uint mip = 1u; mip < kCLodVirtualShadowLocalMipCount; ++mip)
+    {
+        const uint2 origin = CLodVirtualShadowLocalMipPageOrigin(mip);
+        const uint size = CLodVirtualShadowLocalMipPagesPerAxis(mip);
+        if (all(pageCoord >= origin) && all(pageCoord < origin + size))
+        {
+            return mip;
+        }
+    }
+    return kCLodVirtualShadowLocalMipCount;
+}
+
+// The mip of a local light face whose texels best match a receiver's screen pixel: the finest whose texel is at least
+// the pixel's size, so marking and lookup ask for the same pages. pixelWorldSize is the receiver pixel's width in the
+// world; faceTexelWorldSize is the face's mip 0 texel at the receiver's depth.
+float CLodVirtualShadowLocalContinuousMip(float pixelWorldSize, float faceTexelWorldSize, float lodBias)
+{
+    return log2(max(pixelWorldSize, 1.0e-8f) / max(faceTexelWorldSize, 1.0e-8f)) + lodBias;
+}
+
+uint CLodVirtualShadowLocalSelectMip(float continuousMip)
+{
+    return (uint)clamp(floor(continuousMip), 0.0f, (float)(kCLodVirtualShadowLocalMipCount - 1u));
+}
+
+// A face uv (0..1 across the face) as a uv across the slice canvas that holds mip.
+float2 CLodVirtualShadowLocalMipCanvasUv(float2 faceUv, uint mip)
+{
+    const float pages = (float)kCLodVirtualShadowMaxPageTableResolution;
+    // Just short of 1, so a uv on the face's far edge stays on the mip's last page, not the next mip's first.
+    const float2 clampedUv = min(saturate(faceUv), 0.99999f.xx);
+    return ((float2)CLodVirtualShadowLocalMipPageOrigin(mip) +
+        clampedUv * (float)CLodVirtualShadowLocalMipPagesPerAxis(mip)) / pages;
 }
 
 uint2 CLodVirtualShadowReceiverSubpageCoordsFromUv(float2 shadowUv, uint pageTableResolution)

@@ -25,6 +25,7 @@
 #include "OpenRenderGraph/OpenRenderGraph.h"
 #include "VirtualGeometry/GraphIntegration/CLodExtensionComponents.h"
 #include "BasicRenderer/Diagnostics/CLodTelemetry.h"
+#include "BasicRenderer/Extensions/ShaderBuffers.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "BasicRenderer/Pipeline/CLodOptions.h"
 #include "BasicRenderer/Pipeline/RasterBucketFlags.h"
@@ -230,7 +231,7 @@ void LogVisibleClusterAttribution(std::uint64_t frame, const std::vector<std::by
             ++voxelSkipped;
             return;
         }
-        const std::uint32_t drawRecordIndex = (words[0] >> 8u) & 0xFFFFFFu;
+        const std::uint32_t drawRecordIndex = words[0] >> PackedVisibleClusterViewBits;
         if (drawRecordIndex >= drawRecordCount) {
             ++invalidRecords;
             return;
@@ -487,7 +488,7 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
             for (std::uint32_t i = 0; i < used; ++i) {
                 std::uint32_t packedIdentity = 0;
                 std::memcpy(&packedIdentity, indices->data() + i * recordBytes, sizeof(packedIdentity));
-                const auto drawRecordIndex = (packedIdentity >> 8u) & 0xFFFFFFu;
+                const auto drawRecordIndex = packedIdentity >> PackedVisibleClusterViewBits;
                 if (drawRecordIndex >= residentDrawRecordCount) ++outOfRange;
                 if (allowed.contains(drawRecordIndex)) ++matched; else ++unpublished;
             }
@@ -1108,7 +1109,7 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
             spdlog::info(
                 "SARP CLOD replay-state telemetry: frame={} node_writes={} node_dropped={} "
                 "meshlet_writes={} meshlet_dropped={} reyes_split_writes={} reyes_split_dropped={} "
-                "reyes_dice_writes={} reyes_dice_dropped={}",
+                "reyes_dice_writes={} reyes_dice_dropped={} shadow_work_dropped={}",
                 requestedFrame,
                 state.nodeWriteCount,
                 state.nodeDropped,
@@ -1117,7 +1118,8 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
                 state.reyesSplitWriteCount,
                 state.reyesSplitDropped,
                 state.reyesDiceWriteCount,
-                state.reyesDiceDropped);
+                state.reyesDiceDropped,
+                state.shadowWorkDropped);
         });
 
 }
@@ -1229,7 +1231,7 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
             };
 
             spdlog::info(
-                "CLOD VSM budget frame={}: totalBudget={} upgradeBudget={} eligible(normal={},upgrade={}) admitted(total={},normal={},upgrade={}) deferred(normal={},upgrade={}) rendered(normal={},upgrade={}) admittedNotRendered={} valid(total={},upgrade={},rendered={})",
+                "CLOD VSM budget frame={}: totalBudget={} upgradeBudget={} eligible(normal={},upgrade={}) admitted(total={},normal={},upgrade={}) deferred(normal={},upgrade={},upgradeCooldown={}) rendered(normal={},upgrade={}) admittedNotRendered={} valid(total={},upgrade={},rendered={})",
                 requestedFrame,
                 stats.configuredPageRenderBudget,
                 stats.configuredUpgradePageRenderBudget,
@@ -1240,6 +1242,7 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                 stats.upgradeAdmittedPageCount,
                 stats.normalDeferredPageCount,
                 stats.upgradeDeferredPageCount,
+                stats.upgradeCooldownDeferredPageCount,
                 stats.normalRenderedPageCount,
                 stats.upgradeRenderedPageCount,
                 admittedNotRendered,
@@ -1268,7 +1271,7 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                 stats.cumulativeUpgradePageAdmittedCount,
                 stats.cumulativeUpgradePageRenderedCount);
             spdlog::info(
-                "CLOD VSM ownership frame={}: pool(free={},reusable={},allocationRequests={}) pageTableMismatches={} contentValidMismatches={} residentTagMismatches={} renderedWithoutMatchingClear={} syntheticEmptyValid={} newlyAllocated={} staticClears={} dynamicClears={} composed={} admitted={} clearAdmissionInvariant={}",
+                "CLOD VSM ownership frame={}: pool(free={},reusable={},allocationRequests={}) pageTableMismatches={} contentValidMismatches={} residentTagMismatches={} renderedWithoutMatchingClear={} syntheticEmptyValid={} emptyAdmittedCompleted={} rasterWorkDropped={} newlyAllocated={} staticClears={} dynamicClears={} composed={} admitted={} clearAdmissionInvariant={}",
                 requestedFrame,
                 stats.freePhysicalPageCount,
                 stats.reusablePhysicalPageCount,
@@ -1278,6 +1281,8 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                 stats.markResidentTagMismatchCount,
                 stats.renderedWithoutMatchingClearCount,
                 stats.syntheticEmptyValidPageCount,
+                stats.emptyAdmittedCompletedCount,
+                stats.rasterWorkDroppedCount,
                 stats.newlyAllocatedPageCount,
                 stats.physicalPageClearCount,
                 stats.dynamicPageClearCount,

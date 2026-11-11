@@ -17,6 +17,7 @@
 #include "Resources/PixelBuffer.h"
 #include <BasicRenderer/Extensions/Resources/PublishedStateResourceResolver.h>
 #include "BasicRenderer/Streaming/LightStateArtifacts.h"
+#include "Lighting/Lights/LocalShadowSelection.h"
 #include "../../../generated/BuiltinResources.h"
 
 LightManager::LightManager() {
@@ -31,6 +32,7 @@ LightManager::LightManager() {
 	org::memory::SetResourceUsageHint(*m_directionalViewInfo, "Lighting buffers");
 
 	getNumDirectionalLightCascades = SettingsManager::GetInstance().getSettingGetter<uint8_t>("numDirectionalLightCascades");
+	getLocalShadowMaxFaces = SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodLocalVirtualShadowMaxFacesSettingName);
 	getShadowResolution = SettingsManager::GetInstance().getSettingGetter<uint16_t>("shadowResolution");
 	getMaxShadowDistance = SettingsManager::GetInstance().getSettingGetter<float>("maxShadowDistance");
 	getDirectionalShadowSceneExtent = SettingsManager::GetInstance().getSettingGetter<float>("directionalShadowSceneExtent");
@@ -136,8 +138,8 @@ AddLightReturn LightManager::AddLight(LightInfo* lightInfo, uint64_t entityId) {
     Components::LightViewInfo viewInfo;
     std::optional<Components::FrustumPlanes> planes = std::nullopt;
 
-    // Only the sun is shadowed (by the virtual shadow map), so only directional lights get shadow views. A point or
-    // spot light's shadowCaster flag is kept for shadowing modes that trace it.
+    // Directional shadow casters get their clipmap views here. Spot and point shadow casters get face views only while
+    // UpdateLocalShadows selects them.
     if (lightInfo->shadowCaster && lightInfo->type == Components::LightType::Directional) {
         std::tie(viewInfo, planes) = CreateDirectionalLightViewInfo(*lightInfo, entityId);
         viewInfo.depthResX = getShadowResolution();
@@ -161,6 +163,7 @@ void LightManager::RemoveLight(flecs::entity light) {
 		return;
 	}
 
+	ReleaseLocalShadow(light.get<Components::LightViewInfo>().lightBufferIndex);
 	auto& viewInfo = light.get<Components::LightViewInfo>();
 	if (viewInfo.lightBufferView) {
 		m_activeLightIndices->Remove(viewInfo.lightBufferIndex);
@@ -319,7 +322,25 @@ void LightManager::RebuildDirectionalLightViewInfoBuffer(std::optional<uint64_t>
 void LightManager::UpdateLightViewInfo(flecs::entity light) {
 	auto& lightInfo = light.get_mut<Components::Light>();
 	if (lightInfo.type != Components::LightType::Directional) {
-		return; // Only directional lights have shadow views.
+		const auto& viewInfo = light.get<Components::LightViewInfo>();
+		std::optional<LocalShadowAssignment> assignment;
+		{
+			std::lock_guard<std::mutex> lock(m_lightUpdateMutex);
+			if (const auto it = m_localShadows.find(viewInfo.lightBufferIndex); it != m_localShadows.end()) {
+				assignment = it->second;
+			}
+		}
+		if (!assignment) {
+			return;
+		}
+		if (br::lighting::LocalShadowFaceCount(lightInfo.lightInfo) != assignment->faceCount) {
+			// The cone crossed the spot/cube threshold: UpdateLocalShadows gives it the right faces next frame.
+			ReleaseLocalShadow(viewInfo.lightBufferIndex);
+			UpdateLightBufferView(viewInfo.lightBufferView.get(), lightInfo.lightInfo);
+			return;
+		}
+		UpdateLocalShadowFaceViews(*assignment, lightInfo.lightInfo);
+		return;
 	}
 	m_publicationRevision.fetch_add(1, std::memory_order_release);
 	auto viewInfo = light.get<Components::LightViewInfo>();
@@ -448,11 +469,161 @@ void LightManager::UpdateLightBufferView(org::BufferView* view, const LightInfo&
 	const auto lightIndex = static_cast<uint32_t>(view->GetOffset() / sizeof(LightInfo));
 	LightInfo stamped = data;
 	stamped.generation = lightIndex < m_slotGenerations.size() ? m_slotGenerations[lightIndex] : 0u;
+	if (stamped.type != static_cast<unsigned int>(Components::LightType::Directional)) {
+		const auto it = m_localShadows.find(lightIndex);
+		stamped.shadowViewInfoIndex = it != m_localShadows.end()
+			? static_cast<int>(CLodVirtualShadowFirstLocalSlice + it->second.firstFace * CLodVirtualShadowLocalSlicesPerFace)
+			: -1;
+	}
 	m_lightBuffer->UpdateView(view, &stamped);
 	if (const auto it = m_directionalLights.find(lightIndex); it != m_directionalLights.end()) {
 		it->second = data.shadowCaster != 0u;
 	}
 	m_publicationRevision.fetch_add(1, std::memory_order_release);
+}
+
+void LightManager::UpdateLocalShadowFaceViews(const LocalShadowAssignment& assignment, const LightInfo& light) {
+	const auto cameras = br::lighting::BuildLocalShadowFaceCameras(light, CLodVirtualShadowFixedVirtualResolution, getShadowResolution());
+	for (size_t face = 0; face < cameras.size() && face < assignment.viewIDs.size(); ++face) {
+		m_shadowViews->UpdateShadowView(assignment.viewIDs[face], cameras[face]);
+	}
+}
+
+void LightManager::ReleaseLocalShadow(uint32_t lightIndex) {
+	LocalShadowAssignment released;
+	{
+		std::lock_guard<std::mutex> lock(m_lightUpdateMutex);
+		const auto it = m_localShadows.find(lightIndex);
+		if (it == m_localShadows.end()) {
+			return;
+		}
+		released = std::move(it->second);
+		m_localShadows.erase(it);
+		br::lighting::FreeLocalShadowFaces(m_localFaceUsed, released.firstFace, released.faceCount);
+	}
+	for (const auto viewID : released.viewIDs) {
+		m_shadowViews->DestroyShadowView(viewID);
+	}
+	auto& world = RendererECSManager::GetInstance().GetWorld();
+	if (flecs::entity entity(world, released.entityId); entity.is_alive() && entity.has<Components::LightViewInfo>()) {
+		auto viewInfo = entity.get<Components::LightViewInfo>();
+		viewInfo.viewIDs.clear();
+		entity.set<Components::LightViewInfo>(viewInfo);
+	}
+	m_publicationRevision.fetch_add(1, std::memory_order_release);
+}
+
+void LightManager::UpdateLocalShadows() {
+	if (!m_shadowViews || !m_currentCamera.is_valid() || !m_currentCamera.has<Components::Matrix>()) {
+		return;
+	}
+	const auto cameraPosition = GetGlobalPositionFromMatrix(m_currentCamera.get<Components::Matrix>().matrix);
+	const uint32_t faceBudget = (std::min)(getLocalShadowMaxFaces(), CLodVirtualShadowMaxLocalFaceCount);
+
+	struct Light {
+		flecs::entity entity;
+		uint32_t lightIndex = 0;
+	};
+	std::vector<Light> lights;
+	std::vector<br::lighting::LocalShadowCandidate> candidates;
+	auto& world = RendererECSManager::GetInstance().GetWorld();
+	auto query = world.query_builder<const Components::Light, const Components::LightViewInfo>().build();
+	{
+		std::lock_guard<std::mutex> lock(m_lightUpdateMutex);
+		query.each([&](flecs::entity entity, const Components::Light& light, const Components::LightViewInfo& viewInfo) {
+			if (light.type == Components::LightType::Directional || !light.lightInfo.shadowCaster || !viewInfo.lightBufferView) {
+				return;
+			}
+			lights.push_back({ entity, viewInfo.lightBufferIndex });
+			candidates.push_back({
+				br::lighting::LocalShadowScore(light.lightInfo, cameraPosition),
+				br::lighting::LocalShadowFaceCount(light.lightInfo),
+				m_localShadows.contains(viewInfo.lightBufferIndex) });
+		});
+	}
+	const auto selection = br::lighting::SelectLocalShadowLights(candidates, faceBudget);
+	std::set<uint32_t> selected;
+	for (const auto index : selection) {
+		selected.insert(lights[index].lightIndex);
+	}
+
+	// Release first, so the faces they free are there for the lights that replace them.
+	std::vector<uint32_t> released;
+	{
+		std::lock_guard<std::mutex> lock(m_lightUpdateMutex);
+		for (const auto& [lightIndex, assignment] : m_localShadows) {
+			if (!selected.contains(lightIndex)) {
+				released.push_back(lightIndex);
+			}
+		}
+	}
+	const auto reupload = [&](flecs::entity entity) {
+		if (!entity.is_alive() || !entity.has<Components::Light>() || !entity.has<Components::LightViewInfo>()) {
+			return;
+		}
+		const auto& viewInfo = entity.get<Components::LightViewInfo>();
+		if (viewInfo.lightBufferView) {
+			UpdateLightBufferView(viewInfo.lightBufferView.get(), entity.get<Components::Light>().lightInfo);
+		}
+	};
+	for (const auto lightIndex : released) {
+		uint64_t entityId = 0;
+		{
+			std::lock_guard<std::mutex> lock(m_lightUpdateMutex);
+			entityId = m_localShadows[lightIndex].entityId;
+		}
+		ReleaseLocalShadow(lightIndex);
+		reupload(flecs::entity(world, entityId));
+		spdlog::info("Virtual shadow map: light {} gave up its faces", lightIndex);
+	}
+
+	for (const auto index : selection) {
+		const auto& [entity, lightIndex] = lights[index];
+		if (candidates[index].selectedLastFrame) {
+			continue;
+		}
+		const auto& light = entity.get<Components::Light>().lightInfo;
+		LocalShadowAssignment assignment;
+		assignment.entityId = entity.id();
+		assignment.faceCount = candidates[index].faceCount;
+		{
+			std::lock_guard<std::mutex> lock(m_lightUpdateMutex);
+			assignment.firstFace = br::lighting::AllocateLocalShadowFaces(m_localFaceUsed, assignment.faceCount);
+		}
+		if (assignment.firstFace >= CLodVirtualShadowMaxLocalFaceCount) {
+			continue; // Fragmented: the faces are free but not in one run. It can have them once others leave.
+		}
+		const auto cameras = br::lighting::BuildLocalShadowFaceCameras(light, CLodVirtualShadowFixedVirtualResolution, getShadowResolution());
+		for (uint32_t face = 0; face < assignment.faceCount; ++face) {
+			ViewCreationParams params{};
+			params.parentEntityID = entity.id();
+			params.lightType = static_cast<Components::LightType>(light.type);
+			params.cascadeIndex = static_cast<int>(face);
+			assignment.viewIDs.push_back(m_shadowViews->CreateShadowView(cameras[face], ViewFlags::ShadowFace(), params));
+		}
+		auto viewInfo = entity.get<Components::LightViewInfo>();
+		viewInfo.viewIDs = assignment.viewIDs;
+		entity.set<Components::LightViewInfo>(viewInfo);
+		{
+			std::lock_guard<std::mutex> lock(m_lightUpdateMutex);
+			m_localShadows[lightIndex] = std::move(assignment);
+		}
+		reupload(entity);
+		spdlog::info("Virtual shadow map: light {} ({}) has faces {}..{}", lightIndex,
+			light.type == static_cast<unsigned int>(Components::LightType::Spot) ? "spot" : "point",
+			m_localShadows[lightIndex].firstFace, m_localShadows[lightIndex].firstFace + m_localShadows[lightIndex].faceCount - 1u);
+		m_publicationRevision.fetch_add(1, std::memory_order_release);
+	}
+}
+
+std::vector<br::render::PublishedLocalShadowLight> LightManager::CaptureLocalShadows() {
+	std::lock_guard<std::mutex> lock(m_lightUpdateMutex);
+	std::vector<br::render::PublishedLocalShadowLight> shadows;
+	shadows.reserve(m_localShadows.size());
+	for (const auto& [lightIndex, assignment] : m_localShadows) {
+		shadows.push_back({ lightIndex, assignment.firstFace, assignment.viewIDs });
+	}
+	return shadows;
 }
 
 std::shared_ptr<org::Resource> LightManager::ProvideResource(org::ResourceIdentifier const& key) {

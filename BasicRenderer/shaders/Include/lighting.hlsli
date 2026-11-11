@@ -445,7 +445,23 @@ float EvaluateLightOcclusion(
 {
     if (light.type != LIGHT_TYPE_DIRECTIONAL)
     {
-        return 0.0f; // No shadowing mode shadows local lights yet.
+#if !defined(LIGHTING_NO_VIRTUAL_SHADOW_MAPS)
+        // A spot or point light the virtual shadow map selected has faces from shadowViewInfoIndex on.
+        if (options.virtualShadowMaps && light.shadowViewInfoIndex >= 0)
+        {
+            ConstantBuffer<PerFrameBuffer> localPerFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+            // The receiver pixel's width in the world: view depth times the pixel's angular size.
+            const float pixelWorldSize = abs(fragmentInfo.fragPosViewSpace.z) * 2.0f /
+                max(abs(mainCamera.projection[1][1]) * (float)max(localPerFrame.screenResY, 1u), 1.0e-6f);
+            return CLodVirtualShadowLookupLocalOcclusion(
+                light,
+                (uint)light.shadowViewInfoIndex,
+                fragmentInfo.fragPosWorldSpace.xyz,
+                fragmentInfo.normalWS,
+                pixelWorldSize);
+        }
+#endif
+        return 0.0f;
     }
 
     float occlusion = 0.0f;

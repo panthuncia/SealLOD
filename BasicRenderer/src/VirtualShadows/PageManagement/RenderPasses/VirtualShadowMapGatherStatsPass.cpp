@@ -64,8 +64,9 @@ void VirtualShadowMapGatherStatsPass::Record(const VirtualShadowMapGatherStatsBi
     constants[CLOD_VIRTUAL_SHADOW_GATHER_STATS_PAGE_METADATA_DESCRIPTOR_INDEX] = recording.Index(bindings.pageMetadata);
     constants[CLOD_VIRTUAL_SHADOW_GATHER_STATS_STATS_DESCRIPTOR_INDEX] = recording.Index(bindings.stats);
     constants[CLOD_VIRTUAL_SHADOW_GATHER_STATS_PAGE_TABLE_RESOLUTION] = frame.pageTableResolution;
-    constants[CLOD_VIRTUAL_SHADOW_GATHER_STATS_CLIPMAP_COUNT] = CLodVirtualShadowMaxSupportedClipmapCount;
+    const uint32_t sliceCount = CLodVirtualShadowActiveSliceCount();
+    constants[CLOD_VIRTUAL_SHADOW_GATHER_STATS_CLIPMAP_COUNT] = sliceCount;
     constants[CLOD_VIRTUAL_SHADOW_GATHER_STATS_CAPTURE_PRE_ALLOCATE_STATE] = bindings.capturePreAllocateState ? 1u : 0u;
     const uint32_t groups = (frame.pageTableResolution + 7u) / 8u;
-    br::render::DispatchCompute(recording, bindings.pipeline, constants, groups, groups, CLodVirtualShadowMaxSupportedClipmapCount);
+    br::render::DispatchCompute(recording, bindings.pipeline, constants, groups, groups, sliceCount);
 }

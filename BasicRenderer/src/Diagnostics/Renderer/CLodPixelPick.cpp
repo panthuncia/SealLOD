@@ -121,7 +121,7 @@ namespace br::diagnostics {
 			pick.error = "visible cluster outside the read buffer";
 			return pick;
 		}
-		pick.drawRecord = (cluster[0] >> 8u) & 0xFFFFFFu;
+		pick.drawRecord = cluster[0] >> PackedVisibleClusterViewBits;
 		pick.localMeshlet = cluster[1] & 0x3FFFu;
 		pick.globalGroup = ((cluster[1] >> 14u) & 0x3FFFFu) | ((cluster[2] & 0x3u) << 18u) | (((cluster[3] >> 30u) & 0x1u) << 20u);
 		pick.voxel = (cluster[3] & kVoxelFlag) != 0u;

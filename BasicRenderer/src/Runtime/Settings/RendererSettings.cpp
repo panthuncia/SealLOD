@@ -482,6 +482,9 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<uint32_t>(
         CLodDirectionalVirtualShadowUpgradePageRenderBudgetSettingName,
         ReadUintEnvironmentValue("SARP_CLOD_VSM_UPGRADE_PAGE_BUDGET", 500u));
+    settingsManager.registerSetting<uint32_t>(
+        CLodVirtualShadowUpgradeCooldownFramesSettingName,
+        ReadUintEnvironmentValue("SARP_CLOD_VSM_UPGRADE_COOLDOWN_FRAMES", 8u));
     settingsManager.registerSetting<bool>(
         CLodDirectionalVirtualShadowReceiverSubpageMaskSettingName,
         false);
@@ -496,6 +499,8 @@ void Renderer::SetSettings() {
         CLodDirectionalVirtualShadowDynamicContentFilterSettingName,
         false);
     settingsManager.registerSetting<float>(CLodDirectionalVirtualShadowSourceAngleDegreesSettingName, CLodVirtualShadowDefaultDirectionalSourceAngleDegrees);
+    settingsManager.registerSetting<uint32_t>(CLodLocalVirtualShadowMaxFacesSettingName, CLodVirtualShadowDefaultLocalMaxFaces);
+    settingsManager.registerSetting<float>(CLodLocalVirtualShadowLodBiasSettingName, CLodVirtualShadowDefaultLocalLodBias);
     settingsManager.registerSetting<uint32_t>(CLodDirectionalVirtualShadowSmrtRayCountDirectionalSettingName, CLodVirtualShadowDefaultSmrtRayCountDirectional);
     settingsManager.registerSetting<uint32_t>(CLodDirectionalVirtualShadowSmrtSamplesPerRayDirectionalSettingName, CLodVirtualShadowDefaultSmrtSamplesPerRayDirectional);
     settingsManager.registerSetting<float>(CLodDirectionalVirtualShadowSmrtMaxRayAngleFromLightDegreesSettingName, CLodVirtualShadowDefaultSmrtMaxRayAngleFromLightDegrees);

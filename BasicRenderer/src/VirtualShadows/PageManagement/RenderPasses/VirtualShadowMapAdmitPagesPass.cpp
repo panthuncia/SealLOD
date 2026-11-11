@@ -38,6 +38,7 @@ VirtualShadowMapAdmitPagesPass::VirtualShadowMapAdmitPagesPass(
 VirtualShadowMapAdmitPagesBindings VirtualShadowMapAdmitPagesPass::Declare(org::PassBuilder& declaration)
 {
     declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
+    declaration.ConstantBuffer(Builtin::PerFrameBuffer);
     VirtualShadowMapAdmitPagesBindings bindings{
         declaration.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
             L"CLodVirtualShadowAdmitPagesCSMain", "CLod.VirtualShadow.AdmitPages.PSO")),
@@ -49,8 +50,6 @@ VirtualShadowMapAdmitPagesBindings VirtualShadowMapAdmitPagesPass::Declare(org::
         declaration.ShaderResource(m_clipmapInfoBuffer),
         declaration.ShaderResource(m_compactShadowCamerasBuffer),
         declaration.UnorderedAccess(m_statsBuffer)};
-    bindings.normalBudget = SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodDirectionalVirtualShadowPageRenderBudgetSettingName)();
-    bindings.upgradeBudget = SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodDirectionalVirtualShadowUpgradePageRenderBudgetSettingName)();
     bindings.upgradeInputs.reserve(m_upgradeInputBuffers.size());
     for (const auto& buffer : m_upgradeInputBuffers) {
         bindings.upgradeInputs.push_back(declaration.ShaderResource(buffer));
@@ -64,6 +63,10 @@ VirtualShadowMapAdmitPagesFrame VirtualShadowMapAdmitPagesPass::Prepare(
     VirtualShadowMapAdmitPagesFrame frame{};
     const auto upgrades = m_upgradeQueue.Pending();
     frame.pageTableResolution = CLodVirtualShadowBuildRuntimeResolutionConfig().pageTableResolution;
+    auto& settings = SettingsManager::GetInstance();
+    frame.normalBudget = settings.getSettingGetter<uint32_t>(CLodDirectionalVirtualShadowPageRenderBudgetSettingName)();
+    frame.upgradeBudget = settings.getSettingGetter<uint32_t>(CLodDirectionalVirtualShadowUpgradePageRenderBudgetSettingName)();
+    frame.upgradeCooldownFrames = settings.getSettingGetter<uint32_t>(CLodVirtualShadowUpgradeCooldownFramesSettingName)();
     frame.upgrades.reserve(upgrades.size());
     for (const auto& entry : upgrades) {
         const auto& work = entry->work;
@@ -97,20 +100,24 @@ void VirtualShadowMapAdmitPagesPass::Record(const VirtualShadowMapAdmitPagesBind
         c[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_DIRTY_FLAGS_DESCRIPTOR_INDEX] = dirtyPageFlags;
         c[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_STATS_DESCRIPTOR_INDEX] = stats;
         c[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_PAGE_METADATA_DESCRIPTOR_INDEX] = pageMetadata;
-        c[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_CLIPMAP_COUNT] = CLodVirtualShadowMaxSupportedClipmapCount;
+        c[CLOD_VIRTUAL_SHADOW_APPLY_UPGRADES_CLIPMAP_COUNT] = CLodVirtualShadowMaxSliceCount;
         step(bindings.applyUpgradesPipeline, c, (upgrade.inputCount + 63u) / 64u);
     }
     const uint32_t pageGroups = (frame.pageTableResolution * frame.pageTableResolution + 63u) / 64u;
+    // Slice order is admission priority: the sun's clips fine to coarse, then local light faces.
+    const uint32_t sliceCount = CLodVirtualShadowActiveSliceCount();
     for (uint32_t phaseIteration = 0; phaseIteration < 2; ++phaseIteration) {
-        for (uint32_t clipmapIndex = 0; clipmapIndex < CLodVirtualShadowMaxSupportedClipmapCount; ++clipmapIndex) {
+        for (uint32_t clipmapIndex = 0; clipmapIndex < sliceCount; ++clipmapIndex) {
             br::render::MiscConstants c{};
             c[CLOD_VIRTUAL_SHADOW_ADMIT_PAGE_TABLE_DESCRIPTOR_INDEX] = pageTable;
             c[CLOD_VIRTUAL_SHADOW_ADMIT_DIRTY_FLAGS_DESCRIPTOR_INDEX] = dirtyPageFlags;
             c[CLOD_VIRTUAL_SHADOW_ADMIT_STATS_DESCRIPTOR_INDEX] = stats;
             c[CLOD_VIRTUAL_SHADOW_ADMIT_PAGE_TABLE_RESOLUTION] = frame.pageTableResolution;
             c[CLOD_VIRTUAL_SHADOW_ADMIT_CLIPMAP_INDEX] = clipmapIndex;
-            c[CLOD_VIRTUAL_SHADOW_ADMIT_NORMAL_BUDGET] = bindings.normalBudget;
-            c[CLOD_VIRTUAL_SHADOW_ADMIT_UPGRADE_BUDGET] = bindings.upgradeBudget;
+            c[CLOD_VIRTUAL_SHADOW_ADMIT_NORMAL_BUDGET] = frame.normalBudget;
+            c[CLOD_VIRTUAL_SHADOW_ADMIT_UPGRADE_BUDGET] = frame.upgradeBudget;
+            c[CLOD_VIRTUAL_SHADOW_ADMIT_UPGRADE_COOLDOWN_FRAMES] = frame.upgradeCooldownFrames;
+            c[CLOD_VIRTUAL_SHADOW_ADMIT_PAGE_METADATA_DESCRIPTOR_INDEX] = pageMetadata;
             c[CLOD_VIRTUAL_SHADOW_ADMIT_UPGRADE_PHASE] = 1u - phaseIteration;
             step(bindings.admitPipeline, c, pageGroups);
         }

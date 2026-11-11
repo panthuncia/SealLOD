@@ -26,8 +26,9 @@ Fields worth knowing:
   `LIGHT_DEFAULT_SUN_HALF_ANGLE_DEGREES` (0.27°); the shadow map treats 0 as a hard shadow.
 - `generation`: bumped by `LightManager` each time a slot is given to a light, and stamped on every upload. A slot index
   kept across frames (a temporal reservoir, say) is still the same light only if the generation matches.
-- `shadowCaster`: only directional shadow casters get shadow views (the shadow map's clipmaps). Point and spot lights
-  keep the flag for techniques that trace them; nothing shadows them today.
+- `shadowCaster`: a directional shadow caster gets the shadow map's clipmaps. Point and spot shadow casters compete for
+  the shadow map's local faces ("Spot and point light shadows" below).
+- `shadowViewInfoIndex`: for a spot or point light with faces, its first page-table slice; -1 without.
 
 ### The sun
 
@@ -70,7 +71,7 @@ The loop reads no root constants. Callers pass `DirectLightingOptions`:
 | Field | Meaning |
 |---|---|
 | `punctualLights` | False skips every analytic light. |
-| `virtualShadowMaps` | Look up the sun's occlusion in the virtual shadow map; its resources must be bound. |
+| `virtualShadowMaps` | Look up occlusion in the virtual shadow map, for the sun and for spot and point lights with faces; its resources must be bound. |
 | `sunOcclusion` | Sun occlusion known before the loop, combined with the shadow map's by max. |
 | `sunLightIndex` | Which light `sunOcclusion` is for. |
 
@@ -87,6 +88,154 @@ Current callers:
 | AVBOIT shading, deep visibility resolve | From root. |
 | Ray traced reflections | Every light; the sun's occlusion from one ray; no shadow map. |
 
+## Spot and point light shadows
+
+Spot and point lights are shadowed by the same virtual shadow map as the sun. They share its physical page pool, page
+caching, admission budget and raster passes. Each light gets perspective *faces*, following Unreal's local-light
+virtual shadow maps.
+
+### Which lights
+
+`LightManager::UpdateLocalShadows` runs every frame. Candidates are spot and point lights with `shadowCaster` set.
+`LocalShadowSelection.h` holds the policy:
+
+- Each light is scored by its range over its distance from the camera (`LocalShadowScore`).
+- The highest scores are kept until the face budget runs out (`SelectLocalShadowLights`). The budget is
+  `clodLocalVirtualShadowMaxFaces`: 24 by default, 48 at most. A spot light costs one face and a point light six.
+- A light that already has faces is scored 1.25 times higher, so two similar lights don't trade places every frame.
+- A light that loses its faces is logged and its faces are released.
+
+Faces are given in consecutive runs (`AllocateLocalShadowFaces`). This lets `LightInfo::shadowViewInfoIndex`, the
+light's first slice, name all of its faces.
+
+### Faces
+
+A face is one culling view: a 16384² perspective map with 8 mips of 128-texel pages. Its near plane is 0.2% of the
+light's range (at least 1 cm) and its far plane is the range.
+
+- **Spot light:** one face down the light's axis. Its field of view is the cone plus 2°.
+- **Spot wider than 60°:** shadowed as a cube, like a point light.
+- **Point light:** six faces fixed to the world axes, in the order +X, −X, +Y, −Y, +Z, −Z. Each face sees 4 texels
+  of its coarsest mip past 90° (`kLocalShadowCubeGuardTexels`). Receivers pick their face by the dominant axis of
+  their direction from the light, so filter taps and the normal offset always stay inside that face's map.
+
+Each page-table slice is a 16K canvas. Slices 0–21 are the sun's clips. Each local face owns two slices from 22 on:
+
+- mip 0 fills the first slice;
+- mips 1–7 sit in the second slice at block-aligned origins: (0,0), (64,0), (96,0), (112,0), (120,0), (124,0) and
+  (124,4) pages.
+
+`CLodVirtualShadowLocalMip*` in `clodVirtualShadowClipmap.hlsli` defines the layout. A face's slice infos carry the
+Local flag, and the Cube flag on cube faces. Their `texelWorldSize` is mip 0's texel per unit of view depth.
+
+### Pages
+
+**Marking.** `CLodVirtualShadowMarkLocalFaceBlocks` runs per mark tile and requests pages for receivers within the
+light's range.
+
+- Each face's mip comes from the receiver's pixel footprint: `log2(pixel / (texelWorldSize · viewDepth)) + bias`,
+  where the bias is `clodLocalVirtualShadowLodBias`. The lookup uses the same function, so marking and lookup pick the
+  same mip.
+- A tile's nearest and farthest samples are marked separately. Across a depth edge, one rectangle spanning both would
+  request large areas at every mip in between.
+- Only receivers request pages, as for the sun's clips. No page is requested for a fallback: a coarse page covers a
+  large part of the face, and rendering it draws every caster there, including ones that shadow nothing on screen.
+
+**Rendering.** Culling ORs the page activity of all of a face's mips. A cluster's visible-cluster records name one
+mip and one block each; the payload's 5-bit field is `23 + mip`. The mesh shader maps the face's NDC into that mip's
+rectangle on the canvas. **Every raster path must write every mip a cluster covers.** Otherwise pages cached while
+geometry streams in stay empty in some mips, and which ones differs from run to run.
+
+**Upgrades.** A cluster drawn in place of a non-resident refined group leaves a fallback candidate, and its pages are
+rendered again once the group arrives. A local face's candidate records the coarsest mip whose threshold wants the
+refined group (`CLodVirtualShadowPackCandidateSlice`); expansion re-renders only pages at that mip and finer, since
+coarser pages already have the detail they need.
+
+Upgrades are paced for the sun and local faces alike. A page rendered within the last
+`clodVirtualShadowUpgradeCooldownFrames` frames (default 8, `SARP_CLOD_VSM_UPGRADE_COOLDOWN_FRAMES`) keeps its pending
+upgrade but waits, so refinements that stream in meanwhile share one re-render; none are dropped. At most
+`clodDirectionalVirtualShadowUpgradePageRenderBudget` upgraded pages render per frame (default 500,
+`SARP_CLOD_VSM_UPGRADE_PAGE_BUDGET`). Both are in the menu with the page render budget. In the demo the cooldown cut
+upgrade re-renders during loading from about 41,600 to 12,000-13,000 and the time spent in hitch frames by 3-8x. A
+30-frame cooldown let pages wait long enough for their refined groups to be streamed out, and they were re-requested
+and re-rendered indefinitely; the menu caps it at 16.
+
+**Level of detail.** A face's LOD threshold follows the sun's policy: it is set from the `shadowResolution` setting
+(2048), not the 16K the face renders at, so caster detail is about 8 texels of tolerance, as for the sun's clips. At 16K
+the faces asked for 8 times finer geometry than the camera had streamed, and the resulting upgrades re-rendered
+hundreds of pages a frame during loading.
+
+Culling then divides a local face's projected error by 2^m, where m is the finest mip with active pages under the
+bounds being tested (`CLodVirtualShadowLocalLodErrorScale`, set up by `CLodResolveLodViewId`). Geometry that only
+renders into coarse pages is drawn at that mip's resolution. A parent's bounds contain its children's, so its mip is
+never coarser and the LOD cut stays consistent.
+
+**Empty pages.** A page counts as rendered when a fragment writes to it. The sun's receivers are its casters, so its
+marked pages nearly always receive depth. A local page can be covered by casters' bounds without any of their
+triangles (padding past a roof edge, or a finite-range texel that sees nothing). Without help, such a page would stay
+admitted and be rasterized again every frame.
+
+So the stamp kernel (`CLodVirtualShadowStampRenderedPageGenerationsCSMain`) completes an admitted page that received
+no depth with cleared depth, but only in a frame whose shadow work all ran
+(`CLodVirtualShadowFrameShadowWorkComplete`). Culling and raster count every record they drop:
+
+- the replay state's node, meshlet and Reyes drop counters, plus `shadowWorkDropped` (full output buffers, cluster
+  capacity clamps, pages not resident; `CLodNoteVirtualShadowWorkDropped`);
+- the stats' `rasterWorkDroppedCount` (a cluster or voxel page that failed to load) and
+  `blockExpandedDroppedRecordCount`;
+- Reyes's split and dice overflow counters, where the variant resets them each frame.
+
+If any is nonzero the page stays admitted and is tried again next frame. This applies to the sun as well, which had a
+handful of such pages retrying every frame.
+
+**Invalidation.** A face's pages are reset when its view-projection changes, meaning the light moved, or when its
+dynamic-layer state flips. A moved caster invalidates the pages it covers in every mip of every face within range.
+Skinned and wind-deformed casters render into a face's dynamic layer only when the light's sphere comes within the
+wind's reach of the camera, as for the sun's clips. Elsewhere they are cached like rigid casters.
+
+### Lookup
+
+`EvaluateLightOcclusion` calls `CLodVirtualShadowLookupLocalOcclusion` (`shadows.hlsli`) for a spot or point light
+with `shadowViewInfoIndex >= 0`. The lookup:
+
+1. picks the face;
+2. projects the receiver through that face's camera;
+3. selects the mip from the pixel footprint;
+4. walks to coarser mips until a page has content.
+
+It offsets the receiver 1.5 texels along its normal, then compares a 2×2 bilinear-weighted footprint with a
+one-texel depth bias. This is a hard shadow softened over one texel; a ray march using `sourceRadius` is planned.
+
+### Raster paths
+
+| Path | Local faces |
+|---|---|
+| Hardware mesh | Every mip. |
+| Voxels | Every mip (one rasterization pass per mip, with the mip's own scissor). |
+| Software raster | Every mip. One record per cluster; the rasterizer divides by w, interpolates 1/depth, and walks the face's mips, clamping each to its rectangle. Meshlets crossing the near plane go to the hardware path. |
+| Reyes | Not yet. Displaced clusters render undisplaced through the hardware path. |
+| SARP grass (caster provider) | Not yet. |
+
+### Testing
+
+`VirtualShadowBudgetTests` checks selection, face allocation, face counts, cone coverage, and that every direction
+lands inside its cube face's guard band.
+
+The demo takes `BASICRENDERER_DEMO_SHADOW_LIGHT=point|spot|point-unshadowed|spot-unshadowed`, which adds a light
+beside the camera. `BASICRENDERER_DEMO_SHADOW_LIGHT_POSE="x,y,z,dx,dy,dz"` places it instead.
+`SARP_CLOD_VSM_TELEMETRY=1` logs the shadow map's per-frame work. If cluster records keep being emitted but the
+raster's triangle and pixel counts stay near zero, pages are being retried without being written. The ownership
+line's `emptyAdmittedCompleted` and `rasterWorkDropped` show empty completions and the drops that block them.
+
+In the demo with one point light beside the camera, the statistical profiler settles after 22 s (14 s without the
+light). While the first geometry streams in, about 110 frames re-render pages at 20-40 ms of shadow raster. Steady-state
+cost is:
+
+- shadow culling and raster: the same as without the light (0.18 ms and 0.005 ms);
+- shadow lookup: about 0.8 ms of deferred shading at 2560×1600;
+- page clears: 0.42 ms (0.13 ms without the light). The light is within the wind's reach of the camera, so its faces
+  use the dynamic layer, and every active dynamic page is cleared and recomposed each frame.
+
 ## Shadowing modes
 
 `ShadowingMode` (`RenderContext.h`; `SHADOWING_MODE_*` in `shaders/Common/defines.h`) says how analytic lights are
@@ -95,7 +244,7 @@ shadowed. It follows the pipeline recipe and reaches shaders as `MiscShadowingMo
 | Mode | Recipe | Effect |
 |---|---|---|
 | `None` | no `ClusterLodShadowTechnique` | No occlusion. |
-| `VirtualShadowMaps` | `ClusterLodShadowTechnique` | The sun through the virtual shadow map, plus the ray traced sun mask where `enableRayTracedShadows` is on. Local lights unshadowed. |
+| `VirtualShadowMaps` | `ClusterLodShadowTechnique` | The sun through the virtual shadow map, plus the ray traced sun mask where `enableRayTracedShadows` is on. Spot and point lights the budget selected, through their faces in the same shadow map; others unshadowed. |
 
 The `enableShadows` setting (the menu's Shadows checkbox) adds or removes `ClusterLodShadowTechnique`.
 `LightingFrameSettings::shadowingMode` carries the mode to passes. `DeferredShadingPass` declares the shadow map's

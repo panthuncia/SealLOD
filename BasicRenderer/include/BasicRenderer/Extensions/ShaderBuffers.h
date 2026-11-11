@@ -622,7 +622,9 @@ struct LightInfo {
     unsigned int type; // Components::LightType: 0 point, 1 spot, 2 directional.
     float innerConeCos = 1.0f; // Spot: full intensity inside this cone (cosine of the half-angle).
     float outerConeCos = 0.0f; // Spot: zero outside this cone.
-    int shadowViewInfoIndex = -1; // Directional: first clipmap's slot in DirectionalLightCascadeBuffer; -1 if none.
+    // Directional: first clipmap's slot in DirectionalLightCascadeBuffer. Spot/point: the first page-table slice of its
+    // virtual shadow map faces (LocalShadowSelection.h). -1 if none.
+    int shadowViewInfoIndex = -1;
 
     DirectX::XMVECTOR posWorldSpace;
     DirectX::XMVECTOR dirWorldSpace; // Direction light travels: the spot axis, or toward the ground for the sun.
@@ -852,6 +854,9 @@ struct CLodReplayBufferState {
     uint32_t reyesDiceWriteCount = 0;
     uint32_t reyesSplitDropped = 0;
     uint32_t reyesDiceDropped = 0;
+    // Virtual shadow map culling work dropped for a full queue or buffer or a page not resident, beyond the counts
+    // above. The shadow map completes admitted pages that received no depth only when all of these are zero.
+    uint32_t shadowWorkDropped = 0;
 };
 
 struct CLodViewDepthSRVIndex {
@@ -894,8 +899,11 @@ struct VisibleCluster {
     unsigned int virtualShadowActiveMaxPageY;
 };
 
-inline constexpr uint32_t PackedVisibleClusterViewBits = 8u;
-inline constexpr uint32_t PackedVisibleClusterInstanceBits = 24u;
+inline constexpr uint32_t PackedVisibleClusterViewBits = 10u;
+inline constexpr uint32_t PackedVisibleClusterInstanceBits = 22u;
+inline constexpr uint32_t PackedVisibleClusterViewMask = (1u << PackedVisibleClusterViewBits) - 1u;
+// Draw record indices above this do not fit a packed visible cluster.
+inline constexpr uint32_t PackedVisibleClusterInstanceMask = (1u << PackedVisibleClusterInstanceBits) - 1u;
 inline constexpr uint32_t PackedVisibleClusterLocalMeshletBits = 14u;
 inline constexpr uint32_t PackedVisibleClusterGroupBits = 21u; // 20 in words 1-2, the 21st in word 3 bit 30
 // Global CLod index spaces, bounded by what the packed records hold.
@@ -938,8 +946,8 @@ inline VisibleCluster DecodePackedVisibleCluster(const std::byte* data)
     std::memcpy(&word3, data + 12, sizeof(uint32_t));
 
     VisibleCluster cluster{};
-    cluster.viewID = word0 & 0xFFu;
-    cluster.instanceID = (word0 >> PackedVisibleClusterViewBits) & 0xFFFFFFu;
+    cluster.viewID = word0 & PackedVisibleClusterViewMask;
+    cluster.instanceID = (word0 >> PackedVisibleClusterViewBits) & PackedVisibleClusterInstanceMask;
     cluster.localMeshletIndex = word1 & 0x3FFFu;
     cluster.groupID = ((word1 >> PackedVisibleClusterLocalMeshletBits) & 0x3FFFFu) | ((word2 & 0x3u) << 18u) |
         (((word3 >> 30u) & 0x1u) << 20u);

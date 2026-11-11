@@ -311,6 +311,7 @@ set(SOURCES
     # src/Lighting
     "src/Lighting/Environment/EnvironmentManager.cpp"
     "src/Lighting/Lights/LightManager.cpp"
+    "src/Lighting/Lights/LocalShadowSelection.cpp"
     "src/Lighting/Environment/RenderPasses/brdfIntegrationPass.h"
     "src/Lighting/Environment/RenderPasses/EnvironmentConversionPass.h"
     "src/Lighting/Environment/RenderPasses/EnvironmentFilterPass.h"

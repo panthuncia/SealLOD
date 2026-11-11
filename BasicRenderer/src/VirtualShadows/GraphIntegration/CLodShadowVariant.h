@@ -26,7 +26,9 @@ public:
         CLodExtension& extension,
         const CLodVariantTraits& traits,
         std::vector<org::ExternalPassDesc>& outPasses,
-        const std::string& shadowClearDirtyBitsAfterPassName);
+        const std::string& shadowClearDirtyBitsAfterPassName,
+        // The variant's Reyes queue reset runs each frame, so its overflow counters are this frame's.
+        bool reyesQueuesResetEachFrame);
     static std::string AppendCasterRasterPasses(
         CLodExtension& extension,
         const CLodVariantTraits& traits,

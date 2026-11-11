@@ -121,14 +121,14 @@ void VirtualShadowBufferPSMain(VisBufferPSInput input, bool isFrontFace : SV_IsF
 #endif
 
     const uint shadowVsmPayload = input.shadowClipmapIndex;
-    const uint clipmapIndex = CLodVisibleClusterShadowClipmapIndexFromPayload(shadowVsmPayload);
-    if (clipmapIndex >= kCLodVirtualShadowClipmapCount)
+    StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX];
+    const uint clipmapIndex = CLodVisibleClusterVsmSliceFromPayload(shadowVsmPayload, input.viewID, clipmapInfos);
+    if (clipmapIndex >= kCLodVirtualShadowMaxSliceCount)
     {
         CLodRasterPixelTelemetryAdd(WG_COUNTER_RASTER_PIXEL_VSM_CLIPMAP_REJECTED, 1u);
         return;
     }
 
-    StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos = ResourceDescriptorHeap[CLOD_RASTER_VIRTUAL_SHADOW_CLIPMAP_INFO_DESCRIPTOR_INDEX];
     const CLodVirtualShadowClipmapInfo clipmapInfo = WaveLoadVirtualShadowClipmapInfo(clipmapInfos, clipmapIndex);
     if (!CLodVirtualShadowClipmapIsValid(clipmapInfo) || clipmapInfo.shadowCameraBufferIndex != input.viewID)
     {

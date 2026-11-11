@@ -2,9 +2,14 @@
 #include "Render/PassBuilders.h"
 #include "BasicRenderer/Streaming/LightStateArtifacts.h"
 
+#include <algorithm>
 #include <array>
 #include <bit>
 #include <cmath>
+#include <cstring>
+#include <vector>
+
+#include <spdlog/spdlog.h>
 
 #include "Scene/ECS/RendererECSManager.h"
 #include "Runtime/Settings/SettingsManager.h"
@@ -202,9 +207,24 @@ void VirtualShadowMapSetupPass::Update(const org::UpdateExecutionContext& execut
     m_resetResources = m_resetReasonForced || m_resetReasonNoPreviousState;
 
     CLodVirtualShadowRuntimeState runtimeState{};
-    std::array<CLodVirtualShadowClipmapInfo, CLodVirtualShadowMaxSupportedClipmapCount> clipmapInfos{};
+    // Slice rows, then one view row per camera buffer index (CLodVirtualShadowClipInfoRowCount).
+    std::vector<CLodVirtualShadowClipmapInfo> clipmapInfos(CLodVirtualShadowClipInfoRowCount);
     std::array<CLodVirtualShadowMarkClipmapData, CLodVirtualShadowMaxSupportedClipmapCount> markClipmapData{};
-    std::array<CLodVirtualShadowCompactShadowCameraInfo, CLodVirtualShadowMaxSupportedClipmapCount> compactShadowCameras{};
+    std::vector<CLodVirtualShadowCompactShadowCameraInfo> compactShadowCameras(CLodVirtualShadowMaxSliceCount);
+    const auto setViewRow = [&](uint32_t cameraBufferIndex, uint32_t slice) {
+        if (cameraBufferIndex >= CLodVirtualShadowMaxViewRowCount) {
+            if (!m_warnedViewRowOverflow) {
+                spdlog::warn("Virtual shadow view with camera buffer index {} has no view row (at most {}); it renders nothing",
+                    cameraBufferIndex, CLodVirtualShadowMaxViewRowCount);
+                m_warnedViewRowOverflow = true;
+            }
+            return;
+        }
+        auto& row = clipmapInfos[CLodVirtualShadowViewRowBase + cameraBufferIndex];
+        row.flags = CLodVirtualShadowClipmapValidFlag;
+        row.pageTableLayer = slice;
+        row.shadowCameraBufferIndex = cameraBufferIndex;
+    };
     CLodVirtualShadowMainCameraInfo compactMainCamera{};
     DirectX::XMFLOAT3 currentDirectionalLightDirection{};
     bool currentDirectionalLightDirectionValid = false;
@@ -343,6 +363,7 @@ void VirtualShadowMapSetupPass::Update(const org::UpdateExecutionContext& execut
                 compactShadowCameras[clipmapIndex].projection = view.cameraInfo.jitteredProjection;
                 compactShadowCameras[clipmapIndex].viewProjection = view.cameraInfo.viewProjection;
                 compactShadowCameras[clipmapIndex].isOrtho = view.cameraInfo.isOrtho;
+                setViewRow(view.cameraBufferIndex, clipmapIndex);
                 if (m_previousClipmapInfosValid && IsClipmapValid(m_previousClipmapInfos[clipmapIndex])) {
                     clipmapInfo.clearOffsetX = ClampClearOffset(
                         pageOffsetX - m_previousClipmapPageOffsetX[clipmapIndex],
@@ -410,7 +431,7 @@ void VirtualShadowMapSetupPass::Update(const org::UpdateExecutionContext& execut
         }
     }
 
-    m_previousClipmapInfos = clipmapInfos;
+    std::copy_n(clipmapInfos.begin(), CLodVirtualShadowMaxSupportedClipmapCount, m_previousClipmapInfos.begin());
     m_previousClipmapInfosValid = true;
     m_previousDirectionalLightDirection = currentDirectionalLightDirection;
     m_previousDirectionalLightDirectionValid = currentDirectionalLightDirectionValid;
@@ -418,6 +439,83 @@ void VirtualShadowMapSetupPass::Update(const org::UpdateExecutionContext& execut
         m_previousRenderResolution = updateContext->renderResolution;
         m_previousRenderResolutionValid = true;
     }
+
+    // Local light faces. Each owns two slices: mip 0, then mips 1-7 packed. Their pages never scroll, so the clipmap
+    // offsets stay zero; a face whose light or camera changed starts over (Invalidate).
+    for (uint32_t slice = CLodVirtualShadowFirstLocalSlice; slice < CLodVirtualShadowMaxSliceCount; ++slice) {
+        auto& info = clipmapInfos[slice];
+        info.pageTableLayer = slice;
+        info.virtualResolution = virtualShadowResolution;
+        info.pageTableResolution = virtualShadowPageTableResolution;
+        info.physicalAtlasPagesWide = virtualShadowPhysicalAtlasPagesWide;
+        info.physicalAtlasPagesHigh = virtualShadowPhysicalAtlasPagesHigh;
+    }
+    uint32_t activeLocalFaceCount = 0u;
+    std::array<bool, CLodVirtualShadowMaxLocalFaceCount> localFaceSeen{};
+    const float localLodBias = SettingsManager::GetInstance().getSettingGetter<float>(CLodLocalVirtualShadowLodBiasSettingName)();
+    const auto& publishedLocalLights = updateContext ? updateContext->lightTables : nullptr;
+    if (publishedLocalLights) {
+        // As for the sun's clips: skinned and wind-deformed casters render into a face's dynamic layer every frame only
+        // where they animate, within the wind's reach of the camera. Elsewhere they are cached like rigid casters.
+        const float localSkinnedShadowRadius = (std::max)((std::max)(0.0f, updateContext->proceduralWind.outerRadius),
+            m_virtualShadowCasters ? m_virtualShadowCasters->GetRequestedDynamicShadowRadius() : 0.0f);
+        const DirectX::XMVECTOR cameraPosition = DirectX::XMLoadFloat4(&compactMainCamera.positionWorldSpace);
+        for (const auto& local : publishedLocalLights->localShadows) {
+            for (size_t i = 0; i < local.viewIDs.size(); ++i) {
+                const uint32_t face = local.firstFace + static_cast<uint32_t>(i);
+                if (face >= CLodVirtualShadowMaxLocalFaceCount) continue;
+                const auto viewIt = std::ranges::find(updateContext->Views(), local.viewIDs[i], &PreparedViewFrameData::id);
+                if (viewIt == updateContext->Views().end()) continue;
+                const auto& view = *viewIt;
+                const float lightDistance = DirectX::XMVectorGetX(DirectX::XMVector3Length(DirectX::XMVectorSubtract(
+                    DirectX::XMVectorSetW(DirectX::XMLoadFloat4(&view.cameraInfo.positionWorldSpace), 0.0f),
+                    DirectX::XMVectorSetW(cameraPosition, 0.0f))));
+                const bool dynamicSkinned = localSkinnedShadowRadius > 0.0f &&
+                    lightDistance - view.cameraInfo.zFar < localSkinnedShadowRadius;
+                DirectX::XMFLOAT4X4 viewProjection;
+                DirectX::XMStoreFloat4x4(&viewProjection, view.cameraInfo.viewProjection);
+                auto& previous = m_previousLocalFaces[face];
+                const bool changed = !previous.valid || previous.lightIndex != local.lightIndex ||
+                    previous.dynamicSkinned != dynamicSkinned ||
+                    std::memcmp(&previous.viewProjection, &viewProjection, sizeof(viewProjection)) != 0;
+                previous = {true, local.lightIndex, dynamicSkinned, viewProjection};
+                localFaceSeen[face] = true;
+                const uint32_t firstSlice = CLodVirtualShadowFirstLocalSlice + face * CLodVirtualShadowLocalSlicesPerFace;
+                // A face's texels widen with depth: texelWorldSize is mip 0's at unit view depth.
+                const float projectionScale = DirectX::XMVectorGetY(view.cameraInfo.unjitteredProjection.r[1]);
+                const float texelPerDepth = projectionScale > 0.0f
+                    ? 2.0f / (projectionScale * static_cast<float>(std::max(virtualShadowResolution, 1u)))
+                    : 0.0f;
+                for (uint32_t s = 0; s < CLodVirtualShadowLocalSlicesPerFace; ++s) {
+                    const uint32_t slice = firstSlice + s;
+                    auto& info = clipmapInfos[slice];
+                    info.worldOriginX = view.cameraInfo.positionWorldSpace.x;
+                    info.worldOriginY = view.cameraInfo.positionWorldSpace.y;
+                    info.worldOriginZ = view.cameraInfo.positionWorldSpace.z;
+                    info.texelWorldSize = texelPerDepth;
+                    info.shadowCameraBufferIndex = view.cameraBufferIndex;
+                    info.clipLevel = s; // 0: mip 0's slice; 1: the slice of mips 1-7
+                    info.flags = CLodVirtualShadowClipmapValidFlag | CLodVirtualShadowClipmapLocalFlag |
+                        (dynamicSkinned ? CLodVirtualShadowClipmapDynamicSkinnedFlag : 0u) |
+                        (changed ? CLodVirtualShadowClipmapInvalidateFlag : 0u) |
+                        (local.viewIDs.size() > 1u ? CLodVirtualShadowClipmapCubeFlag : 0u);
+                    info.directionalLodBias = localLodBias;
+                    info.depthNear = view.cameraInfo.zNear;
+                    info.depthRange = std::max(view.cameraInfo.zFar - view.cameraInfo.zNear, 1.0e-6f);
+                    compactShadowCameras[slice].view = view.cameraInfo.view;
+                    compactShadowCameras[slice].projection = view.cameraInfo.unjitteredProjection;
+                    compactShadowCameras[slice].viewProjection = view.cameraInfo.viewProjection;
+                    compactShadowCameras[slice].isOrtho = 0u;
+                }
+                setViewRow(view.cameraBufferIndex, firstSlice);
+                activeLocalFaceCount = std::max(activeLocalFaceCount, face + 1u);
+            }
+        }
+    }
+    for (uint32_t face = 0; face < CLodVirtualShadowMaxLocalFaceCount; ++face) {
+        if (!localFaceSeen[face]) m_previousLocalFaces[face].valid = false;
+    }
+    g_clodVirtualShadowActiveLocalFaceCount.store(activeLocalFaceCount, std::memory_order_relaxed);
 
     runtimeState.clipmapCount = activeClipmapCount;
     runtimeState.supportedClipmapCount = CLodVirtualShadowMaxSupportedClipmapCount;
@@ -461,9 +559,10 @@ VirtualShadowMapSetupFrame VirtualShadowMapSetupPass::Prepare(
     const auto config = GetVirtualShadowResolutionConfig();
     VirtualShadowMapSetupFrame frame{};
     frame.pageTableResolution = config.pageTableResolution;
+    frame.sliceCount = CLodVirtualShadowActiveSliceCount();
     frame.packedConfig0 =
         ((config.pageTableResolution & CLOD_VIRTUAL_SHADOW_SETUP_PAGE_TABLE_RESOLUTION_MASK) << CLOD_VIRTUAL_SHADOW_SETUP_PAGE_TABLE_RESOLUTION_SHIFT) |
-        ((CLodVirtualShadowMaxSupportedClipmapCount & CLOD_VIRTUAL_SHADOW_SETUP_CLIPMAP_COUNT_MASK) << CLOD_VIRTUAL_SHADOW_SETUP_CLIPMAP_COUNT_SHIFT) |
+        ((frame.sliceCount & CLOD_VIRTUAL_SHADOW_SETUP_CLIPMAP_COUNT_MASK) << CLOD_VIRTUAL_SHADOW_SETUP_CLIPMAP_COUNT_SHIFT) |
         ((config.maxPhysicalPages & CLOD_VIRTUAL_SHADOW_SETUP_PHYSICAL_PAGE_COUNT_MASK) << CLOD_VIRTUAL_SHADOW_SETUP_PHYSICAL_PAGE_COUNT_SHIFT);
     frame.packedConfig1 = (CLodVirtualShadowDirtyWordCount(config.maxPhysicalPages) &
         CLOD_VIRTUAL_SHADOW_SETUP_DIRTY_WORD_COUNT_MASK) << CLOD_VIRTUAL_SHADOW_SETUP_DIRTY_WORD_COUNT_SHIFT;
@@ -498,5 +597,5 @@ void VirtualShadowMapSetupPass::Record(const VirtualShadowMapSetupBindings& bind
     c[CLOD_VIRTUAL_SHADOW_SETUP_AUTO_BIAS_SCALE_AS_UINT] = std::bit_cast<uint32_t>(frame.autoBiasScale);
     c[CLOD_VIRTUAL_SHADOW_SETUP_FALLBACK_CANDIDATE_COUNT_DESCRIPTOR_INDEX] = recording.Index(bindings.fallbackCandidateCount);
     const uint32_t groups = (frame.pageTableResolution + 7u) / 8u;
-    br::render::DispatchCompute(recording, bindings.pipeline, c, groups, groups, CLodVirtualShadowMaxSupportedClipmapCount);
+    br::render::DispatchCompute(recording, bindings.pipeline, c, groups, groups, frame.sliceCount);
 }

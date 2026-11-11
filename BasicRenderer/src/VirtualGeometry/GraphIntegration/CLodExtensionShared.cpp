@@ -168,7 +168,7 @@ org::TextureDescription CreateVirtualShadowPageTableDescription()
     desc.hasUAV = true;
     desc.uavFormat = rhi::Format::R32_UInt;
     desc.isArray = true;
-    desc.arraySize = CLodVirtualShadowMaxSupportedClipmapCount;
+    desc.arraySize = CLodVirtualShadowMaxSliceCount;
     return desc;
 }
 
@@ -213,7 +213,7 @@ org::TextureDescription CreateVirtualShadowDirtyHierarchyDescription()
     desc.hasUAV = true;
     desc.uavFormat = rhi::Format::R32_UInt;
     desc.isArray = true;
-    desc.arraySize = CLodVirtualShadowMaxSupportedClipmapCount;
+    desc.arraySize = CLodVirtualShadowMaxSliceCount;
     desc.generateMipMaps = true;
     return desc;
 }

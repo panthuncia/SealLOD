@@ -115,7 +115,8 @@ groupshared SWClusterWork gs_clusterWork[SW_RASTER_SETUP_SLOTS];
 groupshared uint gs_groupClusterCount;
 // Groupshared memory limits this shader's occupancy (achieved warps times bytes per group stayed
 // near 44 KB per SM as both changed), so each vertex is one entry: screen xy, linear depth and,
-// for perspective views, 1/w. Virtual shadow views are orthographic clipmaps, where w is 1.
+// for perspective views, 1/w. A virtual shadow view needs no 1/w: the sun's clips are orthographic,
+// where w is 1, and a local light face's w is its linear depth.
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
 typedef float3 SWVertex;
 #else
@@ -137,7 +138,18 @@ void SWLoadClusterSetup(SWClusterWork work, uint slot)
     source.resolvedSkinningSlot = work.resolvedSkinningSlot;
     CLodRasterCluster cluster;
     // A cluster that fails to load has no vertices or triangles, so the later stages do nothing.
-    CLodLoadRasterCluster(source, cluster);
+    const uint loadResult = CLodLoadRasterCluster(source, cluster);
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW && !defined(CLOD_SW_RASTER_EMBEDDED_WORK_GRAPH)
+    if (loadResult != CLOD_RASTER_CLUSTER_OK)
+    {
+        // Its pages are not complete this frame: none may be taken as empty.
+        RWStructuredBuffer<CLodVirtualShadowStats> vsmStats =
+            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Shadows::CLodStats)];
+        InterlockedAdd(vsmStats[0].rasterWorkDroppedCount, 1u);
+    }
+#else
+    (void)loadResult;
+#endif
     gs_clusters[slot] = cluster;
     gs_clusterWork[slot] = work;
 
@@ -243,7 +255,10 @@ void SWTransformVertices(SWClusterWork work, CLodRasterCluster cluster, ClodView
         const float3 position = SWLoadVertexPosition(work, cluster, slab, v);
         const float4 clipPosition = CLodRasterClipPosition(cluster, position);
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
-        const float2 ndc = clipPosition.xy;
+        // Exact for the sun's clips, where w is 1. A local light face's screen position is in its mip 0's pixels;
+        // SWRasterTriangles maps it to each mip. Vertices behind the face have no meaningful position, and their
+        // triangles are rejected by depth.
+        const float2 ndc = clipPosition.xy / clipPosition.w;
 #else
         const float invW = 1.0f / clipPosition.w;
         const float2 ndc = clipPosition.xy * invW;
@@ -268,6 +283,7 @@ struct SWRasterTriangle
 {
     uint3 vertices;
     uint triangleIndex;
+    // Linear depths; their reciprocals for a local light face (SWRasterOutput::vsmPerspective).
     float3 depths;
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
     SWVirtualShadowTrianglePage vsmPage;
@@ -406,7 +422,10 @@ struct SWRasterOutput
     uint visibleClusterIndex;
     uint dynamicShadowLayer;
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+    // The slice of the mip being rastered.
     SWVirtualShadowTarget vsmTarget;
+    // A local light face: a perspective view, so depth and UVs interpolate perspective-correctly.
+    bool vsmPerspective;
 #endif
     SWRasterDebug debug;
 #if CLOD_SW_RASTER_MAY_ALPHA_TEST
@@ -428,7 +447,14 @@ void SWRasterPixel(
     float3 barycentrics)
 {
     SWTelemetryAdd(SW_COUNTER_COVERED_PIXELS, 1u);
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+    // Under perspective 1/depth is affine in screen space.
+    const float depth = output.vsmPerspective
+        ? rcp(dot(barycentrics, tri.depths))
+        : dot(barycentrics, tri.depths);
+#else
     const float depth = dot(barycentrics, tri.depths);
+#endif
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
     // The texel's page and depth come before the alpha test: a texel on a page that is not being
     // rastered, or already holding nearer depth, needs neither its UVs nor its texture samples.
@@ -450,9 +476,10 @@ void SWRasterPixel(
         }
 #endif
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
-        // Orthographic: the screen barycentrics are already the perspective-correct ones.
-        const float3 perspective = barycentrics;
-        const float invSum = 1.0f;
+        // Orthographic: the screen barycentrics are already the perspective-correct ones. A local light face weights
+        // them by 1/depth, which is 1/w.
+        const float3 perspective = output.vsmPerspective ? barycentrics * tri.depths : barycentrics;
+        const float invSum = output.vsmPerspective ? rcp(perspective.x + perspective.y + perspective.z) : 1.0f;
 #else
         const float3 perspective = barycentrics * tri.invW;
         const float invSum = rcp(perspective.x + perspective.y + perspective.z);
@@ -553,9 +580,22 @@ void SWRasterTriangles(SWClusterWork work, CLodRasterCluster cluster, SWClusterF
         ResourceDescriptorHeap[CLOD_SW_VSM_CLIPMAP_INFO_DESCRIPTOR_INDEX];
     CLodVirtualShadowClipmapInfo clipmapInfo = (CLodVirtualShadowClipmapInfo)0;
     const bool hasClipmapInfo = SWFindVirtualShadowClipmapInfo(viewID, clipmapInfos, clipmapInfo);
-    output.vsmTarget = SWBuildVirtualShadowTarget(clipmapInfo);
+    // A local light face rasters each triangle into each of its mips (CLodVirtualShadowLocalMipPageOrigin): mip 0 on
+    // the face's first slice, the rest on its second. The sun's clips are one pass over their slice.
+    const bool localFace = hasClipmapInfo && CLodVirtualShadowClipmapIsLocal(clipmapInfo);
+    const uint mipCount = localFace ? kCLodVirtualShadowLocalMipCount : 1u;
+    const SWVirtualShadowTarget mip0Target = SWBuildVirtualShadowTarget(clipmapInfo);
+    SWVirtualShadowTarget coarseMipsTarget = mip0Target;
+    if (localFace)
+    {
+        coarseMipsTarget =
+            SWBuildVirtualShadowTarget(clipmapInfos[clipmapInfo.pageTableLayer + CLodVirtualShadowLocalMipSliceOffset(1u)]);
+    }
+    output.vsmTarget = mip0Target;
+    output.vsmPerspective = localFace;
     RWTexture2DArray<uint> pageTable = ResourceDescriptorHeap[CLOD_SW_VSM_PAGE_TABLE_DESCRIPTOR_INDEX];
 #else
+    const uint mipCount = 1u;
     RWTexture2D<uint64_t> visBuffer =
         ResourceDescriptorHeap[NonUniformResourceIndex(rasterInfo.visibilityUAVDescriptorIndex)];
 #endif
@@ -603,12 +643,52 @@ void SWRasterTriangles(SWClusterWork work, CLodRasterCluster cluster, SWClusterF
             twiceArea = -twiceArea;
         }
 
+        // Behind-camera vertices project to meaningless positions.
+        if (v0.z <= 0.0f || v1.z <= 0.0f || v2.z <= 0.0f)
+        {
+            SWTelemetryAdd(SW_COUNTER_DEGENERATE_OR_OFFSCREEN, 1u);
+            continue;
+        }
+
+        // Positive scales keep the winding, so the face test above holds for every mip.
+        const float2 faceS0 = s0;
+        const float2 faceS1 = s1;
+        const float2 faceS2 = s2;
+        const float faceTwiceArea = twiceArea;
+        [loop]
+        for (uint mip = 0u; mip < mipCount; ++mip)
+        {
+        int2 targetMin = scissorMin;
+        int2 targetMax = scissorMax;
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+        if (localFace)
+        {
+            // The mip's rectangle of its slice's canvas, which the face's mip 0 pixels scale into.
+            const float mipScale = exp2(-(float)mip);
+            const int2 mipOrigin = int2(CLodVirtualShadowLocalMipPageOrigin(mip) * kCLodVirtualShadowPhysicalPageSize);
+            s0 = faceS0 * mipScale + float2(mipOrigin);
+            s1 = faceS1 * mipScale + float2(mipOrigin);
+            s2 = faceS2 * mipScale + float2(mipOrigin);
+            twiceArea = faceTwiceArea * mipScale * mipScale;
+            targetMin = mipOrigin;
+            targetMax = mipOrigin + int(kCLodVirtualShadowFixedVirtualResolution >> mip) - 1;
+            if (mip == 0u)
+            {
+                output.vsmTarget = mip0Target;
+            }
+            else
+            {
+                output.vsmTarget = coarseMipsTarget;
+            }
+        }
+#endif
+
         // Pixels whose centers can be inside the triangle. Most triangles here are smaller than a
         // pixel and this range is empty for them, so reject before doing any setup.
         int2 minPixel = int2(ceil(min(min(s0, s1), s2) - 0.5f));
         int2 maxPixel = int2(floor(max(max(s0, s1), s2) - 0.5f));
-        minPixel = max(max(minPixel, scissorMin), int2(0, 0));
-        maxPixel = min(maxPixel, scissorMax);
+        minPixel = max(max(minPixel, targetMin), int2(0, 0));
+        maxPixel = min(maxPixel, targetMax);
         if (minPixel.x > maxPixel.x || minPixel.y > maxPixel.y)
         {
             SWTelemetryAdd(SW_COUNTER_DEGENERATE_OR_OFFSCREEN, 1u);
@@ -630,22 +710,20 @@ void SWRasterTriangles(SWClusterWork work, CLodRasterCluster cluster, SWClusterF
         }
 #endif
 
-        // Only the few triangles that reach this point need these. Behind-camera vertices project
-        // to meaningless positions, so the survivors still get the near-plane test.
+        // Only the few triangles that reach this point need these.
         SWRasterTriangle tri;
         tri.vertices = vertices;
         tri.triangleIndex = triangleIndex;
         tri.depths = float3(v0.z, v1.z, v2.z);
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
         tri.vsmPage = trianglePage;
+        if (output.vsmPerspective)
+        {
+            tri.depths = rcp(tri.depths);
+        }
 #else
         tri.invW = float3(v0.w, v1.w, v2.w);
 #endif
-        if (tri.depths.x <= 0.0f || tri.depths.y <= 0.0f || tri.depths.z <= 0.0f)
-        {
-            SWTelemetryAdd(SW_COUNTER_DEGENERATE_OR_OFFSCREEN, 1u);
-            continue;
-        }
 
         // Barycentrics at the first pixel center, and their steps.
         const float invTwiceArea = -1.0f / twiceArea;
@@ -722,6 +800,7 @@ void SWRasterTriangles(SWClusterWork work, CLodRasterCluster cluster, SWClusterF
             SWTelemetryAdd(SW_COUNTER_NO_SAMPLE_COVERED, 1u);
         }
 #endif
+        } // mip
     }
 }
 

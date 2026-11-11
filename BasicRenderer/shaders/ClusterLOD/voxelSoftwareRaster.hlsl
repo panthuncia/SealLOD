@@ -335,6 +335,10 @@ void VoxelRasterLoadCubeHeader(
 }
 
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+// Where the mip being rasterized starts on its slice's canvas, in virtual texels: a local light face's mips 1-7 share one
+// slice (CLodVirtualShadowLocalMipPageOrigin). Zero for the sun's clips and mip 0.
+static uint2 g_voxelRasterVirtualShadowPixelOffset = uint2(0u, 0u);
+
 bool VoxelRasterWriteVirtualShadow(
     uint2 pixel,
     float linearDepth,
@@ -342,6 +346,7 @@ bool VoxelRasterWriteVirtualShadow(
     RWTexture2DArray<uint> pageTable,
     RWTexture2D<uint> physicalPages)
 {
+    pixel += g_voxelRasterVirtualShadowPixelOffset;
     const float2 shadowUv = saturate((float2(pixel) + 0.5f) / max((float)clipmapInfo.virtualResolution, 1.0f));
     const uint2 virtualPageCoords = CLodVirtualShadowVirtualPageCoordsFromUv(shadowUv, clipmapInfo);
     const uint2 wrappedPageCoords = CLodVirtualShadowWrappedPageCoords(virtualPageCoords, clipmapInfo);
@@ -2299,7 +2304,9 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
     ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     const bool debugMode = perFrameBuffer.outputType == OUTPUT_SW_RASTER;
 #endif
+#if !CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
     const float2 targetDimsInv = rcp(max(float2(targetDims), float2(1.0f, 1.0f)));
+#endif
     const VoxelRasterRayProjectionSetup projectionSetup = VoxelRasterBuildRayProjectionSetup(camera.projectionInverse);
 
     const VoxelRasterVoxelSetup voxelSetup = VoxelRasterBuildVoxelSetup(voxelCluster);
@@ -2308,6 +2315,30 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
     const VoxelRasterRigidSetup rigidSetup = VoxelRasterBuildRigidSetup(voxelWidth, objectData, camera);
 #endif
 
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+    // A local light face renders into each of its mips: each pass rasterizes the face at the mip's resolution and writes
+    // where the mip sits on its slice's canvas. The sun's clips are one pass.
+    const bool localFace = CLodVirtualShadowClipmapIsLocal(clipmapInfo);
+    const uint firstSlice = clipmapInfo.pageTableLayer;
+    const uint mipCount = localFace ? kCLodVirtualShadowLocalMipCount : 1u;
+    [loop]
+    for (uint mip = 0u; mip < mipCount; ++mip)
+    {
+    if (localFace)
+    {
+        clipmapInfo = clipmapInfos[firstSlice + CLodVirtualShadowLocalMipSliceOffset(mip)];
+        targetDims = (kCLodVirtualShadowFixedVirtualResolution >> mip).xx;
+        // Cubes project to pixels through the scissor and pixels back to rays through targetDims: both are the mip's.
+        // With the view's mip 0 scissor, coarser mips' cubes covered the wrong pixels and wrote nothing.
+        rasterInfo.scissorMinX = 0u;
+        rasterInfo.scissorMinY = 0u;
+        rasterInfo.scissorMaxX = targetDims.x;
+        rasterInfo.scissorMaxY = targetDims.y;
+        g_voxelRasterVirtualShadowPixelOffset =
+            CLodVirtualShadowLocalMipPageOrigin(mip) * kCLodVirtualShadowPhysicalPageSize;
+    }
+    const float2 targetDimsInv = rcp(max(float2(targetDims), float2(1.0f, 1.0f)));
+#endif
     const uint workFirstCubeOffset = 0u;
     const uint workCubeEnd = voxelCluster.cubeCount;
 
@@ -2380,5 +2411,8 @@ void VoxelRasterCS(uint3 groupId : SV_GroupID, uint3 groupThreadID : SV_GroupThr
         visibilityBuffer
 #endif
         );
+#endif
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+    }
 #endif
 }

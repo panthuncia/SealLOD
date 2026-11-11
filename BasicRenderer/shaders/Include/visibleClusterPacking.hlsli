@@ -4,6 +4,10 @@
 #include "include/clodVirtualShadowClipmap.hlsli"
 
 static const uint CLOD_PACKED_VISIBLE_CLUSTER_STRIDE = 16u;
+// Word 0: view ID (camera buffer index) in the low 10 bits, draw record index in the high 22.
+static const uint CLOD_PACKED_VISIBLE_CLUSTER_VIEW_BITS = 10u;
+static const uint CLOD_PACKED_VISIBLE_CLUSTER_VIEW_MASK = (1u << CLOD_PACKED_VISIBLE_CLUSTER_VIEW_BITS) - 1u;
+static const uint CLOD_PACKED_VISIBLE_CLUSTER_INSTANCE_MASK = (1u << (32u - CLOD_PACKED_VISIBLE_CLUSTER_VIEW_BITS)) - 1u;
 // Page offsets in 4 KiB units, 14 bits: slabs of up to 64 MiB (PagePool::kMaxSlabBytes).
 static const uint CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_SHIFT = 12u;
 static const uint CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_LOW_MASK = 0x3FFu;
@@ -19,6 +23,9 @@ static const uint CLOD_PACKED_VISIBLE_CLUSTER_VSM_LOCAL_PAGE_BITS = 2u;
 static const uint CLOD_PACKED_VISIBLE_CLUSTER_VSM_CLIPMAP_MASK =
     (1u << CLOD_PACKED_VISIBLE_CLUSTER_VSM_CLIPMAP_BITS) - 1u;
 static const uint CLOD_PACKED_VISIBLE_CLUSTER_VSM_INVALID_CLIPMAP_BITS = CLOD_PACKED_VISIBLE_CLUSTER_VSM_CLIPMAP_MASK;
+// The 5-bit field names a sun clip's slice (0..21), or, for a local light face's view, the mip it renders as
+// LOCAL_MIP_BASE + mip; that slice follows from the view (CLodVisibleClusterVsmSliceFromPayload).
+static const uint CLOD_PACKED_VISIBLE_CLUSTER_VSM_LOCAL_MIP_BASE = 23u;
 static const uint CLOD_PACKED_VISIBLE_CLUSTER_VSM_CLIPMAP_SHIFT = 0u;
 static const uint CLOD_PACKED_VISIBLE_CLUSTER_VSM_BLOCK_X_SHIFT =
     CLOD_PACKED_VISIBLE_CLUSTER_VSM_CLIPMAP_SHIFT + CLOD_PACKED_VISIBLE_CLUSTER_VSM_CLIPMAP_BITS;
@@ -92,12 +99,12 @@ void CLodStoreVisibleClusterPackedWordsGloballyCoherent(globallycoherent RWByteA
 
 uint CLodVisibleClusterViewID(uint4 packedCluster)
 {
-    return packedCluster.x & 0xFFu;
+    return packedCluster.x & CLOD_PACKED_VISIBLE_CLUSTER_VIEW_MASK;
 }
 
 uint CLodVisibleClusterInstanceID(uint4 packedCluster)
 {
-    return (packedCluster.x >> 8u) & 0xFFFFFFu;
+    return packedCluster.x >> CLOD_PACKED_VISIBLE_CLUSTER_VIEW_BITS;
 }
 
 uint CLodVisibleClusterLocalMeshletIndex(uint4 packedCluster)
@@ -182,10 +189,11 @@ bool CLodVisibleClusterUsesDynamicShadowLayer(uint4 packedCluster)
 
 uint CLodBuildVisibleClusterVsmPayloadFromClipmapIndex(uint shadowClipmapIndex)
 {
+    // Only a sun clip's slice fits the field; a local face's record names its mip (CLodVisibleClusterVsmFieldForLocalMip).
     const uint encodedClipmapIndex =
-        shadowClipmapIndex == CLOD_PACKED_VISIBLE_CLUSTER_INVALID_SHADOW_CLIPMAP_INDEX
-            ? CLOD_PACKED_VISIBLE_CLUSTER_VSM_INVALID_CLIPMAP_BITS
-            : (shadowClipmapIndex & CLOD_PACKED_VISIBLE_CLUSTER_VSM_CLIPMAP_MASK);
+        shadowClipmapIndex < kCLodVirtualShadowClipmapCount
+            ? shadowClipmapIndex
+            : CLOD_PACKED_VISIBLE_CLUSTER_VSM_INVALID_CLIPMAP_BITS;
     return encodedClipmapIndex << CLOD_PACKED_VISIBLE_CLUSTER_VSM_CLIPMAP_SHIFT;
 }
 
@@ -196,7 +204,11 @@ uint CLodPackVisibleClusterVsmPayloadForBlock(
     uint2 maxLocalPageCoord,
     bool overflowed)
 {
-    uint payload = CLodBuildVisibleClusterVsmPayloadFromClipmapIndex(shadowClipmapIndex);
+    // shadowClipmapIndex is the payload field: a sun clip's slice, or a local face's CLodVisibleClusterVsmFieldForLocalMip.
+    const uint encodedField = shadowClipmapIndex < CLOD_PACKED_VISIBLE_CLUSTER_VSM_INVALID_CLIPMAP_BITS
+        ? shadowClipmapIndex
+        : CLOD_PACKED_VISIBLE_CLUSTER_VSM_INVALID_CLIPMAP_BITS;
+    uint payload = encodedField << CLOD_PACKED_VISIBLE_CLUSTER_VSM_CLIPMAP_SHIFT;
     payload |= (blockCoord.x & 0x1Fu) << CLOD_PACKED_VISIBLE_CLUSTER_VSM_BLOCK_X_SHIFT;
     payload |= (blockCoord.y & 0x1Fu) << CLOD_PACKED_VISIBLE_CLUSTER_VSM_BLOCK_Y_SHIFT;
     payload |= (minLocalPageCoord.x & 0x3u) << CLOD_PACKED_VISIBLE_CLUSTER_VSM_RECT_MIN_X_SHIFT;
@@ -220,6 +232,58 @@ uint CLodVisibleClusterShadowClipmapIndexFromPayload(uint vsmPayload)
 uint CLodVisibleClusterShadowClipmapIndex(uint4 packedCluster)
 {
     return CLodVisibleClusterShadowClipmapIndexFromPayload(CLodVisibleClusterVsmPayload(packedCluster));
+}
+
+uint CLodVisibleClusterVsmFieldForLocalMip(uint mip)
+{
+    return CLOD_PACKED_VISIBLE_CLUSTER_VSM_LOCAL_MIP_BASE + mip;
+}
+
+// The mip a local face's payload renders, or kCLodVirtualShadowLocalMipCount for a sun clip's or an invalid payload.
+uint CLodVisibleClusterVsmLocalMipFromPayload(uint vsmPayload)
+{
+    const uint field = CLodVisibleClusterShadowClipmapIndexFromPayload(vsmPayload);
+    return field >= CLOD_PACKED_VISIBLE_CLUSTER_VSM_LOCAL_MIP_BASE &&
+            field < CLOD_PACKED_VISIBLE_CLUSTER_VSM_LOCAL_MIP_BASE + kCLodVirtualShadowLocalMipCount
+        ? field - CLOD_PACKED_VISIBLE_CLUSTER_VSM_LOCAL_MIP_BASE
+        : kCLodVirtualShadowLocalMipCount;
+}
+
+uint CLodVisibleClusterVsmSliceFromField(uint field, uint viewSlice)
+{
+    if (field < kCLodVirtualShadowClipmapCount)
+    {
+        return field;
+    }
+    if (field < CLOD_PACKED_VISIBLE_CLUSTER_VSM_LOCAL_MIP_BASE ||
+        field >= CLOD_PACKED_VISIBLE_CLUSTER_VSM_LOCAL_MIP_BASE + kCLodVirtualShadowLocalMipCount ||
+        viewSlice < kCLodVirtualShadowFirstLocalSlice || viewSlice >= kCLodVirtualShadowMaxSliceCount)
+    {
+        return kCLodVirtualShadowInvalidSlice;
+    }
+    return viewSlice + CLodVirtualShadowLocalMipSliceOffset(field - CLOD_PACKED_VISIBLE_CLUSTER_VSM_LOCAL_MIP_BASE);
+}
+
+// The slice a visible cluster's VSM payload renders into, or kCLodVirtualShadowInvalidSlice. A sun clip's payload names
+// its slice; a local face's names a mip, so its slice comes from the view's row.
+uint CLodVisibleClusterVsmSliceFromPayload(uint vsmPayload, uint viewID, StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos)
+{
+    const uint field = CLodVisibleClusterShadowClipmapIndexFromPayload(vsmPayload);
+    if (field < kCLodVirtualShadowClipmapCount)
+    {
+        return field;
+    }
+    return CLodVisibleClusterVsmSliceFromField(field, CLodVirtualShadowFindClipmapIndexForView(viewID, clipmapInfos));
+}
+
+uint CLodVisibleClusterVsmSliceFromPayload(uint vsmPayload, uint viewID, RWStructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos)
+{
+    const uint field = CLodVisibleClusterShadowClipmapIndexFromPayload(vsmPayload);
+    if (field < kCLodVirtualShadowClipmapCount)
+    {
+        return field;
+    }
+    return CLodVisibleClusterVsmSliceFromField(field, CLodVirtualShadowFindClipmapIndexForView(viewID, clipmapInfos));
 }
 
 bool CLodVisibleClusterHasVsmBlockDataFromPayload(uint vsmPayload)
@@ -268,7 +332,8 @@ uint4 CLodPackVisibleCluster(
     const uint pageOffsetUnits =
         pageSlabByteOffset >> CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_SHIFT;
     return uint4(
-        (viewID & 0xFFu) | ((instanceID & 0xFFFFFFu) << 8u),
+        (viewID & CLOD_PACKED_VISIBLE_CLUSTER_VIEW_MASK) |
+            ((instanceID & CLOD_PACKED_VISIBLE_CLUSTER_INSTANCE_MASK) << CLOD_PACKED_VISIBLE_CLUSTER_VIEW_BITS),
         (localMeshletIndex & 0x3FFFu) | ((groupID & 0x3FFFFu) << 14u),
         ((groupID >> 18u) & 0x3u) |
             ((pageSlabDescriptorIndex & 0xFFFFFu) << 2u) |
@@ -293,7 +358,8 @@ uint4 CLodPackVisibleClusterWithVsmPayload(
     const uint pageOffsetUnits =
         pageSlabByteOffset >> CLOD_PACKED_VISIBLE_CLUSTER_PAGE_OFFSET_SHIFT;
     return uint4(
-        (viewID & 0xFFu) | ((instanceID & 0xFFFFFFu) << 8u),
+        (viewID & CLOD_PACKED_VISIBLE_CLUSTER_VIEW_MASK) |
+            ((instanceID & CLOD_PACKED_VISIBLE_CLUSTER_INSTANCE_MASK) << CLOD_PACKED_VISIBLE_CLUSTER_VIEW_BITS),
         (localMeshletIndex & 0x3FFFu) | ((groupID & 0x3FFFFu) << 14u),
         ((groupID >> 18u) & 0x3u) |
             ((pageSlabDescriptorIndex & 0xFFFFFu) << 2u) |

@@ -104,6 +104,9 @@ inline constexpr const char* CLodDirectionalVirtualShadowAutoLodBiasScaleSetting
 inline constexpr const char* CLodDirectionalVirtualShadowPredictiveLodInvalidationSettingName = "clodDirectionalVirtualShadowPredictiveLodInvalidation";
 inline constexpr const char* CLodDirectionalVirtualShadowPageRenderBudgetSettingName = "clodDirectionalVirtualShadowPageRenderBudget";
 inline constexpr const char* CLodDirectionalVirtualShadowUpgradePageRenderBudgetSettingName = "clodDirectionalVirtualShadowUpgradePageRenderBudget";
+// Frames a page waits after it was last rendered before a streaming upgrade may render it again. The upgrade stays
+// pending meanwhile, so refinements that arrive in the wait share one re-render and none are lost. 0 disables.
+inline constexpr const char* CLodVirtualShadowUpgradeCooldownFramesSettingName = "clodVirtualShadowUpgradeCooldownFrames";
 inline constexpr const char* CLodDirectionalVirtualShadowReceiverSubpageMaskSettingName = "clodDirectionalVirtualShadowReceiverSubpageMask";
 inline constexpr const char* CLodDirectionalVirtualShadowReceiverSubpageModeSettingName = "clodDirectionalVirtualShadowReceiverSubpageMode";
 inline constexpr uint32_t CLodVirtualShadowReceiverSubpageModeOff = 0u;
@@ -134,6 +137,11 @@ inline constexpr CLodVirtualShadowBudgetAdmission CLodVirtualShadowAdmitPageCoun
     };
 }
 inline constexpr const char* CLodDirectionalVirtualShadowSourceAngleDegreesSettingName = "clodDirectionalVirtualShadowSourceAngleDegrees";
+// How many local light faces (a spot light is one, a point light six) get virtual shadow maps at once, at most
+// CLodVirtualShadowMaxLocalFaceCount. 0 shadows no spot or point light.
+inline constexpr const char* CLodLocalVirtualShadowMaxFacesSettingName = "clodLocalVirtualShadowMaxFaces";
+// Added to the mip a local light face's receivers request: positive is coarser.
+inline constexpr const char* CLodLocalVirtualShadowLodBiasSettingName = "clodLocalVirtualShadowLodBias";
 inline constexpr const char* CLodDirectionalVirtualShadowSmrtRayCountDirectionalSettingName = "clodDirectionalVirtualShadowSmrtRayCountDirectional";
 inline constexpr const char* CLodDirectionalVirtualShadowSmrtSamplesPerRayDirectionalSettingName = "clodDirectionalVirtualShadowSmrtSamplesPerRayDirectional";
 inline constexpr const char* CLodDirectionalVirtualShadowSmrtMaxRayAngleFromLightDegreesSettingName = "clodDirectionalVirtualShadowSmrtMaxRayAngleFromLightDegrees";
@@ -334,6 +342,20 @@ static_assert(sizeof(CLodAVBOITEarlyDepthTileIndirectCommand) == 28u, "CLodAVBOI
 
 inline constexpr uint32_t CLodVirtualShadowMaxSupportedClipmapCount = 22u;
 inline constexpr uint32_t CLodVirtualShadowDefaultClipmapCount = 22u;
+// Page-table slices; mirrors clodVirtualShadowClipmap.hlsli. The sun's clip i is slice i. Each spot or point light face
+// owns two more after them: mip 0 fills the first, mips 1-7 are packed into the second.
+inline constexpr uint32_t CLodVirtualShadowMaxLocalFaceCount = 48u;
+inline constexpr uint32_t CLodVirtualShadowLocalSlicesPerFace = 2u;
+inline constexpr uint32_t CLodVirtualShadowLocalMipCount = 8u;
+inline constexpr uint32_t CLodVirtualShadowFirstLocalSlice = CLodVirtualShadowMaxSupportedClipmapCount;
+inline constexpr uint32_t CLodVirtualShadowMaxSliceCount =
+    CLodVirtualShadowMaxSupportedClipmapCount + CLodVirtualShadowMaxLocalFaceCount * CLodVirtualShadowLocalSlicesPerFace;
+inline constexpr uint32_t CLodVirtualShadowInvalidSlice = CLodVirtualShadowMaxSliceCount;
+// The clip info buffer holds one row per slice, then one view row per camera buffer index naming the slice that camera
+// renders. A shadow view with a camera buffer index at or past CLodVirtualShadowMaxViewRowCount renders nothing.
+inline constexpr uint32_t CLodVirtualShadowMaxViewRowCount = 512u;
+inline constexpr uint32_t CLodVirtualShadowViewRowBase = CLodVirtualShadowMaxSliceCount;
+inline constexpr uint32_t CLodVirtualShadowClipInfoRowCount = CLodVirtualShadowViewRowBase + CLodVirtualShadowMaxViewRowCount;
 inline constexpr uint32_t CLodVirtualShadowPhysicalPageSize = 128u;
 inline constexpr uint32_t CLodVirtualShadowFixedVirtualPageCountPerAxis = 128u;
 inline constexpr uint32_t CLodVirtualShadowFixedVirtualResolution =
@@ -365,6 +387,8 @@ inline constexpr uint32_t CLodVirtualShadowMaxPhysicalPageCount =
 inline constexpr uint32_t CLodVirtualShadowExpandedRecordCapacityMultiplier = 4u;
 inline constexpr float CLodVirtualShadowDefaultDirectionalLodBias = 1.2f;
 inline constexpr float CLodVirtualShadowDefaultDirectionalSourceAngleDegrees = 6.0f;
+inline constexpr uint32_t CLodVirtualShadowDefaultLocalMaxFaces = 24u;
+inline constexpr float CLodVirtualShadowDefaultLocalLodBias = 0.0f;
 inline constexpr uint32_t CLodVirtualShadowDefaultSmrtRayCountDirectional = 2u;
 inline constexpr uint32_t CLodVirtualShadowDefaultSmrtSamplesPerRayDirectional = 3u;
 inline constexpr float CLodVirtualShadowDefaultSmrtMaxRayAngleFromLightDegrees = 5.0f;
@@ -385,7 +409,7 @@ inline constexpr uint32_t CLodVirtualShadowReceiverSubpagesPerAxis = 4u;
 inline constexpr uint32_t CLodVirtualShadowMaxReceiverPageCount =
     CLodVirtualShadowMaxPageTableResolution *
     CLodVirtualShadowMaxPageTableResolution *
-    CLodVirtualShadowMaxSupportedClipmapCount;
+    CLodVirtualShadowMaxSliceCount;
 inline constexpr uint32_t CLodVirtualShadowBlockPackedPhysicalPageIndexCount =
     (CLodVirtualShadowBlockPagesPerAxis * CLodVirtualShadowBlockPagesPerAxis) / 2u;
 inline constexpr uint32_t CLodVirtualShadowMaxBlocksPerAxis =
@@ -393,7 +417,7 @@ inline constexpr uint32_t CLodVirtualShadowMaxBlocksPerAxis =
 inline constexpr uint32_t CLodVirtualShadowMaxBlocksPerClipmap =
     CLodVirtualShadowMaxBlocksPerAxis * CLodVirtualShadowMaxBlocksPerAxis;
 inline constexpr uint32_t CLodVirtualShadowMaxMarkedBlockCount =
-    CLodVirtualShadowMaxBlocksPerClipmap * CLodVirtualShadowMaxSupportedClipmapCount;
+    CLodVirtualShadowMaxBlocksPerClipmap * CLodVirtualShadowMaxSliceCount;
 inline constexpr uint32_t CLodVirtualShadowMaxMarkTileGridDimension = 512u;
 inline constexpr uint32_t CLodVirtualShadowMaxMarkTileCount =
     CLodVirtualShadowMaxMarkTileGridDimension * CLodVirtualShadowMaxMarkTileGridDimension;
@@ -412,9 +436,19 @@ inline std::atomic<uint32_t> g_clodSkinnedShadowActiveClipmapCount{0u};
 inline std::atomic<uint32_t> g_clodSkinnedShadowDynamicClipmapMask{0u};
 inline std::atomic<uint64_t> g_clodSkinnedShadowClassificationGeneration{0u};
 inline std::atomic<uint64_t> g_clodSkinnedShadowOneShotInvalidationCount{0u};
+// Local light faces holding slices this frame, published by the VSM setup pass. Slice passes dispatch over
+// CLodVirtualShadowActiveSliceCount() rather than every slice the page table has room for.
+inline std::atomic<uint32_t> g_clodVirtualShadowActiveLocalFaceCount{0u};
+inline uint32_t CLodVirtualShadowActiveSliceCount() noexcept {
+    const uint32_t faces = g_clodVirtualShadowActiveLocalFaceCount.load(std::memory_order_relaxed);
+    return CLodVirtualShadowFirstLocalSlice +
+        (faces < CLodVirtualShadowMaxLocalFaceCount ? faces : CLodVirtualShadowMaxLocalFaceCount) * CLodVirtualShadowLocalSlicesPerFace;
+}
 inline constexpr uint32_t CLodVirtualShadowClipmapValidFlag = 0x1u;
 inline constexpr uint32_t CLodVirtualShadowClipmapInvalidateFlag = 0x2u;
 inline constexpr uint32_t CLodVirtualShadowClipmapDynamicSkinnedFlag = 0x4u;
+inline constexpr uint32_t CLodVirtualShadowClipmapLocalFlag = 0x8u;
+inline constexpr uint32_t CLodVirtualShadowClipmapCubeFlag = 0x10u;
 inline constexpr uint32_t CLodVirtualShadowPageAllocatedMask = 0x80000000u;
 inline constexpr uint32_t CLodVirtualShadowPageDirtyMask = 0x40000000u;
 inline constexpr uint32_t CLodVirtualShadowPageContentValidMask = 0x20000000u;
@@ -714,7 +748,10 @@ static_assert(
     "Packed VSM page-job records reserve 7 bits per page coordinate");
 static_assert(
     CLodVirtualShadowMaxSupportedClipmapCount <= (1u << 5u),
-    "Packed VSM transient records reserve 5 bits for clipmap indices");
+    "The visible-cluster VSM payload reserves 5 bits for a clip index");
+static_assert(
+    CLodVirtualShadowMaxSliceCount < (1u << 8u),
+    "Packed VSM predicted pages reserve 8 bits for slice indices");
 
 struct CLodVirtualShadowClipmapInfo
 {
@@ -879,8 +916,9 @@ struct CLodVirtualShadowPredictedPage
     [[nodiscard]] uint32_t PhysicalPageIndex() const noexcept {
         return physicalClipmapVirtualLow & 0x3FFFu;
     }
+    // The slice: 5 bits here, the high 3 in virtualHighAndInstance bits 1-3.
     [[nodiscard]] uint32_t ClipmapIndex() const noexcept {
-        return (physicalClipmapVirtualLow >> 14u) & 0x1Fu;
+        return ((physicalClipmapVirtualLow >> 14u) & 0x1Fu) | (((virtualHighAndInstance >> 1u) & 0x7u) << 5u);
     }
     [[nodiscard]] uint32_t VirtualAddress() const noexcept {
         return ((physicalClipmapVirtualLow >> 19u) & 0x1FFFu) |
@@ -1002,6 +1040,9 @@ struct CLodVirtualShadowStats
     uint32_t blockExpandedRequestedRecordCount = 0u;
     uint32_t blockExpandedCommittedRecordCount = 0u;
     uint32_t blockExpandedDroppedRecordCount = 0u;
+    uint32_t rasterWorkDroppedCount = 0u;
+    uint32_t emptyAdmittedCompletedCount = 0u;
+    uint32_t upgradeCooldownDeferredPageCount = 0u;
     uint32_t setupWrappedClearedPageTableEntries[CLodVirtualShadowMaxSupportedClipmapCount] = {};
     uint32_t setupStaleDirtyClearedPageTableEntries[CLodVirtualShadowMaxSupportedClipmapCount] = {};
     uint32_t markResidentCleanHits[CLodVirtualShadowMaxSupportedClipmapCount] = {};
@@ -1050,7 +1091,7 @@ struct CLodVirtualShadowStats
 };
 
 static_assert(
-    sizeof(CLodVirtualShadowStats) == (80u * sizeof(uint32_t)) + (19u * CLodVirtualShadowMaxSupportedClipmapCount * sizeof(uint32_t)),
+    sizeof(CLodVirtualShadowStats) == (83u * sizeof(uint32_t)) + (19u * CLodVirtualShadowMaxSupportedClipmapCount * sizeof(uint32_t)),
     "CLodVirtualShadowStats size must match HLSL");
 
 

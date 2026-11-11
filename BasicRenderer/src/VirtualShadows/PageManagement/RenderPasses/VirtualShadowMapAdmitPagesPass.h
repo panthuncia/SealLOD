@@ -17,8 +17,6 @@ struct VirtualShadowMapAdmitPagesBindings {
     org::PipelineState admitPipeline, applyUpgradesPipeline;
     org::DeclaredViewToken pageTable, dirtyPageFlags, pageMetadata, clipmapInfo, compactShadowCameras, stats;
     std::vector<org::DeclaredViewToken> upgradeInputs;
-    uint32_t normalBudget = 0;
-    uint32_t upgradeBudget = 0;
 };
 
 struct VirtualShadowMapAdmitPagesFrame {
@@ -28,6 +26,10 @@ struct VirtualShadowMapAdmitPagesFrame {
     };
     std::vector<Upgrade> upgrades;
     uint32_t pageTableResolution = 0;
+    // Read each frame, so the settings apply without rebuilding the graph.
+    uint32_t normalBudget = 0;
+    uint32_t upgradeBudget = 0;
+    uint32_t upgradeCooldownFrames = 0;
 };
 
 class VirtualShadowMapAdmitPagesPass final : public org::TypedRenderGraphPass<VirtualShadowMapAdmitPagesPass,

@@ -9,6 +9,8 @@
 #include "Resources/Buffers/Buffer.h"
 #include "Resources/PixelBuffer.h"
 
+#include <algorithm>
+
 #include "../shaders/PerPassRootConstants/clodVirtualShadowExpandPredictedPagesRootConstants.h"
 
 VirtualShadowMapExpandPredictedPagesPass::VirtualShadowMapExpandPredictedPagesPass(
@@ -22,7 +24,9 @@ VirtualShadowMapExpandPredictedPagesPass::VirtualShadowMapExpandPredictedPagesPa
     std::shared_ptr<org::PixelBuffer> pageTableTexture,
     std::shared_ptr<org::Buffer> pageMetadataBuffer,
     std::shared_ptr<org::Buffer> pageViewInfoBuffer,
-    uint32_t physicalPageCount)
+    uint32_t physicalPageCount,
+    std::shared_ptr<org::Buffer> replayStateBuffer,
+    std::array<std::shared_ptr<org::Buffer>, 3> reyesOverflowBuffers)
     : m_predictiveCandidatesBuffer(std::move(predictiveCandidatesBuffer))
     , m_predictiveCandidateCountBuffer(std::move(predictiveCandidateCountBuffer))
     , m_predictiveRawPagesBuffer(std::move(predictiveRawPagesBuffer))
@@ -34,6 +38,8 @@ VirtualShadowMapExpandPredictedPagesPass::VirtualShadowMapExpandPredictedPagesPa
     , m_pageMetadataBuffer(std::move(pageMetadataBuffer))
     , m_pageViewInfoBuffer(std::move(pageViewInfoBuffer))
     , m_physicalPageCount(physicalPageCount)
+    , m_replayStateBuffer(std::move(replayStateBuffer))
+    , m_reyesOverflowBuffers(std::move(reyesOverflowBuffers))
 {
 }
 
@@ -45,7 +51,7 @@ VirtualShadowMapExpandPredictedPagesBindings VirtualShadowMapExpandPredictedPage
             Builtin::CameraBuffer);
 
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    return {builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+    VirtualShadowMapExpandPredictedPagesBindings bindings{builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
                 L"CLodVirtualShadowStampRenderedPageGenerationsCSMain", "CLod.VirtualShadow.StampRenderedPageGenerations.PSO")),
         builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
                 L"CLodVirtualShadowExpandPredictedPagesCSMain", "CLod.VirtualShadow.ExpandPredictedPages.PSO")),
@@ -56,7 +62,16 @@ VirtualShadowMapExpandPredictedPagesBindings VirtualShadowMapExpandPredictedPage
         builder.UnorderedAccess(m_predictiveRawPageCountBuffer), builder.ShaderResource(m_clipmapInfoBuffer),
         builder.UnorderedAccess(m_scratchBitsetBuffer), builder.UnorderedAccess(m_statsBuffer),
         builder.UnorderedAccess(m_pageTableTexture, {static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)}), builder.UnorderedAccess(m_pageMetadataBuffer),
-        builder.UnorderedAccess(m_pageViewInfoBuffer), m_physicalPageCount};
+        builder.UnorderedAccess(m_pageViewInfoBuffer)};
+    bindings.physicalPageCount = m_physicalPageCount;
+    bindings.replayState = builder.ShaderResource(m_replayStateBuffer);
+    bindings.hasReyesOverflows = std::ranges::all_of(m_reyesOverflowBuffers, [](const auto& buffer) { return buffer != nullptr; });
+    if (bindings.hasReyesOverflows) {
+        for (size_t i = 0; i < m_reyesOverflowBuffers.size(); ++i) {
+            bindings.reyesOverflows[i] = builder.ShaderResource(m_reyesOverflowBuffers[i]);
+        }
+    }
+    return bindings;
 }
 
 void VirtualShadowMapExpandPredictedPagesPass::Record(const VirtualShadowMapExpandPredictedPagesBindings& bindings,
@@ -72,8 +87,16 @@ void VirtualShadowMapExpandPredictedPagesPass::Record(const VirtualShadowMapExpa
     constants[CLOD_VIRTUAL_SHADOW_EXPAND_PREDICTED_PAGES_PAGE_TABLE_DESCRIPTOR_INDEX] = recording.Index(bindings.pageTable);
     constants[CLOD_VIRTUAL_SHADOW_EXPAND_PREDICTED_PAGES_PAGE_METADATA_DESCRIPTOR_INDEX] = recording.Index(bindings.pageMetadata);
     constants[CLOD_VIRTUAL_SHADOW_EXPAND_PREDICTED_PAGES_PHYSICAL_PAGE_COUNT] = bindings.physicalPageCount;
-    constants[CLOD_VIRTUAL_SHADOW_EXPAND_PREDICTED_PAGES_CLIPMAP_COUNT] = CLodVirtualShadowMaxSupportedClipmapCount;
+    constants[CLOD_VIRTUAL_SHADOW_EXPAND_PREDICTED_PAGES_CLIPMAP_COUNT] = CLodVirtualShadowMaxSliceCount;
     constants[CLOD_VIRTUAL_SHADOW_EXPAND_PREDICTED_PAGES_PAGE_VIEW_INFO_DESCRIPTOR_INDEX] = recording.Index(bindings.pageViewInfo);
+    constants[CLOD_VIRTUAL_SHADOW_EXPAND_PREDICTED_PAGES_REPLAY_STATE_DESCRIPTOR_INDEX] = recording.Index(bindings.replayState);
+    const uint32_t reyesOverflowSlots[3] = {
+        CLOD_VIRTUAL_SHADOW_EXPAND_PREDICTED_PAGES_REYES_SPLIT_OVERFLOW_A_DESCRIPTOR_INDEX,
+        CLOD_VIRTUAL_SHADOW_EXPAND_PREDICTED_PAGES_REYES_SPLIT_OVERFLOW_B_DESCRIPTOR_INDEX,
+        CLOD_VIRTUAL_SHADOW_EXPAND_PREDICTED_PAGES_REYES_DICE_OVERFLOW_DESCRIPTOR_INDEX};
+    for (size_t i = 0; i < 3; ++i) {
+        constants[reyesOverflowSlots[i]] = bindings.hasReyesOverflows ? recording.Index(bindings.reyesOverflows[i]) : 0xFFFFFFFFu;
+    }
     br::render::DispatchCompute(recording, bindings.stampContentGenerationPipeline, constants, (bindings.physicalPageCount + 63u) / 64u);
     recording.UavBarrier();
     br::render::DispatchCompute(recording, bindings.expandPipeline, constants, (CLodVirtualShadowPredictiveCandidateCapacity + 63u) / 64u);

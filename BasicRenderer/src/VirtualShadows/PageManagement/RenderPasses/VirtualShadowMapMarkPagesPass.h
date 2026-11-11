@@ -20,6 +20,9 @@ struct VirtualShadowMarkFrameData {
     uint32_t screenWidth = 0, screenHeight = 0;
     uint32_t activeClipmapCount = 0;
     uint32_t receiverSubpageMode = 0;
+    uint32_t localFaceCount = 0;
+    float localLodBias = 0.0f;
+    uint32_t sliceCount = 0;
 };
 
 struct VirtualShadowMapMarkPagesBindings {

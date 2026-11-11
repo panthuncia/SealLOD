@@ -19,11 +19,11 @@ struct VirtualShadowMapAllocatePagesBindings {
     org::ResourceBindingToken indirectArgs;
     org::DeclaredViewToken clipmapInfo, pageTable;
     org::DeclaredViewToken pageMetadata, dirtyFlags, freePages, reusablePages, header, stats;
-    uint32_t pageRenderBudget = 0;
 };
 struct VirtualShadowMapAllocatePagesFrame {
     uint32_t pageTableResolution = 0;
     uint32_t maxPhysicalPages = 0;
+    uint32_t pageRenderBudget = 0; // Read each frame, so the setting applies without rebuilding the graph.
 };
 
 class VirtualShadowMapAllocatePagesPass final : public org::TypedRenderGraphPass<VirtualShadowMapAllocatePagesPass,

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <iostream>
@@ -7,6 +8,8 @@
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include <BasicRenderer/Extensions/VirtualShadowCasterProvider.h>
 #include "Utilities/Utilities.h"
+#include "BasicRenderer/Scene/Components.h"
+#include "Lighting/Lights/LocalShadowSelection.h"
 
 namespace {
 class MockCasterProvider final : public IVirtualShadowCasterProvider
@@ -584,6 +587,155 @@ void RunDirectionalClipFitCases()
 }
 }
 
+LightInfo MakeLocalLight(unsigned int type, DirectX::XMFLOAT3 position, float range, float outerHalfAngle = 0.5f)
+{
+    LightInfo light{};
+    light.type = type;
+    light.posWorldSpace = DirectX::XMVectorSet(position.x, position.y, position.z, 1.0f);
+    light.dirWorldSpace = DirectX::XMVectorSet(0.0f, -1.0f, 0.0f, 0.0f);
+    light.range = range;
+    light.outerConeCos = std::cos(outerHalfAngle);
+    light.innerConeCos = std::cos(outerHalfAngle * 0.8f);
+    light.shadowCaster = 1u;
+    return light;
+}
+
+// A world position's uv in a face camera, false outside its frustum.
+bool ProjectToFace(const CameraInfo& face, DirectX::XMVECTOR positionWS, DirectX::XMFLOAT2& uv)
+{
+    DirectX::XMFLOAT4 clip;
+    DirectX::XMStoreFloat4(&clip, DirectX::XMVector4Transform(DirectX::XMVectorSetW(positionWS, 1.0f), face.viewProjection));
+    if (clip.w <= 0.0f || clip.z < 0.0f || clip.z > clip.w) {
+        return false;
+    }
+    uv = {clip.x / clip.w * 0.5f + 0.5f, 0.5f - clip.y / clip.w * 0.5f};
+    return uv.x >= 0.0f && uv.x <= 1.0f && uv.y >= 0.0f && uv.y <= 1.0f;
+}
+
+void RunLocalShadowCases()
+{
+    using namespace br::lighting;
+    static_assert(CLodVirtualShadowMaxSliceCount ==
+        CLodVirtualShadowFirstLocalSlice + CLodVirtualShadowMaxLocalFaceCount * CLodVirtualShadowLocalSlicesPerFace);
+    static_assert(CLodVirtualShadowMaxPhysicalPageCount <= CLodVirtualShadowPhysicalPageIndexMask);
+
+    // Face counts: a spot is one face, a point light or a spot wider than 60 degrees a cube.
+    const auto spot = MakeLocalLight(Components::LightType::Spot, {0.0f, 5.0f, 0.0f}, 20.0f, 0.5f);
+    const auto wideSpot = MakeLocalLight(Components::LightType::Spot, {0.0f, 5.0f, 0.0f}, 20.0f, 1.2f);
+    const auto point = MakeLocalLight(Components::LightType::Point, {1.0f, 2.0f, 3.0f}, 10.0f);
+    if (LocalShadowFaceCount(spot) != 1u || LocalShadowFaceCount(wideSpot) != 6u || LocalShadowFaceCount(point) != 6u) {
+        throw std::runtime_error("local shadow face counts are wrong");
+    }
+
+    // A spot's face sees its whole cone.
+    const auto spotFaces = BuildLocalShadowFaceCameras(spot, CLodVirtualShadowFixedVirtualResolution, 2048u);
+    if (spotFaces.size() != 1u) {
+        throw std::runtime_error("a spot light did not get one face");
+    }
+    for (int i = 0; i < 16; ++i) {
+        const float around = 6.2831853f * static_cast<float>(i) / 16.0f;
+        const float half = std::acos(spot.outerConeCos) * 0.999f;
+        const DirectX::XMVECTOR direction = DirectX::XMVectorSet(
+            std::sin(half) * std::cos(around), -std::cos(half), std::sin(half) * std::sin(around), 0.0f);
+        DirectX::XMFLOAT2 uv;
+        if (!ProjectToFace(spotFaces[0], DirectX::XMVectorAdd(spot.posWorldSpace, DirectX::XMVectorScale(direction, 10.0f)), uv)) {
+            throw std::runtime_error("a spot light's face does not cover its cone");
+        }
+    }
+
+    // Each direction falls in the cube face its dominant axis picks (the lookup's choice), at least the guard band
+    // from that face's edge, so filter taps never leave the face.
+    const auto cube = BuildLocalShadowFaceCameras(point, CLodVirtualShadowFixedVirtualResolution, 2048u);
+    if (cube.size() != 6u) {
+        throw std::runtime_error("a point light did not get six faces");
+    }
+    const float guardUv = kLocalShadowCubeGuardTexels / kLocalShadowCoarsestMipTexels;
+    uint32_t state = 12345u;
+    const auto random = [&state]() {
+        state = state * 1664525u + 1013904223u;
+        return static_cast<float>(state >> 8) / 16777216.0f * 2.0f - 1.0f;
+    };
+    for (int i = 0; i < 4096; ++i) {
+        DirectX::XMFLOAT3 direction{random(), random(), random()};
+        if (i < 8) {
+            // Cube corners, where three faces meet.
+            direction = {(i & 1) ? 1.0f : -1.0f, (i & 2) ? 1.0f : -1.0f, (i & 4) ? 1.0f : -1.0f};
+        }
+        const float ax = std::abs(direction.x);
+        const float ay = std::abs(direction.y);
+        const float az = std::abs(direction.z);
+        if ((std::max)({ax, ay, az}) < 1.0e-3f) {
+            continue;
+        }
+        const uint32_t face = (ax >= ay && ax >= az) ? (direction.x >= 0.0f ? 0u : 1u)
+            : (ay >= az) ? (direction.y >= 0.0f ? 2u : 3u)
+            : (direction.z >= 0.0f ? 4u : 5u);
+        const DirectX::XMVECTOR offset =
+            DirectX::XMVectorScale(DirectX::XMVector3Normalize(DirectX::XMLoadFloat3(&direction)), 5.0f);
+        DirectX::XMFLOAT2 uv;
+        if (!ProjectToFace(cube[face], DirectX::XMVectorAdd(point.posWorldSpace, offset), uv) ||
+            uv.x < guardUv - 1.0e-4f || uv.x > 1.0f - guardUv + 1.0e-4f ||
+            uv.y < guardUv - 1.0e-4f || uv.y > 1.0f - guardUv + 1.0e-4f) {
+            throw std::runtime_error("a direction is not inside its cube face's guard band");
+        }
+    }
+
+    // Selection: highest score first, skipping lights that do not fit what remains of the budget.
+    {
+        const std::array<LocalShadowCandidate, 4> candidates{{
+            {5.0f, 6u, false},
+            {9.0f, 1u, false},
+            {7.0f, 6u, false},
+            {1.0f, 1u, false},
+        }};
+        if (SelectLocalShadowLights(candidates, 8u) != std::vector<uint32_t>{1u, 2u, 3u}) {
+            throw std::runtime_error("local shadow selection did not pack the budget by score");
+        }
+    }
+    // Hysteresis: a selected light keeps its faces against a slightly better newcomer, not a much better one.
+    {
+        const std::array<LocalShadowCandidate, 2> slightlyBetter{{{1.0f, 6u, true}, {1.2f, 6u, false}}};
+        if (SelectLocalShadowLights(slightlyBetter, 6u) != std::vector<uint32_t>{0u}) {
+            throw std::runtime_error("local shadow hysteresis did not keep the selected light");
+        }
+        const std::array<LocalShadowCandidate, 2> muchBetter{{{1.0f, 6u, true}, {1.5f, 6u, false}}};
+        if (SelectLocalShadowLights(muchBetter, 6u) != std::vector<uint32_t>{1u}) {
+            throw std::runtime_error("local shadow hysteresis kept a much weaker light");
+        }
+    }
+
+    // Faces are given in runs, first fit; a fragmented free list has no run for a cube.
+    {
+        std::array<bool, 12> used{};
+        const uint32_t a = AllocateLocalShadowFaces(used, 6u);
+        const uint32_t b = AllocateLocalShadowFaces(used, 1u);
+        const uint32_t c = AllocateLocalShadowFaces(used, 1u);
+        if (a != 0u || b != 6u || c != 7u) {
+            throw std::runtime_error("local shadow faces were not allocated first fit");
+        }
+        FreeLocalShadowFaces(used, b, 1u);
+        if (AllocateLocalShadowFaces(used, 6u) != used.size()) {
+            throw std::runtime_error("a cube was given faces that are not one run");
+        }
+        if (AllocateLocalShadowFaces(used, 1u) != 6u) {
+            throw std::runtime_error("a freed face was not reused");
+        }
+    }
+
+    // Score: nearer and larger lights rank higher, and a light at the camera still has a finite score.
+    {
+        const auto nearLight = MakeLocalLight(Components::LightType::Point, {0.0f, 0.0f, 5.0f}, 10.0f);
+        const auto farLight = MakeLocalLight(Components::LightType::Point, {0.0f, 0.0f, 50.0f}, 10.0f);
+        const auto bigLight = MakeLocalLight(Components::LightType::Point, {0.0f, 0.0f, 50.0f}, 40.0f);
+        const DirectX::XMFLOAT3 camera{0.0f, 0.0f, 0.0f};
+        if (!(LocalShadowScore(nearLight, camera) > LocalShadowScore(farLight, camera)) ||
+            !(LocalShadowScore(bigLight, camera) > LocalShadowScore(farLight, camera)) ||
+            !std::isfinite(LocalShadowScore(MakeLocalLight(Components::LightType::Point, camera, 10.0f), camera))) {
+            throw std::runtime_error("local shadow scores are not ordered by range over distance");
+        }
+    }
+}
+
 int main()
 {
     try {
@@ -596,6 +748,7 @@ int main()
         RunAbsolutePageTagCases();
         RunDirectionalClipFitCases();
         RunCasterExtensionCases();
+        RunLocalShadowCases();
         std::cout << "Virtual shadow budget tests passed.\n";
         return 0;
     }

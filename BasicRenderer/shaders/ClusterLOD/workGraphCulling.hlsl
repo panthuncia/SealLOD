@@ -538,6 +538,24 @@ bool CLodWorkGraphIsPhase2()
     return (CLOD_WG_FLAGS & CLOD_WG_FLAG_PHASE2) != 0u;
 }
 
+// Shadow work culling could not carry this frame: a record past a full queue or buffer, or a page not resident. An
+// admitted page that received no depth is empty only if every caster that could reach it was rasterized, so the
+// shadow map completes such pages only in frames with none of this (CLodVirtualShadowStampRenderedPageGenerationsCSMain).
+// The node, meshlet and Reyes queues count their own drops in the replay state.
+void CLodNoteVirtualShadowWorkDropped(uint count)
+{
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+    if (count != 0u)
+    {
+        RWStructuredBuffer<CLodReplayBufferState> replayState =
+            ResourceDescriptorHeap[CLOD_WG_OCCLUSION_REPLAY_STATE_DESCRIPTOR_INDEX];
+        InterlockedAdd(replayState[0].shadowWorkDropped, count);
+    }
+#else
+    (void)count;
+#endif
+}
+
 uint CLodWorkGraphSharedVisibleClusterWriteCapacity(
     uint visibleClusterCapacity,
     uint phase1HWBase,
@@ -626,9 +644,9 @@ bool CLodReadBit(ByteAddressBuffer bits, uint key)
 }
 
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
-// The clip that renders viewId, as an index: kCLodVirtualShadowClipmapCount when none does. A caller that tests one
-// view many times (a node's children, a run's meshlets) resolves it once and passes it to the *InClip helpers, which
-// load the clip's info by index: each lookup reads every clip's camera index.
+// The slice viewId renders, from its view row: kCLodVirtualShadowInvalidSlice when it renders none. A caller that
+// tests one view many times (a node's children, a run's meshlets) resolves it once and passes it to the *InClip
+// helpers, which load the slice's info by index.
 uint CLodVirtualShadowClipmapIndexForView(uint viewId)
 {
     StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos =
@@ -638,7 +656,7 @@ uint CLodVirtualShadowClipmapIndexForView(uint viewId)
 
 bool CLodVirtualShadowLoadClipmap(uint clipmapIndex, out CLodVirtualShadowClipmapInfo clipmapInfo)
 {
-    if (clipmapIndex >= kCLodVirtualShadowClipmapCount)
+    if (clipmapIndex >= kCLodVirtualShadowMaxSliceCount)
     {
         clipmapInfo = (CLodVirtualShadowClipmapInfo)0;
         return false;
@@ -652,12 +670,22 @@ bool CLodVirtualShadowLoadClipmap(uint clipmapIndex, out CLodVirtualShadowClipma
 bool CLodVirtualShadowFindClipmapForView(uint viewId, out uint outClipmapIndex, out CLodVirtualShadowClipmapInfo outClipmapInfo)
 {
     const uint clipmapIndex = CLodVirtualShadowClipmapIndexForView(viewId);
-    outClipmapIndex = clipmapIndex < kCLodVirtualShadowClipmapCount ? clipmapIndex : 0u;
+    outClipmapIndex = clipmapIndex < kCLodVirtualShadowMaxSliceCount ? clipmapIndex : 0u;
     return CLodVirtualShadowLoadClipmap(clipmapIndex, outClipmapInfo);
 }
 
+// The local light face whose LOD this thread evaluates, set by CLodResolveLodViewId; kCLodVirtualShadowInvalidSlice
+// for a sun clip. Read by CLodVirtualShadowLocalLodErrorScale.
+static uint g_clodLocalShadowLodSlice = kCLodVirtualShadowInvalidSlice;
+
+// Every LOD camera load goes through here, so this is also where a thread learns which local face its projected
+// errors are for.
 uint CLodResolveLodViewId(uint cullViewId)
 {
+    const uint slice = CLodVirtualShadowClipmapIndexForView(cullViewId);
+    g_clodLocalShadowLodSlice = (slice >= kCLodVirtualShadowFirstLocalSlice && slice < kCLodVirtualShadowMaxSliceCount)
+        ? slice
+        : kCLodVirtualShadowInvalidSlice;
     return cullViewId;
 }
 
@@ -800,13 +828,109 @@ bool CLodVirtualShadowViewHasActivePages(uint viewId, bool dynamicLayer)
     const uint hierarchyMask = dynamicLayer
         ? kCLodVirtualShadowHierarchyDynamicMask
         : kCLodVirtualShadowHierarchyStaticMask;
-    return (dirtyHierarchy.Load(
+    const bool active = (dirtyHierarchy.Load(
         int4(0, 0, clipmapInfo.pageTableLayer, hierarchyTopMip)) & hierarchyMask) != 0u;
+    if (active || clipmapIndex < kCLodVirtualShadowFirstLocalSlice)
+    {
+        return active;
+    }
+    // A local face: mips 1-7 are in its second slice.
+    return (dirtyHierarchy.Load(
+        int4(0, 0, clipmapInfo.pageTableLayer + 1u, hierarchyTopMip)) & hierarchyMask) != 0u;
 }
 
 bool CLodVirtualShadowViewHasDirtyPages(uint viewId)
 {
     return CLodVirtualShadowViewHasActivePages(viewId, false);
+}
+
+// The finest mip of a local light face with active pages under a sphere's bounds, or kCLodVirtualShadowLocalMipCount
+// for none. Mip 0 fills the face's first slice; mips 1-7 share its second. The hierarchy query is conservative, so a
+// sphere containing another never gets a coarser mip.
+uint CLodVirtualShadowFinestActiveLocalFaceMip(
+    float3 worldCenter,
+    float radiusWorld,
+    uint firstSlice,
+    uint hierarchyMask,
+    Texture2DArray<uint> dirtyHierarchy)
+{
+    const uint hierarchyTopMip = firstbithigh(kCLodVirtualShadowMaxPageTableResolution);
+    const bool mip0Active =
+        (dirtyHierarchy.Load(int4(0, 0, firstSlice, hierarchyTopMip)) & hierarchyMask) != 0u;
+    const bool coarseMipsActive =
+        (dirtyHierarchy.Load(int4(0, 0, firstSlice + 1u, hierarchyTopMip)) & hierarchyMask) != 0u;
+    if (!mip0Active && !coarseMipsActive)
+    {
+        return kCLodVirtualShadowLocalMipCount;
+    }
+
+    StructuredBuffer<CLodVirtualShadowCompactShadowCameraInfo> shadowCameras =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Shadows::CLodCompactShadowCameras)];
+    float2 uvMin = 0.0f.xx;
+    float2 uvMax = 0.0f.xx;
+    bool queryClipped = false;
+    if (!CLodVirtualShadowComputeSphereAabbUvBounds(
+            worldCenter, radiusWorld, shadowCameras[firstSlice], uvMin, uvMax, queryClipped))
+    {
+        return kCLodVirtualShadowLocalMipCount;
+    }
+
+    const uint2 resolution = uint2(kCLodVirtualShadowMaxPageTableResolution, kCLodVirtualShadowMaxPageTableResolution);
+    uint sampledMipLevel = 0u;
+    [loop]
+    for (uint mip = 0u; mip < kCLodVirtualShadowLocalMipCount; ++mip)
+    {
+        if (!(mip == 0u ? mip0Active : coarseMipsActive))
+        {
+            continue;
+        }
+        if (CLodVirtualShadowDirtyHierarchyAnyHit(
+                dirtyHierarchy,
+                firstSlice + CLodVirtualShadowLocalMipSliceOffset(mip),
+                resolution,
+                CLodVirtualShadowLocalMipCanvasUv(uvMin, mip),
+                CLodVirtualShadowLocalMipCanvasUv(uvMax, mip),
+                hierarchyMask,
+                sampledMipLevel))
+        {
+            return mip;
+        }
+    }
+    return kCLodVirtualShadowLocalMipCount;
+}
+
+bool CLodVirtualShadowBoundsTouchActiveLocalFacePages(
+    float3 worldCenter,
+    float radiusWorld,
+    uint firstSlice,
+    uint hierarchyMask,
+    Texture2DArray<uint> dirtyHierarchy)
+{
+    return CLodVirtualShadowFinestActiveLocalFaceMip(worldCenter, radiusWorld, firstSlice, hierarchyMask, dirtyHierarchy) <
+        kCLodVirtualShadowLocalMipCount;
+}
+
+// A local face's LOD threshold is mip 0's texel. A sphere whose finest active mip is m only needs that mip's texels,
+// 2^m times larger, so its projected error is scaled by 2^-m: geometry that only renders into coarse mips (a fallback
+// page, an upgrade of one) is drawn at their resolution instead of mip 0's. Spheres with no active pages count as the
+// coarsest mip. A parent's sphere contains its children's, so its mip is never coarser and the cut stays consistent.
+// Both layers' pages count, which can only pick a finer mip than the instance's own layer needs.
+float CLodVirtualShadowLocalLodErrorScale(float3 worldCenter, float worldRadius)
+{
+    if (g_clodLocalShadowLodSlice == kCLodVirtualShadowInvalidSlice || !CLodWorkGraphShadowDirtyPageCullingEnabled())
+    {
+        return 1.0f;
+    }
+    Texture2DArray<uint> dirtyHierarchy = ResourceDescriptorHeap[CLOD_WG_SHADOW_DIRTY_HIERARCHY_DESCRIPTOR_INDEX];
+    const uint mip = min(
+        CLodVirtualShadowFinestActiveLocalFaceMip(
+            worldCenter,
+            worldRadius,
+            g_clodLocalShadowLodSlice,
+            kCLodVirtualShadowHierarchyStaticMask | kCLodVirtualShadowHierarchyDynamicMask,
+            dirtyHierarchy),
+        kCLodVirtualShadowLocalMipCount - 1u);
+    return exp2(-(float)mip);
 }
 
 // For the clip CLodVirtualShadowClipmapIndexForView resolved.
@@ -831,6 +955,11 @@ bool CLodVirtualShadowBoundsTouchActivePagesInClip(
     const uint hierarchyMask = dynamicLayer
         ? kCLodVirtualShadowHierarchyDynamicMask
         : kCLodVirtualShadowHierarchyStaticMask;
+    if (clipmapIndex >= kCLodVirtualShadowFirstLocalSlice)
+    {
+        return CLodVirtualShadowBoundsTouchActiveLocalFacePages(
+            worldCenter, radiusWorld, clipmapIndex, hierarchyMask, dirtyHierarchy);
+    }
     if ((dirtyHierarchy.Load(int4(0, 0, clipmapInfo.pageTableLayer, hierarchyTopMip)) & hierarchyMask) == 0u)
     {
         return false;
@@ -1011,7 +1140,7 @@ bool CLodVirtualShadowComputeMeshletBlockCoverage(
     minBlockCoord = uint2(0u, 0u);
     blockCount = uint2(0u, 0u);
 
-    if (shadowClipmapIndex >= kCLodVirtualShadowClipmapCount || !CLodVirtualShadowClipmapIsValid(clipmapInfo))
+    if (shadowClipmapIndex >= kCLodVirtualShadowMaxSliceCount || !CLodVirtualShadowClipmapIsValid(clipmapInfo))
     {
         return false;
     }
@@ -1019,6 +1148,24 @@ bool CLodVirtualShadowComputeMeshletBlockCoverage(
     StructuredBuffer<CLodVirtualShadowCompactShadowCameraInfo> shadowCameras =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Shadows::CLodCompactShadowCameras)];
     const CLodVirtualShadowCompactShadowCameraInfo shadowCamera = shadowCameras[shadowClipmapIndex];
+
+    if (shadowClipmapIndex >= kCLodVirtualShadowFirstLocalSlice)
+    {
+        // A local face: its pages at mip 0, which the block helpers map to each mip. Always the block path (true):
+        // a whole-slice record could not say which mip it renders. No blocks when the bounds miss the face.
+        float2 faceUvMin = 0.0f.xx;
+        float2 faceUvMax = 0.0f.xx;
+        bool faceQueryClipped = false;
+        if (CLodVirtualShadowComputeSphereAabbUvBounds(
+                worldCenter, radiusWorld, shadowCamera, faceUvMin, faceUvMax, faceQueryClipped))
+        {
+            minPageCoord = CLodVirtualShadowVirtualPageCoordsFromUv(faceUvMin, kCLodVirtualShadowMaxPageTableResolution);
+            maxPageCoord = CLodVirtualShadowVirtualPageCoordsFromUv(faceUvMax, kCLodVirtualShadowMaxPageTableResolution);
+            minBlockCoord = CLodVirtualShadowBlockCoordFromPageCoord(minPageCoord);
+            blockCount = CLodVirtualShadowBlockCoordFromPageCoord(maxPageCoord) - minBlockCoord + 1u;
+        }
+        return true;
+    }
 
     float2 uvMin = 0.0f.xx;
     float2 uvMax = 0.0f.xx;
@@ -1045,8 +1192,9 @@ bool CLodVirtualShadowComputeMeshletBlockCoverage(
             uvMin, uvMax, shadowClipmapIndex, clipmapInfo);
 }
 
-bool CLodVirtualShadowBuildVisibleClusterBlockPayload(
+bool CLodVirtualShadowBuildVisibleClusterBlockPayloadWithField(
     uint shadowClipmapIndex,
+    uint payloadField,
     uint2 meshletMinPageCoord,
     uint2 meshletMaxPageCoord,
     uint2 blockCoord,
@@ -1083,7 +1231,7 @@ bool CLodVirtualShadowBuildVisibleClusterBlockPayload(
     }
 
     vsmPayload = CLodPackVisibleClusterVsmPayloadForBlock(
-        shadowClipmapIndex,
+        payloadField,
         blockCoord,
         minLocalPageCoord,
         maxLocalPageCoord,
@@ -1095,6 +1243,75 @@ bool CLodVirtualShadowBuildVisibleClusterBlockPayload(
     return true;
 }
 
+bool CLodVirtualShadowBuildVisibleClusterBlockPayload(
+    uint shadowClipmapIndex,
+    uint2 meshletMinPageCoord,
+    uint2 meshletMaxPageCoord,
+    uint2 blockCoord,
+    bool dynamicLayer,
+    out uint vsmPayload)
+{
+    return CLodVirtualShadowBuildVisibleClusterBlockPayloadWithField(
+        shadowClipmapIndex, shadowClipmapIndex, meshletMinPageCoord, meshletMaxPageCoord, blockCoord, dynamicLayer, vsmPayload);
+}
+
+// A meshlet's page rectangle at a local face's mip, in the canvas of the slice that holds the mip. facePageMin/Max are
+// its pages at mip 0.
+void CLodVirtualShadowLocalMipPageRect(uint2 facePageMin, uint2 facePageMax, uint mip, out uint2 pageMin, out uint2 pageMax)
+{
+    const uint2 origin = CLodVirtualShadowLocalMipPageOrigin(mip);
+    pageMin = origin + (facePageMin >> mip);
+    pageMax = origin + (facePageMax >> mip);
+}
+
+// Visible-cluster records for a meshlet in a local face: one per active block of every mip, each naming its mip. A
+// meshlet renders into every mip whose pages need it; each mip's cache must hold all its casters. Count and emit walk
+// the same blocks in the same order.
+uint CLodVirtualShadowCountLocalFaceBlocksForMeshlet(
+    uint firstSlice,
+    uint2 facePageMin,
+    uint2 facePageMax,
+    uint2 faceBlockCount,
+    bool dynamicLayer)
+{
+    if (any(faceBlockCount == 0u))
+    {
+        return 0u;
+    }
+    uint activeBlockCount = 0u;
+    [loop]
+    for (uint mip = 0u; mip < kCLodVirtualShadowLocalMipCount; ++mip)
+    {
+        uint2 pageMin;
+        uint2 pageMax;
+        CLodVirtualShadowLocalMipPageRect(facePageMin, facePageMax, mip, pageMin, pageMax);
+        const uint slice = firstSlice + CLodVirtualShadowLocalMipSliceOffset(mip);
+        const uint2 minBlock = CLodVirtualShadowBlockCoordFromPageCoord(pageMin);
+        const uint2 maxBlock = CLodVirtualShadowBlockCoordFromPageCoord(pageMax);
+        [loop]
+        for (uint blockY = minBlock.y; blockY <= maxBlock.y; ++blockY)
+        {
+            [loop]
+            for (uint blockX = minBlock.x; blockX <= maxBlock.x; ++blockX)
+            {
+                uint vsmPayload = 0u;
+                if (CLodVirtualShadowBuildVisibleClusterBlockPayloadWithField(
+                        slice,
+                        CLodVisibleClusterVsmFieldForLocalMip(mip),
+                        pageMin,
+                        pageMax,
+                        uint2(blockX, blockY),
+                        dynamicLayer,
+                        vsmPayload))
+                {
+                    activeBlockCount++;
+                }
+            }
+        }
+    }
+    return activeBlockCount;
+}
+
 uint CLodVirtualShadowCountVisibleClusterBlocksForMeshlet(
     uint shadowClipmapIndex,
     uint2 meshletMinPageCoord,
@@ -1103,6 +1320,11 @@ uint CLodVirtualShadowCountVisibleClusterBlocksForMeshlet(
     uint2 blockCount,
     bool dynamicLayer)
 {
+    if (shadowClipmapIndex >= kCLodVirtualShadowFirstLocalSlice)
+    {
+        return CLodVirtualShadowCountLocalFaceBlocksForMeshlet(
+            shadowClipmapIndex, meshletMinPageCoord, meshletMaxPageCoord, blockCount, dynamicLayer);
+    }
     uint activeBlockCount = 0u;
     const uint totalBlockCount = blockCount.x * blockCount.y;
     [loop]
@@ -1185,6 +1407,64 @@ void CLodVirtualShadowEmitVisibleClusterBlocksForMeshlet(
     uint2 blockCount,
     bool dynamicLayer)
 {
+    if (shadowClipmapIndex >= kCLodVirtualShadowFirstLocalSlice)
+    {
+        if (any(blockCount == 0u))
+        {
+            return;
+        }
+        uint localEmittedCount = 0u;
+        [loop]
+        for (uint mip = 0u; mip < kCLodVirtualShadowLocalMipCount; ++mip)
+        {
+            uint2 pageMin;
+            uint2 pageMax;
+            CLodVirtualShadowLocalMipPageRect(meshletMinPageCoord, meshletMaxPageCoord, mip, pageMin, pageMax);
+            const uint slice = shadowClipmapIndex + CLodVirtualShadowLocalMipSliceOffset(mip);
+            const uint2 minBlock = CLodVirtualShadowBlockCoordFromPageCoord(pageMin);
+            const uint2 maxBlock = CLodVirtualShadowBlockCoordFromPageCoord(pageMax);
+            [loop]
+            for (uint blockY = minBlock.y; blockY <= maxBlock.y; ++blockY)
+            {
+                [loop]
+                for (uint blockX = minBlock.x; blockX <= maxBlock.x; ++blockX)
+                {
+                    uint vsmPayload = 0u;
+                    if (!CLodVirtualShadowBuildVisibleClusterBlockPayloadWithField(
+                            slice,
+                            CLodVisibleClusterVsmFieldForLocalMip(mip),
+                            pageMin,
+                            pageMax,
+                            uint2(blockX, blockY),
+                            dynamicLayer,
+                            vsmPayload))
+                    {
+                        continue;
+                    }
+                    if (localEmittedCount < maxWriteCount)
+                    {
+                        CLodStoreVisibleClusterWithVsmPayloadGloballyCoherent(
+                            visibleClusters,
+                            writeBase + localEmittedCount,
+                            viewId,
+                            instanceIndex,
+                            localMeshletIndex,
+                            visibleGroupId,
+                            pageSlabDescriptorIndex,
+                            pageSlabByteOffset,
+                            vsmPayload);
+                        visibleClusterTransformIndices[writeBase + localEmittedCount] = clusterSideBand;
+                    }
+                    localEmittedCount++;
+                    if (localEmittedCount == maxWriteCount)
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+        return;
+    }
     const uint totalBlockCount = blockCount.x * blockCount.y;
     uint emittedCount = 0u;
     [loop]
@@ -1564,6 +1844,7 @@ void CLodAppendVoxelRasterClusterWork(
     if (!CLodTryLoadVoxelPageForSegment(clodMeshMetadata, voxelGroup, voxelSegment, voxelPageEntry, voxelPageHeader))
     {
         WGTelemetryAdd(WG_COUNTER_VOXEL_RASTER_SEGMENT_PAGE_MISSES, 1);
+        CLodNoteVirtualShadowWorkDropped(1u);
         return;
     }
 
@@ -1797,6 +2078,7 @@ void CLodAppendVoxelRasterClusterWork(
     if (droppedCount != 0u)
     {
         WGTelemetryAdd(WG_COUNTER_TRAVERSE_VOXEL_RASTER_WORK_DROPPED, droppedCount);
+        CLodNoteVirtualShadowWorkDropped(droppedCount);
     }
 }
 #endif
@@ -2073,7 +2355,8 @@ void CLodAppendVirtualShadowPredictiveInvalidationCandidate(
     float radiusWorld,
     uint shadowViewId,
     uint sourceGroupGlobalIndex,
-    uint perMeshInstanceBufferIndex)
+    uint perMeshInstanceBufferIndex,
+    uint coarsestMip)
 {
     uint clipmapIndex = 0u;
     CLodVirtualShadowClipmapInfo clipmapInfo;
@@ -2095,7 +2378,7 @@ void CLodAppendVirtualShadowPredictiveInvalidationCandidate(
             ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
         CLodVirtualShadowPredictiveInvalidationCandidate candidate;
         candidate.worldCenterAndRadius = float4(worldCenter, radiusWorld);
-        candidate.shadowClipmapIndex = clipmapIndex;
+        candidate.shadowClipmapIndex = CLodVirtualShadowPackCandidateSlice(clipmapIndex, coarsestMip);
         candidate.sourceGroupGlobalIndex = sourceGroupGlobalIndex;
         candidate.perMeshInstanceBufferIndex = perMeshInstanceBufferIndex;
         candidate.observedFrameIndex = perFrameBuffer.frameIndex;
@@ -2365,7 +2648,11 @@ float ProjectedGeometricError(
     const float denom = max(-centerViewZ - worldRadius, zNear);
 #endif
 
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW && !CLOD_RT_VIEW
+    return worldSpaceError / denom * CLodVirtualShadowLocalLodErrorScale(worldCenter, worldRadius);
+#else
     return worldSpaceError / denom;
+#endif
 }
 
 bool CLodTouchAndRequestGroupResident(
@@ -2689,13 +2976,26 @@ bool CLodRefinedChildSuppressesParent(
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
     if (CLodWorkGraphVirtualShadowPredictiveLodInvalidationEnabled())
     {
+        // A local face wants the child at mip m while its error, unscaled by CLodVirtualShadowLocalLodErrorScale, over
+        // 2^m is above the threshold. The sun's clips have one resolution each.
+        uint coarsestMip = kCLodVirtualShadowLocalMipCount - 1u;
+        if (g_clodLocalShadowLodSlice != kCLodVirtualShadowInvalidSlice)
+        {
+            const float unscaledEOD =
+                childBoundaryEOD / CLodVirtualShadowLocalLodErrorScale(childWorldCenter, childWorldRadius);
+            coarsestMip = (uint)clamp(
+                floor(log2(unscaledEOD / max(lodCam.errorOverDistanceThreshold, 1.0e-30f))),
+                0.0f,
+                (float)(kCLodVirtualShadowLocalMipCount - 1u));
+        }
         const bool useChildPredictiveBounds = predictiveRadiusWorld < 0.0f;
         CLodAppendVirtualShadowPredictiveInvalidationCandidate(
             useChildPredictiveBounds ? childWorldCenter : predictiveCenterWorld,
             useChildPredictiveBounds ? childWorldRadius : predictiveRadiusWorld,
             viewId,
             childGroupGlobalIndex,
-            instanceIndex);
+            instanceIndex,
+            coarsestMip);
     }
 #endif
 
@@ -4204,7 +4504,7 @@ void ClusterCullBody(
     bool objectInvalidatedThisFrame = false;
     // The run's view is one clip: found once for its meshlets' page tests and visible-cluster records.
     const uint bucketShadowClipmapIndex =
-        hasBucket ? CLodVirtualShadowClipmapIndexForView(b.viewId) : kCLodVirtualShadowClipmapCount;
+        hasBucket ? CLodVirtualShadowClipmapIndexForView(b.viewId) : kCLodVirtualShadowInvalidSlice;
 	if (hasBucket) {
 		shadowClipmapAllowsSkinnedDeformation =
 			CLodVirtualShadowClipUsesDynamicSkinnedCasters(bucketShadowClipmapIndex);
@@ -4756,6 +5056,7 @@ void ClusterCullBody(
                     : 0u;
 
             if (WaveGetLaneIndex() == hwLeader && (hwCombinedBase + hwWriteCount > hwVisibleClusterWriteCapacity)) {
+                CLodNoteVirtualShadowWorkDropped(hwCombinedBase + hwWriteCount - max(hwCombinedBase, hwVisibleClusterWriteCapacity));
                 InterlockedMin(replayState[0].visibleClusterCombinedCount, hwVisibleClusterWriteCapacity);
             }
 
@@ -4870,6 +5171,7 @@ void ClusterCullBody(
                         : 0u;
 
                 if (WaveGetLaneIndex() == hwLeader && (hwCombinedBase + hwWriteCount > hwVisibleClusterWriteCapacity)) {
+                    CLodNoteVirtualShadowWorkDropped(hwCombinedBase + hwWriteCount - max(hwCombinedBase, hwVisibleClusterWriteCapacity));
                     InterlockedMin(replayState[0].visibleClusterCombinedCount, hwVisibleClusterWriteCapacity);
                 }
 
@@ -4923,13 +5225,25 @@ void ClusterCullBody(
         }
 
         // SW/HW classification.
+#if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+        // A local light face. Reyes does not render them yet. The software raster does, but only meshlets wholly in
+        // front of the near plane: it projects without clipping.
+        const bool vsmLocalFace =
+            bucketShadowClipmapIndex >= kCLodVirtualShadowFirstLocalSlice &&
+            bucketShadowClipmapIndex < kCLodVirtualShadowMaxSliceCount;
+        const bool vsmLocalFaceSoftwareRasterable =
+            -meshletCenterViewSpace.z - meshletRadiusWorld > cullCam.zNear;
+#else
+        const bool vsmLocalFace = false;
+        const bool vsmLocalFaceSoftwareRasterable = false;
+#endif
         bool isSW = false;
         if (contributes) {
             WGTelemetryAdd(WG_COUNTER_CLASSIFY_CONTRIBUTING, 1);
         }
         const bool outputReyes =
 #if CLOD_WG_ENABLE_REYES_VISIBILITY
-            contributes && meshletNeedsReyesDisplacement;
+            contributes && meshletNeedsReyesDisplacement && !vsmLocalFace;
 #else
             false;
 #endif
@@ -4943,7 +5257,7 @@ void ClusterCullBody(
                     meshletCenterViewSpace.z,
                     cullCam.zNear,
                     cullCameraIsOrtho);
-                isSW = projectedDiameter < swDiameterThreshold;
+                isSW = projectedDiameter < swDiameterThreshold && (!vsmLocalFace || vsmLocalFaceSoftwareRasterable);
             } else {
                 WGTelemetryAdd(WG_COUNTER_CLASSIFY_SW_DISABLED, 1);
             }
@@ -4969,13 +5283,18 @@ void ClusterCullBody(
                     swMaxPageCoord,
                     swMinBlockCoord,
                     swBlockCount) &&
-                CLodVirtualShadowMeshletTouchesActiveBlock(
-                    shadowClipmapIndex,
-                    swMinBlockCoord,
-                    swBlockCount,
-                    dynamicShadowLayer,
-                    !dynamicShadowLayer &&
-                        CLodWorkGraphShadowDirtyPageCullingEnabled());
+                (vsmLocalFace
+                    // One record for the whole face, as for voxels: the software raster finds the face from the
+                    // view's row and walks every mip (SWRasterTriangles).
+                    ? CLodVirtualShadowCountLocalFaceBlocksForMeshlet(
+                          shadowClipmapIndex, swMinPageCoord, swMaxPageCoord, swBlockCount, dynamicShadowLayer) != 0u
+                    : CLodVirtualShadowMeshletTouchesActiveBlock(
+                          shadowClipmapIndex,
+                          swMinBlockCoord,
+                          swBlockCount,
+                          dynamicShadowLayer,
+                          !dynamicShadowLayer &&
+                              CLodWorkGraphShadowDirtyPageCullingEnabled()));
         }
 #endif
 
@@ -5045,6 +5364,7 @@ void ClusterCullBody(
                         : 0u;
 
                 if (WaveGetLaneIndex() == hwLeader && (hwCombinedBase + hwWriteCount > hwVisibleClusterWriteCapacity)) {
+                    CLodNoteVirtualShadowWorkDropped(hwCombinedBase + hwWriteCount - max(hwCombinedBase, hwVisibleClusterWriteCapacity));
                     InterlockedMin(replayState[0].visibleClusterCombinedCount, hwVisibleClusterWriteCapacity);
                 }
 
@@ -5126,6 +5446,7 @@ void ClusterCullBody(
                 reyesBase = WaveReadLaneAt(reyesBase, reyesLeader);
 
                 if (WaveGetLaneIndex() == reyesLeader && (reyesCombinedBase + reyesIterCount > swVisibleClusterWriteCapacity)) {
+                    CLodNoteVirtualShadowWorkDropped(reyesCombinedBase + reyesIterCount - max(reyesCombinedBase, swVisibleClusterWriteCapacity));
                     InterlockedMin(replayState[0].visibleClusterCombinedCount, swVisibleClusterWriteCapacity);
                 }
 
@@ -5180,6 +5501,7 @@ void ClusterCullBody(
                 swBase = WaveReadLaneAt(swBase, swLeader);
 
                 if (WaveGetLaneIndex() == swLeader && (swCombinedBase + swIterCount > swVisibleClusterWriteCapacity)) {
+                    CLodNoteVirtualShadowWorkDropped(swCombinedBase + swIterCount - max(swCombinedBase, swVisibleClusterWriteCapacity));
                     InterlockedMin(replayState[0].visibleClusterCombinedCount, swVisibleClusterWriteCapacity);
                 }
 

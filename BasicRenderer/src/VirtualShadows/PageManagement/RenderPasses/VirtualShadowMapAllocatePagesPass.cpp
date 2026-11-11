@@ -54,14 +54,14 @@ VirtualShadowMapAllocatePagesBindings VirtualShadowMapAllocatePagesPass::Declare
         builder.UnorderedAccess(m_pageTableTexture, {static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)}), builder.UnorderedAccess(m_pageMetadataBuffer),
         builder.UnorderedAccess(m_dirtyPageFlagsBuffer), builder.ShaderResource(m_freePhysicalPagesBuffer),
         builder.ShaderResource(m_reusablePhysicalPagesBuffer), builder.ShaderResource(m_pageListHeaderBuffer),
-        builder.UnorderedAccess(m_statsBuffer),
-        SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodDirectionalVirtualShadowPageRenderBudgetSettingName)()};
+        builder.UnorderedAccess(m_statsBuffer)};
 }
 
 VirtualShadowMapAllocatePagesFrame VirtualShadowMapAllocatePagesPass::Prepare(
     const VirtualShadowMapAllocatePagesBindings&, const org::PassPrepareContext&) const {
     const auto config = CLodVirtualShadowBuildRuntimeResolutionConfig();
-    return {config.pageTableResolution, config.maxPhysicalPages};
+    return {config.pageTableResolution, config.maxPhysicalPages,
+        SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodDirectionalVirtualShadowPageRenderBudgetSettingName)()};
 }
 
 void VirtualShadowMapAllocatePagesPass::Record(const VirtualShadowMapAllocatePagesBindings& bindings,
@@ -77,9 +77,9 @@ void VirtualShadowMapAllocatePagesPass::Record(const VirtualShadowMapAllocatePag
     constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_PAGE_LIST_HEADER_DESCRIPTOR_INDEX] = recording.Index(bindings.header);
     constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_CLIPMAP_INFO_DESCRIPTOR_INDEX] = recording.Index(bindings.clipmapInfo);
     constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_PAGE_TABLE_RESOLUTION] = frame.pageTableResolution;
-    constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_CLIPMAP_COUNT] = CLodVirtualShadowMaxSupportedClipmapCount;
+    constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_CLIPMAP_COUNT] = CLodVirtualShadowMaxSliceCount;
     constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_PHYSICAL_PAGE_COUNT] = frame.maxPhysicalPages;
-    constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_PAGE_RENDER_BUDGET] = bindings.pageRenderBudget;
+    constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_PAGE_RENDER_BUDGET] = frame.pageRenderBudget;
     constants[CLOD_VIRTUAL_SHADOW_ALLOCATE_STATS_DESCRIPTOR_INDEX] = recording.Index(bindings.stats);
     br::render::DispatchComputeIndirect(recording, bindings.pipeline, constants, bindings.commandSignature,
         bindings.indirectArgs);

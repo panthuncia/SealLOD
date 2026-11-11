@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <memory>
 
 #include "Render/PipelineState.h"
@@ -12,7 +13,9 @@ namespace org { class PixelBuffer; }
 struct VirtualShadowMapExpandPredictedPagesBindings {
     org::PipelineState stampContentGenerationPipeline, expandPipeline, resetCandidateCountPipeline;
     org::DeclaredViewToken candidates, candidateCount, rawPages, rawCount, clipmapInfo;
-    org::DeclaredViewToken scratch, stats, pageTable, pageMetadata, pageViewInfo;
+    org::DeclaredViewToken scratch, stats, pageTable, pageMetadata, pageViewInfo, replayState;
+    std::array<org::DeclaredViewToken, 3> reyesOverflows{};
+    bool hasReyesOverflows = false;
     uint32_t physicalPageCount = 0;
 };
 
@@ -30,7 +33,11 @@ public:
         std::shared_ptr<org::PixelBuffer> pageTableTexture,
         std::shared_ptr<org::Buffer> pageMetadataBuffer,
         std::shared_ptr<org::Buffer> pageViewInfoBuffer,
-        uint32_t physicalPageCount);
+        uint32_t physicalPageCount,
+        // Which tell whether this frame's shadow work all ran (CLodVirtualShadowFrameShadowWorkComplete). The Reyes
+        // split A, split B and dice queue overflow counters are null where the variant does not reset them each frame.
+        std::shared_ptr<org::Buffer> replayStateBuffer,
+        std::array<std::shared_ptr<org::Buffer>, 3> reyesOverflowBuffers);
 
     VirtualShadowMapExpandPredictedPagesBindings Declare(org::PassBuilder& builder);
     static void Record(const VirtualShadowMapExpandPredictedPagesBindings&, org::PassRecordContext&);
@@ -47,4 +54,6 @@ private:
     std::shared_ptr<org::Buffer> m_pageMetadataBuffer;
     std::shared_ptr<org::Buffer> m_pageViewInfoBuffer;
     uint32_t m_physicalPageCount = 0u;
+    std::shared_ptr<org::Buffer> m_replayStateBuffer;
+    std::array<std::shared_ptr<org::Buffer>, 3> m_reyesOverflowBuffers;
 };

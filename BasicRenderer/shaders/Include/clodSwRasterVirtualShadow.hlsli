@@ -16,41 +16,16 @@
 #define CLOD_SW_VSM_DYNAMIC_PAGES_DESCRIPTOR_INDEX CLOD_RASTER_VIRTUAL_SHADOW_DYNAMIC_PAGES_DESCRIPTOR_INDEX
 #endif
 
-// The clip a wave-uniform view renders, found by the wave together: each lane tests one clip's two
-// fields, then the first match is loaded. The same result as CLodVirtualShadowTryGetClipmapInfoForView,
-// which loads up to every clip's whole info in turn. Call with every lane active.
+// The slice a view renders: one load of its view row.
 bool SWFindVirtualShadowClipmapInfo(
     uint viewID,
     StructuredBuffer<CLodVirtualShadowClipmapInfo> clipmapInfos,
     out CLodVirtualShadowClipmapInfo clipmapInfo)
 {
-    if (WaveGetLaneCount() < kCLodVirtualShadowClipmapCount)
-    {
-        return CLodVirtualShadowTryGetClipmapInfoForView(viewID, clipmapInfos, clipmapInfo);
-    }
-    clipmapInfo = (CLodVirtualShadowClipmapInfo)0;
-    const uint lane = WaveGetLaneIndex();
-    bool matches = false;
-    if (lane < kCLodVirtualShadowClipmapCount)
-    {
-        const uint flags = clipmapInfos[lane].flags;
-        const uint shadowCameraBufferIndex = clipmapInfos[lane].shadowCameraBufferIndex;
-        matches = (flags & kCLodVirtualShadowClipmapValidFlag) != 0u &&
-            shadowCameraBufferIndex != kInvalidShadowCameraIndex &&
-            shadowCameraBufferIndex == viewID;
-    }
-    // Every clip index is below 32, so its bit is in the first word for any wave size.
-    const uint matchBits = WaveActiveBallot(matches).x;
-    if (matchBits == 0u)
-    {
-        return false;
-    }
-    clipmapInfo = clipmapInfos[firstbitlow(matchBits)];
-    return true;
+    return CLodVirtualShadowTryGetClipmapInfoForView(viewID, clipmapInfos, clipmapInfo);
 }
 
-// A cluster's clip, resolved once per lane by the caller. Searching the clipmap infos per texel
-// cost every covered texel up to kCLodVirtualShadowClipmapCount struct loads.
+// A cluster's slice, resolved once per lane by the caller rather than per texel.
 struct SWVirtualShadowTarget
 {
     CLodVirtualShadowClipmapInfo clipmapInfo;

@@ -21,6 +21,7 @@ ArtifactBuildResult BuildLightTable(const ArtifactBuildContext& context) {
     state->lightCount = input->lightCount;
     state->lightPagePoolSize = input->lightPagePoolSize;
     state->directionalShadows = input->directionalShadows;
+    state->localShadows = input->localShadows;
     state->retainedResources = input->retainedResources;
     state->tableImages = input->tableImages;
     for (const auto& dependency : context.dependencies) {

@@ -27,11 +27,20 @@ struct PublishedDirectionalShadowLight {
     // this table publishes asynchronously and would trail the view matrices.
 };
 
+// A spot or point light with virtual shadow map faces. viewIDs[i] renders face firstFace + i, whose slices start at
+// CLodVirtualShadowFirstLocalSlice + (firstFace + i) * CLodVirtualShadowLocalSlicesPerFace.
+struct PublishedLocalShadowLight {
+    std::uint32_t lightIndex = 0;
+    std::uint32_t firstFace = 0;
+    std::vector<std::uint64_t> viewIDs;
+};
+
 struct LightTableBuildInput {
     std::uint64_t revision = 0;
     std::uint32_t lightCount = 0;
     std::uint32_t lightPagePoolSize = 0;
     std::vector<PublishedDirectionalShadowLight> directionalShadows;
+    std::vector<PublishedLocalShadowLight> localShadows;
     std::vector<std::shared_ptr<org::Resource>> retainedResources;
     std::vector<std::shared_ptr<const std::vector<std::byte>>> tableImages;
 };
@@ -41,6 +50,7 @@ struct PublishedLightTableState {
     std::uint32_t lightCount = 0;
     std::uint32_t lightPagePoolSize = 0;
     std::vector<PublishedDirectionalShadowLight> directionalShadows;
+    std::vector<PublishedLocalShadowLight> localShadows;
     std::vector<std::shared_ptr<org::Resource>> retainedResources;
     std::vector<std::shared_ptr<const std::vector<std::byte>>> tableImages;
     std::vector<std::shared_ptr<const PublishedGpuBufferVersion>> tableVersions;
