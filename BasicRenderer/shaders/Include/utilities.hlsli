@@ -131,6 +131,75 @@ uint TerrainRvtTextureDeficitResidentMip(uint deficit) { return (deficit >> 22) 
 static uint g_terrainRvtTextureDeficit = 0u;
 #endif
 
+// Texture streaming feedback (TextureStreamingManager). One buffer holds two kinds of word, interleaved so neither needs
+// its own resource: a streamed texture's requested top mip + 1 at word 2 * streamingTextureID, and a material's
+// footprint at word 2 * materialSlot + 1. Both keep the finest (smallest) value since the worker last reset them;
+// 0xFFFFFFFF is no request. Zero is what a newly grown backing holds before its reset lands, so neither encoding uses it.
+//
+// Material evaluation writes ONE word per material: the footprint, log2 of the UV one pixel covers, which needs no
+// texture's size (the worker turns it into each of the material's textures' mips). Samples taken inside a material
+// evaluation write nothing of their own. Samplers outside one (terrain layers, RVT pages, displacement, ray tracing's
+// alpha) still write their texture's word.
+static const float kMaterialStreamingFootprintOffset = 32.0f;
+static const float kMaterialStreamingFootprintScale = 256.0f;
+static uint g_materialStreamingFeedbackDepth = 0u;
+
+void RecordStreamingFeedbackWord(uint word, uint value)
+{
+#if defined(CLOD_RESOLVE_PATH_HIT)
+    // Reordering moves threads between hits, so there is no wave to reduce over: every sample writes for itself.
+    if (g_clodPathHitIsPrimary)
+    {
+        RWStructuredBuffer<uint> pathHitFeedbackBuffer =
+            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Material::TextureStreamingFeedbackBuffer)];
+        uint pathHitPrevious;
+        InterlockedMin(pathHitFeedbackBuffer[word], value, pathHitPrevious);
+    }
+#else
+    RWStructuredBuffer<uint> textureStreamingFeedbackBuffer =
+        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Material::TextureStreamingFeedbackBuffer)];
+
+    if (WaveActiveAllEqual(word))
+    {
+        const uint waveValue = WaveActiveMin(value);
+        if (WaveIsFirstLane())
+        {
+            uint previous;
+            InterlockedMin(textureStreamingFeedbackBuffer[word], waveValue, previous);
+        }
+        return;
+    }
+
+    // Mixed words in one wave: peel off one word per iteration, reducing while all its lanes are still active.
+    // (A WaveMatch leader reading its group's lanes after they have returned reads inactive lanes, which is undefined.)
+    // Wave ops skip helper lanes, so a helper whose word no live lane shares would never lead and would loop forever:
+    // a virtual shadow pixel shader whose alpha test followed its early returns hung the GPU here (DRED: device hung
+    // in the hardware raster). Helpers' requests are not needed.
+    if (IsHelperLane())
+    {
+        return;
+    }
+    // The reduction masks other words' lanes out itself rather than relying on only the leader's lanes being active
+    // inside the branch: SM 6 does not guarantee lanes reconverge that way in a loop with divergent returns, and on
+    // NVIDIA lanes of other textures took part, so a texture was sent other materials' (finer) requests. Under raster
+    // on Zorah that kept about 7 GB of textures at mip 0 that feedback for their own pixels put at mip 2-5.
+    for (;;)
+    {
+        const uint leaderWord = WaveReadLaneFirst(word);
+        const uint groupValue = WaveActiveMin(word == leaderWord ? value : 0xFFFFFFFFu);
+        if (word == leaderWord)
+        {
+            if (WaveIsFirstLane())
+            {
+                uint previous;
+                InterlockedMin(textureStreamingFeedbackBuffer[leaderWord], groupValue, previous);
+            }
+            return;
+        }
+    }
+#endif
+}
+
 void RecordTextureStreamingFeedbackRequestedTopMip(
     TextureStreamingGPUInfo streamingInfo,
     uint streamingTextureID,
@@ -154,63 +223,12 @@ void RecordTextureStreamingFeedbackRequestedTopMip(
     }
 #endif
     // Stored as mip + 1: zero is what a newly grown backing holds before its reset lands, and must not read as mip 0.
-    requestedTopMip += 1u;
+    RecordStreamingFeedbackWord(streamingTextureID * 2u, requestedTopMip + 1u);
+}
 
-#if defined(CLOD_RESOLVE_PATH_HIT)
-    // Reordering moves threads between hits, so there is no wave to reduce over: every sample writes for itself.
-    if (g_clodPathHitIsPrimary)
-    {
-        RWStructuredBuffer<uint> pathHitFeedbackBuffer =
-            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Material::TextureStreamingFeedbackBuffer)];
-        uint pathHitPreviousRequestedTopMip;
-        InterlockedMin(pathHitFeedbackBuffer[streamingTextureID], requestedTopMip, pathHitPreviousRequestedTopMip);
-    }
-#else
-    RWStructuredBuffer<uint> textureStreamingFeedbackBuffer =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Material::TextureStreamingFeedbackBuffer)];
-
-    if (WaveActiveAllEqual(streamingTextureID))
-    {
-        const uint waveRequestedTopMip = WaveActiveMin(requestedTopMip);
-        if (WaveIsFirstLane())
-        {
-            uint previousRequestedTopMip;
-            InterlockedMin(
-                textureStreamingFeedbackBuffer[streamingTextureID],
-                waveRequestedTopMip,
-                previousRequestedTopMip);
-        }
-        return;
-    }
-
-    // Mixed textures in one wave: peel off one texture ID per iteration, reducing while all its lanes are still active.
-    // (A WaveMatch leader reading its group's lanes after they have returned reads inactive lanes, which is undefined.)
-    // Wave ops skip helper lanes, so a helper whose ID no live lane shares would never lead and would loop forever:
-    // a virtual shadow pixel shader whose alpha test followed its early returns hung the GPU here (DRED: device hung
-    // in the hardware raster). Helpers' requests are not needed.
-    if (IsHelperLane())
-    {
-        return;
-    }
-    // The reduction masks other textures' lanes out itself rather than relying on only the leader's lanes being active
-    // inside the branch: SM 6 does not guarantee lanes reconverge that way in a loop with divergent returns, and on
-    // NVIDIA lanes of other textures took part, so a texture was sent other materials' (finer) requests. Under raster
-    // on Zorah that kept about 7 GB of textures at mip 0 that feedback for their own pixels put at mip 2-5.
-    for (;;)
-    {
-        const uint leaderTextureID = WaveReadLaneFirst(streamingTextureID);
-        const uint groupRequestedTopMip = WaveActiveMin(streamingTextureID == leaderTextureID ? requestedTopMip : 0xFFFFFFFFu);
-        if (streamingTextureID == leaderTextureID)
-        {
-            if (WaveIsFirstLane())
-            {
-                uint previousRequestedTopMip;
-                InterlockedMin(textureStreamingFeedbackBuffer[leaderTextureID], groupRequestedTopMip, previousRequestedTopMip);
-            }
-            return;
-        }
-    }
-#endif
+bool InMaterialStreamingFeedbackScope()
+{
+    return g_materialStreamingFeedbackDepth != 0u;
 }
 
 void RecordTextureStreamingFeedback(
@@ -219,7 +237,7 @@ void RecordTextureStreamingFeedback(
     float2 texelDdx,
     float2 texelDdy)
 {
-    if (streamingTextureID == 0u) {
+    if (streamingTextureID == 0u || InMaterialStreamingFeedbackScope()) {
         return;
     }
 
@@ -229,6 +247,35 @@ void RecordTextureStreamingFeedback(
 
     const uint requestedTopMip = ComputeTextureStreamingRequestedTopMip(streamingInfo, texelDdx, texelDdy);
     RecordTextureStreamingFeedbackRequestedTopMip(streamingInfo, streamingTextureID, requestedTopMip);
+}
+
+// log2 of the UV one pixel covers along the derivatives' longer axis: the mip trilinear filtering selects, for a texture
+// one texel wide. TextureStreamingPolicy.h's TopForFootprint adds log2 of the texture's largest side.
+float MaterialStreamingFootprintLog2(float2 dUVdx, float2 dUVdy)
+{
+    const float majorSq = max(dot(dUVdx, dUVdx), dot(dUVdy, dUVdy));
+    return 0.5f * log2(max(majorSq, 1.0e-16f));
+}
+
+// The finest footprint a material evaluation saw, written once to the material's word.
+void RecordMaterialStreamingFootprint(uint streamingFeedbackSlot, float footprintLog2)
+{
+    if (streamingFeedbackSlot == 0u) {
+        return;
+    }
+#if defined(CLOD_RESOLVE_PATH_HIT)
+    if (!g_clodPathHitIsPrimary) {
+        return;
+    }
+#endif
+    const uint value = max(1u, (uint)(max(footprintLog2 + kMaterialStreamingFootprintOffset, 0.0f) * kMaterialStreamingFootprintScale));
+    RecordStreamingFeedbackWord((streamingFeedbackSlot - 1u) * 2u + 1u, value);
+}
+
+// Ends a scope opened by one of the BeginMaterialStreamingFeedback overloads below.
+void EndMaterialStreamingFeedback()
+{
+    g_materialStreamingFeedbackDepth = g_materialStreamingFeedbackDepth > 0u ? g_materialStreamingFeedbackDepth - 1u : 0u;
 }
 
 OpenPBRSurfaceSample ResolveCanonicalOpenPBRSurface(
@@ -453,23 +500,11 @@ float4 SampleAlphaTestMaterialTexture2DGrad(
         }
     }
 
+    // Alpha tests (depth, shadow and visibility raster) ask for nothing: their fragments include overdraw and shadow
+    // texels. What is seen asks through its material evaluation, and alpha-tested textures keep the minimum resident
+    // size that holds their coverage (AlphaTestedMaterialTextureMaxResidentTopMip).
     Texture2D<float4> texture = ResourceDescriptorHeap[
         NonUniformResourceIndex(resolvedTextureDescriptorIndex)];
-    if (hasStreamingInfo)
-    {
-        uint width;
-        uint height;
-        uint mipCount;
-        texture.GetDimensions(0u, width, height, mipCount);
-        const float2 texelScale = ResolveTextureStreamingTexelScale(
-            streamingInfo, width, height);
-        RecordTextureStreamingFeedback(
-            streamingInfo,
-            streamingTextureID,
-            dUVdx * texelScale,
-            dUVdy * texelScale);
-    }
-
     return texture.SampleGrad(samplerState, uv, dUVdx, dUVdy);
 }
 
@@ -1118,7 +1153,8 @@ void RecordObjectSurfaceTriplanarTextureAccess(
     if (hasStreamingInfo)
     {
         streamingInfo = LoadTextureStreamingInfo(streamingTextureID);
-        if ((streamingInfo.flags & kTextureStreamingFlagEnabled) != 0u && streamingInfo.totalMipCount > 1u)
+        if ((streamingInfo.flags & kTextureStreamingFlagEnabled) != 0u && streamingInfo.totalMipCount > 1u &&
+            !InMaterialStreamingFeedbackScope())
         {
             const float2 texelScale = ResolveTextureStreamingTexelScale(streamingInfo, width, height);
             const uint requestedTopMip = ComputeObjectSurfaceTriplanarRequestedTopMip(
@@ -1169,7 +1205,8 @@ void RecordObjectSurfaceTriplanarTextureAccess(
     if (hasStreamingInfo)
     {
         streamingInfo = LoadTextureStreamingInfo(streamingTextureID);
-        if ((streamingInfo.flags & kTextureStreamingFlagEnabled) != 0u && streamingInfo.totalMipCount > 1u)
+        if ((streamingInfo.flags & kTextureStreamingFlagEnabled) != 0u && streamingInfo.totalMipCount > 1u &&
+            !InMaterialStreamingFeedbackScope())
         {
             const float2 texelScale = ResolveTextureStreamingTexelScale(streamingInfo, width, height);
             const uint requestedTopMip = ComputeObjectSurfaceTriplanarRequestedTopMip(
@@ -2100,6 +2137,41 @@ MaterialUvSample ResolveMaterialUvSample(
     return sample;
 }
 
+// Opens a material evaluation's texture streaming feedback scope: writes the material's finest footprint over its UV sets
+// once, and the samples inside write nothing of their own. Nested scopes write nothing.
+void BeginMaterialStreamingFeedback(uint streamingFeedbackSlot, in MaterialUvCache cache)
+{
+    const uint depth = g_materialStreamingFeedbackDepth;
+    g_materialStreamingFeedbackDepth = depth + 1u;
+    if (depth != 0u || cache.count == 0u) {
+        return;
+    }
+    float finest = 3.0e38f;
+    [unroll]
+    for (uint index = 0u; index < MATERIAL_MAX_UNIQUE_UV_SETS; ++index)
+    {
+        if (index < cache.count)
+        {
+            finest = min(finest, MaterialStreamingFootprintLog2(cache.samples[index].dUVdx, cache.samples[index].dUVdy));
+        }
+    }
+    RecordMaterialStreamingFootprint(streamingFeedbackSlot, finest);
+}
+
+// Object-space triplanar projection: the finest of the three planes' footprints.
+void BeginMaterialStreamingFeedbackTriplanar(uint streamingFeedbackSlot, float3 dpdxOS, float3 dpdyOS, float density)
+{
+    const uint depth = g_materialStreamingFeedbackDepth;
+    g_materialStreamingFeedbackDepth = depth + 1u;
+    if (depth != 0u) {
+        return;
+    }
+    const float x = MaterialStreamingFootprintLog2(dpdxOS.yz * density, dpdyOS.yz * density);
+    const float y = MaterialStreamingFootprintLog2(dpdxOS.zx * density, dpdyOS.zx * density);
+    const float z = MaterialStreamingFootprintLog2(dpdxOS.xy * density, dpdyOS.xy * density);
+    RecordMaterialStreamingFootprint(streamingFeedbackSlot, min(x, min(y, z)));
+}
+
 float3x3 BuildMaterialTBN(
     in MaterialUvCache cache,
     in MaterialUvBindings bindings,
@@ -2780,7 +2852,7 @@ float3 ObjectSurfaceSampleTriplanarNormalWS(
         positionOS, normalOS, dpdxOS, dpdyOS, density, normalMatrix, feedback);
 }
 
-void SampleObjectTriplanarStochasticMaterial(
+void SampleObjectTriplanarStochasticMaterialBody(
     in float3 normalWSBase,
     in float3 normalOS,
     in float3 positionOS,
@@ -2891,7 +2963,25 @@ void SampleObjectTriplanarStochasticMaterial(
     ApplyMaterialGlintInfo(materialInfo, ret);
 }
 
+// Opens texture streaming's feedback scope: one footprint for the material, none per sample.
 void SampleObjectTriplanarStochasticMaterial(
+    in float3 normalWSBase,
+    in float3 normalOS,
+    in float3 positionOS,
+    in float3 vertexColorMultiplier,
+    in float3 dpdxOS,
+    in float3 dpdyOS,
+    in float3x3 normalMatrix,
+    in MaterialInfo materialInfo,
+    in uint materialFlags,
+    out MaterialInputs ret)
+{
+    BeginMaterialStreamingFeedbackTriplanar(materialInfo.streamingFeedbackSlot, dpdxOS, dpdyOS, max(materialInfo.objectSurfaceTexelDensity, 1.0e-6f));
+    SampleObjectTriplanarStochasticMaterialBody(normalWSBase, normalOS, positionOS, vertexColorMultiplier, dpdxOS, dpdyOS, normalMatrix, materialInfo, materialFlags, ret);
+    EndMaterialStreamingFeedback();
+}
+
+void SampleObjectTriplanarStochasticMaterialBody(
     in float3 normalWSBase,
     in float3 normalOS,
     in float3 positionOS,
@@ -3002,7 +3092,25 @@ void SampleObjectTriplanarStochasticMaterial(
     ApplyMaterialGlintInfo(materialInfo, ret);
 }
 
-void SampleMaterialFromUvCache(
+// Opens texture streaming's feedback scope: one footprint for the material, none per sample.
+void SampleObjectTriplanarStochasticMaterial(
+    in float3 normalWSBase,
+    in float3 normalOS,
+    in float3 positionOS,
+    in float3 vertexColorMultiplier,
+    in float3 dpdxOS,
+    in float3 dpdyOS,
+    in float3x3 normalMatrix,
+    in MaterialEvalInfo materialInfo,
+    in uint materialFlags,
+    out MaterialInputs ret)
+{
+    BeginMaterialStreamingFeedbackTriplanar(materialInfo.streamingFeedbackSlot, dpdxOS, dpdyOS, max(materialInfo.objectSurfaceTexelDensity, 1.0e-6f));
+    SampleObjectTriplanarStochasticMaterialBody(normalWSBase, normalOS, positionOS, vertexColorMultiplier, dpdxOS, dpdyOS, normalMatrix, materialInfo, materialFlags, ret);
+    EndMaterialStreamingFeedback();
+}
+
+void SampleMaterialFromUvCacheBody(
     in MaterialUvCache uvCache,
     in MaterialUvBindings uvBindings,
     in float3 normalWSBase,
@@ -3264,7 +3372,25 @@ void SampleMaterialFromUvCache(
     ApplyMaterialGlintInfo(materialInfo, ret);
 }
 
-void SampleMaterialEvalFromUvCache(
+// Opens texture streaming's feedback scope: one footprint for the material, none per sample.
+void SampleMaterialFromUvCache(
+    in MaterialUvCache uvCache,
+    in MaterialUvBindings uvBindings,
+    in float3 normalWSBase,
+    in float3 posWS,
+    in float3 vertexColorMultiplier,
+    in MaterialInfo materialInfo,
+    in uint materialFlags,
+    in float3 dpdx,
+    in float3 dpdy,
+    out MaterialInputs ret)
+{
+    BeginMaterialStreamingFeedback(materialInfo.streamingFeedbackSlot, uvCache);
+    SampleMaterialFromUvCacheBody(uvCache, uvBindings, normalWSBase, posWS, vertexColorMultiplier, materialInfo, materialFlags, dpdx, dpdy, ret);
+    EndMaterialStreamingFeedback();
+}
+
+void SampleMaterialEvalFromUvCacheBody(
     in MaterialUvCache uvCache,
     in MaterialUvBindings uvBindings,
     in float3 normalWSBase,
@@ -3549,6 +3675,24 @@ void SampleMaterialEvalFromUvCache(
     ApplyMaterialGlintInfo(materialInfo, ret);
 }
 
+// Opens texture streaming's feedback scope: one footprint for the material, none per sample.
+void SampleMaterialEvalFromUvCache(
+    in MaterialUvCache uvCache,
+    in MaterialUvBindings uvBindings,
+    in float3 normalWSBase,
+    in float3 posWS,
+    in float3 vertexColorMultiplier,
+    in MaterialEvalInfo materialInfo,
+    in uint materialFlags,
+    in float3 dpdx,
+    in float3 dpdy,
+    out MaterialInputs ret)
+{
+    BeginMaterialStreamingFeedback(materialInfo.streamingFeedbackSlot, uvCache);
+    SampleMaterialEvalFromUvCacheBody(uvCache, uvBindings, normalWSBase, posWS, vertexColorMultiplier, materialInfo, materialFlags, dpdx, dpdy, ret);
+    EndMaterialStreamingFeedback();
+}
+
 void SampleMaterialFromUvCacheWithVertexTangent(
     in MaterialUvCache uvCache,
     in MaterialUvBindings uvBindings,
@@ -3562,6 +3706,8 @@ void SampleMaterialFromUvCacheWithVertexTangent(
     in float3 dpdy,
     out MaterialInputs ret)
 {
+    // The scope covers the normal map resampled below as well.
+    BeginMaterialStreamingFeedback(materialInfo.streamingFeedbackSlot, uvCache);
     SampleMaterialFromUvCache(uvCache, uvBindings, normalWSBase, posWS, vertexColorMultiplier, materialInfo, materialFlags, dpdx, dpdy, ret);
 
 #if defined(PSO_NORMAL_MAP)
@@ -3577,9 +3723,10 @@ void SampleMaterialFromUvCacheWithVertexTangent(
         ret.normalWS = normalize(mul(tangentSpaceNormal, normalTBN));
     }
 #endif
+    EndMaterialStreamingFeedback();
 }
 
-void SampleMaterialFromUvCacheRuntime(
+void SampleMaterialFromUvCacheRuntimeBody(
     in MaterialUvCache uvCache,
     in MaterialUvBindings uvBindings,
     in float3 normalWSBase,
@@ -3840,6 +3987,24 @@ void SampleMaterialFromUvCacheRuntime(
     ApplyMaterialGlintInfo(materialInfo, ret);
 }
 
+// Opens texture streaming's feedback scope: one footprint for the material, none per sample.
+void SampleMaterialFromUvCacheRuntime(
+    in MaterialUvCache uvCache,
+    in MaterialUvBindings uvBindings,
+    in float3 normalWSBase,
+    in float3 posWS,
+    in float3 vertexColorMultiplier,
+    in MaterialInfo materialInfo,
+    in uint materialFlags,
+    in float3 dpdx,
+    in float3 dpdy,
+    out MaterialInputs ret)
+{
+    BeginMaterialStreamingFeedback(materialInfo.streamingFeedbackSlot, uvCache);
+    SampleMaterialFromUvCacheRuntimeBody(uvCache, uvBindings, normalWSBase, posWS, vertexColorMultiplier, materialInfo, materialFlags, dpdx, dpdy, ret);
+    EndMaterialStreamingFeedback();
+}
+
 void SampleMaterialCorePrecompiled(
     in float2 uv,
     in float2 dUVdx,
@@ -4082,6 +4247,8 @@ void SampleMaterialFromUvCacheRuntimeWithVertexTangent(
     in float3 dpdy,
     out MaterialInputs ret)
 {
+    // The scope covers the normal map resampled below as well.
+    BeginMaterialStreamingFeedback(materialInfo.streamingFeedbackSlot, uvCache);
     SampleMaterialFromUvCacheRuntime(uvCache, uvBindings, normalWSBase, posWS, vertexColorMultiplier, materialInfo, materialFlags, dpdx, dpdy, ret);
 
     if (uvBindings.hasTbnSource && abs(tangentWS.w) > 0.5f && (materialFlags & MATERIAL_NORMAL_MAP) != 0u &&
@@ -4095,6 +4262,7 @@ void SampleMaterialFromUvCacheRuntimeWithVertexTangent(
         float3 tangentSpaceNormal = DecodeMaterialNormalSample(textureNormal, materialInfo.normalChannels, materialFlags);
         ret.normalWS = normalize(mul(tangentSpaceNormal, normalTBN));
     }
+    EndMaterialStreamingFeedback();
 }
 
 void SampleMaterialCS(

@@ -176,8 +176,14 @@ void Renderer::SetSettings() {
 		ProceduralWindTransientBoneCapacitySettingName,
 		ReadUintEnvironmentValue("SARP_PROCEDURAL_WIND_TRANSIENT_BONE_CAPACITY", 262144u));
 	settingsManager.registerSetting<uint32_t>(
-		MaterialTextureStreamingIdleFramesSettingName,
-		ReadUintEnvironmentValue("SARP_TEXTURE_STREAMING_IDLE_FRAMES", 1800u));
+		MaterialTextureStreamingBudgetMBSettingName,
+		ReadUintEnvironmentValue("SARP_TEXTURE_STREAMING_BUDGET_MB", 0u));
+	settingsManager.registerSetting<uint32_t>(
+		MaterialTextureStreamingVisibleOffsetSettingName,
+		ReadUintEnvironmentValue("SARP_TEXTURE_STREAMING_VISIBLE_OFFSET", 16u));
+	settingsManager.registerSetting<uint32_t>(
+		MaterialTextureStreamingRateMBSettingName,
+		ReadUintEnvironmentValue("SARP_TEXTURE_STREAMING_RATE_MB", 1024u));
 	settingsManager.registerSetting<uint32_t>(
 		AlphaTestedMaterialTextureMaxResidentTopMipSettingName,
 		ReadUintEnvironmentValue(

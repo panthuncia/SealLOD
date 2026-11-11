@@ -729,13 +729,11 @@ void Renderer::Initialize(
                 unorderedAccess, false, owner,
                 br::render::PublishedResourceUsage::ShaderResource, variant, false });
     };
-    constexpr std::array<std::uint64_t, 5> lightVariants{
-        br::render::LightInfoTableVariant, br::render::LightSpotViewTableVariant,
-        br::render::LightPointViewTableVariant, br::render::LightDirectionalViewTableVariant,
+    constexpr std::array<std::uint64_t, br::render::LightTableFamilyCount> lightVariants{
+        br::render::LightInfoTableVariant, br::render::LightDirectionalViewTableVariant,
         br::render::LightActiveIndexTableVariant };
-    constexpr std::array<std::uint32_t, 5> lightStrides{
-        sizeof(LightInfo), sizeof(std::uint32_t), sizeof(std::uint32_t), sizeof(std::uint32_t),
-        sizeof(std::uint32_t) };
+    constexpr std::array<std::uint32_t, br::render::LightTableFamilyCount> lightStrides{
+        sizeof(LightInfo), sizeof(std::uint32_t), sizeof(std::uint32_t) };
     for (std::size_t i = 0; i < m_lightTableFamilies.size(); ++i)
         m_lightTableFamilies[i] = makeFrameTableFamily(110 + i, "LightFrameTable", lightStrides[i],
             br::render::PublishedFragmentKind::Lights, lightVariants[i]);

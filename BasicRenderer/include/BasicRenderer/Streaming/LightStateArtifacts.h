@@ -13,11 +13,12 @@ namespace org { class Resource; }
 namespace org::services { struct PublishedBufferVersion; }
 namespace br::render {
 using PublishedGpuBufferVersion = org::services::PublishedBufferVersion;
+// The published light tables, in LightManager::CaptureTableImages order. 2 and 3 were the retired spot and point light
+// shadow view tables.
 inline constexpr std::uint64_t LightInfoTableVariant = 1;
-inline constexpr std::uint64_t LightSpotViewTableVariant = 2;
-inline constexpr std::uint64_t LightPointViewTableVariant = 3;
 inline constexpr std::uint64_t LightDirectionalViewTableVariant = 4;
 inline constexpr std::uint64_t LightActiveIndexTableVariant = 5;
+inline constexpr std::size_t LightTableFamilyCount = 3;
 
 struct PublishedDirectionalShadowLight {
     DirectX::XMFLOAT3 direction{};

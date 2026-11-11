@@ -24,7 +24,30 @@ struct MaterialTextureStreamingRecord {
 	bool alphaTested = false;
 };
 
+// The residency policy's budget controller, from its last tick (TextureStreamingManager::RunResidencyPolicyTick).
+struct TextureStreamingBudgetStats {
+	bool measured = false;
+	uint64_t driverBudgetBytes = 0;    // what the OS offers this process of local VRAM
+	uint64_t budgetBytes = 0;          // what applies: the setting, or the driver's
+	uint64_t usageBytes = 0;           // the process's local VRAM use
+	uint64_t nonWindowBytes = 0;       // of it, what is not a streamed window, smoothed
+	uint64_t allowanceBytes = 0;       // what the windows are fitted to
+	uint64_t residentBytes = 0;        // the windows' bytes
+	uint64_t committedBytes = 0;       // with the windows on their way
+	uint64_t wantedBytes = 0;          // what the policy wants at the current pull-back
+	uint64_t visibleWantedBytes = 0;   // of it, what is on screen asked for
+	uint64_t unconstrainedBytes = 0;   // what demand would take with no pull-back
+	float heldPullback = 0.0f;         // in mips, of demand not reported in the last second
+	float visiblePullback = 0.0f;      // in mips, of what is on screen
+	uint32_t textures = 0;
+	uint32_t visibleTextures = 0;
+	uint32_t heldTextures = 0;
+	uint64_t upgrades = 0, downgrades = 0, pressureDowngrades = 0;  // since the start
+	uint64_t materialReports = 0, textureReports = 0;                // since the start
+};
+
 struct MaterialTextureStreamingStats {
+	TextureStreamingBudgetStats budget = {};
 	uint32_t uniqueMaterialTextureCount = 0;
 	uint32_t uniqueStreamableTextureCount = 0;
 	uint32_t uniqueStreamingEnabledTextureCount = 0;

@@ -1,5 +1,6 @@
 #include "include/cbuffers.hlsli"
 #include "include/structs.hlsli"
+#include "include/lightModel.hlsli"
 #include "PerPassRootConstants/lightCullingRootConstants.h"
 
 // Returns true if a sphere (with a given center and radius) intersects an AABB
@@ -96,18 +97,18 @@ void CSMain(uint3 groupID : SV_GroupID,
             numLightsInPage = 0;
         }
         
-        // If the light intersects the cluster
+        // If the light intersects the cluster. Pages store light buffer indices, not active-list slots.
         LightInfo light = lights[activeLightIndices[i]];
         switch (light.type) {
-            case 0: // Point light
-            case 1: // Spot light
+            case LIGHT_TYPE_POINT:
+            case LIGHT_TYPE_SPOT: // Its bounding sphere encloses the cone.
                 if (testSphereAABB(primaryCamera.view, light.boundingSphere.sphere.xyz, light.boundingSphere.sphere.w, cluster)) {
                     lightPages[pageIndex].lightIndices[numLightsInPage] = activeLightIndices[i];
                     numLightsInPage++;
                     cluster.numLights++;
                 }
                 break;
-            case 2:
+            case LIGHT_TYPE_DIRECTIONAL:
                 // Directional lights always intersect the cluster.
                 lightPages[pageIndex].lightIndices[numLightsInPage] = activeLightIndices[i];
                 numLightsInPage++;

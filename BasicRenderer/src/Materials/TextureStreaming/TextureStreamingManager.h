@@ -9,6 +9,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -25,6 +26,7 @@
 #include "BasicRenderer/Assets/Texture.h"
 #include <BasicRenderer/Streaming/TaskScheduler.h>
 #include <BasicRenderer/Streaming/SerializedTaskPump.h>
+#include "Materials/TextureStreaming/TextureStreamingPolicy.h"
 
 class TextureFactory;
 namespace br::render {
@@ -94,6 +96,10 @@ public:
 		TextureStreamingBindingOptions options = {});
 	void UnregisterTextureBinding(uint64_t bindingID);
 	void UnregisterTextureBindings(const std::vector<uint64_t>& bindingIDs);
+
+	// The streamed textures a material row names (MaterialManager::JournalMaterialRow): the textures a material's feedback
+	// word reaches. Empty clears the slot. Any thread.
+	void SetMaterialFeedbackTextures(uint32_t materialSlot, std::span<const uint32_t> streamingTextureIDs);
 
 	// Copies the feedback buffer into a free readback slot through `client` (ITextureStreamingFeedbackService).
 	void SubmitTextureStreamingFeedbackReadback(org::ExternalClient& client, uint32_t queueSlot);
@@ -166,6 +172,13 @@ private:
 	void FinishPipelineLoad(uint32_t streamingTextureID, bool loaded);
 
 	void BeginTextureStreamingFeedbackFrame(uint64_t frameIndex);
+	// The residency policy (BasicRenderer/docs/texture-streaming.md): each texture's demand from its materials' footprints and its own
+	// requests, the budget's pull-back, then the upgrades and downgrades that follow. Worker drain only.
+	void RunResidencyPolicyTick(uint64_t frameIndex);
+	struct TexturePolicyState;
+	uint32_t CoarsestAllowedTopMip(uint32_t streamingTextureID, const TextureAsset& texture, uint32_t totalMipCount) const;
+	void RefreshPolicyBytes(TexturePolicyState& policy, const TextureAsset& texture, const TextureStreamingState& state) const;
+	bool MeasureTextureStreamingAllowance(uint64_t residentBytes, uint64_t& allowance);
 	bool UpdateTextureStreamingMetadata(const std::shared_ptr<TextureAsset>& texture);
 	void NotifyBindingChanged(TextureAsset& texture);
 	void TrackTexture(const std::shared_ptr<TextureAsset>& texture);
@@ -216,6 +229,37 @@ private:
 	mutable std::mutex m_activeFeedbackMutex;
 	mutable std::mutex m_textureStreamingFeedbackMutex;
 	std::vector<std::pair<uint32_t, uint32_t>> m_pendingTextureStreamingFeedback;
+	std::vector<std::pair<uint32_t, uint32_t>> m_pendingMaterialStreamingFeedback;  // (material slot, encoded footprint)
+
+	// Material slot -> streamed textures, written by MaterialManager, copied by the worker when its revision moves.
+	std::mutex m_materialFeedbackSlotsMutex;
+	std::vector<std::vector<uint32_t>> m_materialFeedbackSlots;
+	uint64_t m_materialFeedbackSlotsRevision = 0;
+	std::atomic<uint32_t> m_materialFeedbackSlotCount{ 0 };
+	// Worker drain only: the policy's view of the slots, and what feedback reported since the last tick.
+	std::vector<std::vector<uint32_t>> m_policyMaterialSlots;
+	uint64_t m_policyMaterialSlotsRevision = ~0ull;
+	std::vector<float> m_materialFootprintSinceTick;
+	std::unordered_map<uint32_t, uint32_t> m_textureTopSinceTick;
+	struct TexturePolicyState {
+		float heldFootprint = std::numeric_limits<float>::infinity();  // the last report, held kHoldTicks
+		uint32_t age = br::texturestreaming::kHoldTicks;               // ticks since that report
+		br::texturestreaming::Pace pace{};
+		uint32_t pendingTop = br::texturestreaming::kNoWindow;         // asked for, not resident yet
+		uint32_t pendingTicks = 0;
+		uint32_t wantedTop = 0;                                        // the last tick's choice, for the stats
+		bool visible = false;
+		// Bytes of the window from each top, for the shape they were computed for.
+		uint32_t bytesWidth = 0, bytesHeight = 0, bytesMips = 0;
+		rhi::Format bytesFormat = rhi::Format::Unknown;
+		std::vector<uint64_t> bytesFrom;
+	};
+	std::unordered_map<uint32_t, TexturePolicyState> m_texturePolicy;
+	br::texturestreaming::Pullback m_pullback{};
+	uint64_t m_nonWindowBytes = 0;  // VRAM that is not a streamed window, smoothed
+	bool m_budgetMeasured = false;
+	std::chrono::steady_clock::time_point m_lastPolicyTick{};
+	TextureStreamingBudgetStats m_budgetStats{};  // the last tick's, published with the stats
 	std::vector<uint32_t> m_dirtyTextureStreamingIDs;
 	std::unordered_set<uint32_t> m_dirtyTextureStreamingIDSet;
 	std::vector<uint32_t> m_texturesNeedingUploadAdvance;
@@ -258,6 +302,7 @@ private:
 	struct ReadbackSlot {
 		std::shared_ptr<org::Buffer> staging;
 		std::vector<uint32_t> activeStreamingTextureIDs;
+		uint32_t materialSlotCount = 0;
 		uint64_t capacityBytes = 0;
 		uint64_t copyBytes = 0;
 		uint64_t fenceValue = 0;

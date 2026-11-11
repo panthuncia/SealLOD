@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -40,11 +41,13 @@ namespace {
 	constexpr uint32_t kTextureStreamingFlagEligible = 1u << 0;
 	constexpr uint32_t kTextureStreamingFlagEnabled = 1u << 1;
 	constexpr uint32_t kTextureStreamingFeedbackUnused = 0xffffffffu;
-	uint64_t TextureStreamingIdleFramesBeforeCoarsen() {
-		return (std::max<uint64_t>)(
-			1u,
-			SettingsManager::GetInstance().getSettingGetter<uint32_t>(
-				MaterialTextureStreamingIdleFramesSettingName)());
+	// The feedback buffer interleaves two kinds of word (utilities.hlsli): a texture's requested top mip + 1, and a
+	// material slot's encoded footprint.
+	constexpr uint64_t TextureFeedbackWord(uint32_t streamingTextureID) { return uint64_t{ streamingTextureID } * 2u; }
+	constexpr uint64_t MaterialFeedbackWord(uint32_t materialSlot) { return uint64_t{ materialSlot } * 2u + 1u; }
+
+	uint32_t SettingUint(const char* name) {
+		return SettingsManager::GetInstance().getSettingGetter<uint32_t>(name)();
 	}
 
 	bool MaterialTextureStreamingTransitionLoggingEnabled() {
@@ -418,6 +421,7 @@ void TextureStreamingManager::PollCompletedReadbackSlots(uint64_t& lastProcessed
 		uint64_t copyBytes = 0;
 		std::shared_ptr<org::Buffer> staging;
 		std::vector<uint32_t> activeIDs;
+		uint32_t materialSlotCount = 0;
 	};
 	std::vector<CompletedSlot> completedSlots;
 	{
@@ -430,7 +434,8 @@ void TextureStreamingManager::PollCompletedReadbackSlots(uint64_t& lastProcessed
 				.fenceValue = slot.fenceValue,
 				.copyBytes = slot.copyBytes,
 				.staging = slot.staging,
-				.activeIDs = slot.activeStreamingTextureIDs});
+				.activeIDs = slot.activeStreamingTextureIDs,
+				.materialSlotCount = slot.materialSlotCount});
 		}
 	}
 	for (auto& completedSlot : completedSlots) {
@@ -439,12 +444,19 @@ void TextureStreamingManager::PollCompletedReadbackSlots(uint64_t& lastProcessed
 		if (mapped) {
 			std::lock_guard feedbackLock(m_textureStreamingFeedbackMutex);
 			const size_t wordCount = static_cast<size_t>(completedSlot.copyBytes / sizeof(uint32_t));
+			const auto* words = static_cast<const uint32_t*>(mapped);
+			for (uint32_t materialSlot = 0; materialSlot < completedSlot.materialSlotCount; ++materialSlot) {
+				const uint64_t word = MaterialFeedbackWord(materialSlot);
+				if (word >= wordCount) break;
+				const uint32_t value = words[word];
+				// Zero: a word no reset has reached yet (see below).
+				if (value != kTextureStreamingFeedbackUnused && value != 0u)
+					m_pendingMaterialStreamingFeedback.emplace_back(materialSlot, value);
+			}
 			for (uint32_t streamingTextureID : completedSlot.activeIDs) {
-				if (streamingTextureID >= wordCount) continue;
-				uint32_t requestedTopMip = kTextureStreamingFeedbackUnused;
-				std::memcpy(&requestedTopMip,
-					static_cast<const std::byte*>(mapped) + static_cast<size_t>(streamingTextureID) * sizeof(uint32_t),
-					sizeof(uint32_t));
+				const uint64_t word = TextureFeedbackWord(streamingTextureID);
+				if (word >= wordCount) continue;
+				const uint32_t requestedTopMip = words[word];
 				// Shaders store mip + 1. Zero is a slot no reset has reached yet (a newly grown backing replays the CPU
 				// copy, which can still hold zeros), not a request: read as mip 0, each one loaded a full-resolution image.
 				if (requestedTopMip != kTextureStreamingFeedbackUnused && requestedTopMip != 0u) {
@@ -542,7 +554,7 @@ void TextureStreamingManager::ApplyRegisterCommand(WorkerCommand&& command)
 		cappedTopMip = (std::min)(cappedTopMip, capIt->second.begin()->first);
 	}
 	if (texture->GetStreamingState().requestedTopMip > cappedTopMip) {
-		(void)texture->ApplyStreamingSystemRequest(cappedTopMip, 0u, true);
+		(void)texture->ApplyStreamingSystemRequest(cappedTopMip, 0u);
 	}
 	TrackTexture(texture);
 	MarkTextureStreamingMetadataDirty(texture, true, "track_binding");
@@ -674,6 +686,8 @@ void TextureStreamingManager::ApplyUnregisterCommand(uint64_t bindingID)
 			ZoneScopedN("TextureStreamingManager::UnregisterTextureBinding::EraseTextureState");
 			m_bindingIDsByStreamingTextureID.erase(ownersIt);
 			m_streamingTexturesByID.erase(streamingTextureID);
+			m_texturePolicy.erase(streamingTextureID);
+			m_textureTopSinceTick.erase(streamingTextureID);
 			m_textureStreamingMetadataRevisions.erase(streamingTextureID);
 			m_alphaTestedBindingCountsByStreamingTextureID.erase(streamingTextureID);
 			m_idleCoarseningDisabledBindingCountsByStreamingTextureID.erase(streamingTextureID);
@@ -767,138 +781,129 @@ void TextureStreamingManager::MarkTextureStreamingMetadataDirty(
 	RecordTextureDirtyReason(reason);
 }
 
+void TextureStreamingManager::SetMaterialFeedbackTextures(uint32_t materialSlot, std::span<const uint32_t> streamingTextureIDs)
+{
+	std::vector<uint32_t> ids;
+	ids.reserve(streamingTextureIDs.size());
+	for (const uint32_t id : streamingTextureIDs) {
+		if (id != 0u && std::find(ids.begin(), ids.end(), id) == ids.end()) ids.push_back(id);
+	}
+	std::lock_guard lock(m_materialFeedbackSlotsMutex);
+	if (materialSlot >= m_materialFeedbackSlots.size()) {
+		if (ids.empty()) return;
+		m_materialFeedbackSlots.resize(static_cast<size_t>(materialSlot) + 1u);
+	}
+	if (m_materialFeedbackSlots[materialSlot] == ids) return;
+	m_materialFeedbackSlots[materialSlot] = std::move(ids);
+	++m_materialFeedbackSlotsRevision;
+	m_materialFeedbackSlotCount.store(static_cast<uint32_t>(m_materialFeedbackSlots.size()), std::memory_order_release);
+}
+
+uint32_t TextureStreamingManager::CoarsestAllowedTopMip(uint32_t streamingTextureID, const TextureAsset& texture, uint32_t totalMipCount) const
+{
+	uint32_t top = totalMipCount - 1u;
+	if (auto capIt = m_maximumResidentTopMipBindingCountsByStreamingTextureID.find(streamingTextureID);
+		capIt != m_maximumResidentTopMipBindingCountsByStreamingTextureID.end() && !capIt->second.empty()) {
+		top = (std::min)(top, capIt->second.begin()->first);
+	}
+	if (m_alphaTestedBindingCountsByStreamingTextureID.contains(streamingTextureID)) {
+		top = (std::min)(top, AlphaTestedTopMipCap(texture));
+	}
+	return top;
+}
+
+void TextureStreamingManager::RefreshPolicyBytes(TexturePolicyState& policy, const TextureAsset& texture, const TextureStreamingState& state) const
+{
+	const uint32_t width = texture.GetFullMip0Width();
+	const uint32_t height = texture.GetFullMip0Height();
+	const uint32_t mips = state.residency.totalMipCount;
+	const rhi::Format format = texture.Format();
+	if (policy.bytesWidth == width && policy.bytesHeight == height && policy.bytesMips == mips && policy.bytesFormat == format &&
+		!policy.bytesFrom.empty()) {
+		return;
+	}
+	policy.bytesWidth = width;
+	policy.bytesHeight = height;
+	policy.bytesMips = mips;
+	policy.bytesFormat = format;
+	const rhi::BlockInfo block = rhi::GetBlockInfo(format);
+	const uint64_t blockBytes = block.bytesPerBlock != 0u ? block.bytesPerBlock : 4u;
+	const uint64_t blockWidth = (std::max)(block.blockWidth, 1u);
+	const uint64_t blockHeight = (std::max)(block.blockHeight, 1u);
+	std::vector<uint64_t> mipBytes(mips, 0u);
+	for (uint32_t mip = 0; mip < mips; ++mip) {
+		const uint64_t w = (std::max)(width >> mip, 1u);
+		const uint64_t h = (std::max)(height >> mip, 1u);
+		mipBytes[mip] = ((w + blockWidth - 1u) / blockWidth) * ((h + blockHeight - 1u) / blockHeight) * blockBytes;
+	}
+	policy.bytesFrom.assign(mips, 0u);
+	uint64_t running = 0;
+	for (uint32_t mip = mips; mip-- > 0;) {
+		running += mipBytes[mip];
+		policy.bytesFrom[mip] = br::texturestreaming::AlignTextureBytes(running);
+	}
+}
+
+bool TextureStreamingManager::MeasureTextureStreamingAllowance(uint64_t residentBytes, uint64_t& allowance)
+{
+	rhi::VideoMemoryInfo local{};
+	auto device = DeviceManager::GetInstance().GetDevice();
+	if (rhi::Failed(device.QueryVideoMemoryInfo(0, rhi::MemorySegmentGroup::Local, local)) || local.budgetBytes == 0u) {
+		return false;
+	}
+	// Everything that is not a window comes off the budget first. A rise counts within a second, a fall takes tens:
+	// a window just replaced stays allocated until its last frame retires, and a load's spike passes.
+	const uint64_t other = local.currentUsageBytes > residentBytes ? local.currentUsageBytes - residentBytes : 0u;
+	if (!m_budgetMeasured) m_nonWindowBytes = other;
+	else if (other > m_nonWindowBytes) m_nonWindowBytes += (other - m_nonWindowBytes) / 4u;
+	else m_nonWindowBytes -= (m_nonWindowBytes - other) / 20u;
+	m_budgetMeasured = true;
+
+	const uint64_t configured = uint64_t{ SettingUint(MaterialTextureStreamingBudgetMBSettingName) } << 20u;
+	const uint64_t budget = configured != 0u ? configured : local.budgetBytes;
+	const auto target = static_cast<uint64_t>(static_cast<double>(budget) * br::texturestreaming::kBudgetTarget);
+	allowance = target > m_nonWindowBytes ? target - m_nonWindowBytes : 0u;
+
+	m_budgetStats.measured = true;
+	m_budgetStats.driverBudgetBytes = local.budgetBytes;
+	m_budgetStats.budgetBytes = budget;
+	m_budgetStats.usageBytes = local.currentUsageBytes;
+	m_budgetStats.nonWindowBytes = m_nonWindowBytes;
+	m_budgetStats.allowanceBytes = allowance;
+	return true;
+}
+
 void TextureStreamingManager::BeginTextureStreamingFeedbackFrame(uint64_t frameIndex)
 {
 	if (!IsMaterialTextureStreamingEnabledSetting()) {
 		return;
 	}
 
-	std::vector<std::pair<uint32_t, uint32_t>> pendingFeedback;
+	// Fold the readbacks that landed since the last frame into what the next policy tick reads: the finest each
+	// material slot and each texture asked for.
+	std::vector<std::pair<uint32_t, uint32_t>> textureFeedback;
+	std::vector<std::pair<uint32_t, uint32_t>> materialFeedback;
 	{
 		std::lock_guard lock(m_textureStreamingFeedbackMutex);
-		pendingFeedback.swap(m_pendingTextureStreamingFeedback);
+		textureFeedback.swap(m_pendingTextureStreamingFeedback);
+		materialFeedback.swap(m_pendingMaterialStreamingFeedback);
+	}
+	for (const auto& [streamingTextureID, requestedTopMip] : textureFeedback) {
+		auto [it, inserted] = m_textureTopSinceTick.try_emplace(streamingTextureID, requestedTopMip);
+		if (!inserted) it->second = (std::min)(it->second, requestedTopMip);
+	}
+	for (const auto& [materialSlot, value] : materialFeedback) {
+		if (materialSlot >= m_materialFootprintSinceTick.size()) {
+			m_materialFootprintSinceTick.resize(static_cast<size_t>(materialSlot) + 1u, std::numeric_limits<float>::infinity());
+		}
+		auto& footprint = m_materialFootprintSinceTick[materialSlot];
+		footprint = (std::min)(footprint, br::texturestreaming::DecodeFootprint(value));
 	}
 
-	std::vector<uint32_t> expiredTextureIDs;
-	for (const auto& [streamingTextureID, requestedTopMip] : pendingFeedback) {
-		auto it = m_streamingTexturesByID.find(streamingTextureID);
-		if (it == m_streamingTexturesByID.end()) {
-			continue;
-		}
-
-		auto texture = it->second.lock();
-		if (!texture) {
-			expiredTextureIDs.push_back(streamingTextureID);
-			continue;
-		}
-
-		if (!texture->IsMipStreamingEnabled()) {
-			continue;
-		}
-
-		// SARP_TEXTURE_FEEDBACK_TRACE_IDS=<id>,<id>,...: log every feedback frame's request for these textures.
-		static const std::vector<uint32_t> tracedTextureIDs = [] {
-			std::vector<uint32_t> ids;
-			if (const char* v = std::getenv("SARP_TEXTURE_FEEDBACK_TRACE_IDS")) {
-				for (const char* at = v; *at;) {
-					char* end = nullptr;
-					const unsigned long id = std::strtoul(at, &end, 10);
-					if (end == at) break;
-					ids.push_back(static_cast<uint32_t>(id));
-					at = *end == ',' ? end + 1 : end;
-				}
-			}
-			return ids;
-		}();
-		if (!tracedTextureIDs.empty() && std::find(tracedTextureIDs.begin(), tracedTextureIDs.end(), streamingTextureID) != tracedTextureIDs.end()) {
-			const auto state = texture->GetStreamingState();
-			spdlog::info("Texture feedback trace: frame={} id={} requested={} resident={} pending={}", frameIndex, streamingTextureID,
-				requestedTopMip, state.residency.residentTopMip, state.pendingTopMip);
-		}
-		uint32_t policyTopMip = requestedTopMip;
-		// SARP_TEXTURE_FEEDBACK_FORCE_MIP=<n>: debug override, every request becomes mip n (0 gives a full-resolution reference).
-		static const int forcedFeedbackMip = [] { const char* v = std::getenv("SARP_TEXTURE_FEEDBACK_FORCE_MIP"); return v && v[0] ? std::atoi(v) : -1; }();
-		if (forcedFeedbackMip >= 0) policyTopMip = static_cast<uint32_t>(forcedFeedbackMip);
-		if (m_alphaTestedBindingCountsByStreamingTextureID.contains(streamingTextureID)) {
-			policyTopMip = (std::min)(policyTopMip, AlphaTestedTopMipCap(*texture));
-		}
-		if (auto capIt = m_maximumResidentTopMipBindingCountsByStreamingTextureID.find(streamingTextureID);
-			capIt != m_maximumResidentTopMipBindingCountsByStreamingTextureID.end() && !capIt->second.empty()) {
-			policyTopMip = (std::min)(policyTopMip, capIt->second.begin()->first);
-		}
-		const uint64_t previousRevision = texture->GetStreamingStateRevision();
-		const bool needsUploadAdvance = texture->ApplyStreamingSystemRequest(policyTopMip, frameIndex);
-		if (texture->GetStreamingStateRevision() != previousRevision) {
-			MarkTextureStreamingMetadataDirty(texture, needsUploadAdvance, "feedback");
-		}
-	}
-
-	for (uint32_t streamingTextureID : expiredTextureIDs) {
-		m_streamingTexturesByID.erase(streamingTextureID);
-	}
-
-	const uint64_t idleFramesBeforeCoarsen = TextureStreamingIdleFramesBeforeCoarsen();
-	for (auto it = m_streamingTexturesByID.begin(); it != m_streamingTexturesByID.end();) {
-		auto texture = it->second.lock();
-		if (!texture) {
-			it = m_streamingTexturesByID.erase(it);
-			continue;
-		}
-
-		if (!texture->IsMipStreamingEnabled()) {
-			++it;
-			continue;
-		}
-
-		const TextureStreamingState& state = texture->GetStreamingState();
-		uint32_t bindingMipCap = state.residency.totalMipCount - 1u;
-		if (auto capIt = m_maximumResidentTopMipBindingCountsByStreamingTextureID.find(it->first);
-			capIt != m_maximumResidentTopMipBindingCountsByStreamingTextureID.end() && !capIt->second.empty()) {
-			bindingMipCap = (std::min)(bindingMipCap, capIt->second.begin()->first);
-		}
-		if (m_alphaTestedBindingCountsByStreamingTextureID.contains(it->first)) {
-			bindingMipCap = (std::min)(bindingMipCap, AlphaTestedTopMipCap(*texture));
-		}
-		if (state.requestedTopMip > bindingMipCap ||
-			state.pendingTopMip > bindingMipCap ||
-			state.residency.residentTopMip > bindingMipCap) {
-				const uint64_t previousRevision = texture->GetStreamingStateRevision();
-				const bool needsUploadAdvance =
-					texture->ApplyStreamingSystemRequest(bindingMipCap, 0u, true);
-				if (texture->GetStreamingStateRevision() != previousRevision) {
-					MarkTextureStreamingMetadataDirty(
-						texture,
-						needsUploadAdvance,
-						"binding_mip_cap");
-				}
-				++it;
-				continue;
-		}
-		if (m_idleCoarseningDisabledBindingCountsByStreamingTextureID.contains(it->first)) {
-			++it;
-			continue;
-		}
-		if (state.lastSeenFrame == 0u ||
-			frameIndex <= state.lastSeenFrame + idleFramesBeforeCoarsen) {
-			++it;
-			continue;
-		}
-
-		// Once a texture has been unseen for the full idle interval, jump directly to
-		// its terminal coarse mip.  Rebuilding every intermediate one-mip window made
-		// an idle scene cycle allocate and retire the entire texture set repeatedly.
-		// The terminal mip respects binding caps (bindingMipCap includes the alpha-tested one): going below them only
-		// had the cap check above load the capped image again the next frame.
-		const uint32_t coarsenedTopMip = bindingMipCap;
-		if (coarsenedTopMip != state.requestedTopMip) {
-			const uint64_t previousRevision = texture->GetStreamingStateRevision();
-			const bool needsUploadAdvance = texture->ApplyStreamingSystemRequest(coarsenedTopMip, frameIndex, true);
-			if (texture->GetStreamingStateRevision() != previousRevision) {
-				MarkTextureStreamingMetadataDirty(texture, needsUploadAdvance, "idle_coarsen");
-			}
-		}
-
-		++it;
+	const auto now = std::chrono::steady_clock::now();
+	if (now - m_lastPolicyTick >= std::chrono::milliseconds(br::texturestreaming::kTickMilliseconds)) {
+		m_lastPolicyTick = now;
+		RunResidencyPolicyTick(frameIndex);
 	}
 
 	std::vector<uint32_t> activeFeedbackIDs;
@@ -906,14 +911,286 @@ void TextureStreamingManager::BeginTextureStreamingFeedbackFrame(uint64_t frameI
 		std::lock_guard feedbackIDsLock(m_activeFeedbackMutex);
 		activeFeedbackIDs = m_activeTextureStreamingFeedbackIDs;
 	}
+	const uint32_t materialSlotCount = m_materialFeedbackSlotCount.load(std::memory_order_acquire);
+	uint64_t lastWord = 0u;
 	if (!activeFeedbackIDs.empty()) {
+		lastWord = TextureFeedbackWord(*std::max_element(activeFeedbackIDs.begin(), activeFeedbackIDs.end()));
+	}
+	if (materialSlotCount != 0u) {
+		lastWord = (std::max)(lastWord, MaterialFeedbackWord(materialSlotCount - 1u));
+	}
+	if (lastWord != 0u) {
 		// Reset one dense range instead of staging one four-byte upload per active
-		// texture.  Sparse per-ID resets generated hundreds of CopyBufferRegion calls
+		// word.  Sparse per-ID resets generated hundreds of CopyBufferRegion calls
 		// every feedback frame and dominated both FlushClient and upload command
 		// recording despite transferring only a few KiB.
-		const uint32_t lastActiveID = *std::max_element(activeFeedbackIDs.begin(), activeFeedbackIDs.end());
-		std::vector<uint32_t> resetValues(static_cast<size_t>(lastActiveID) + 1u, kTextureStreamingFeedbackUnused);
+		std::vector<uint32_t> resetValues(static_cast<size_t>(lastWord) + 1u, kTextureStreamingFeedbackUnused);
 		m_textureStreamingFeedbackBuffer->StageRange(0u, resetValues);
+	}
+}
+
+void TextureStreamingManager::RunResidencyPolicyTick(uint64_t frameIndex)
+{
+	namespace ts = br::texturestreaming;
+	ZoneScopedN("TextureStreamingManager::RunResidencyPolicyTick");
+
+	{
+		std::lock_guard lock(m_materialFeedbackSlotsMutex);
+		if (m_policyMaterialSlotsRevision != m_materialFeedbackSlotsRevision) {
+			m_policyMaterialSlots = m_materialFeedbackSlots;
+			m_policyMaterialSlotsRevision = m_materialFeedbackSlotsRevision;
+		}
+	}
+	// This tick's reports as footprints: a material's reaches every texture its row names.
+	std::unordered_map<uint32_t, float> reported;
+	for (uint32_t slot = 0; slot < m_materialFootprintSinceTick.size(); ++slot) {
+		float& footprint = m_materialFootprintSinceTick[slot];
+		if (!std::isfinite(footprint)) continue;
+		++m_budgetStats.materialReports;
+		if (slot < m_policyMaterialSlots.size()) {
+			for (const uint32_t id : m_policyMaterialSlots[slot]) {
+				auto [it, inserted] = reported.try_emplace(id, footprint);
+				if (!inserted) it->second = (std::min)(it->second, footprint);
+			}
+		}
+		footprint = std::numeric_limits<float>::infinity();
+	}
+	std::unordered_map<uint32_t, uint32_t> reportedTops;
+	reportedTops.swap(m_textureTopSinceTick);
+	m_budgetStats.textureReports += reportedTops.size();
+
+	// SARP_TEXTURE_FEEDBACK_FORCE_MIP=<n>: every texture at mip n (clamped to its caps), 0 for a full-resolution
+	// reference. Still held to the budget.
+	static const int forcedTop = [] { const char* v = std::getenv("SARP_TEXTURE_FEEDBACK_FORCE_MIP"); return v && v[0] ? std::atoi(v) : -1; }();
+
+	struct Entry {
+		std::shared_ptr<TextureAsset> texture;
+		TexturePolicyState* policy = nullptr;
+		uint32_t id = 0;
+		uint32_t largest = 1;
+		uint32_t coarsest = 0;
+		uint32_t resident = br::texturestreaming::kNoWindow;
+		bool inFlight = false;
+	};
+	std::vector<Entry> entries;
+	entries.reserve(m_streamingTexturesByID.size());
+	for (auto it = m_streamingTexturesByID.begin(); it != m_streamingTexturesByID.end();) {
+		auto texture = it->second.lock();
+		if (!texture) {
+			m_texturePolicy.erase(it->first);
+			it = m_streamingTexturesByID.erase(it);
+			continue;
+		}
+		const uint32_t id = it->first;
+		++it;
+		if (!texture->IsMipStreamingEnabled()) continue;
+		const TextureStreamingState state = texture->GetStreamingState();
+		const uint32_t totalMips = state.residency.totalMipCount;
+		if (totalMips <= 1u) continue;
+
+		auto& policy = m_texturePolicy[id];
+		RefreshPolicyBytes(policy, *texture, state);
+		Entry entry{};
+		entry.texture = std::move(texture);
+		entry.policy = &policy;
+		entry.id = id;
+		entry.largest = (std::max)(entry.texture->GetFullMip0Width(), entry.texture->GetFullMip0Height());
+		entry.coarsest = CoarsestAllowedTopMip(id, *entry.texture, totalMips);
+
+		float report = std::numeric_limits<float>::infinity();
+		if (const auto found = reported.find(id); found != reported.end()) report = found->second;
+		if (const auto found = reportedTops.find(id); found != reportedTops.end()) {
+			report = (std::min)(report, ts::FootprintForTop(entry.largest, found->second));
+		}
+		if (std::isfinite(report)) {
+			policy.heldFootprint = report;
+			policy.age = 0;
+		}
+		else if (policy.age < ts::kHoldTicks) {
+			++policy.age;
+		}
+		// A binding that does not let its texture coarsen when idle keeps the last demand.
+		if (policy.age >= ts::kHoldTicks && std::isfinite(policy.heldFootprint) &&
+			m_idleCoarseningDisabledBindingCountsByStreamingTextureID.contains(id)) {
+			policy.age = ts::kHoldTicks - 1u;
+		}
+
+		if (entry.texture->IsResidentFinalImage()) {
+			entry.resident = (std::min)(state.residency.residentTopMip, totalMips - 1u);
+			entry.inFlight = state.pendingTopMip != state.residency.residentTopMip;
+		}
+		entries.push_back(std::move(entry));
+	}
+
+	const auto wantedTop = [&](const Entry& entry, float held, float visible) -> uint32_t {
+		const auto& policy = *entry.policy;
+		if (forcedTop >= 0) {
+			// A forced window is held demand: the budget pulls it back first.
+			return ts::TopForFootprint(entry.largest, ts::FootprintForTop(entry.largest, static_cast<uint32_t>(forcedTop)) + held, entry.coarsest);
+		}
+		if (policy.age >= ts::kHoldTicks) return entry.coarsest;
+		const float pullback = policy.age < ts::kVisibleTicks ? visible : held;
+		return ts::TopForFootprint(entry.largest, policy.heldFootprint + pullback, entry.coarsest);
+	};
+	const auto bytesAt = [](const Entry& entry, uint32_t top) {
+		const auto& bytes = entry.policy->bytesFrom;
+		return bytes.empty() ? uint64_t{ 0 } : bytes[(std::min<size_t>)(top, bytes.size() - 1u)];
+	};
+
+	uint64_t residentBytes = 0;
+	for (const auto& entry : entries) {
+		if (entry.resident != ts::kNoWindow) residentBytes += bytesAt(entry, entry.resident);
+	}
+	uint64_t allowance = std::numeric_limits<uint64_t>::max();
+	const bool bounded = MeasureTextureStreamingAllowance(residentBytes, allowance);
+	if (!bounded) {
+		m_pullback = {};
+	}
+	else {
+		const float maxVisible = static_cast<float>((std::min)(SettingUint(MaterialTextureStreamingVisibleOffsetSettingName), 16u));
+		ts::StepPullback(m_pullback, allowance, maxVisible, [&](float held, float visible) {
+			uint64_t bytes = 0;
+			for (const auto& entry : entries) {
+				if (entry.resident != ts::kNoWindow) bytes += bytesAt(entry, wantedTop(entry, held, visible));
+			}
+			return bytes;
+		});
+	}
+
+	struct Candidate {
+		Entry* entry = nullptr;
+		uint32_t top = 0;
+		uint32_t shortMips = 0;
+		uint64_t bytes = 0;  // an upgrade's: what it adds. A release's: what it frees.
+		bool visible = false;
+	};
+	std::vector<Candidate> upgrades;
+	std::vector<Candidate> downgrades;
+	uint64_t committed = residentBytes;  // with what is on its way
+	uint64_t wantedBytes = 0, visibleWantedBytes = 0, unconstrainedBytes = 0;
+	uint32_t visibleTextures = 0, heldTextures = 0;
+	for (auto& entry : entries) {
+		auto& policy = *entry.policy;
+		const bool visible = policy.age < ts::kVisibleTicks;
+		visibleTextures += visible ? 1u : 0u;
+		heldTextures += !visible && policy.age < ts::kHoldTicks ? 1u : 0u;
+		policy.visible = visible;
+		if (entry.resident == ts::kNoWindow) {
+			// No window yet: its first load (the bootstrap mip) is the texture's own business.
+			policy.wantedTop = entry.coarsest;
+			continue;
+		}
+		const uint32_t wanted = wantedTop(entry, m_pullback.held, m_pullback.visible);
+		policy.wantedTop = wanted;
+		wantedBytes += bytesAt(entry, wanted);
+		unconstrainedBytes += bytesAt(entry, wantedTop(entry, 0.0f, 0.0f));
+		if (visible) visibleWantedBytes += bytesAt(entry, wanted);
+
+		// What was asked for and not there yet stays asked for, unless it takes too long.
+		if (entry.inFlight) {
+			const uint32_t pendingTop = entry.texture->GetStreamingState().pendingTopMip;
+			if (++policy.pendingTicks < ts::kPendingTimeoutTicks) {
+				if (pendingTop < entry.resident) committed += bytesAt(entry, pendingTop) - bytesAt(entry, entry.resident);
+				continue;
+			}
+			// Stuck: kick its residency again rather than wait on it forever.
+			policy.pendingTicks = 0;
+			MarkTextureStreamingMetadataDirty(entry.texture, true, "pending_retry");
+			continue;
+		}
+		policy.pendingTicks = 0;
+
+		auto action = ts::Decide(entry.resident, wanted, policy.pace);
+		// Coarser than a binding allows (an alpha-tested texture losing its coverage): at once.
+		if (entry.resident > entry.coarsest) action = ts::Action::Upgrade;
+		if (forcedTop >= 0 && wanted != entry.resident) action = wanted < entry.resident ? ts::Action::Upgrade : ts::Action::Downgrade;
+		if (action == ts::Action::Upgrade && wanted < entry.resident) {
+			upgrades.push_back({ &entry, wanted, entry.resident - wanted, bytesAt(entry, wanted) - bytesAt(entry, entry.resident),
+				visible || entry.resident > entry.coarsest });
+		}
+		else if (action == ts::Action::Downgrade && wanted > entry.resident) {
+			downgrades.push_back({ &entry, wanted, 0u, bytesAt(entry, entry.resident) - bytesAt(entry, wanted), visible });
+		}
+	}
+
+	const auto post = [&](Candidate& candidate, const char* reason) {
+		auto& texture = candidate.entry->texture;
+		const uint64_t previousRevision = texture->GetStreamingStateRevision();
+		const bool needsUploadAdvance = texture->ApplyStreamingSystemRequest(candidate.top, frameIndex);
+		if (texture->GetStreamingStateRevision() != previousRevision) {
+			MarkTextureStreamingMetadataDirty(texture, needsUploadAdvance, reason);
+		}
+		candidate.entry->policy->pendingTicks = 0;
+		candidate.entry->inFlight = true;
+	};
+	for (auto& candidate : downgrades) {
+		++m_budgetStats.downgrades;
+		post(candidate, "policy_downgrade");
+	}
+	if (bounded && committed > allowance) {
+		// Over the allowance: the wait for a downgrade is off, and the largest surplus goes first. Only down to what is
+		// wanted: the controller decides what that is, so a texture on screen is not released to make room for another.
+		constexpr size_t kMaxReleasesPerTick = 256u;
+		std::vector<Candidate> surplus;
+		for (auto& entry : entries) {
+			if (entry.resident == ts::kNoWindow || entry.inFlight || entry.policy->wantedTop <= entry.resident) continue;
+			surplus.push_back({ &entry, entry.policy->wantedTop, 0u,
+				bytesAt(entry, entry.resident) - bytesAt(entry, entry.policy->wantedTop), false });
+		}
+		std::sort(surplus.begin(), surplus.end(), [](const Candidate& a, const Candidate& b) { return a.bytes > b.bytes; });
+		uint64_t over = committed - allowance;
+		for (size_t i = 0; i < (std::min)(surplus.size(), kMaxReleasesPerTick) && over != 0u; ++i) {
+			++m_budgetStats.pressureDowngrades;
+			post(surplus[i], "policy_pressure");
+			committed -= (std::min)(committed, surplus[i].bytes);
+			over -= (std::min)(over, surplus[i].bytes);
+		}
+	}
+	// What is on screen first, then the furthest short. The rate caps what starts this tick, and the next tick takes the
+	// rest. What is on screen loads whatever the allowance says: the controller already stepped it down as far as the
+	// setting lets it. Another upgrade that does not fit is skipped rather than ending the list: a smaller one may still.
+	std::sort(upgrades.begin(), upgrades.end(), [](const Candidate& a, const Candidate& b) {
+		return a.visible != b.visible ? a.visible : a.shortMips > b.shortMips;
+	});
+	const uint64_t tickRate = (std::max<uint64_t>)(uint64_t{ SettingUint(MaterialTextureStreamingRateMBSettingName) } << 20u, 1ull << 20u) *
+		ts::kTickMilliseconds / 1000u;
+	uint64_t uploadLeft = tickRate;
+	for (auto& candidate : upgrades) {
+		if (candidate.bytes > uploadLeft && uploadLeft != tickRate) break;
+		if (bounded && (!candidate.visible || forcedTop >= 0) && (candidate.bytes > allowance || committed > allowance - candidate.bytes)) continue;
+		uploadLeft -= (std::min)(uploadLeft, candidate.bytes);
+		committed += candidate.bytes;
+		++m_budgetStats.upgrades;
+		post(candidate, "policy_upgrade");
+	}
+
+	m_budgetStats.residentBytes = residentBytes;
+	m_budgetStats.committedBytes = committed;
+	m_budgetStats.wantedBytes = wantedBytes;
+	m_budgetStats.visibleWantedBytes = visibleWantedBytes;
+	m_budgetStats.unconstrainedBytes = unconstrainedBytes;
+	m_budgetStats.heldPullback = m_pullback.held;
+	m_budgetStats.visiblePullback = m_pullback.visible;
+	m_budgetStats.textures = static_cast<uint32_t>(entries.size());
+	m_budgetStats.visibleTextures = visibleTextures;
+	m_budgetStats.heldTextures = heldTextures;
+	if (!bounded) m_budgetStats.allowanceBytes = 0u;
+
+	// SARP_TEXTURE_STREAMING_LOG_SECONDS: how often this line is logged (default 10 s).
+	static const int logSeconds = [] { const char* v = std::getenv("SARP_TEXTURE_STREAMING_LOG_SECONDS"); return v && v[0] ? (std::max)(std::atoi(v), 1) : 10; }();
+	static auto lastLog = std::chrono::steady_clock::time_point{};
+	const auto now = std::chrono::steady_clock::now();
+	if (now - lastLog >= std::chrono::seconds(logSeconds)) {
+		lastLog = now;
+		const auto mib = [](uint64_t bytes) { return bytes >> 20u; };
+		spdlog::info(
+			"Texture streaming: budget {} MiB (driver {} MiB), VRAM use {} MiB, not windows {} MiB, allowance {} MiB; windows {} MiB "
+			"resident, {} MiB committed, {} MiB wanted ({} MiB on screen, {} MiB unconstrained); pull-back held {:.2f} on screen {:.2f}; "
+			"textures {} ({} on screen, {} held); upgrades {} downgrades {} pressure {}",
+			mib(m_budgetStats.budgetBytes), mib(m_budgetStats.driverBudgetBytes), mib(m_budgetStats.usageBytes),
+			mib(m_budgetStats.nonWindowBytes), mib(m_budgetStats.allowanceBytes), mib(residentBytes), mib(committed), mib(wantedBytes),
+			mib(visibleWantedBytes), mib(unconstrainedBytes), m_pullback.held, m_pullback.visible, entries.size(), visibleTextures,
+			heldTextures, m_budgetStats.upgrades, m_budgetStats.downgrades, m_budgetStats.pressureDowngrades);
 	}
 }
 
@@ -934,7 +1211,8 @@ void TextureStreamingManager::SubmitTextureStreamingFeedbackReadback(org::Extern
 		std::lock_guard lock(m_activeFeedbackMutex);
 		activeIDs = m_activeTextureStreamingFeedbackIDs;
 	}
-	if (activeIDs.empty()) return;
+	const uint32_t materialSlotCount = m_materialFeedbackSlotCount.load(std::memory_order_acquire);
+	if (activeIDs.empty() && materialSlotCount == 0u) return;
 
 	uint64_t bytes = 0;
 	if (!m_textureStreamingFeedbackBuffer->TryGetBufferByteSize(bytes) || bytes == 0) return;
@@ -961,6 +1239,7 @@ void TextureStreamingManager::SubmitTextureStreamingFeedbackReadback(org::Extern
 			slot.capacityBytes = bytes;
 		}
 		slot.activeStreamingTextureIDs = std::move(activeIDs);
+		slot.materialSlotCount = materialSlotCount;
 		slot.inFlight = true;
 		slot.copyBytes = bytes;
 		slot.fenceValue = 0;
@@ -1570,7 +1849,7 @@ bool TextureStreamingManager::UpdateTextureStreamingMetadata(const std::shared_p
 		m_textureImageTableAcknowledgedEpoch.load(std::memory_order_acquire) == 0u;
 	if ((bootstrapMetadata &&
 		!m_textureStreamingMetadataBuffer->TryEnsureCapacityForIndex(streamingTextureID)) ||
-		!m_textureStreamingFeedbackBuffer->TryEnsureCapacityForIndex(streamingTextureID)) {
+		!m_textureStreamingFeedbackBuffer->TryEnsureCapacityForIndex(TextureFeedbackWord(streamingTextureID))) {
 		return false;
 	}
 
@@ -1584,7 +1863,7 @@ bool TextureStreamingManager::UpdateTextureStreamingMetadata(const std::shared_p
 	}
 	{
 		ZoneScopedN("TextureStreamingManager::UpdateTextureStreamingMetadata::ResetFeedback");
-		if (!m_textureStreamingFeedbackBuffer->TryUpdateAt(streamingTextureID, kTextureStreamingFeedbackUnused)) {
+		if (!m_textureStreamingFeedbackBuffer->TryUpdateAt(static_cast<UINT>(TextureFeedbackWord(streamingTextureID)), kTextureStreamingFeedbackUnused)) {
 			return false;
 		}
 	}
@@ -2075,12 +2354,22 @@ MaterialTextureStreamingReadinessStats TextureStreamingManager::GetTextureStream
 MaterialTextureStreamingStats TextureStreamingManager::BuildTextureStreamingStats() const
 {
 	MaterialTextureStreamingStats stats{};
+	stats.budget = m_budgetStats;
 	std::unordered_set<uint64_t> seenImageResourceIDs;
 
-	for (const auto& [_, weakTexture] : m_streamingTexturesByID) {
+	for (const auto& [streamingTextureIDKey, weakTexture] : m_streamingTexturesByID) {
 		auto texture = weakTexture.lock();
 		if (!texture || !texture->ImagePtr()) {
 			continue;
+		}
+		// What the residency policy's demand asks of it, with no pull-back: its held report's mip, or none.
+		uint32_t demandTopMip = UINT32_MAX;
+		if (const auto policy = m_texturePolicy.find(streamingTextureIDKey);
+			policy != m_texturePolicy.end() && policy->second.age < br::texturestreaming::kHoldTicks) {
+			const auto shape = texture->GetStreamingState().residency;
+			demandTopMip = br::texturestreaming::TopForFootprint(
+				(std::max)(texture->GetFullMip0Width(), texture->GetFullMip0Height()), policy->second.heldFootprint,
+				shape.totalMipCount > 0u ? shape.totalMipCount - 1u : 0u);
 		}
 
 		auto image = texture->ImagePtr();
@@ -2139,7 +2428,7 @@ MaterialTextureStreamingStats TextureStreamingManager::BuildTextureStreamingStat
 			.residentTopMip = residentTopMip,
 			.residentMipCount = streamingState.residency.residentMipCount,
 			.requestedTopMip = requestedTopMip,
-			.feedbackTopMip = streamingState.lastFeedbackTopMip,
+			.feedbackTopMip = demandTopMip,
 			.eligible = streamingState.eligible,
 			.enabled = streamingState.enabled,
 			.alphaTested = alphaTested,
@@ -2193,16 +2482,14 @@ MaterialTextureStreamingStats TextureStreamingManager::BuildTextureStreamingStat
 			stats.requestedTopMipHistogram.resize(static_cast<size_t>(requestedTopMip) + 1u, 0u);
 		}
 		stats.requestedTopMipHistogram[requestedTopMip]++;
-		if (streamingState.lastFeedbackTopMip == UINT32_MAX) {
+		if (demandTopMip == UINT32_MAX) {
 			stats.texturesWithoutFeedback++;
 		}
 		else {
-			if (stats.feedbackTopMipHistogram.size() <= streamingState.lastFeedbackTopMip) {
-				stats.feedbackTopMipHistogram.resize(
-					static_cast<size_t>(streamingState.lastFeedbackTopMip) + 1u,
-					0u);
+			if (stats.feedbackTopMipHistogram.size() <= demandTopMip) {
+				stats.feedbackTopMipHistogram.resize(static_cast<size_t>(demandTopMip) + 1u, 0u);
 			}
-			stats.feedbackTopMipHistogram[streamingState.lastFeedbackTopMip]++;
+			stats.feedbackTopMipHistogram[demandTopMip]++;
 		}
 		if (stats.residentBytesByTopMip.size() <= residentTopMip) {
 			stats.residentBytesByTopMip.resize(static_cast<size_t>(residentTopMip) + 1u, 0u);

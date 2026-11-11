@@ -32,32 +32,6 @@
 
 using Microsoft::WRL::ComPtr;
 
-struct PSOKey {
-    uint64_t psoFlags;
-    MaterialCompileFlags materialCompileFlags;
-	bool wireframe;
-
-    PSOKey(uint64_t flags, MaterialCompileFlags materialCompileFlags, bool wireframe) : psoFlags(flags), materialCompileFlags(materialCompileFlags), wireframe(wireframe) {}
-
-    bool operator==(const PSOKey& other) const {
-        return psoFlags == other.psoFlags && materialCompileFlags == other.materialCompileFlags && wireframe == other.wireframe;
-    }
-};
-
-namespace std {
-    template <>
-    struct hash<PSOKey> {
-        std::size_t operator()(const PSOKey& key) const noexcept {
-            // Combine the hash of psoFlags, materialCompileFlags, and wireframe
-			std::size_t seed = 0;
-
-			boost::hash_combine(seed, key.psoFlags);
-			boost::hash_combine(seed, key.materialCompileFlags);
-			boost::hash_combine(seed, key.wireframe);
-            return seed;
-        }
-    };
-}
 
 struct RasterPSOKey {
 	MaterialRasterFlags materialRasterFlags;
@@ -134,16 +108,6 @@ public:
     void initialize();
     void initializeShaderCompiler();
     void Cleanup();
-
-    const org::PipelineState& GetPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
-    const org::PipelineState& GetPrePassPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
-
-
-    const org::PipelineState& GetPPLLPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
-
-    const org::PipelineState& GetShadowPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
-
-    const org::PipelineState& GetVisibilityBufferPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
 
     const org::PipelineState& GetClusterLODRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
     const org::PipelineState& GetClusterLODVirtualShadowRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
@@ -316,15 +280,6 @@ private:
     };
     std::shared_ptr<LayoutGeneration> m_layoutGeneration = std::make_shared<LayoutGeneration>();
 
-    std::unordered_map<PSOKey, org::PipelineState> m_psoCache;
-    std::unordered_map<PSOKey, org::PipelineState> m_PPLLPSOCache;
-
-    std::unordered_map<PSOKey, org::PipelineState> m_prePassPSOCache;
-
-    std::unordered_map<PSOKey, org::PipelineState> m_shadowPSOCache;
-
-    std::unordered_map<PSOKey, org::PipelineState> m_visibilityBufferPSOCache;
-
     std::unordered_map<RasterPSOKey, org::PipelineState> m_clusterLODRasterPSOCache;
     std::unordered_map<RasterPSOKey, org::PipelineState> m_clusterLODVirtualShadowRasterPSOCache;
     std::unordered_map<RasterPSOKey, org::PipelineState> m_clusterLODDeepVisibilityRasterPSOCache;
@@ -365,15 +320,6 @@ private:
     std::deque<RetiredPayload> m_retiredLivePayloads;
     std::atomic<uint64_t> m_nextLiveJobId = 1;
     std::atomic<uint64_t> m_pipelineEpoch = 1;
-
-    org::PipelineState CreatePSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
-    org::PipelineState CreatePPLLPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
-
-    org::PipelineState CreatePrePassPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
-
-    org::PipelineState CreateShadowPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
-
-	org::PipelineState CreateVisibilityBufferPSO(UINT psoFlags, MaterialCompileFlags materialCompileFlags, bool wireframe = false);
 
     org::PipelineState CreateClusterLODRasterPSO(
         MaterialRasterFlags materialRasterFlags,

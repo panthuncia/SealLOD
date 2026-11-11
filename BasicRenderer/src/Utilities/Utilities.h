@@ -223,7 +223,6 @@ inline void hash_combine(std::size_t& s, const T& v) {
 
 std::string GetFileExtension(const std::string& filePath);
 
-DirectX::XMMATRIX GetProjectionMatrixForLight(LightInfo info);
 
 DirectX::XMVECTOR QuaternionFromAxisAngle(const DirectX::XMFLOAT3& dir);
 

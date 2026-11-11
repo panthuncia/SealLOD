@@ -95,10 +95,12 @@ void ::ResourceManager::SetUploadService(std::shared_ptr<org::runtime::IUploadSe
 	m_uploadService = std::move(uploadService);
 }
 
-void ::ResourceManager::UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, DirectX::XMUINT2 screenRes, DirectX::XMUINT3 clusterSizes, unsigned int frameIndex) {
+void ::ResourceManager::UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, UINT sunLightIndex, UINT sunLightSlot, DirectX::XMUINT2 screenRes, DirectX::XMUINT3 clusterSizes, unsigned int frameIndex) {
 	UpdateDirectionalShadowConstants(perFrameCBData);
 	perFrameCBData.mainCameraIndex = cameraIndex;
 	perFrameCBData.numLights = numLights;
+	perFrameCBData.sunLightIndex = sunLightIndex;
+	perFrameCBData.sunLightSlot = sunLightSlot;
 	perFrameCBData.screenResX = screenRes.x;
 	perFrameCBData.screenResY = screenRes.y;
 	perFrameCBData.lightClusterGridSizeX = clusterSizes.x;

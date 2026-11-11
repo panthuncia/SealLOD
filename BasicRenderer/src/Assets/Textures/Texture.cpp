@@ -1758,80 +1758,23 @@ TexturePendingDebugInfo TextureAsset::GetPendingDebugInfo() const {
 	return info;
 }
 
-bool TextureAsset::ApplyStreamingSystemRequest(uint32_t topMip, uint64_t frameIndex, bool forceResidencyChange) {
-	constexpr uint64_t kUpgradeRequestSettleFrames = 8u;
-	// Feedback must stay coarser than residency this long before residency follows it down.
-	constexpr uint64_t kDowngradeRequestSettleFrames = 240u;
+// The residency policy (TextureStreamingManager::RunResidencyPolicyTick) decides when a window changes; this applies its
+// choice. Returns whether the wanted window changed, so the texture needs a residency job.
+bool TextureAsset::ApplyStreamingSystemRequest(uint32_t topMip, uint64_t frameIndex) {
 	std::scoped_lock uploadAdvanceLock(m_uploadAdvanceMutex);
-	const uint32_t rawClampedTopMip = (std::min)(topMip, m_streamingState.residency.totalMipCount - 1u);
-	if (!forceResidencyChange) {
-		m_streamingState.lastFeedbackTopMip = rawClampedTopMip;
-	}
-	// Upgrades load exactly the mip feedback asks for. Rounding them to a multiple of four mips toward the finer end
-	// meant a request for mip 3 loaded mip 0, 64 times the bytes. Intermediate requests while an object approaches
-	// still settle first (below), and their images are a small fraction of the final one.
-	uint32_t clampedTopMip = rawClampedTopMip;
-	bool downgradeDue = false;
-	if (!forceResidencyChange && frameIndex != 0u) {
-		const uint32_t residentTopMip = m_streamingState.residency.residentTopMip;
-		if (rawClampedTopMip > residentTopMip) {
-			if (m_coarserFeedbackSinceFrame == 0u) {
-				m_coarserFeedbackSinceFrame = frameIndex;
-				m_coarserFeedbackFinestTopMip = rawClampedTopMip;
-			} else {
-				m_coarserFeedbackFinestTopMip = (std::min)(m_coarserFeedbackFinestTopMip, rawClampedTopMip);
-			}
-			if (frameIndex >= m_coarserFeedbackSinceFrame + kDowngradeRequestSettleFrames) {
-				// Down to the finest mip asked for over the whole window, so a texture seen at varying distances keeps it.
-				clampedTopMip = m_coarserFeedbackFinestTopMip;
-				downgradeDue = true;
-				m_coarserFeedbackSinceFrame = 0u;
-			}
-		} else {
-			m_coarserFeedbackSinceFrame = 0u;
-		}
-	}
+	const uint32_t clampedTopMip = (std::min)(topMip, m_streamingState.residency.totalMipCount - 1u);
 	const bool requestChanged = m_streamingState.requestedTopMip != clampedTopMip;
-	const bool frameChanged = frameIndex != 0u && m_streamingState.lastSeenFrame != frameIndex;
-	const bool requestIsResident = clampedTopMip >= m_streamingState.residency.residentTopMip;
-	// A residency job reads the window streaming wants when it runs, so a change of the
-	// wanted window never waits for a load in flight.
-	const bool uploadInProgress = false;
-	if (requestChanged) {
-		m_streamingRequestChangedFrame = frameIndex;
-	}
-	// Feedback commonly walks through several successively finer mips while an
-	// object approaches the camera.  Rebuilding a complete replacement for every
-	// intermediate request multiplies texture copies.  Keep the current usable
-	// image briefly and let the request settle; mip zero remains immediate.
-	const bool upgradeRequestSettled =
-		frameIndex == 0u ||
-		clampedTopMip == 0u ||
-		m_streamingRequestChangedFrame == 0u ||
-		frameIndex >= m_streamingRequestChangedFrame + kUpgradeRequestSettleFrames;
-	const bool shouldChangeResidency =
-		((forceResidencyChange || downgradeDue) && !uploadInProgress && m_streamingState.pendingTopMip != clampedTopMip) ||
-		(!requestIsResident && !uploadInProgress && m_streamingState.pendingTopMip != clampedTopMip &&
-		 upgradeRequestSettled);
-
-	if (!requestChanged && !shouldChangeResidency && !frameChanged) {
-		return false;
-	}
-
+	const bool residencyChanged = m_streamingState.pendingTopMip != clampedTopMip;
 	if (frameIndex != 0u) {
 		m_streamingState.lastSeenFrame = frameIndex;
 	}
-	if (requestChanged) {
-		m_streamingState.requestedTopMip = clampedTopMip;
+	if (!requestChanged && !residencyChanged) {
+		return false;
 	}
-	if (shouldChangeResidency) {
-		m_streamingState.pendingTopMip = clampedTopMip;
-	}
-
-	if (requestChanged || shouldChangeResidency) {
-		BumpStreamingStateRevision();
-	}
-	return shouldChangeResidency;
+	m_streamingState.requestedTopMip = clampedTopMip;
+	m_streamingState.pendingTopMip = clampedTopMip;
+	BumpStreamingStateRevision();
+	return residencyChanged;
 }
 
 void TextureAsset::EnableMipStreaming(bool enabled) {

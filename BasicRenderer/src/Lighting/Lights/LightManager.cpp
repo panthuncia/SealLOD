@@ -24,14 +24,10 @@ LightManager::LightManager() {
 
 	m_activeLightIndices = SortedUnsignedIntBuffer::CreateShared(1, "activeLightIndices");
     m_lightBuffer = org::LazyDynamicStructuredBuffer<LightInfo>::CreateShared(10, "lightBuffer<LightInfo>");
-    m_spotViewInfo = DynamicStructuredBuffer<unsigned int>::CreateShared(1, "spotViewInfo<uint>");
-    m_pointViewInfo = DynamicStructuredBuffer<unsigned int>::CreateShared(1, "pointViewInfo<uint>");
     m_directionalViewInfo = DynamicStructuredBuffer<unsigned int>::CreateShared(1, "direcitonalViewInfo<uint>");
 
 	org::memory::SetResourceUsageHint(*m_activeLightIndices, "Lighting buffers");
 	org::memory::SetResourceUsageHint(*m_lightBuffer, "Lighting buffers");
-	org::memory::SetResourceUsageHint(*m_spotViewInfo, "Lighting buffers");
-	org::memory::SetResourceUsageHint(*m_pointViewInfo, "Lighting buffers");
 	org::memory::SetResourceUsageHint(*m_directionalViewInfo, "Lighting buffers");
 
 	getNumDirectionalLightCascades = SettingsManager::GetInstance().getSettingGetter<uint8_t>("numDirectionalLightCascades");
@@ -40,10 +36,6 @@ LightManager::LightManager() {
 	getDirectionalShadowSceneExtent = SettingsManager::GetInstance().getSettingGetter<float>("directionalShadowSceneExtent");
 	getDirectionalVirtualShadowSourceAngleDegrees = SettingsManager::GetInstance().getSettingGetter<float>(
 		CLodDirectionalVirtualShadowSourceAngleDegreesSettingName);
-
-	m_pLightViewInfoResourceGroup = std::make_shared<org::ResourceGroup>("LightViewInfo");
-	m_pLightViewInfoResourceGroup->AddResource(m_spotViewInfo);
-	m_pLightViewInfoResourceGroup->AddResource(m_pointViewInfo);
 
 	m_pLightBufferResourceGroup = std::make_shared<org::ResourceGroup>("LightBufferResourceGroup");
 	m_pLightBufferResourceGroup->AddResource(m_lightBuffer);
@@ -73,8 +65,6 @@ LightManager::LightManager() {
 	m_resources[Builtin::Light::ClusterBuffer] = m_pClusterBuffer;
 	m_resources[Builtin::Light::PagesBuffer] = m_pLightPagesBuffer;
 	m_resources[Builtin::Light::InfoBuffer] = m_lightBuffer;
-	m_resources[Builtin::Light::PointLightCubemapBuffer] = m_pointViewInfo;
-	m_resources[Builtin::Light::SpotLightMatrixBuffer] = m_spotViewInfo;
 	m_resources[Builtin::Light::DirectionalLightCascadeBuffer] = m_directionalViewInfo;
 	m_resources[Builtin::Light::ActiveLightIndices] = m_activeLightIndices;
 
@@ -87,17 +77,11 @@ LightManager::LightManager() {
             std::move(fallback));
     };
     addPublished(Builtin::Light::InfoBuffer, m_lightBuffer, br::render::LightInfoTableVariant);
-    addPublished(Builtin::Light::SpotLightMatrixBuffer, m_spotViewInfo,
-        br::render::LightSpotViewTableVariant);
-    addPublished(Builtin::Light::PointLightCubemapBuffer, m_pointViewInfo,
-        br::render::LightPointViewTableVariant);
     addPublished(Builtin::Light::DirectionalLightCascadeBuffer, m_directionalViewInfo,
         br::render::LightDirectionalViewTableVariant);
     addPublished(Builtin::Light::ActiveLightIndices, m_activeLightIndices,
         br::render::LightActiveIndexTableVariant);
 
-	m_resolvers[Builtin::Light::ViewResourceGroup] = 
-		std::make_shared<ResourceGroupResolver>(m_pLightViewInfoResourceGroup);
 	m_resolvers[Builtin::Light::BufferGroup] = 
 		std::make_shared<ResourceGroupResolver>(m_pLightBufferResourceGroup);
 }
@@ -136,33 +120,33 @@ AddLightReturn LightManager::AddLight(LightInfo* lightInfo, uint64_t entityId) {
     auto lightBufferView = m_lightBuffer->Add(*lightInfo);
     uint32_t lightIndex = static_cast<uint32_t>(lightBufferView->GetOffset() / sizeof(LightInfo));
     m_activeLightIndices->Insert(lightIndex);
+    {
+        std::lock_guard<std::mutex> lock(m_lightUpdateMutex);
+        if (m_slotGenerations.size() <= lightIndex) {
+            m_slotGenerations.resize(lightIndex + 1u, 0u);
+        }
+        lightInfo->generation = ++m_slotGenerations[lightIndex];
+        m_lightBuffer->UpdateView(lightBufferView.get(), lightInfo);
+        m_activeIndices.insert(lightIndex);
+        if (lightInfo->type == Components::LightType::Directional) {
+            m_directionalLights[lightIndex] = lightInfo->shadowCaster != 0u;
+        }
+    }
 
     Components::LightViewInfo viewInfo;
     std::optional<Components::FrustumPlanes> planes = std::nullopt;
 
-    if (lightInfo->shadowCaster) {
-        switch (lightInfo->type) {
-            case Components::LightType::Point:
-                std::tie(viewInfo, planes) = CreatePointLightViewInfo(*lightInfo, entityId);
-                break;
-            case Components::LightType::Spot:
-                std::tie(viewInfo, planes) = CreateSpotLightViewInfo(*lightInfo, entityId);
-                break;
-            case Components::LightType::Directional:
-                std::tie(viewInfo, planes) = CreateDirectionalLightViewInfo(*lightInfo, entityId);
-                break;
-            default:
-                spdlog::warn("Unhandled light type");
-                break;
-        }
-
-		viewInfo.depthResX = getShadowResolution();
-		viewInfo.depthResY = getShadowResolution();
+    // Only the sun is shadowed (by the virtual shadow map), so only directional lights get shadow views. A point or
+    // spot light's shadowCaster flag is kept for shadowing modes that trace it.
+    if (lightInfo->shadowCaster && lightInfo->type == Components::LightType::Directional) {
+        std::tie(viewInfo, planes) = CreateDirectionalLightViewInfo(*lightInfo, entityId);
+        viewInfo.depthResX = getShadowResolution();
+        viewInfo.depthResY = getShadowResolution();
     }
 
     viewInfo.lightBufferIndex = lightIndex;
     viewInfo.lightBufferView = lightBufferView;
-    
+
     m_publicationRevision.fetch_add(1, std::memory_order_release);
     return { viewInfo, planes };
 }
@@ -181,6 +165,9 @@ void LightManager::RemoveLight(flecs::entity light) {
 	if (viewInfo.lightBufferView) {
 		m_activeLightIndices->Remove(viewInfo.lightBufferIndex);
 		m_lightBuffer->Remove(viewInfo.lightBufferView.get());
+		std::lock_guard<std::mutex> lock(m_lightUpdateMutex);
+		m_activeIndices.erase(viewInfo.lightBufferIndex);
+		m_directionalLights.erase(viewInfo.lightBufferIndex);
 	}
 
 	RemoveLightViewInfo(light);
@@ -192,71 +179,25 @@ unsigned int LightManager::GetNumLights() {
 	return m_activeLightIndices->Size();
 }
 
-std::pair<Components::LightViewInfo, std::optional<Components::FrustumPlanes>>
-LightManager::CreatePointLightViewInfo(const LightInfo& info, uint64_t entityId) {
-	Components::LightViewInfo viewInfo = {};
-	// Assume each cubemap face uses the same projection but different view matrices.
-	auto cubeViewIndex = m_pointViewInfo->Size() / 6;
-	viewInfo.viewInfoBufferIndex = cubeViewIndex;
-	DirectX::XMFLOAT3 pos;
-	DirectX::XMStoreFloat3(&pos, info.posWorldSpace);
-	auto cubemapMatrices = GetCubemapViewMatrices(pos);
-
-	auto projection = GetProjectionMatrixForLight(info);
-
-	// For each face of the cubemap, create a camera view
-	for (int i = 0; i < 6; i++) {
-		CameraInfo camera = {};
-		camera.positionWorldSpace = { pos.x, pos.y, pos.z, 1.0f };
-		camera.view = cubemapMatrices[i];
-		camera.unjitteredProjection = projection;
-		camera.jitteredProjection = projection; // lights don't use jittering.
-		camera.prevView = camera.view;
-		camera.prevJitteredProjection = camera.jitteredProjection;
-		camera.prevUnjitteredProjection = camera.unjitteredProjection;
-		camera.viewProjection = XMMatrixMultiply(cubemapMatrices[i], camera.unjitteredProjection);
-
-		ViewCreationParams viewParams{};
-		viewParams.parentEntityID = entityId;
-		viewParams.lightType = Components::LightType::Point;
-		auto renderView = m_shadowViews->CreateShadowView(camera, ViewFlags::ShadowFace(), viewParams);
-		m_pointViewInfo->Add(m_shadowViews->ShadowViewCameraBufferIndex(renderView));
-		viewInfo.viewIDs.push_back(renderView);
-	}	
-	
-	viewInfo.projectionMatrix = Components::Matrix(projection);
-
-	return { viewInfo, std::nullopt }; // Point lights don't need extra frustum data.
-}
-
-std::pair<Components::LightViewInfo, std::optional<Components::FrustumPlanes>>
-LightManager::CreateSpotLightViewInfo(const LightInfo& info, uint64_t entityId) {
-	Components::LightViewInfo viewInfo = {};
-	viewInfo.viewInfoBufferIndex = m_spotViewInfo->Size();
-
-	DirectX::XMFLOAT3 pos;
-	DirectX::XMStoreFloat3(&pos, info.posWorldSpace);
-
-	CameraInfo camera = {};
-	camera.positionWorldSpace = { pos.x, pos.y, pos.z, 1.0f };
-	DirectX::XMFLOAT3 up = { 0, 1, 0 };
-	camera.view = DirectX::XMMatrixLookToRH(info.posWorldSpace, info.dirWorldSpace, DirectX::XMLoadFloat3(&up));
-	camera.unjitteredProjection = GetProjectionMatrixForLight(info);
-	camera.jitteredProjection = camera.unjitteredProjection; // lights don't use jittering.
-	camera.prevView = camera.view;
-	camera.prevJitteredProjection = camera.jitteredProjection;
-	camera.prevUnjitteredProjection = camera.unjitteredProjection;
-	camera.viewProjection = DirectX::XMMatrixMultiply(camera.view, camera.unjitteredProjection);
-
-	ViewCreationParams viewParams{};
-	viewParams.parentEntityID = entityId;
-	viewParams.lightType = Components::LightType::Spot;
-	auto renderView = m_shadowViews->CreateShadowView(camera, ViewFlags::ShadowFace(), viewParams);
-	m_spotViewInfo->Add(m_shadowViews->ShadowViewCameraBufferIndex(renderView));
-	viewInfo.viewIDs.push_back(renderView);
-
-	viewInfo.projectionMatrix = Components::Matrix(camera.unjitteredProjection);
-	return { viewInfo, std::nullopt };
+SunLightSelection LightManager::GetSunLight() {
+	std::lock_guard<std::mutex> lock(m_lightUpdateMutex);
+	SunLightSelection selection;
+	for (const auto& [index, shadowCaster] : m_directionalLights) {
+		if (shadowCaster) {
+			selection.lightIndex = index;
+			break;
+		}
+	}
+	if (selection.lightIndex == 0xFFFFFFFFu && !m_directionalLights.empty()) {
+		selection.lightIndex = m_directionalLights.begin()->first;
+	}
+	if (const auto it = m_activeIndices.find(selection.lightIndex); it != m_activeIndices.end()) {
+		selection.activeSlot = static_cast<uint32_t>(std::distance(m_activeIndices.begin(), it));
+	}
+	else {
+		selection.lightIndex = 0xFFFFFFFFu;
+	}
+	return selection;
 }
 
 std::pair<Components::LightViewInfo, std::optional<Components::FrustumPlanes>>
@@ -376,79 +317,17 @@ void LightManager::RebuildDirectionalLightViewInfoBuffer(std::optional<uint64_t>
 
 
 void LightManager::UpdateLightViewInfo(flecs::entity light) {
+	auto& lightInfo = light.get_mut<Components::Light>();
+	if (lightInfo.type != Components::LightType::Directional) {
+		return; // Only directional lights have shadow views.
+	}
 	m_publicationRevision.fetch_add(1, std::memory_order_release);
-	//auto projectionMatrix = light.get<Components::ProjectionMatrix>();
 	auto viewInfo = light.get<Components::LightViewInfo>();
 	auto& renderViewIds = viewInfo.viewIDs;
 	bool lightViewInfoChanged = false;
-	auto& lightInfo = light.get_mut<Components::Light>();
-	auto& lightMatrix = light.get<Components::Matrix>();
-	auto& planes = light.get<Components::FrustumPlanes>().frustumPlanes;
-	auto globalPos = GetGlobalPositionFromMatrix(lightMatrix.matrix);
-	if (lightInfo.type == Components::LightType::Directional) {
-		lightInfo.lightInfo.shadowSourceAngleDegrees = getDirectionalVirtualShadowSourceAngleDegrees();
-	}
+	// The virtual shadow map's source angle setting is the sun's size for everything that reads the light.
+	lightInfo.lightInfo.sourceHalfAngleDegrees = getDirectionalVirtualShadowSourceAngleDegrees();
 	switch (lightInfo.type) {
-	case Components::LightType::Point: {
-		auto cubemapMatrices = GetCubemapViewMatrices(globalPos);
-		for (int i = 0; i < 6; i++) {
-			//const CameraInfo* oldInfo = light.get<CameraInfo>();
-			CameraInfo info = {};
-			info.positionWorldSpace = { globalPos.x, globalPos.y, globalPos.z, 1.0 };
-			info.view = cubemapMatrices[i];
-			info.unjitteredProjection = viewInfo.projectionMatrix.matrix;
-			info.jitteredProjection = info.unjitteredProjection; // lights don't use jittering.
-			info.prevView = info.view;
-			info.prevJitteredProjection = info.jitteredProjection;
-			info.prevUnjitteredProjection = info.unjitteredProjection;
-			info.viewProjection = XMMatrixMultiply(cubemapMatrices[i], viewInfo.projectionMatrix.matrix);
-			info.clippingPlanes[0] = planes[i][0];
-			info.clippingPlanes[1] = planes[i][1];
-			info.clippingPlanes[2] = planes[i][2];
-			info.clippingPlanes[3] = planes[i][3];
-			info.clippingPlanes[4] = planes[i][4];
-			info.clippingPlanes[5] = planes[i][5];
-			info.depthBufferArrayIndex = i;
-			info.depthResX = viewInfo.depthResX;
-			info.depthResY = viewInfo.depthResY;
-			info.uvScaleToNextPowerOfTwo = {
-				static_cast<float>(viewInfo.depthResX) / static_cast<float>(GetNextPowerOfTwo(viewInfo.depthResX)),
-				static_cast<float>(viewInfo.depthResY) / static_cast<float>(GetNextPowerOfTwo(viewInfo.depthResY))
-			};
-			info.numDepthMips = CalculateMipLevels(static_cast<uint16_t>(info.depthResX), static_cast<uint16_t>(info.depthResY));
-			m_shadowViews->UpdateShadowView(renderViewIds[i], info);
-		}
-		break;
-	}
-	case Components::LightType::Spot: {
-		CameraInfo camera = {};
-		camera.positionWorldSpace = { globalPos.x, globalPos.y, globalPos.z, 1.0 };
-		auto up = DirectX::XMFLOAT3(0, 1, 0);
-		camera.view = DirectX::XMMatrixLookToRH(DirectX::XMLoadFloat3(&globalPos), DirectX::XMVector3Normalize(lightMatrix.matrix.r[2]), XMLoadFloat3(&up));
-		camera.unjitteredProjection = viewInfo.projectionMatrix.matrix;
-		camera.jitteredProjection = camera.unjitteredProjection; // lights don't use jittering.
-		camera.prevView = camera.view;
-		camera.prevJitteredProjection = camera.jitteredProjection;
-		camera.prevUnjitteredProjection = camera.unjitteredProjection;
-		camera.viewProjection = DirectX::XMMatrixMultiply(camera.view, viewInfo.projectionMatrix.matrix);
-		camera.clippingPlanes[0] = planes[0][0];
-		camera.clippingPlanes[1] = planes[0][1];
-		camera.clippingPlanes[2] = planes[0][2];
-		camera.clippingPlanes[3] = planes[0][3];
-		camera.clippingPlanes[4] = planes[0][4];
-		camera.clippingPlanes[5] = planes[0][5];
-		camera.depthBufferArrayIndex = 0;
-		camera.depthResX = viewInfo.depthResX;
-		camera.depthResY = viewInfo.depthResY;
-		camera.uvScaleToNextPowerOfTwo = {
-			static_cast<float>(viewInfo.depthResX) / static_cast<float>(GetNextPowerOfTwo(viewInfo.depthResX)),
-			static_cast<float>(viewInfo.depthResY) / static_cast<float>(GetNextPowerOfTwo(viewInfo.depthResY))
-		};
-		camera.numDepthMips = CalculateMipLevels(static_cast<uint16_t>(camera.depthResX), static_cast<uint16_t>(camera.depthResY));
-
-		m_shadowViews->UpdateShadowView(renderViewIds[0], camera);
-		break;
-	}
 	case Components::LightType::Directional: {
 		if (!m_currentCamera.is_valid()) {
 			spdlog::warn("Camera must be provided for directional light shadow mapping");
@@ -533,30 +412,11 @@ void LightManager::RemoveLightViewInfo(flecs::entity light) {
 		return;
 	}
 
-	switch (lightInfo->type) {
-	case Components::LightType::Point: {
-		const auto& views = viewInfo->viewIDs;
-		for (size_t i = 0; i < views.size(); i++) {
-			m_shadowViews->DestroyShadowView(views[i]);
-		}
-		break;
+	for (const auto viewID : viewInfo->viewIDs) {
+		m_shadowViews->DestroyShadowView(viewID);
 	}
-	case Components::LightType::Spot: {
-		for (const auto viewID : viewInfo->viewIDs) {
-			m_shadowViews->DestroyShadowView(viewID);
-		}
-		break;
-	}
-	case Components::LightType::Directional: {
-		const auto& views = viewInfo->viewIDs;
-		for (size_t i = 0; i < views.size(); i++) {
-			m_shadowViews->DestroyShadowView(views[i]);
-		}
+	if (lightInfo->type == Components::LightType::Directional) {
 		RebuildDirectionalLightViewInfoBuffer(light.id());
-		break;
-	}
-	default:
-		spdlog::warn("Light type not recognized");
 	}
 }
 
@@ -571,14 +431,13 @@ void LightManager::SetShadowViewService(br::render::IShadowViewService* service)
 
 std::vector<std::shared_ptr<const std::vector<std::byte>>> LightManager::CaptureTableImages() const {
     std::vector<std::shared_ptr<const std::vector<std::byte>>> result;
-    result.reserve(5);
+    // In LightTableFamilyCount order: LightInfoTableVariant, LightDirectionalViewTableVariant, LightActiveIndexTableVariant.
+    result.reserve(br::render::LightTableFamilyCount);
     const auto capture = [&](const auto& buffer) {
         result.push_back(std::make_shared<const std::vector<std::byte>>(
             buffer->CaptureCpuShadowBytes()));
     };
     capture(m_lightBuffer);
-    capture(m_spotViewInfo);
-    capture(m_pointViewInfo);
     capture(m_directionalViewInfo);
     capture(m_activeLightIndices);
     return result;
@@ -586,7 +445,13 @@ std::vector<std::shared_ptr<const std::vector<std::byte>>> LightManager::Capture
 
 void LightManager::UpdateLightBufferView(org::BufferView* view, const LightInfo& data) {
 	std::lock_guard<std::mutex> lock(m_lightUpdateMutex);
-	m_lightBuffer->UpdateView(view, &data);
+	const auto lightIndex = static_cast<uint32_t>(view->GetOffset() / sizeof(LightInfo));
+	LightInfo stamped = data;
+	stamped.generation = lightIndex < m_slotGenerations.size() ? m_slotGenerations[lightIndex] : 0u;
+	m_lightBuffer->UpdateView(view, &stamped);
+	if (const auto it = m_directionalLights.find(lightIndex); it != m_directionalLights.end()) {
+		it->second = data.shadowCaster != 0u;
+	}
 	m_publicationRevision.fetch_add(1, std::memory_order_release);
 }
 

@@ -147,6 +147,12 @@ Be aware of what does and does not exist before you go looking:
   rerender, deferred-shading and small-pass optimization rounds). These are lab notebooks tied to
   specific experiments, not architecture references.
 
+[docs/texture-streaming.md](docs/texture-streaming.md) is the reference for material texture streaming: per-material
+feedback, the residency policy and its VRAM budget.
+
+[docs/lighting.md](docs/lighting.md) is the reference for analytic lights: the light model, the single direct-light
+loop and its visibility options, and the shadowing modes a new technique slots in beside.
+
 Architecture and migration status are now documented in
 [docs/renderer-architecture.md](docs/renderer-architecture.md). Historical baseline and
 validation records are in [docs/history/renderer-migration-history.md](docs/history/renderer-migration-history.md).

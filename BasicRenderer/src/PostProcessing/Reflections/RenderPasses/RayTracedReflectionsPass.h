@@ -61,7 +61,7 @@ public:
             Builtin::SkeletonResources::SkinningInstanceInfo, Builtin::Material::TextureStreamingMetadataBuffer,
             Builtin::Terrain::Sets, Builtin::Terrain::Layers, Builtin::Terrain::StochasticLayers, Builtin::Terrain::LayerRefs,
             Builtin::Terrain::Regions, Builtin::Terrain::WeightBlocks,
-            Builtin::Light::PointLightCubemapBuffer, Builtin::Light::DirectionalLightCascadeBuffer, Builtin::Light::SpotLightMatrixBuffer,
+            Builtin::Light::DirectionalLightCascadeBuffer,
             Builtin::PerMaterialOpenPBRDataBuffer, Builtin::OpenPBR::FuzzLTC, Builtin::OpenPBR::IdealMetalEnergyComplement,
             Builtin::OpenPBR::IdealMetalAverageEnergyComplement, Builtin::OpenPBR::OpaqueDielectricAverageEnergyComplement, Builtin::Noise::BlueNoise2D);
         builder.ShaderResource(Builtin::OpenPBR::OpaqueDielectricEnergyComplement,

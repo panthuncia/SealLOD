@@ -3,6 +3,8 @@
 
 #include "include/vertex.hlsli"
 #include "include/structs.hlsli"
+#include "Common/defines.h"
+#include "include/lightModel.hlsli"
 #include "include/materialFlags.hlsli"
 #include "include/parallax.hlsli"
 #include "include/cbuffers.hlsli"
@@ -130,17 +132,6 @@ void CLodVirtualShadowRecordReceiverTelemetry(
 }
 #endif
 
-struct LightFragmentData {
-    uint lightType;
-    float3 lightPos;
-    float3 lightColor;
-    float intensity;
-    float3 lightToFrag;
-    float attenuation;
-    float distance;
-    float spotAttenuation;
-};
-
 struct LightingParameters {
     float3 fragPos;
     float3 viewDir;
@@ -249,53 +240,6 @@ struct LightingOutput { // Lighting + debug info
 #endif
 };
 
-// Models spotlight falloff with linear interpolation between inner and outer cone angles
-float spotAttenuation(float3 pointToLight, float3 lightDirection, float outerConeCos, float innerConeCos) {
-    float cos = dot(normalize(lightDirection), normalize(-pointToLight));
-    if (cos > outerConeCos) {
-        if (cos < innerConeCos) {
-            return smoothstep(outerConeCos, innerConeCos, cos);
-        }
-        return 1.0;
-    }
-    return 0.0;
-}
-
-LightFragmentData getLightParametersForFragment(LightInfo light, float3 fragPos) {
-    LightFragmentData result;
-    result.lightType = light.type;
-    result.lightPos = light.posWorldSpace.xyz;
-    result.lightColor = light.color.xyz;
-    result.intensity = light.color.w;
-    result.distance = 0.0;
-    
-    switch (light.type) {
-        case 2:{
-                result.lightToFrag = -light.dirWorldSpace.xyz;
-                result.attenuation = 1.0;
-                break;
-            }
-        default:{
-                float constantAttenuation = light.attenuation.x;
-                float linearAttenuation = light.attenuation.y;
-                float quadraticAttenuation = light.attenuation.z;
-                result.lightToFrag = normalize(light.posWorldSpace.xyz - fragPos);
-                result.distance = length(light.posWorldSpace.xyz - fragPos);
-                result.attenuation = 1.0 / ((constantAttenuation + linearAttenuation * result.distance + quadraticAttenuation * result.distance * result.distance) + 0.0001); //+0.0001 fudge-factor to prevent division by 0;
-                break;
-            }
-    }
-    
-    if (light.type == 1) {
-        result.spotAttenuation = spotAttenuation(result.lightToFrag, light.dirWorldSpace.xyz, light.outerConeAngle, light.innerConeAngle);
-    }
-    else {
-        result.spotAttenuation = 1.0;
-    }
-    return result;
-}
-
-
 // Direct-lighting BRDF for any light direction, shared by raster and the path tracer. Callers
 // must have rejected NdotL <= 0 and NdotV <= 0. Excludes glint, which is not a physical lobe.
 // The return value is the sum of diffuse and specular, computed separately so raster's
@@ -362,11 +306,21 @@ float3 EvaluateOpenPBRSurfaceBrdf(
     return (baseEvaluation.diffuse + baseEvaluation.specular) * baseAttenuation + coatFr * fuzzLayerScale.xxx + fuzzFr;
 }
 
-float3 calculateLightContributionPBR(
+// One light's unshadowed contribution. total is what raster accumulates, computed exactly as it always has been;
+// diffuse and specular split it by lobe (glint counts as specular) for passes that need them apart.
+struct DirectLightContribution
+{
+    float3 total;
+    float3 diffuse;
+    float3 specular;
+};
+
+DirectLightContribution EvaluateDirectLightContribution(
     LightFragmentData light,
     LightingParameters lightingParameters,
     OpenPBRBaseLayerState baseState)
 {
+    DirectLightContribution result = (DirectLightContribution)0;
     float normDotView = saturate(dot(lightingParameters.normal, lightingParameters.viewDir));
     float normDotLight = saturate(dot(lightingParameters.normal, light.lightToFrag));
     // A light at or below the geometric shading horizon has no direct surface
@@ -374,15 +328,20 @@ float3 calculateLightContributionPBR(
     // the GGX horizon singularity from becoming Inf * 0 when NoL is zero.
     if (normDotLight <= 0.0f || normDotView <= 0.0f)
     {
-        return 0.0f.xxx;
+        return result;
     }
-    float3 unusedDiffuse;
-    float3 unusedSpecular;
-    float3 BRDF = EvaluateOpenPBRSurfaceBrdf(lightingParameters, baseState, light.lightToFrag, normDotView, normDotLight, unusedDiffuse, unusedSpecular);
+    float3 diffuse;
+    float3 specular;
+    float3 BRDF = EvaluateOpenPBRSurfaceBrdf(lightingParameters, baseState, light.lightToFrag, normDotView, normDotLight, diffuse, specular);
 
-    float3 result = BRDF * light.lightColor.rgb * light.intensity * light.attenuation * light.spotAttenuation * normDotLight;
+    result.total = BRDF * light.lightColor.rgb * light.intensity * light.attenuation * light.spotAttenuation * normDotLight;
+    const float3 irradiance = LightIncidentRadiance(light) * normDotLight;
+    result.diffuse = diffuse * irradiance;
+    result.specular = specular * irradiance;
 #if !defined(CLOD_FORWARD_GLINT) || CLOD_FORWARD_GLINT
-    result += EvaluateGlintContribution(light, lightingParameters);
+    const float3 glint = EvaluateGlintContribution(light, lightingParameters);
+    result.total += glint;
+    result.specular += glint;
 #endif
     return result;
 }
@@ -426,16 +385,310 @@ uint3 ComputeClusterID(float2 pixelCoords, float viewDepth,
     return uint3(tile.x, tile.y, sliceZ);
 }
 
-float3 lightFragmentColor(FragmentInfo fragmentInfo, Camera mainCamera, uint activeEnvironmentIndex, uint environmentBufferDescriptorIndex) {
+// ---------------------------------------------------------------------------------------------------------------------
+// The direct-light loop. Every raster and ray-hit shading path runs this one loop over the analytic lights; what differs
+// between them is only how visibility is known, which the caller states in DirectLightingOptions. Nothing below reads
+// root constants, so a pass that does not set the lighting switches (MiscShadowingMode and the rest) builds its options
+// explicitly instead of inheriting whatever its own root constants hold in those slots.
+//
+// Shadowing (ShadowingMode, SHADOWING_MODE_* in Common/defines.h):
+//   NONE                 no occlusion.
+//   VIRTUAL_SHADOW_MAPS  the sun's occlusion from the virtual shadow map, combined by max with options.sunOcclusion
+//                        (the ray traced sun mask, where it runs). Local lights are unshadowed.
+// Defining LIGHTING_NO_VIRTUAL_SHADOW_MAPS compiles the shadow map lookup out, for passes that never bind its resources
+// (ray hits: the shadow map only has pages for what the camera sees).
+
+struct DirectLightingOptions
+{
+    bool punctualLights; // False skips every analytic light.
+    bool virtualShadowMaps; // The sun's occlusion from the virtual shadow map; its resources must be bound.
+    float sunOcclusion; // The sun's occlusion known before the loop (a traced ray or mask), combined by max.
+    uint sunLightIndex; // Which light sunOcclusion belongs to: PerFrameCB::sunLightIndex.
+};
+
+DirectLightingOptions MakeDirectLightingOptions(bool punctualLights, uint shadowingMode)
+{
+    ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+    DirectLightingOptions options;
+    options.punctualLights = punctualLights;
+    options.virtualShadowMaps = shadowingMode == SHADOWING_MODE_VIRTUAL_SHADOW_MAPS;
+    options.sunOcclusion = 0.0f;
+    options.sunLightIndex = perFrame.sunLightIndex;
+    return options;
+}
+
+// The options a lighting pass's root constants describe (MiscEnablePunctualLights, MiscShadowingMode).
+DirectLightingOptions DirectLightingOptionsFromRoot()
+{
+    return MakeDirectLightingOptions(GetRootEnablePunctualLights(), GetRootShadowingMode());
+}
+
+struct DirectLightingResult
+{
+    float3 lighting; // Every light's contribution, as raster writes it.
+    float3 diffuse; // lighting split by lobe.
+    float3 specular;
+    bool hasSunShadowDebug; // The first shadow-mapped directional light's lookup, for the VSM debug views.
+    CLodVirtualShadowDebugInfo sunShadowDebug;
+    uint clusterIndex; // PSO_CLUSTERED_LIGHTING: the fragment's cluster Z slice and its light count.
+    uint clusterLightCount;
+};
+
+// One light's occlusion at the fragment: 0 lit, 1 fully shadowed.
+float EvaluateLightOcclusion(
+    LightInfo light,
+    uint lightIndex,
+    FragmentInfo fragmentInfo,
+    Camera mainCamera,
+    DirectLightingOptions options,
+    inout DirectLightingResult result)
+{
+    if (light.type != LIGHT_TYPE_DIRECTIONAL)
+    {
+        return 0.0f; // No shadowing mode shadows local lights yet.
+    }
+
+    float occlusion = 0.0f;
+    bool shadowMapped = false;
+    CLodVirtualShadowDebugInfo shadowDebugInfo = CLodVirtualShadowInitDebugInfo(0xFFFFFFFFu);
+#if !defined(LIGHTING_NO_VIRTUAL_SHADOW_MAPS)
+    if (options.virtualShadowMaps && light.shadowViewInfoIndex >= 0)
+    {
+        ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+        StructuredBuffer<unsigned int> directionalShadowViewInfoIndexBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::DirectionalLightCascadeBuffer)];
+        StructuredBuffer<Camera> cameraBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
+        occlusion = calculateDirectionalVSMShadowDetailed(
+            fragmentInfo.pixelCoords,
+            fragmentInfo.fragPosWorldSpace,
+            fragmentInfo.fragPosViewSpace,
+            fragmentInfo.normalWS,
+            light,
+            perFrame.numDirectionalClipmaps,
+            perFrame.shadowCascadeSplits,
+            directionalShadowViewInfoIndexBuffer,
+            cameraBuffer,
+            shadowDebugInfo);
+        shadowMapped = true;
+    }
+#endif
+    if (lightIndex == options.sunLightIndex)
+    {
+        occlusion = max(occlusion, options.sunOcclusion);
+    }
+
+    if (shadowMapped)
+    {
+#if defined(CLOD_VSM_RECEIVER_TELEMETRY)
+        if (GetRootEnableVirtualShadowReceiverTelemetry())
+        {
+            CLodVirtualShadowRecordReceiverTelemetry(
+                shadowDebugInfo,
+                occlusion,
+                (uint2)fragmentInfo.pixelCoords,
+                fragmentInfo.fragPosWorldSpace,
+                -fragmentInfo.fragPosViewSpace.z,
+                mainCamera);
+        }
+#endif
+        if (!result.hasSunShadowDebug)
+        {
+            result.hasSunShadowDebug = true;
+            result.sunShadowDebug = shadowDebugInfo;
+        }
+    }
+    return occlusion;
+}
+
+void AccumulateDirectLight(
+    uint lightIndex,
+    FragmentInfo fragmentInfo,
+    Camera mainCamera,
+    LightingParameters lightingParameters,
+    OpenPBRBaseLayerState baseState,
+    DirectLightingOptions options,
+    inout DirectLightingResult result)
+{
+    StructuredBuffer<LightInfo> lights = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::InfoBuffer)];
+    const LightInfo light = lights[lightIndex];
+    const float occlusion = EvaluateLightOcclusion(light, lightIndex, fragmentInfo, mainCamera, options, result);
+    // Full occlusion makes every direct-light term exactly zero.
+    if (occlusion >= 1.0f)
+    {
+        return;
+    }
+
+    const LightFragmentData lightData = EvaluateLightAtPoint(light, fragmentInfo.fragPosWorldSpace.xyz);
+    if (!LightInRange(light, lightData))
+    {
+        return;
+    }
+    const DirectLightContribution contribution = EvaluateDirectLightContribution(lightData, lightingParameters, baseState);
+    const float visibility = 1.0f - occlusion;
+    result.lighting += visibility * contribution.total;
+    result.diffuse += visibility * contribution.diffuse;
+    result.specular += visibility * contribution.specular;
+}
+
+DirectLightingResult EvaluateDirectLighting(FragmentInfo fragmentInfo, Camera mainCamera, DirectLightingOptions options)
+{
+    DirectLightingResult result = (DirectLightingResult)0;
+    result.hasSunShadowDebug = false;
+    result.sunShadowDebug = CLodVirtualShadowInitDebugInfo(0xFFFFFFFFu);
+    if (!options.punctualLights)
+    {
+        return result;
+    }
+
     ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
-    float3 lighting = float3(0.0, 0.0, 0.0);
+    const LightingParameters lightingParameters = MakeLightingParameters(fragmentInfo);
+    // This state depends only on the material/view inputs, so it is built once, outside the light loop.
+    const OpenPBRBaseLayerState baseState = MakeOpenPBRBaseLayerState(
+        lightingParameters.weightedBaseColor,
+        lightingParameters.diffuseColor,
+        lightingParameters.baseDiffuseRoughness,
+        lightingParameters.specularAlpha,
+        lightingParameters.weightedSpecularIor,
+        lightingParameters.dielectricSpecularF0,
+        lightingParameters.dielectricSpecularWeight,
+        lightingParameters.metalAverageFresnel,
+        lightingParameters.metalSpecularF0,
+        lightingParameters.metalSpecularWeight);
+
+    // TODO: Parallax shadows will require a forward pass.
+
+#if defined(PSO_CLUSTERED_LIGHTING)
+    StructuredBuffer<Cluster> clusterBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::ClusterBuffer)];
+    StructuredBuffer<LightPage> lightPagesBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::PagesBuffer)];
+
+    const uint3 clusterID = ComputeClusterID(fragmentInfo.pixelCoords, fragmentInfo.fragPosViewSpace.z, perFrameBuffer, mainCamera);
+    const uint clusterIndex = clusterID.x +
+                              clusterID.y * perFrameBuffer.lightClusterGridSizeX +
+                              clusterID.z * perFrameBuffer.lightClusterGridSizeX * perFrameBuffer.lightClusterGridSizeY;
+    const Cluster activeCluster = clusterBuffer[clusterIndex];
+    result.clusterIndex = clusterID.z;
+    result.clusterLightCount = activeCluster.numLights;
+
+    // Pages hold light buffer indices: lightCulling.hlsl copies them out of the active list.
+    uint remainingLights = activeCluster.numLights;
+    uint pageIndex = activeCluster.ptrFirstPage;
+    const uint maxPagesToVisit = max(1u, (remainingLights + LIGHTS_PER_PAGE - 1u) / LIGHTS_PER_PAGE);
+    uint pagesVisited = 0;
+    while (pageIndex != LIGHT_PAGE_ADDRESS_NULL && remainingLights > 0 && pagesVisited < maxPagesToVisit)
+    {
+        const LightPage page = lightPagesBuffer[pageIndex];
+        const uint lightsInPage = min(min(page.numLightsInPage, LIGHTS_PER_PAGE), remainingLights);
+        if (lightsInPage == 0)
+        {
+            break;
+        }
+        for (uint i = 0; i < lightsInPage; i++)
+        {
+            AccumulateDirectLight(page.lightIndices[i], fragmentInfo, mainCamera, lightingParameters, baseState, options, result);
+        }
+        remainingLights -= lightsInPage;
+        pageIndex = page.ptrNextPage;
+        pagesVisited++;
+    }
+#else
+    StructuredBuffer<unsigned int> activeLightIndices = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::ActiveLightIndices)];
+    for (uint i = 0; i < perFrameBuffer.numLights; i++)
+    {
+        AccumulateDirectLight(activeLightIndices[i], fragmentInfo, mainCamera, lightingParameters, baseState, options, result);
+    }
+#endif
+    return result;
+}
+
+// The VSM debug views' payload for the sun's lookup, or DEBUG_SENTINEL when the view is not a VSM one.
+uint2 VirtualShadowDebugPayload(DirectLightingResult direct, uint outputType)
+{
+    if (!direct.hasSunShadowDebug)
+    {
+        return uint2(DEBUG_SENTINEL, DEBUG_SENTINEL);
+    }
+    const CLodVirtualShadowDebugInfo shadowDebugInfo = direct.sunShadowDebug;
+    switch (outputType)
+    {
+    case OUTPUT_VSM_PREFERRED_CLIPMAP:
+        return PackDebugFloat3(CLodVirtualShadowDebugClipmapColor(shadowDebugInfo.preferredClipmapIndex));
+    case OUTPUT_VSM_SAMPLED_CLIPMAP:
+        return PackDebugFloat3(CLodVirtualShadowDebugClipmapColor(shadowDebugInfo.sampledClipmapIndex));
+    case OUTPUT_VSM_PAGE_STATE:
+        return PackDebugFloat3(CLodVirtualShadowDebugPageStateColor(shadowDebugInfo));
+    case OUTPUT_VSM_PHYSICAL_PAGE:
+        return PackDebugUint(shadowDebugInfo.sampledPhysicalPageIndex == 0xFFFFFFFFu ? 0u : (shadowDebugInfo.sampledPhysicalPageIndex + 1u));
+    case OUTPUT_VSM_RERENDERED_THIS_FRAME:
+        return PackDebugFloat3(CLodVirtualShadowDebugRerenderedThisFrameColor(shadowDebugInfo));
+    case OUTPUT_VSM_CACHED_BASIS_CORRECTION:
+        return PackDebugFloat3(CLodVirtualShadowDebugCachedBasisColor(shadowDebugInfo));
+    case OUTPUT_VSM_PAGE_LOCAL_TEXEL:
+        return PackDebugFloat3(CLodVirtualShadowDebugPageLocalTexelColor(shadowDebugInfo));
+    case OUTPUT_VSM_DEPTH_MARGIN:
+        return PackDebugFloat3(CLodVirtualShadowDebugDepthMarginColor(shadowDebugInfo));
+    case OUTPUT_VSM_CLIP_COMPARISON:
+        return PackDebugFloat3(CLodVirtualShadowDebugClipComparisonColor(shadowDebugInfo));
+    case OUTPUT_VSM_CLIP_GRID_OFFSET:
+        return PackDebugFloat3(CLodVirtualShadowDebugClipGridOffsetColor(shadowDebugInfo));
+    case OUTPUT_VSM_TRACE_FOOTPRINT:
+        return PackDebugFloat3(CLodVirtualShadowDebugTraceFootprintColor(shadowDebugInfo));
+    default:
+        return uint2(DEBUG_SENTINEL, DEBUG_SENTINEL);
+    }
+}
+
+// Emission, through the coat and fuzz layers above it where those are compiled in.
+float3 EvaluateFragmentEmission(FragmentInfo fragmentInfo)
+{
+#if !defined(CLOD_FORWARD_EMISSION) || CLOD_FORWARD_EMISSION
+    if (all(fragmentInfo.emissive == 0.0f.xxx))
+    {
+        return 0.0f.xxx;
+    }
+#if (!defined(CLOD_FORWARD_COAT) || CLOD_FORWARD_COAT) || (!defined(CLOD_FORWARD_FUZZ) || CLOD_FORWARD_FUZZ)
+    const OpenPBRBaseLayerState emissiveBaseState = MakeOpenPBRBaseLayerState(
+        fragmentInfo.albedo,
+        fragmentInfo.diffuseColor,
+        fragmentInfo.baseDiffuseRoughness,
+        fragmentInfo.specularAlpha,
+        fragmentInfo.weightedSpecularIor,
+        fragmentInfo.dielectricSpecularF0,
+        fragmentInfo.dielectricSpecularWeight,
+        fragmentInfo.metalAverageFresnel,
+        fragmentInfo.metalSpecularF0,
+        fragmentInfo.metalSpecularWeight);
+    const OpenPBRCoatLayerState emissiveCoatState = MakeOpenPBRCoatLayerState(
+        emissiveBaseState,
+        fragmentInfo.coatColor,
+        fragmentInfo.coatWeight,
+        fragmentInfo.coatIor,
+        fragmentInfo.coatRoughness,
+        fragmentInfo.coatDarkening);
+    return EvaluateOpenPBREmissive(
+        fragmentInfo.emissive,
+        emissiveCoatState,
+        fragmentInfo.fuzzWeight,
+        fragmentInfo.fuzzRoughness,
+        fragmentInfo.NdotV);
+#else
+    return fragmentInfo.emissive;
+#endif
+#else
+    return 0.0f.xxx;
+#endif
+}
 
 #if defined(PSO_IMAGE_BASED_LIGHTING)
-    float3 unusedDiffuseIBL = 0.0f.xxx;
-    float3 unusedSpecularIBL = 0.0f.xxx;
+void EvaluateFragmentIBL(
+    FragmentInfo fragmentInfo,
+    uint activeEnvironmentIndex,
+    uint environmentBufferDescriptorIndex,
+    inout float3 lighting,
+    inout float3 diffuseIBL,
+    inout float3 specularIBL)
+{
     evaluateIBL(lighting,
-                unusedDiffuseIBL,
-                unusedSpecularIBL,
+                diffuseIBL,
+                specularIBL,
                 fragmentInfo.normalWS,
                 fragmentInfo.normalWS,
                 fragmentInfo.albedo,
@@ -465,469 +718,45 @@ float3 lightFragmentColor(FragmentInfo fragmentInfo, Camera mainCamera, uint act
                 fragmentInfo.NdotV,
                 activeEnvironmentIndex,
                 environmentBufferDescriptorIndex);
+}
 #endif
 
-    if (GetRootEnablePunctualLights())
-    {
-        const LightingParameters lightingParameters = MakeLightingParameters(fragmentInfo);
-
-        // This state depends only on the material/view inputs. Keep it outside
-        // the light loop so multi-light forward passes do not rebuild it for
-        // every punctual light.
-        const OpenPBRBaseLayerState directBaseState = MakeOpenPBRBaseLayerState(
-            lightingParameters.weightedBaseColor,
-            lightingParameters.diffuseColor,
-            lightingParameters.baseDiffuseRoughness,
-            lightingParameters.specularAlpha,
-            lightingParameters.weightedSpecularIor,
-            lightingParameters.dielectricSpecularF0,
-            lightingParameters.dielectricSpecularWeight,
-            lightingParameters.metalAverageFresnel,
-            lightingParameters.metalSpecularF0,
-            lightingParameters.metalSpecularWeight);
-
-        StructuredBuffer<unsigned int> pointShadowViewInfoIndexBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::PointLightCubemapBuffer)];
-        StructuredBuffer<unsigned int> spotShadowViewInfoIndexBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::SpotLightMatrixBuffer)];
-        StructuredBuffer<unsigned int> directionalShadowViewInfoIndexBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::DirectionalLightCascadeBuffer)];
-        StructuredBuffer<Camera> cameraBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
-
-        StructuredBuffer<unsigned int> activeLightIndices = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::ActiveLightIndices)];
-        StructuredBuffer<LightInfo> lights = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::InfoBuffer)];
-
-#if defined(PSO_CLUSTERED_LIGHTING)
-        StructuredBuffer<Cluster> clusterBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::ClusterBuffer)];
-        StructuredBuffer<LightPage> lightPagesBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::PagesBuffer)];
-
-        float3 clusterID = ComputeClusterID(fragmentInfo.pixelCoords, fragmentInfo.fragPosViewSpace.z, perFrameBuffer, cameraBuffer[perFrameBuffer.mainCameraIndex]);
-        uint clusterIndex = clusterID.x +
-                            clusterID.y * perFrameBuffer.lightClusterGridSizeX +
-                            clusterID.z * perFrameBuffer.lightClusterGridSizeX * perFrameBuffer.lightClusterGridSizeY;
-
-        Cluster activeCluster = clusterBuffer[clusterIndex];
-
-        uint remainingLights = activeCluster.numLights;
-        uint pageIndex = activeCluster.ptrFirstPage;
-        uint maxPagesToVisit = max(1u, (remainingLights + LIGHTS_PER_PAGE - 1u) / LIGHTS_PER_PAGE);
-        uint pagesVisited = 0;
-
-        while (pageIndex != LIGHT_PAGE_ADDRESS_NULL && remainingLights > 0 && pagesVisited < maxPagesToVisit) {
-            LightPage page = lightPagesBuffer[pageIndex];
-            uint lightsInPage = min(page.numLightsInPage, LIGHTS_PER_PAGE);
-            lightsInPage = min(lightsInPage, remainingLights);
-            if (lightsInPage == 0) {
-                break;
-            }
-
-            for (uint i = 0; i < lightsInPage; i++) {
-                unsigned int index = activeLightIndices[page.lightIndices[i]];
-#else
-        for (uint i = 0; i < perFrameBuffer.numLights; i++)
-        {
-            unsigned int index = activeLightIndices[i];
+// Image-based, direct and emitted light at a fragment.
+float3 lightFragmentColor(FragmentInfo fragmentInfo, Camera mainCamera, uint activeEnvironmentIndex, uint environmentBufferDescriptorIndex, DirectLightingOptions options)
+{
+    float3 lighting = float3(0.0, 0.0, 0.0);
+#if defined(PSO_IMAGE_BASED_LIGHTING)
+    float3 unusedDiffuseIBL = 0.0f.xxx;
+    float3 unusedSpecularIBL = 0.0f.xxx;
+    EvaluateFragmentIBL(fragmentInfo, activeEnvironmentIndex, environmentBufferDescriptorIndex, lighting, unusedDiffuseIBL, unusedSpecularIBL);
 #endif
-            LightInfo light = lights[index];
-            float shadow = 0.0;
-            if (GetRootEnableShadows())
-            {
-                if (light.shadowViewInfoIndex != -1)
-                {
-                    switch (light.type)
-                    {
-                    case 0:{
-                            if (light.shadowMapIndex == -1)
-                            {
-                                break;
-                            }
-                            shadow = calculatePointShadow(fragmentInfo.fragPosWorldSpace, fragmentInfo.normalWS.xyz, light, pointShadowViewInfoIndexBuffer, cameraBuffer);
-                            break;
-                        }
-                    case 1:{
-                            if (light.shadowMapIndex == -1)
-                            {
-                                break;
-                            }
-                            uint spotShadowCameraIndex = spotShadowViewInfoIndexBuffer[light.shadowViewInfoIndex];
-                            Camera camera = cameraBuffer[spotShadowCameraIndex];
-                            shadow = calculateSpotShadow(fragmentInfo.fragPosWorldSpace, fragmentInfo.normalWS, light, camera.viewProjection, light.nearPlane, light.farPlane);
-                            break;
-                        }
-                    case 2:{
-#if defined(CLOD_RT_HIT_LIGHTING)
-                            shadow = g_clodRtSunShadow; // Shadow maps only have pages for what the camera sees.
-#else
-                            shadow = calculateDirectionalVSMShadow(
-                                fragmentInfo.pixelCoords,
-                                fragmentInfo.fragPosWorldSpace,
-                                fragmentInfo.fragPosViewSpace,
-                                fragmentInfo.normalWS,
-                                light,
-                                perFrameBuffer.numDirectionalClipmaps,
-                                perFrameBuffer.shadowCascadeSplits,
-                                directionalShadowViewInfoIndexBuffer,
-                                cameraBuffer);
-                            if (GetRootEnableRayTracedSunShadow())
-                            {
-                                Texture2D<float> rayTracedSun = ResourceDescriptorHeap[OptionalResourceDescriptorIndex(Builtin::RayTracing::SunShadow)];
-                                shadow = max(shadow, rayTracedSun[fragmentInfo.pixelCoords]);
-                            }
-#endif
-                            break;
-                        }
-                    }
-                }
-            }
-
-            // Full occlusion makes every direct-light term exactly zero.
-            if (shadow >= 1.0f)
-            {
-                continue;
-            }
-
-            LightFragmentData lightFragmentInfo = getLightParametersForFragment(light, fragmentInfo.fragPosWorldSpace.xyz);
-            if (light.type != 2 && lightFragmentInfo.distance > light.maxRange)
-            {
-                continue;
-            }
-            lighting += (1.0 - shadow) * calculateLightContributionPBR(lightFragmentInfo, lightingParameters, directBaseState);
-        }
-#if defined(PSO_CLUSTERED_LIGHTING)
-            remainingLights -= lightsInPage;
-            pageIndex = page.ptrNextPage;
-            pagesVisited++;
-        }
-#endif
-    }
-
-#if !defined(CLOD_FORWARD_EMISSION) || CLOD_FORWARD_EMISSION
-#if (!defined(CLOD_FORWARD_COAT) || CLOD_FORWARD_COAT) || (!defined(CLOD_FORWARD_FUZZ) || CLOD_FORWARD_FUZZ)
-    const OpenPBRBaseLayerState emissiveBaseState = MakeOpenPBRBaseLayerState(
-        fragmentInfo.albedo,
-        fragmentInfo.diffuseColor,
-        fragmentInfo.baseDiffuseRoughness,
-        fragmentInfo.specularAlpha,
-        fragmentInfo.weightedSpecularIor,
-        fragmentInfo.dielectricSpecularF0,
-        fragmentInfo.dielectricSpecularWeight,
-        fragmentInfo.metalAverageFresnel,
-        fragmentInfo.metalSpecularF0,
-        fragmentInfo.metalSpecularWeight);
-    const OpenPBRCoatLayerState emissiveCoatState = MakeOpenPBRCoatLayerState(
-        emissiveBaseState,
-        fragmentInfo.coatColor,
-        fragmentInfo.coatWeight,
-        fragmentInfo.coatIor,
-        fragmentInfo.coatRoughness,
-        fragmentInfo.coatDarkening);
-    return lighting + EvaluateOpenPBREmissive(
-        fragmentInfo.emissive,
-        emissiveCoatState,
-        fragmentInfo.fuzzWeight,
-        fragmentInfo.fuzzRoughness,
-        fragmentInfo.NdotV);
-#else
-    return lighting + fragmentInfo.emissive;
-#endif
-#else
-    return lighting;
-#endif
+    lighting += EvaluateDirectLighting(fragmentInfo, mainCamera, options).lighting;
+    return lighting + EvaluateFragmentEmission(fragmentInfo);
 }
 
-LightingOutput lightFragment(FragmentInfo fragmentInfo, Camera mainCamera, uint activeEnvironmentIndex, uint environmentBufferDescriptorIndex, bool isFrontFace) {
+// lightFragmentColor, plus what the debug views need.
+LightingOutput lightFragment(FragmentInfo fragmentInfo, Camera mainCamera, uint activeEnvironmentIndex, uint environmentBufferDescriptorIndex, DirectLightingOptions options)
+{
     ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+    LightingOutput output;
     float3 lighting = float3(0.0, 0.0, 0.0);
-
 #if defined(PSO_IMAGE_BASED_LIGHTING)
     float3 debugDiffuse = float3(0, 0, 0);
     float3 debugSpecular = float3(0, 0, 0);
-#endif
-
-    LightingOutput output;
-
-#if defined(PSO_CLUSTERED_LIGHTING)
-    output.shadowDebugPayload = uint2(DEBUG_SENTINEL, DEBUG_SENTINEL);
-#endif
-
-#if defined(PSO_IMAGE_BASED_LIGHTING)
-    evaluateIBL(lighting,
-                debugDiffuse,
-                debugSpecular,
-                fragmentInfo.normalWS, 
-                fragmentInfo.normalWS, 
-                fragmentInfo.albedo,
-                fragmentInfo.diffuseColor, 
-                fragmentInfo.diffuseAmbientOcclusion, 
-                fragmentInfo.baseDiffuseRoughness,
-                fragmentInfo.dielectricSpecularF0,
-                fragmentInfo.dielectricSpecularWeight,
-                fragmentInfo.weightedSpecularIor,
-                fragmentInfo.metalAverageFresnel,
-                fragmentInfo.metalSpecularF0,
-                fragmentInfo.metalSpecularWeight,
-                fragmentInfo.reflectedWS, 
-                fragmentInfo.roughness,
-                fragmentInfo.perceptualRoughness,
-                fragmentInfo.specularAlpha,
-                fragmentInfo.coatColor,
-                fragmentInfo.coatF0,
-                fragmentInfo.coatWeight,
-                fragmentInfo.coatIor,
-                fragmentInfo.coatDarkening,
-                fragmentInfo.coatRoughness,
-                fragmentInfo.coatPerceptualRoughness,
-                fragmentInfo.fuzzColor,
-                fragmentInfo.fuzzWeight,
-                fragmentInfo.fuzzRoughness,
-                fragmentInfo.NdotV,
-                activeEnvironmentIndex, 
-                environmentBufferDescriptorIndex);
-#endif // IMAGE_BASED_LIGHTING
-
-    // Direct lighting
-#if defined(PSO_CLUSTERED_LIGHTING)
-    uint clusterIndex = 0; // Which light cluster this fragment belongs to
-    uint clusterLightCount = 0; // Number of lights in the cluster
-#endif
-        
-    if (GetRootEnablePunctualLights())
-    {
-        const LightingParameters lightingParameters = MakeLightingParameters(fragmentInfo);
-
-        const OpenPBRBaseLayerState directBaseState = MakeOpenPBRBaseLayerState(
-            lightingParameters.weightedBaseColor,
-            lightingParameters.diffuseColor,
-            lightingParameters.baseDiffuseRoughness,
-            lightingParameters.specularAlpha,
-            lightingParameters.weightedSpecularIor,
-            lightingParameters.dielectricSpecularF0,
-            lightingParameters.dielectricSpecularWeight,
-            lightingParameters.metalAverageFresnel,
-            lightingParameters.metalSpecularF0,
-            lightingParameters.metalSpecularWeight);
-
-        // TODO: Parallax shadows will require a forward pass
-        //parallaxShadowParameters parallaxShadowParams;
-        //if (materialInfo.materialFlags & MATERIAL_PARALLAX)
-        // {
-        //    parallaxShadowParams.parallaxTexture = ResourceDescriptorHeap[materialInfo.heightMapIndex];
-        //    parallaxShadowParams.parallaxSampler = ResourceDescriptorHeap[materialInfo.heightSamplerIndex];
-        //    parallaxShadowParams.TBN = TBN;
-        //    parallaxShadowParams.heightmapScale = materialInfo.heightMapScale;
-        //    parallaxShadowParams.lightToFrag = viewDir;
-        //    parallaxShadowParams.viewDir = viewDir;
-        //    parallaxShadowParams.uv = uv;
-        //}
-        
-        StructuredBuffer<unsigned int> pointShadowViewInfoIndexBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::PointLightCubemapBuffer)];
-        StructuredBuffer<unsigned int> spotShadowViewInfoIndexBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::SpotLightMatrixBuffer)];
-        StructuredBuffer<unsigned int> directionalShadowViewInfoIndexBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::DirectionalLightCascadeBuffer)];
-        StructuredBuffer<Camera> cameraBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
-        
-        StructuredBuffer<unsigned int> activeLightIndices = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::ActiveLightIndices)];
-        StructuredBuffer<LightInfo> lights = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::InfoBuffer)];
-
-#if defined(PSO_CLUSTERED_LIGHTING)
-        
-        StructuredBuffer<Cluster> clusterBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::ClusterBuffer)];
-        StructuredBuffer<LightPage> lightPagesBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::PagesBuffer)];
-        
-        float3 clusterID = ComputeClusterID(fragmentInfo.pixelCoords, fragmentInfo.fragPosViewSpace.z, perFrameBuffer, cameraBuffer[perFrameBuffer.mainCameraIndex]);
-        clusterIndex = clusterID.x +
-                        clusterID.y * perFrameBuffer.lightClusterGridSizeX +
-                        clusterID.z * perFrameBuffer.lightClusterGridSizeX * perFrameBuffer.lightClusterGridSizeY;
-        
-        Cluster activeCluster = clusterBuffer[clusterIndex];
-        
-        clusterIndex = clusterID.z;
-
-        clusterLightCount = activeCluster.numLights;
-        // Loop through all pages of lights in the cluster
-        uint pageIndex = activeCluster.ptrFirstPage;
-
-        uint remainingLights = clusterLightCount;
-        uint maxPagesToVisit = max(1u, (clusterLightCount + LIGHTS_PER_PAGE - 1u) / LIGHTS_PER_PAGE);
-        uint pagesVisited = 0;
-
-        while (pageIndex != LIGHT_PAGE_ADDRESS_NULL && remainingLights > 0 && pagesVisited < maxPagesToVisit) {
-            LightPage page = lightPagesBuffer[pageIndex];
-            uint lightsInPage = min(page.numLightsInPage, LIGHTS_PER_PAGE);
-            lightsInPage = min(lightsInPage, remainingLights);
-            if (lightsInPage == 0) {
-                break;
-            }
-
-            for (uint i = 0; i < lightsInPage; i++) {
-                unsigned int index = activeLightIndices[page.lightIndices[i]];
-#else
-        for (uint i = 0; i < perFrameBuffer.numLights; i++)
-        {
-            unsigned int index = activeLightIndices[i];
-#endif
-            LightInfo light = lights[index];
-            float shadow = 0.0;
-            if (GetRootEnableShadows())
-            {
-                if (light.shadowViewInfoIndex != -1)
-                {
-                    switch (light.type)
-                    {
-                    case 0:{ // Point light
-                            if (light.shadowMapIndex == -1)
-                            {
-                                break;
-                            }
-                            shadow = calculatePointShadow(fragmentInfo.fragPosWorldSpace, fragmentInfo.normalWS.xyz, light, pointShadowViewInfoIndexBuffer, cameraBuffer);
-                        //return float4(shadow, shadow, shadow, 1.0);
-                            break;
-                        }
-                    case 1:{ // Spot light
-                            if (light.shadowMapIndex == -1)
-                            {
-                                break;
-                            }
-                            uint spotShadowCameraIndex = spotShadowViewInfoIndexBuffer[light.shadowViewInfoIndex];
-                            Camera camera = cameraBuffer[spotShadowCameraIndex];
-                            shadow = calculateSpotShadow(fragmentInfo.fragPosWorldSpace, fragmentInfo.normalWS, light, camera.viewProjection, light.nearPlane, light.farPlane);
-                            break;
-                        }
-                    case 2:{// Directional light
-                            CLodVirtualShadowDebugInfo shadowDebugInfo = CLodVirtualShadowInitDebugInfo(0xFFFFFFFFu);
-	                         shadow = calculateDirectionalVSMShadowDetailed(
-	                             fragmentInfo.pixelCoords,
-	                             fragmentInfo.fragPosWorldSpace,
-	                             fragmentInfo.fragPosViewSpace,
-	                             fragmentInfo.normalWS,
-	                             light,
-	                             perFrameBuffer.numDirectionalClipmaps,
-	                             perFrameBuffer.shadowCascadeSplits,
-	                             directionalShadowViewInfoIndexBuffer,
-	                             cameraBuffer,
-	                             shadowDebugInfo);
-                            if (GetRootEnableRayTracedSunShadow())
-                            {
-                                Texture2D<float> rayTracedSun = ResourceDescriptorHeap[OptionalResourceDescriptorIndex(Builtin::RayTracing::SunShadow)];
-                                shadow = max(shadow, rayTracedSun[fragmentInfo.pixelCoords]);
-                            }
-#if defined(CLOD_VSM_RECEIVER_TELEMETRY)
-                            if (GetRootEnableVirtualShadowReceiverTelemetry())
-                            {
-                                CLodVirtualShadowRecordReceiverTelemetry(
-                                    shadowDebugInfo,
-                                    shadow,
-                                    (uint2)fragmentInfo.pixelCoords,
-                                    fragmentInfo.fragPosWorldSpace,
-                                    -fragmentInfo.fragPosViewSpace.z,
-                                    mainCamera);
-                            }
-#endif
-
-                            if (output.shadowDebugPayload.x == DEBUG_SENTINEL)
-                            {
-                                switch (perFrameBuffer.outputType)
-                                {
-                                case OUTPUT_VSM_PREFERRED_CLIPMAP:
-                                    output.shadowDebugPayload = PackDebugFloat3(CLodVirtualShadowDebugClipmapColor(shadowDebugInfo.preferredClipmapIndex));
-                                    break;
-                                case OUTPUT_VSM_SAMPLED_CLIPMAP:
-                                    output.shadowDebugPayload = PackDebugFloat3(CLodVirtualShadowDebugClipmapColor(shadowDebugInfo.sampledClipmapIndex));
-                                    break;
-                                case OUTPUT_VSM_PAGE_STATE:
-                                    output.shadowDebugPayload = PackDebugFloat3(CLodVirtualShadowDebugPageStateColor(shadowDebugInfo));
-                                    break;
-                                case OUTPUT_VSM_PHYSICAL_PAGE:
-                                    output.shadowDebugPayload = PackDebugUint(shadowDebugInfo.sampledPhysicalPageIndex == 0xFFFFFFFFu ? 0u : (shadowDebugInfo.sampledPhysicalPageIndex + 1u));
-                                    break;
-                                case OUTPUT_VSM_RERENDERED_THIS_FRAME:
-                                    output.shadowDebugPayload = PackDebugFloat3(CLodVirtualShadowDebugRerenderedThisFrameColor(shadowDebugInfo));
-                                    break;
-                                case OUTPUT_VSM_CACHED_BASIS_CORRECTION:
-                                    output.shadowDebugPayload = PackDebugFloat3(CLodVirtualShadowDebugCachedBasisColor(shadowDebugInfo));
-                                    break;
-                                case OUTPUT_VSM_PAGE_LOCAL_TEXEL:
-                                    output.shadowDebugPayload = PackDebugFloat3(CLodVirtualShadowDebugPageLocalTexelColor(shadowDebugInfo));
-                                    break;
-                                case OUTPUT_VSM_DEPTH_MARGIN:
-                                    output.shadowDebugPayload = PackDebugFloat3(CLodVirtualShadowDebugDepthMarginColor(shadowDebugInfo));
-                                    break;
-                                case OUTPUT_VSM_CLIP_COMPARISON:
-                                    output.shadowDebugPayload = PackDebugFloat3(CLodVirtualShadowDebugClipComparisonColor(shadowDebugInfo));
-                                    break;
-                                case OUTPUT_VSM_CLIP_GRID_OFFSET:
-                                    output.shadowDebugPayload = PackDebugFloat3(CLodVirtualShadowDebugClipGridOffsetColor(shadowDebugInfo));
-                                    break;
-                                case OUTPUT_VSM_TRACE_FOOTPRINT:
-                                    output.shadowDebugPayload = PackDebugFloat3(CLodVirtualShadowDebugTraceFootprintColor(shadowDebugInfo));
-                                    break;
-                                }
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-            
-            // Full occlusion makes every direct-light term exactly zero.
-            if (shadow >= 1.0f)
-            {
-                continue;
-            }
-
-            LightFragmentData lightFragmentInfo = getLightParametersForFragment(light, fragmentInfo.fragPosWorldSpace.xyz);
-            if (light.type != 2 && lightFragmentInfo.distance > light.maxRange)
-            {
-                continue;
-            }
-            lighting += (1.0 - shadow) * calculateLightContributionPBR(lightFragmentInfo, lightingParameters, directBaseState);
-            //if (materialInfo.materialFlags & MATERIAL_PARALLAX)
-            //{
-            //    float parallaxShadow = getParallaxShadow(parallaxShadowParams);
-            //}
-        }
-#if defined(PSO_CLUSTERED_LIGHTING)
-            remainingLights -= lightsInPage;
-            pageIndex = page.ptrNextPage;
-            pagesVisited++;
-        }
-#endif
-    }
-
-    if (any(fragmentInfo.emissive != 0.0f.xxx))
-    {
-        const OpenPBRBaseLayerState emissiveBaseState = MakeOpenPBRBaseLayerState(
-            fragmentInfo.albedo,
-            fragmentInfo.diffuseColor,
-            fragmentInfo.baseDiffuseRoughness,
-            fragmentInfo.specularAlpha,
-            fragmentInfo.weightedSpecularIor,
-            fragmentInfo.dielectricSpecularF0,
-            fragmentInfo.dielectricSpecularWeight,
-            fragmentInfo.metalAverageFresnel,
-            fragmentInfo.metalSpecularF0,
-            fragmentInfo.metalSpecularWeight);
-        const OpenPBRCoatLayerState emissiveCoatState = MakeOpenPBRCoatLayerState(
-            emissiveBaseState,
-            fragmentInfo.coatColor,
-            fragmentInfo.coatWeight,
-            fragmentInfo.coatIor,
-            fragmentInfo.coatRoughness,
-            fragmentInfo.coatDarkening);
-        lighting += EvaluateOpenPBREmissive(
-            fragmentInfo.emissive,
-            emissiveCoatState,
-            fragmentInfo.fuzzWeight,
-            fragmentInfo.fuzzRoughness,
-            fragmentInfo.NdotV);
-    }
-    
-    output.lighting = lighting;
-    
-#if defined(PSO_IMAGE_BASED_LIGHTING)
+    EvaluateFragmentIBL(fragmentInfo, activeEnvironmentIndex, environmentBufferDescriptorIndex, lighting, debugDiffuse, debugSpecular);
     output.diffuseIBL = debugDiffuse;
     output.specularIBL = debugSpecular;
-#endif // IMAGE_BASED_LIGHTING
-#if defined(PSO_CLUSTERED_LIGHTING)
-    output.clusterIndex = clusterIndex;
-    output.clusterLightCount = clusterLightCount;
 #endif
+
+    const DirectLightingResult direct = EvaluateDirectLighting(fragmentInfo, mainCamera, options);
+    lighting += direct.lighting;
+    output.shadowDebugPayload = VirtualShadowDebugPayload(direct, perFrameBuffer.outputType);
+#if defined(PSO_CLUSTERED_LIGHTING)
+    output.clusterIndex = direct.clusterIndex;
+    output.clusterLightCount = direct.clusterLightCount;
+#endif
+
+    output.lighting = lighting + EvaluateFragmentEmission(fragmentInfo);
     return output;
 }
 

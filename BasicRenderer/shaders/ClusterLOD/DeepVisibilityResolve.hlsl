@@ -210,7 +210,8 @@ void CLodDeepVisibilityResolveCS(uint3 dispatchThreadId : SV_DispatchThreadID)
                 fragmentInfo,
                 mainCamera,
                 perFrameBuffer.activeEnvironmentIndex,
-                ResourceDescriptorIndex(Builtin::Environment::InfoBuffer));
+                ResourceDescriptorIndex(Builtin::Environment::InfoBuffer),
+                DirectLightingOptionsFromRoot());
 
             float alpha = saturate(fragmentInfo.alpha);
             float remaining = 1.0f - accumulatedAlpha;

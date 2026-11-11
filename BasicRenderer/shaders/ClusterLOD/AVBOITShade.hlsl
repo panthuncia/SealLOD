@@ -135,7 +135,8 @@ AVBOITShadeOutput AVBOITShadePSMain(VisBufferPSInput input, bool isFrontFace : S
         fragmentInfo,
         mainCamera,
         perFrameBuffer.activeEnvironmentIndex,
-        ResourceDescriptorIndex(Builtin::Environment::InfoBuffer));
+        ResourceDescriptorIndex(Builtin::Environment::InfoBuffer),
+        DirectLightingOptionsFromRoot());
 
     const float3 weight = alpha * transmittance;
     const float scalarOpticalDepth = -log(max(1.0f - alpha, 1.0e-4f));

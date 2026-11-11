@@ -73,13 +73,12 @@ namespace Components {
     };
     struct Light {
         Light() = default;
-        Light(LightType type, DirectX::XMFLOAT3 color, DirectX::XMFLOAT3 attenuation, float range, LightInfo info)
-            : type(type), color(color), attenuation(attenuation), range(range), lightInfo(info) {
+        Light(LightType type, DirectX::XMFLOAT3 color, float range, LightInfo info)
+            : type(type), color(color), range(range), lightInfo(info) {
         }
         LightType type;
         DirectX::XMFLOAT3 color;
-        DirectX::XMFLOAT3 attenuation;
-        float range;
+        float range; // Point/spot: where the falloff reaches zero (LightInfo::range).
         LightInfo lightInfo;
     };
 

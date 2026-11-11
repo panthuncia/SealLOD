@@ -10,9 +10,8 @@
 #include "include/visibilityPacking.hlsli"
 #include "PerPassRootConstants/clodRayTracingSetupRootConstants.h"
 #include "include/clodRayTracingHits.hlsli"
+#include "include/lightModel.hlsli"
 
-// The sun's angular radius, roughly.
-#define CLOD_RT_SUN_CONE_TANGENT 0.005f
 #define CLOD_RT_SHADOW_MAX_DISTANCE 100000.0f
 
 uint CLodRtPcgHash(uint value)
@@ -20,20 +19,6 @@ uint CLodRtPcgHash(uint value)
     const uint state = value * 747796405u + 2891336453u;
     const uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
     return (word >> 22u) ^ word;
-}
-
-float3 CLodRtSunDirection()
-{
-    ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
-    StructuredBuffer<unsigned int> activeLights = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::ActiveLightIndices)];
-    StructuredBuffer<LightInfo> lights = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::InfoBuffer)];
-    for (uint i = 0u; i < perFrame.numLights; ++i) {
-        const LightInfo light = lights[activeLights[i]];
-        if (light.type == 2u && light.shadowCaster) {
-            return normalize(-light.dirWorldSpace.xyz);
-        }
-    }
-    return 0.0f.xxx;
 }
 
 [numthreads(8, 8, 1)]
@@ -46,8 +31,11 @@ void CLodRtShadowTraceCS(uint3 id : SV_DispatchThreadID)
     RWTexture2D<unorm float> output = ResourceDescriptorHeap[CLOD_RT_SEC_OUTPUT_UAV];
     Texture2D<uint64_t> visibility = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PrimaryCamera::VisibilityTexture)];
     const uint64_t key = visibility[id.xy];
-    const float3 sun = CLodRtSunDirection();
-    if (key == 0xFFFFFFFFFFFFFFFFull || dot(sun, sun) == 0.0f) {
+    StructuredBuffer<LightInfo> lights = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::InfoBuffer)];
+    const LightInfo sunLight = lights[HasSunLight(perFrame) ? perFrame.sunLightIndex : 0u];
+    const bool hasSun = HasSunLight(perFrame) && sunLight.shadowCaster != 0u;
+    const float3 sun = hasSun ? normalize(-sunLight.dirWorldSpace.xyz) : 0.0f.xxx;
+    if (key == 0xFFFFFFFFFFFFFFFFull || !hasSun) {
         output[id.xy] = 0.0f;
         return;
     }
@@ -67,18 +55,16 @@ void CLodRtShadowTraceCS(uint3 id : SV_DispatchThreadID)
         return;
     }
 
-    // A point on the sun's disk, different for each pixel and frame. Temporal accumulation downstream smooths it further.
+    // A direction in the sun's disc (the light's sourceHalfAngleDegrees), different for each pixel and frame. Temporal
+    // accumulation downstream smooths it further.
     const uint seed = CLodRtPcgHash(id.x + id.y * 65521u + CLOD_RT_SEC_FRAME * 2039u);
-    const float angle = float(seed & 0xFFFFu) / 65536.0f * 6.2831853f;
-    const float radius = sqrt(float(seed >> 16u) / 65536.0f) * CLOD_RT_SUN_CONE_TANGENT;
-    const float3 tangent = normalize(abs(sun.y) < 0.99f ? cross(sun, float3(0.0f, 1.0f, 0.0f)) : cross(sun, float3(1.0f, 0.0f, 0.0f)));
-    const float3 bitangent = cross(sun, tangent);
+    const float2 u = float2(float(seed & 0xFFFFu), float(seed >> 16u)) / 65536.0f;
 
     RayDesc ray;
     // Offset by the size of a pixel at this distance: the BVH can be at a coarser LOD than the surface it starts from.
     const float offset = max(0.05f, distance * 2e-3f);
     ray.Origin = position + shadingNormal * offset;
-    ray.Direction = normalize(sun + tangent * (cos(angle) * radius) + bitangent * (sin(angle) * radius));
+    ray.Direction = LightSampleConeDirection(sun, LightSourceHalfAngleRadians(sunLight), u);
     ray.TMin = 0.0f;
     ray.TMax = CLOD_RT_SHADOW_MAX_DISTANCE;
 

@@ -163,9 +163,8 @@ uint GetRootPerMeshInstanceBufferIndex()
 #endif
 }
 
-int GetRootCurrentLightID() { return (int)UintRootConstant22; }
-int GetRootLightViewIndex() { return (int)UintRootConstant23; }
-bool GetRootEnableShadows() { return UintRootConstant24 != 0u; }
+// Lighting passes' switches (MiscShadowingMode and the rest in ShaderBuffers.h).
+uint GetRootShadowingMode() { return UintRootConstant24; } // SHADOWING_MODE_* (shaders/Common/defines.h)
 bool GetRootEnablePunctualLights() { return UintRootConstant25 != 0u; }
 bool GetRootEnableGTAO() { return UintRootConstant26 != 0u; }
 bool GetRootEnableSkybox() { return UintRootConstant27 != 0u; }

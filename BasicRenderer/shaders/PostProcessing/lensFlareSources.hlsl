@@ -1,12 +1,13 @@
 // Ghost flares, stage 1 (GhostFlareManager; SARP's docs/lens_simulation.md "Ghost flares"): this frame's sources and the
-// sensor frame, in one group. The sources are the sun (the first directional light, as the path tracer takes it) and the
+// sensor frame, in one group. The sources are the sun (PerFrameCB::sunLightIndex, as the path tracer takes it) and the
 // LENS_FLARE_RC_MAX_LIGHTS brightest point and spot lights at the camera, among those within the field the ghost data
 // covers (a little wider than the frame's: a source just outside the frame still makes ghosts). Each source's visibility
-// is the fraction of LENS_FLARE_VISIBILITY_RAYS fixed points on it (the sun's disc, a light's shadow radius) that the
+// is the fraction of LENS_FLARE_VISIBILITY_RAYS fixed points on it (the sun's disc, a light's source radius) that the
 // camera sees: by ray query against the path tracer's BVH (LENS_FLARE_RAY_QUERY), else by the depth buffer, where a point
 // outside the frame counts as seen.
 #include "include/cbuffers.hlsli"
 #include "include/structs.hlsli"
+#include "include/lightModel.hlsli"
 #ifdef LENS_FLARE_RAY_QUERY
 #include "include/instanceDrawRecordHelpers.hlsli"
 #include "include/materialFlags.hlsli"
@@ -19,7 +20,6 @@
 #endif
 #include "include/lens/lensGhost.hlsli"
 
-#define LENS_FLARE_SUN_HALF_ANGLE_DEGREES 0.27f // as pathTracingLights.hlsli's PATH_LIGHT_DEFAULT_SUN_CONE_DEGREES
 #define LENS_FLARE_MAX_LOCAL (LENS_FLARE_MAX_SOURCES - 1u)
 #define LENS_FLARE_SHADOW_DISTANCE 100000.0f
 
@@ -137,28 +137,21 @@ FlareSource FlareLightSource(Camera camera, LightInfo light, uint lightIndex)
 {
     FlareSource source = (FlareSource)0;
     source.lightIndex = lightIndex;
-    if (light.type == 2u) {
-        source.worldToSource = normalize(-light.dirWorldSpace.xyz);
-        source.irradiance = light.color.xyz * light.color.w;
-        const float halfAngle = light.shadowSourceAngleDegrees > 0.0f ? light.shadowSourceAngleDegrees : LENS_FLARE_SUN_HALF_ANGLE_DEGREES;
-        source.sampleRadius = tan(radians(halfAngle));
+    // The light as it arrives at the camera, through the same model shading uses (lightModel.hlsli).
+    const LightFragmentData atCamera = EvaluateLightAtPoint(light, camera.positionWorldSpace.xyz);
+    if (light.type == LIGHT_TYPE_DIRECTIONAL) {
+        source.worldToSource = atCamera.lightToFrag;
+        source.irradiance = LightIncidentRadiance(atCamera);
+        source.sampleRadius = tan(LightSourceHalfAngleRadians(light));
         source.valid = any(source.irradiance > 0.0f);
         return source;
     }
-    const float3 toLight = light.posWorldSpace.xyz - camera.positionWorldSpace.xyz;
-    const float distance = length(toLight);
-    if (!(distance > camera.zNear) || distance > light.maxRange) return source;
+    if (!(atCamera.distance > camera.zNear) || !LightInRange(light, atCamera)) return source;
     source.isPoint = true;
-    source.worldDistance = distance;
-    source.worldToSource = toLight / distance;
-    const float attenuation = 1.0f / (light.attenuation.x + light.attenuation.y * distance + light.attenuation.z * distance * distance + 0.0001f);
-    float spot = 1.0f;
-    if (light.type == 1u) {
-        const float cosine = dot(normalize(light.dirWorldSpace.xyz), -source.worldToSource);
-        spot = cosine > light.outerConeAngle ? (cosine < light.innerConeAngle ? smoothstep(light.outerConeAngle, light.innerConeAngle, cosine) : 1.0f) : 0.0f;
-    }
-    source.irradiance = light.color.xyz * light.color.w * attenuation * spot;
-    source.sampleRadius = max(light.shadowSourceRadius, 0.0f);
+    source.worldDistance = atCamera.distance;
+    source.worldToSource = atCamera.lightToFrag;
+    source.irradiance = LightIncidentRadiance(atCamera);
+    source.sampleRadius = max(light.sourceRadius, 0.0f);
     source.valid = any(source.irradiance > 0.0f);
     return source;
 }
@@ -252,7 +245,7 @@ void LensFlareSourcesCS(uint3 thread : SV_GroupThreadID)
         for (uint slot = tid; slot < lightCount; slot += LENS_FLARE_SOURCES_GROUP) {
             const uint index = activeLights[slot];
             const LightInfo light = lights[index];
-            if (light.type == 2u) continue;
+            if (light.type == LIGHT_TYPE_DIRECTIONAL) continue;
             FlareSource source = FlareLightSource(camera, light, index);
             if (!source.valid || !FlareToLens(camera, frame.fieldScale, ghostHeader.maxField, source)) continue;
             float score = FlareLuminance(source.irradiance);
@@ -326,13 +319,7 @@ void LensFlareSourcesCS(uint3 thread : SV_GroupThreadID)
         source.valid = any(source.irradiance > 0.0f);
     }
     else if (tid == 0u) {
-        for (uint slot = 0u; slot < lightCount; ++slot) {
-            const uint index = activeLights[slot];
-            if (lights[index].type == 2u) {
-                source = FlareLightSource(camera, lights[index], index);
-                break;
-            }
-        }
+        if (HasSunLight(perFrame)) source = FlareLightSource(camera, lights[perFrame.sunLightIndex], perFrame.sunLightIndex);
     }
     else {
         const uint index = gs_selected[tid - 1u];

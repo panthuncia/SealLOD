@@ -20,7 +20,12 @@ inline constexpr const char* ProceduralWindSkeletonLodLateReserveSettingName = "
 inline constexpr const char* ProceduralWindSkeletonLodHysteresisSettingName = "proceduralWindSkeletonLodHysteresis";
 inline constexpr const char* ProceduralWindForcedSkeletonLodSettingName = "proceduralWindForcedSkeletonLod";
 inline constexpr const char* ProceduralWindTransientBoneCapacitySettingName = "proceduralWindTransientBoneCapacity";
-inline constexpr const char* MaterialTextureStreamingIdleFramesSettingName = "materialTextureStreamingIdleFrames";
+// Texture streaming's VRAM budget in MiB; 0 uses the budget the OS offers the process.
+inline constexpr const char* MaterialTextureStreamingBudgetMBSettingName = "materialTextureStreamingBudgetMB";
+// Over the budget, how many mips what is on screen may step down; 16 or more holds the budget whatever it costs.
+inline constexpr const char* MaterialTextureStreamingVisibleOffsetSettingName = "materialTextureStreamingVisibleOffset";
+// Upgrades started per second, in MiB.
+inline constexpr const char* MaterialTextureStreamingRateMBSettingName = "materialTextureStreamingRateMB";
 
 enum class WindowResolutionPreset : uint8_t {
     P720,

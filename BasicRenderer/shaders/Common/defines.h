@@ -11,3 +11,7 @@
 #define CLOD_PAGE_SIZE 256*1024
 #define CLOD_PAGE_HEADER_SIZE 64        // 16 x uint32
 #define CLOD_MESHLET_DESCRIPTOR_SIZE 48  // 12 x uint32 = 3 x Load4
+
+// How analytic lights are shadowed: ShadowingMode in RenderContext.h, GetRootShadowingMode() in shaders.
+#define SHADOWING_MODE_NONE 0
+#define SHADOWING_MODE_VIRTUAL_SHADOW_MAPS 1 // The sun through the virtual shadow map; local lights unshadowed.

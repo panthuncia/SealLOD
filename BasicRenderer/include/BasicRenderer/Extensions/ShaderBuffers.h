@@ -128,6 +128,12 @@ struct PerFrameCB {
     float terrainReyesDisplacementScale = 8.0f;
     float objectReyesDisplacementScale = 1.0f;
     float objectParallaxHeightScale = 1.0f;
+    // The sun: the first shadow-casting directional light, else the first directional one (LightManager::GetSunLight).
+    // sunLightIndex indexes the light buffer and sunLightSlot the active-index list; both are 0xFFFFFFFF without one.
+    unsigned int sunLightIndex = 0xFFFFFFFFu;
+    unsigned int sunLightSlot = 0xFFFFFFFFu;
+    unsigned int sunLightPad0 = 0u;
+    unsigned int sunLightPad1 = 0u;
 };
 
 static_assert(offsetof(PerFrameCB, shadowVirtualReceiverTraceEnabled) == 100, "PerFrameCB layout mismatch.");
@@ -149,7 +155,8 @@ static_assert(offsetof(PerFrameCB, terrainRvtTelemetryEnabled) == 204, "PerFrame
 static_assert(offsetof(PerFrameCB, terrainReyesDisplacementScale) == 208, "PerFrameCB layout mismatch.");
 static_assert(offsetof(PerFrameCB, objectReyesDisplacementScale) == 212, "PerFrameCB layout mismatch.");
 static_assert(offsetof(PerFrameCB, objectParallaxHeightScale) == 216, "PerFrameCB layout mismatch.");
-static_assert(sizeof(PerFrameCB) == 224, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, sunLightIndex) == 220, "PerFrameCB layout mismatch.");
+static_assert(sizeof(PerFrameCB) == 240, "PerFrameCB layout mismatch.");
 
 // Object flags (shared with HLSL OBJECT_FLAG_* defines)
 static constexpr unsigned int OBJECT_FLAG_REVERSE_WINDING = 1u << 0;
@@ -315,7 +322,10 @@ struct PerMaterialCB {
     // KHR_texture_transform, encoded so zero is the identity (BuildMaterialUvTransformGpu in MaterialDescription.h).
     DirectX::XMFLOAT4 uvTransformLinearDelta = { 0.0f, 0.0f, 0.0f, 0.0f };
     DirectX::XMFLOAT2 uvTransformOffset = { 0.0f, 0.0f };
-    DirectX::XMUINT2 padUvTransform = {};
+    // Texture streaming's feedback slot: the material row's own slot + 1 (0: none). Shaders write one footprint per
+    // material evaluation to it (TextureStreamingManager, materialStreamingFeedback in utilities.hlsli).
+    unsigned int streamingFeedbackSlot = 0u;
+    unsigned int padStreamingFeedback = 0u;
 };
 
 static_assert(sizeof(PerMaterialCB) == 372, "PerMaterialCB must match HLSL MaterialInfo stride.");
@@ -399,7 +409,10 @@ struct PerMaterialEvalCB {
     // KHR_texture_transform, encoded so zero is the identity (BuildMaterialUvTransformGpu in MaterialDescription.h).
     DirectX::XMFLOAT4 uvTransformLinearDelta = { 0.0f, 0.0f, 0.0f, 0.0f };
     DirectX::XMFLOAT2 uvTransformOffset = { 0.0f, 0.0f };
-    DirectX::XMUINT2 padUvTransform = {};
+    // Texture streaming's feedback slot: the material row's own slot + 1 (0: none). Shaders write one footprint per
+    // material evaluation to it (TextureStreamingManager, materialStreamingFeedback in utilities.hlsli).
+    unsigned int streamingFeedbackSlot = 0u;
+    unsigned int padStreamingFeedback = 0u;
 };
 
 static_assert(sizeof(PerMaterialEvalCB) == 352, "PerMaterialEvalCB must match HLSL MaterialEvalInfo stride.");
@@ -603,32 +616,34 @@ struct TextureStreamingGPUInfo {
 	unsigned int samplerDescriptorIndex;
 };
 
+// One analytic light, as shaders read it (LightInfo in structs.hlsli; evaluated by lightModel.hlsli).
+// Point and spot lights fall off as inverse square, bounded below by sourceRadius and windowed to zero at range.
 struct LightInfo {
-    // Light attributes: x=type (0=point, 1=spot, 2=directional)
-    // x=point -> w = shadow caster
-    // x=spot -> y= inner cone angle, z= outer cone angle, w= shadow caster
-    // x=directional => w= shadow caster
-    unsigned int type;
-    float innerConeAngle;
-    float outerConeAngle;
-    int shadowViewInfoIndex;
+    unsigned int type; // Components::LightType: 0 point, 1 spot, 2 directional.
+    float innerConeCos = 1.0f; // Spot: full intensity inside this cone (cosine of the half-angle).
+    float outerConeCos = 0.0f; // Spot: zero outside this cone.
+    int shadowViewInfoIndex = -1; // Directional: first clipmap's slot in DirectionalLightCascadeBuffer; -1 if none.
 
-    DirectX::XMVECTOR posWorldSpace; // Position of the lights
-    DirectX::XMVECTOR dirWorldSpace; // Direction of the lights
-    DirectX::XMVECTOR attenuation; // x,y,z = constant, linear, quadratic attenuation
-    DirectX::XMVECTOR color; // Color of the lights
+    DirectX::XMVECTOR posWorldSpace;
+    DirectX::XMVECTOR dirWorldSpace; // Direction light travels: the spot axis, or toward the ground for the sun.
+    DirectX::XMVECTOR color; // rgb color, w intensity.
 
-    float nearPlane;
-    float farPlane;
-	int shadowMapIndex = -1;
-    int shadowSamplerIndex = -1;
+	BoundingSphere boundingSphere; // Point/spot culling bounds (the spot's is its cone's).
 
-    bool shadowCaster;
-	BoundingSphere boundingSphere;
-    float maxRange;
-    float shadowSourceRadius = 0.0f;
-    float shadowSourceAngleDegrees = 0.0f;
+    float range = 0.0f; // Point/spot: the distance falloff reaches zero at.
+    float sourceRadius = 0.0f; // Point/spot: emitter radius. Bounds the falloff near the light; area for soft shadows.
+    float sourceHalfAngleDegrees = 0.0f; // Directional: angular radius of the disc. 0: unset.
+    unsigned int shadowCaster = 0u;
+
+    // Bumped whenever this slot is given to a light, so a slot index kept from a past frame can be checked.
+    // LightManager owns it: it is stamped on every upload, so callers never set it.
+    unsigned int generation = 0u;
+    unsigned int pad0 = 0u;
+    unsigned int pad1 = 0u;
+    unsigned int pad2 = 0u;
 };
+
+static_assert(sizeof(LightInfo) == 112, "LightInfo must match the HLSL LightInfo stride.");
 
 #define LIGHTS_PER_PAGE 12
 struct LightPage {
@@ -1016,11 +1031,14 @@ enum MiscUintRootConstants { // Used for pass-specific one-off constants, includ
     MiscPerObjectBufferIndex = UintRootConstant19,
     MiscPerMeshBufferIndex = UintRootConstant20,
     MiscPerMeshInstanceBufferIndex = UintRootConstant21,
-    MiscCurrentLightID = UintRootConstant22,
-    MiscLightViewIndex = UintRootConstant23,
-    MiscEnableShadows = UintRootConstant24,
+    // Lighting passes' switches, read by cbuffers.hlsli's GetRoot* accessors.
+    MiscShadowingMode = UintRootConstant24, // ShadowingMode (SHADOWING_MODE_*).
     MiscEnablePunctualLights = UintRootConstant25,
     MiscEnableGTAO = UintRootConstant26,
+    MiscEnableSkybox = UintRootConstant27, // Deferred pass only.
+    MiscEnableRayTracedSunShadow = UintRootConstant28, // Deferred pass only.
+    MiscEnableVirtualShadowReceiverTelemetry = UintRootConstant29, // Deferred pass only.
+    MiscVirtualShadowReceiverTelemetryFrame = UintRootConstant30, // Deferred pass only.
 	UintRootConstant47 = UintRootConstant46 + 1,
 	NumMiscUintRootConstants = UintRootConstant47 + 1
 };

@@ -91,7 +91,14 @@ void DeferredCSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     FragmentInfo fragmentInfo;
     GetFragmentInfoCanonicalSurface(pixel, viewDirWS, positionVS, positionWS, GetRootEnableGTAO(), fragmentInfo);
     
-    LightingOutput lightingOutput = lightFragment(fragmentInfo, mainCamera, perFrameBuffer.activeEnvironmentIndex, ResourceDescriptorIndex(Builtin::Environment::InfoBuffer), true);
+    DirectLightingOptions lightingOptions = DirectLightingOptionsFromRoot();
+    if (GetRootEnableRayTracedSunShadow() && GetRootShadowingMode() != SHADOWING_MODE_NONE)
+    {
+        // The ray traced sun mask covers what the shadow map's pages leave out; the loop combines the two by max.
+        Texture2D<float> rayTracedSun = ResourceDescriptorHeap[OptionalResourceDescriptorIndex(Builtin::RayTracing::SunShadow)];
+        lightingOptions.sunOcclusion = rayTracedSun[pixel];
+    }
+    LightingOutput lightingOutput = lightFragment(fragmentInfo, mainCamera, perFrameBuffer.activeEnvironmentIndex, ResourceDescriptorIndex(Builtin::Environment::InfoBuffer), lightingOptions);
     
     float3 lighting = lightingOutput.lighting;
 
@@ -128,6 +135,7 @@ void DeferredCSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
             case OUTPUT_LIGHT_CLUSTER_LIGHT_COUNT:
                 payload = PackDebugUint(lightingOutput.clusterLightCount);
                 break;
+#endif
             case OUTPUT_VSM_PREFERRED_CLIPMAP:
             case OUTPUT_VSM_SAMPLED_CLIPMAP:
             case OUTPUT_VSM_PAGE_STATE:
@@ -141,7 +149,6 @@ void DeferredCSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
             case OUTPUT_VSM_TRACE_FOOTPRINT:
                 payload = lightingOutput.shadowDebugPayload;
                 break;
-#endif
         }
         if (payload.x != DEBUG_SENTINEL) {
             WriteDebugPixel(debugVisTex, pixel, payload);

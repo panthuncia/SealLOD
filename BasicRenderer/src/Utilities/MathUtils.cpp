@@ -1,5 +1,6 @@
 #include "Utilities/MathUtils.h"
 
+#include <cmath>
 #include <spdlog/spdlog.h>
 
 using namespace DirectX;
@@ -33,38 +34,11 @@ XMVECTOR GetUpFromMatrix(const DirectX::XMMATRIX& matrix) {
     return -XMVector3Normalize(matrix.r[1]);
 }
 
-float CalculateLightRadius(float intensity, float constant, float linear, float quadratic, float threshold) {
-
-    // quadratic * d^2 + linear * d + (constant - intensity/threshold) = 0
-    float a = quadratic;
-    float b = linear;
-
-	// If threshold is zero, we cannot divide by it.
-    if (threshold == 0.0f) {
-		spdlog::warn("Light threshold is zero. Is this intentional?");
+float LightRangeForIntensity(float intensity, float threshold) {
+    if (threshold <= 0.0f || intensity <= 0.0f) {
         return 0.0f;
     }
-
-    float c = constant - (intensity / threshold);
-
-    float d = 0.0;
-    // If quadratic term is significant, solve via quadratic formula
-    if (abs(a) > 1e-6) {
-        float discriminant = static_cast<float>(b * b - 4.0 * a * c);
-        // In case of a negative discriminant, there is no real solution. Return 0.
-        if (discriminant < 0.0)
-            d = 0.0;
-        else
-            d = (-b + sqrt(discriminant)) / (2.0f * a);
-    } 
-    else if (abs(b) > 1e-6) {  // Fall back to linear solution if a is negligible
-        d = -c / b;
-    }
-    else {
-        d = 0.0; // No attenuation factors; effective range is undefined.
-    }
-
-    return d;
+    return std::sqrt(intensity / threshold);
 }
 
 BoundingSphere ComputeConeBoundingSphere(const XMVECTOR& origin, const XMVECTOR& direction, float height, float halfAngle) {

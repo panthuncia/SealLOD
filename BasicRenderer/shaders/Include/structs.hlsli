@@ -285,6 +285,10 @@ struct PerFrameBuffer {
     float terrainReyesDisplacementScale;
     float objectReyesDisplacementScale;
     float objectParallaxHeightScale;
+    uint sunLightIndex; // Light buffer index of the sun, LIGHT_INDEX_NONE without one (PerFrameCB).
+    uint sunLightSlot; // Its position in the active-index list.
+    uint sunLightPad0;
+    uint sunLightPad1;
 };
 
 static const uint TERRAIN_RVT_CONTENT_HEIGHT = 1u << 0;
@@ -469,27 +473,28 @@ struct BoundingSphere {
     float4 sphere;
 };
 
+// One analytic light. Mirrors LightInfo in ShaderBuffers.h; lightModel.hlsli evaluates it.
 struct LightInfo {
-    uint type;
-    float innerConeAngle;
-    float outerConeAngle;
-    int shadowViewInfoIndex; // -1 if no shadow map
-    
-    float4 posWorldSpace; // Position of the light
-    float4 dirWorldSpace; // Direction of the light
-    float4 attenuation; // x,y,z = constant, linear, quadratic attenuation, w= max range
-    float4 color; // Color of the light
-    
-    float nearPlane;
-    float farPlane;
-    int shadowMapIndex;
-    int shadowSamplerIndex;
-    
-    bool shadowCaster;
-    BoundingSphere boundingSphere;
-    float maxRange;
-    float shadowSourceRadius;
-    float shadowSourceAngleDegrees;
+    uint type; // LIGHT_TYPE_* (lightModel.hlsli)
+    float innerConeCos; // Spot: full intensity inside this cone (cosine of the half-angle).
+    float outerConeCos; // Spot: zero outside this cone.
+    int shadowViewInfoIndex; // Directional: first clipmap's slot in DirectionalLightCascadeBuffer; -1 if none.
+
+    float4 posWorldSpace;
+    float4 dirWorldSpace; // Direction light travels: the spot axis, or toward the ground for the sun.
+    float4 color; // rgb color, w intensity.
+
+    BoundingSphere boundingSphere; // Point/spot culling bounds (the spot's is its cone's).
+
+    float range; // Point/spot: the distance falloff reaches zero at.
+    float sourceRadius; // Point/spot: emitter radius. Bounds the falloff near the light; area for soft shadows.
+    float sourceHalfAngleDegrees; // Directional: angular radius of the disc. 0: unset.
+    uint shadowCaster;
+
+    uint generation; // Bumped whenever this slot is given to a light, so a slot index from a past frame can be checked.
+    uint pad0;
+    uint pad1;
+    uint pad2;
 };
 
 struct MaterialInfo {
@@ -577,7 +582,8 @@ struct MaterialInfo {
     // KHR_texture_transform, zero = identity: materialUvTransform.hlsli.
     float4 uvTransformLinearDelta;
     float2 uvTransformOffset;
-    uint2 padUvTransform;
+    uint streamingFeedbackSlot; // the row's own material slot + 1, 0: none (texture streaming feedback)
+    uint padStreamingFeedback;
 };
 
 struct MaterialEvalInfo {
@@ -657,7 +663,8 @@ struct MaterialEvalInfo {
     // KHR_texture_transform, zero = identity: materialUvTransform.hlsli.
     float4 uvTransformLinearDelta;
     float2 uvTransformOffset;
-    uint2 padUvTransform;
+    uint streamingFeedbackSlot; // the row's own material slot + 1, 0: none (texture streaming feedback)
+    uint padStreamingFeedback;
 };
 
 struct TerrainLayerInfo {

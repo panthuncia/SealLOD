@@ -47,10 +47,17 @@ struct ProceduralWindFrameSettings {
 	bool occlusionCullingEnabled = true;
 };
 
+// How analytic lights are shadowed. Shaders read it from GetRootShadowingMode() as SHADOWING_MODE_* (shaders/Common/defines.h).
+// It follows the pipeline recipe: VirtualShadowMaps exactly when ClusterLodShadowTechnique is in it.
+enum class ShadowingMode : uint32_t {
+	None = 0,
+	VirtualShadowMaps = 1, // The sun through the virtual shadow map; local lights unshadowed.
+};
+
 struct LightingFrameSettings {
 	bool imageBasedLightingEnabled = true;
 	bool punctualLightingEnabled = true;
-	bool shadowsEnabled = true;
+	ShadowingMode shadowingMode = ShadowingMode::None;
 	bool gtaoEnabled = true;
 	bool clusteredLightingEnabled = true;
 };

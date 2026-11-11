@@ -55,6 +55,7 @@
 #include "BasicRenderer/Runtime/Detail/MaterialEvaluationBuildInputs.h"
 #include <BasicRenderer/Extensions/ProducerPersistentState.h>
 #include <BasicRenderer/Streaming/ArtifactTypes.h>
+#include <BasicRenderer/Streaming/LightStateArtifacts.h>
 #include <BasicRenderer/Diagnostics/SamplingReadinessSnapshot.h>
 
 struct ID3D12Resource;
@@ -338,7 +339,7 @@ private:
     std::optional<br::render::AsyncStateGraphTraceConfig> m_pendingAsyncStateGraphTrace;
     std::unique_ptr<br::render::RendererStatePublisher> m_rendererStatePublisher;
     std::unique_ptr<br::render::RendererStateRequestService> m_rendererStateRequests;
-    std::array<std::unique_ptr<br::render::VersionedBufferFamily>, 5> m_lightTableFamilies;
+    std::array<std::unique_ptr<br::render::VersionedBufferFamily>, br::render::LightTableFamilyCount> m_lightTableFamilies;
     std::array<std::unique_ptr<br::render::VersionedBufferFamily>, 4> m_poseTableFamilies;
     TaskScope m_rendererStateCommitScope;
     TaskScope m_presentationTailScope;

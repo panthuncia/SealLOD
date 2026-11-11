@@ -326,14 +326,14 @@ void Renderer::RunRenderResourceSyncStage() {
                 1.0f);
             switch (light.lightInfo.type) {
             case Components::LightType::Spot:
-                light.lightInfo.boundingSphere = ComputeConeBoundingSphere(light.lightInfo.posWorldSpace, light.lightInfo.dirWorldSpace, light.lightInfo.maxRange, acos(light.lightInfo.outerConeAngle));
+                light.lightInfo.boundingSphere = ComputeConeBoundingSphere(light.lightInfo.posWorldSpace, light.lightInfo.dirWorldSpace, light.lightInfo.range, acos(light.lightInfo.outerConeCos));
                 break;
             case Components::LightType::Point:
                 light.lightInfo.boundingSphere = {{
                     XMVectorGetX(worldMatrix.matrix.r[3]),
                     XMVectorGetY(worldMatrix.matrix.r[3]),
                     XMVectorGetZ(worldMatrix.matrix.r[3]),
-                    light.lightInfo.maxRange }};
+                    light.lightInfo.range }};
                 break;
             default:
                 break;

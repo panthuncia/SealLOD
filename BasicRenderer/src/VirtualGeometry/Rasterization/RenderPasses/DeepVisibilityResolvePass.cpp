@@ -63,8 +63,6 @@ DeepVisibilityResolveBindings DeepVisibilityResolvePass::Declare(org::PassBuilde
             Builtin::CameraBuffer,
             Builtin::Light::ActiveLightIndices,
             Builtin::Light::InfoBuffer,
-            Builtin::Light::PointLightCubemapBuffer,
-            Builtin::Light::SpotLightMatrixBuffer,
             Builtin::Light::DirectionalLightCascadeBuffer,
             Builtin::Light::ClusterBuffer,
             Builtin::Light::PagesBuffer,
@@ -179,7 +177,7 @@ void DeepVisibilityResolvePass::Record(const DeepVisibilityResolveBindings& bind
     const DeepVisibilityResolveFrame& frame, org::PassRecordContext& context) {
     if (!frame.ready) return;
     br::render::MiscConstants constants{};
-    constants[MiscEnableShadows] = bindings.shadows;
+    constants[MiscShadowingMode] = static_cast<uint32_t>(bindings.shadows ? ShadowingMode::VirtualShadowMaps : ShadowingMode::None);
     constants[MiscEnablePunctualLights] = bindings.punctualLights;
     constants[MiscEnableGTAO] = bindings.gtao;
     constants[CLOD_DEEP_VISIBILITY_RESOLVE_HEAD_POINTER_DESCRIPTOR_INDEX] = context.Index(bindings.headPointers);

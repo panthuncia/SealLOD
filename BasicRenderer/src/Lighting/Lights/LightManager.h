@@ -9,6 +9,8 @@
 #include <optional>
 #include <atomic>
 #include <cstddef>
+#include <map>
+#include <set>
 
 #include "BasicRenderer/Extensions/ShaderBuffers.h"
 #include "Resources/ResourceIdentifier.h"
@@ -22,11 +24,15 @@
 #include "BasicRenderer/Scene/Components.h"
 #include "BasicRenderer/Scene/RendererComponents.h"
 
-class ShadowMaps;
-class LinearShadowMaps;
-class IndirectCommandBufferManager;
 namespace br::render { class IShadowViewService; }
 class SortedUnsignedIntBuffer;
+
+// The sun as shaders see it (PerFrameCB::sunLightIndex/sunLightSlot): the first shadow-casting directional light, else
+// the first directional one, by light buffer index. Both are 0xFFFFFFFF without one.
+struct SunLightSelection {
+	uint32_t lightIndex = 0xFFFFFFFFu;
+	uint32_t activeSlot = 0xFFFFFFFFu;
+};
 
 struct AddLightReturn {
 	Components::LightViewInfo lightViewInfo;
@@ -44,9 +50,11 @@ public:
     void RemoveLight(LightInfo* light);
 	void RemoveLight(flecs::entity light);
 	unsigned int GetNumLights();
+	SunLightSelection GetSunLight();
 	uint64_t GetPublicationRevision() const noexcept { return m_publicationRevision.load(std::memory_order_acquire); }
     void SetCurrentCamera(flecs::entity camera);
 	void SetShadowViewService(br::render::IShadowViewService* service);
+	// Uploads a light's data, stamping its slot's generation over data.generation.
 	void UpdateLightBufferView(org::BufferView* view, const LightInfo& data);
     void UpdateLightViewInfo(flecs::entity light);
 	unsigned int GetLightPagePoolSize() { return m_lightPagePoolSize; }
@@ -62,20 +70,19 @@ private:
 	flecs::entity m_currentCamera;
     std::shared_ptr<org::LazyDynamicStructuredBuffer<LightInfo>> m_lightBuffer;
 	std::shared_ptr<SortedUnsignedIntBuffer> m_activeLightIndices; // Sorted list of active light indices
-    std::shared_ptr<DynamicStructuredBuffer<unsigned int>> m_spotViewInfo; // Indices into camera buffer
-    std::shared_ptr<DynamicStructuredBuffer<unsigned int>> m_pointViewInfo;
-    std::shared_ptr<DynamicStructuredBuffer<unsigned int>> m_directionalViewInfo;
+    std::shared_ptr<DynamicStructuredBuffer<unsigned int>> m_directionalViewInfo; // Clipmap views' camera buffer indices.
 
-	std::shared_ptr<org::ResourceGroup> m_pLightViewInfoResourceGroup;
 	std::shared_ptr<org::ResourceGroup> m_pLightBufferResourceGroup;
+
+	// Per light buffer slot: bumped each time the slot is given to a light (LightInfo::generation).
+	std::vector<uint32_t> m_slotGenerations;
+	// Mirrors of what the GPU tables hold, for choosing the sun: active light buffer indices, and the directional
+	// lights among them with whether each casts shadows. Guarded by m_lightUpdateMutex.
+	std::set<uint32_t> m_activeIndices;
+	std::map<uint32_t, bool> m_directionalLights;
 
 	std::shared_ptr<org::Buffer> m_pClusterBuffer;
 	std::shared_ptr<org::Buffer> m_pLightPagesBuffer;
-
-    // TODO: The buffer size and increment size are low for testing.
-    unsigned int m_commandBufferSize = 1;
-	bool m_resizeCommandBuffers = false;
-	static constexpr unsigned int m_commandBufferIncrementSize = 1;
 
     // Settings funcs
 	std::function<uint8_t()> getNumDirectionalLightCascades;
@@ -83,17 +90,12 @@ private:
 	std::function<float()> getMaxShadowDistance;
 	std::function<float()> getDirectionalShadowSceneExtent;
 	std::function<float()> getDirectionalVirtualShadowSourceAngleDegrees;
-    std::function<void(std::shared_ptr<void>)> markForDelete;
 	br::render::IShadowViewService* m_shadowViews = nullptr;
 	unsigned int m_lightPagePoolSize = 0;
 
 	std::mutex m_lightUpdateMutex;
 	std::atomic_uint64_t m_publicationRevision{1};
 
-    std::pair<Components::LightViewInfo, std::optional<Components::FrustumPlanes>>
-        CreatePointLightViewInfo(const LightInfo& info, uint64_t entityId);
-	std::pair<Components::LightViewInfo, std::optional<Components::FrustumPlanes>>
-		CreateSpotLightViewInfo(const LightInfo& info, uint64_t entityId);
 	std::pair<Components::LightViewInfo, std::optional<Components::FrustumPlanes>>
 		CreateDirectionalLightViewInfo(const LightInfo& info, uint64_t entityId);
 	void RebuildDirectionalLightViewInfoBuffer(std::optional<uint64_t> excludedLightEntityId = std::nullopt);

@@ -1347,21 +1347,6 @@ std::string GetFileExtension(const std::string& filePath) {
     return filePath.substr(dotPos + 1);
 }
 
-DirectX::XMMATRIX GetProjectionMatrixForLight(LightInfo info) {
-    switch (info.type) {
-    case Components::LightType::Spot:
-        return XMMatrixPerspectiveFovRH(acos(info.outerConeAngle) * 2, 1.0, info.nearPlane, info.farPlane);
-        break;
-    case Components::LightType::Point:
-        return XMMatrixPerspectiveFovRH(XM_PI / 2, 1.0, info.nearPlane, info.farPlane);
-        break;
-    case Components::LightType::Directional:
-		throw std::runtime_error("Implemented elsewhere"); // TODO: Consolidate?
-    default:
-		throw std::runtime_error("Unknown light type for projection matrix");
-    }
-}
-
 DirectX::XMVECTOR QuaternionFromAxisAngle(const XMFLOAT3& dir) {
     XMVECTOR targetDirection = XMVector3Normalize(XMLoadFloat3(&dir));
     float dotProduct = XMVectorGetX(XMVector3Dot(defaultDirection, targetDirection));

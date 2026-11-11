@@ -158,7 +158,6 @@ struct TextureStreamingState {
     TextureMipResidencyWindow residency = {};
     uint32_t requestedTopMip = 0;
     uint32_t pendingTopMip = 0;
-    uint32_t lastFeedbackTopMip = UINT32_MAX;
     uint64_t lastSeenFrame = 0;
     uint64_t stateRevision = 0;
     uint64_t bindingRevision = 0;
@@ -321,7 +320,8 @@ public:
         std::scoped_lock lock(m_uploadAdvanceMutex);
         return m_sourceFullHeight != 0u ? m_sourceFullHeight : m_desc.imageDimensions[0].height;
     }
-    bool ApplyStreamingSystemRequest(uint32_t topMip, uint64_t frameIndex = 0, bool forceResidencyChange = false);
+    // Applies the residency policy's window: true when the texture needs a residency job.
+    bool ApplyStreamingSystemRequest(uint32_t topMip, uint64_t frameIndex = 0);
     void EnableMipStreaming(bool enabled);
     void SetMipStreamingSuppressed(bool suppressed);
 
@@ -383,10 +383,6 @@ private:
     TextureStreamingState m_streamingState;
     std::shared_ptr<const br::textures::TextureRequest> m_pipelineRequest;
     std::string m_pipelineCacheKey;
-	uint64_t m_streamingRequestChangedFrame = 0;
-	// Feedback coarser than residency: the frame it started, and the finest mip asked for since (0 frame: not coarser).
-	uint64_t m_coarserFeedbackSinceFrame = 0;
-	uint32_t m_coarserFeedbackFinestTopMip = 0;
     bool m_suppressMipStreaming = false;
 	uint32_t m_sourceTotalMipCount = 0;
     uint32_t m_sourceFullWidth = 0;

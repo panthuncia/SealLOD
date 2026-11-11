@@ -269,24 +269,20 @@ Scene::Scene(){
 }
 
 flecs::entity Scene::CreateDirectionalLightECS(std::wstring name, XMFLOAT3 color, float intensity, XMFLOAT3 direction, bool shadowCasting){
-	return CreateLightECS(name, Components::LightType::Directional, { 0, 0, 0 }, color, intensity, { 0, 0, 0 }, direction, 0, 0, shadowCasting);
+	return CreateLightECS(name, Components::LightType::Directional, { 0, 0, 0 }, color, intensity, 0.0f, 0.0f, direction, 0, 0, shadowCasting);
 }
 
-flecs::entity Scene::CreatePointLightECS(std::wstring name, XMFLOAT3 position, XMFLOAT3 color, float intensity, float constantAttenuation, float linearAttenuation, float quadraticAttenuation, bool shadowCasting) {
-	return CreateLightECS(name, Components::LightType::Point, position, color, intensity, { constantAttenuation, linearAttenuation, quadraticAttenuation }, {0, 0, 0}, 0, 0, shadowCasting);
+flecs::entity Scene::CreatePointLightECS(std::wstring name, XMFLOAT3 position, XMFLOAT3 color, float intensity, float range, float sourceRadius, bool shadowCasting) {
+	return CreateLightECS(name, Components::LightType::Point, position, color, intensity, range, sourceRadius, {0, 0, 0}, 0, 0, shadowCasting);
 }
 
-flecs::entity Scene::CreateSpotLightECS(std::wstring name, XMFLOAT3 position, XMFLOAT3 color, float intensity, XMFLOAT3 direction, float innerConeAngle, float outerConeAngle, float constantAttenuation, float linearAttenuation, float quadraticAttenuation, bool shadowCasting) {
-	return CreateLightECS(name, Components::LightType::Spot, position, color, intensity, { constantAttenuation, linearAttenuation, quadraticAttenuation }, direction, innerConeAngle, outerConeAngle, shadowCasting);
+flecs::entity Scene::CreateSpotLightECS(std::wstring name, XMFLOAT3 position, XMFLOAT3 color, float intensity, XMFLOAT3 direction, float innerConeAngle, float outerConeAngle, float range, float sourceRadius, bool shadowCasting) {
+	return CreateLightECS(name, Components::LightType::Spot, position, color, intensity, range, sourceRadius, direction, innerConeAngle, outerConeAngle, shadowCasting);
 }
 
-flecs::entity Scene::CreateLightECS(std::wstring name, Components::LightType type, XMFLOAT3 position, XMFLOAT3 color, float intensity, XMFLOAT3 attenuation, XMFLOAT3 direction, float innerConeAngle, float outerConeAngle, bool shadowCasting) {
+flecs::entity Scene::CreateLightECS(std::wstring name, Components::LightType type, XMFLOAT3 position, XMFLOAT3 color, float intensity, float range, float sourceRadius, XMFLOAT3 direction, float innerConeAngle, float outerConeAngle, bool shadowCasting) {
 	auto& world = GetSceneWorld();
-	//float maxRange = 20.0f;
-	XMVECTOR normalizedAttenuationVec = XMVector3Normalize(XMLoadFloat3(&attenuation));
-	XMFLOAT3 normalizedAttenuation;
-	XMStoreFloat3(&normalizedAttenuation, normalizedAttenuationVec);
-	auto maxRange = CalculateLightRadius(intensity, normalizedAttenuation.x, normalizedAttenuation.y, normalizedAttenuation.z);
+	const float maxRange = range > 0.0f ? range : LightRangeForIntensity(intensity);
 
 	LightInfo lightInfo;
 	lightInfo.type = type;
@@ -295,19 +291,14 @@ flecs::entity Scene::CreateLightECS(std::wstring name, Components::LightType typ
 	// Set W to intensity
 	lightColor = XMVectorSetW(lightColor, intensity);
 	lightInfo.color = lightColor;
-	float nearPlane = 0.01f;
-	float farPlane = maxRange;
-	lightInfo.attenuation = normalizedAttenuationVec;
 	lightInfo.dirWorldSpace = XMLoadFloat3(&direction);
-	lightInfo.innerConeAngle = cos(innerConeAngle);
-	lightInfo.outerConeAngle = cos(outerConeAngle);
+	lightInfo.innerConeCos = cos(innerConeAngle);
+	lightInfo.outerConeCos = cos(outerConeAngle);
 	lightInfo.shadowViewInfoIndex = -1;
-	lightInfo.nearPlane = nearPlane;
-	lightInfo.farPlane = farPlane;
-	lightInfo.shadowCaster = shadowCasting;
-	lightInfo.maxRange = maxRange;
-	lightInfo.shadowSourceRadius = 0.0f;
-	lightInfo.shadowSourceAngleDegrees = 0.0f;
+	lightInfo.shadowCaster = shadowCasting ? 1u : 0u;
+	lightInfo.range = maxRange;
+	lightInfo.sourceRadius = (std::max)(sourceRadius, 0.0f);
+	lightInfo.sourceHalfAngleDegrees = 0.0f;
 	switch(type){
 	case Components::LightType::Spot:
 		lightInfo.boundingSphere = ComputeConeBoundingSphere(XMLoadFloat3(&position), XMLoadFloat3(&direction), maxRange, outerConeAngle);
@@ -316,13 +307,13 @@ flecs::entity Scene::CreateLightECS(std::wstring name, Components::LightType typ
 		lightInfo.boundingSphere = { { position.x, position.y, position.z, maxRange } };
 		break;
 	case Components::LightType::Directional:
-		lightInfo.shadowSourceAngleDegrees = CLodVirtualShadowDefaultDirectionalSourceAngleDegrees;
+		lightInfo.sourceHalfAngleDegrees = CLodVirtualShadowDefaultDirectionalSourceAngleDegrees;
 		break;
 	}
 
 	flecs::entity entity = world.entity();
 	entity.child_of(ECSSceneRoot)
-		.set<Components::Light>({ type, color, normalizedAttenuation, maxRange, lightInfo })
+		.set<Components::Light>({ type, color, maxRange, lightInfo })
 		.set<Components::Position>(position)
 		.set<Components::Scale>({ 1, 1, 1 })
 		.set<Components::Matrix>(DirectX::XMMatrixIdentity())
@@ -342,35 +333,6 @@ flecs::entity Scene::CreateLightECS(std::wstring name, Components::LightType typ
 		entity.add<Components::Active>();
 	}
 
-	float aspect = 1.0f;
-
-	switch (type) {
-	case Components::LightType::Spot:
-		entity.set<Components::ProjectionMatrix>({ XMMatrixPerspectiveFovRH(outerConeAngle * 2, aspect, nearPlane, farPlane) });
-		break;
-	case Components::LightType::Point:
-		entity.set<Components::ProjectionMatrix>({ XMMatrixPerspectiveFovRH(XM_PI / 2, aspect, nearPlane, farPlane) });
-		break;
-	}
-
-	std::vector<std::array<ClippingPlane, 6>> frustumPlanes;
-	switch (type) {
-	case Components::LightType::Directional:
-		break; // Directional is special-cased, frustrums are in world space, calculated during cascade setup
-	case Components::LightType::Spot: {
-		frustumPlanes.push_back(GetFrustumPlanesPerspective(1.0f, outerConeAngle * 2, nearPlane, farPlane));
-		entity.set<Components::FrustumPlanes>({ frustumPlanes });
-		break;
-	case Components::LightType::Point: {
-		for (int i = 0; i < 6; i++) {
-			frustumPlanes.push_back(GetFrustumPlanesPerspective(1.0f, XM_PI / 2, nearPlane, farPlane)); // TODO: All of these are the same.
-		}
-		entity.set<Components::FrustumPlanes>({ frustumPlanes });
-		break;
-	}
-	}
-	}
-	
 	return entity;
 }
 

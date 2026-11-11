@@ -2,13 +2,13 @@
 // is compiled with CLOD_RESOLVE_RAY_HIT, which takes barycentrics from the ray and gradients from a ray cone instead of
 // projecting a pixel. Built twice: without PSO_TERRAIN for everything else, and with it for terrain, each skipping the other.
 #define CLOD_RESOLVE_RAY_HIT 1
-#define CLOD_RT_HIT_LIGHTING 1
+// The shadow map only has pages for what the camera sees; the sun is shadowed by a ray instead.
+#define LIGHTING_NO_VIRTUAL_SHADOW_MAPS 1
 
 static uint4 g_clodRtPackedCluster;
 static uint g_clodRtHitTransformIndex = 0xFFFFFFFFu;
 static float2 g_clodRtBarycentrics;
 static float g_clodRtConeWidth;
-static float g_clodRtSunShadow;
 
 #include "include/cbuffers.hlsli"
 #include "include/structs.hlsli"
@@ -74,30 +74,30 @@ void CLodRtReflectionShadeCS(uint3 id : SV_DispatchThreadID)
     fragment.fragPosViewSpace = mul(float4(position, 1.0f), camera.view).xyz;
     FillFragmentInfoDirect(fragment, sample.materialInputs, -hit.direction, float2(id.xy), false, false, hit.frontFace != 0u, materialFlags);
 
-    // Sun visibility by ray: shadow maps only have pages for what the camera sees.
-    g_clodRtSunShadow = 0.0f;
-    StructuredBuffer<unsigned int> activeLights = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::ActiveLightIndices)];
-    StructuredBuffer<LightInfo> lights = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::InfoBuffer)];
-    for (uint i = 0u; i < perFrame.numLights; ++i) {
-        const LightInfo light = lights[activeLights[i]];
-        if (light.type == 2u && light.shadowCaster) {
+    // This pass sets none of the lighting root switches, so it states its options: every light, and the sun's
+    // visibility by ray.
+    DirectLightingOptions lightingOptions = MakeDirectLightingOptions(true, SHADOWING_MODE_NONE);
+    if (HasSunLight(perFrame)) {
+        StructuredBuffer<LightInfo> lights = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::InfoBuffer)];
+        const LightInfo sun = lights[perFrame.sunLightIndex];
+        if (sun.shadowCaster != 0u) {
             RaytracingAccelerationStructure scene = ResourceDescriptorHeap[CLOD_RT_SEC_TLAS_SRV];
             RayDesc ray;
             ray.Origin = position + fragment.normalWS * max(0.05f, hit.coneWidth);
-            ray.Direction = normalize(-light.dirWorldSpace.xyz);
+            ray.Direction = normalize(-sun.dirWorldSpace.xyz);
             ray.TMin = 0.0f;
             ray.TMax = 100000.0f;
             // Alpha-tested casters count as solid here: this is a shadow seen in a reflection, and it keeps this pass simple.
             RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES, CLOD_RT_RAYQUERY_FLAGS> query;
             query.TraceRayInline(scene, RAY_FLAG_NONE, 0xFFu, ray);
             query.Proceed();
-            g_clodRtSunShadow = query.CommittedStatus() == COMMITTED_TRIANGLE_HIT ? 1.0f : 0.0f;
-            break;
+            lightingOptions.sunOcclusion = query.CommittedStatus() == COMMITTED_TRIANGLE_HIT ? 1.0f : 0.0f;
         }
     }
 
+    // lightFragmentColor includes emission.
     const float3 lit = lightFragmentColor(fragment, camera, perFrame.activeEnvironmentIndex,
-        ResourceDescriptorIndex(Builtin::Environment::InfoBuffer)) + fragment.emissive;
+        ResourceDescriptorIndex(Builtin::Environment::InfoBuffer), lightingOptions);
     RWTexture2D<float4> output = ResourceDescriptorHeap[CLOD_RT_SEC_OUTPUT_UAV];
     output[id.xy] = float4(lit, 1.0f);
 }

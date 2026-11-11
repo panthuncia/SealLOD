@@ -499,7 +499,9 @@ void Renderer::Update(float elapsedSeconds) {
     auto res = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
     runCapturedStage("PerFrameBuffer", [&]() {
         BT_ZONE_SCOPE("Renderer::Update::PerFrameBuffer");
-        resourceManager.UpdatePerFrameBuffer(cameraIndex, m_pLightManager->GetNumLights(), { res.x, res.y }, m_lightClusterSize, static_cast<uint32_t>(m_totalFramesRendered));
+        const SunLightSelection sun = m_pLightManager->GetSunLight();
+        resourceManager.UpdatePerFrameBuffer(cameraIndex, m_pLightManager->GetNumLights(), sun.lightIndex, sun.activeSlot,
+            { res.x, res.y }, m_lightClusterSize, static_cast<uint32_t>(m_totalFramesRendered));
     });
 
     static const basic_telemetry::Callsite captureFrameInputsCallsite("Renderer::Update::CaptureFrameInputs");
@@ -538,8 +540,8 @@ void Renderer::Update(float elapsedSeconds) {
             .getSettingGetter<bool>("enableImageBasedLighting")(),
         .punctualLightingEnabled = SettingsManager::GetInstance()
             .getSettingGetter<bool>("enablePunctualLighting")(),
-        .shadowsEnabled = SettingsManager::GetInstance()
-            .getSettingGetter<bool>("enableShadows")(),
+        .shadowingMode = m_pipelineRecipe.Contains<br::pipeline::ClusterLodShadowTechnique>()
+            ? ShadowingMode::VirtualShadowMaps : ShadowingMode::None,
         .gtaoEnabled = SettingsManager::GetInstance()
             .getSettingGetter<bool>("enableGTAO")(),
         .clusteredLightingEnabled = SettingsManager::GetInstance()
@@ -789,9 +791,8 @@ void Renderer::Update(float elapsedSeconds) {
         }
         std::vector<br::render::ArtifactRequirement> lightRequirements;
         if (auto uploads = currentRenderGraph ? m_orgRuntime->Uploads() : nullptr) {
-            const std::array<std::uint32_t, 5> strides{
-                sizeof(LightInfo), sizeof(std::uint32_t), sizeof(std::uint32_t), sizeof(std::uint32_t),
-                sizeof(std::uint32_t) };
+            const std::array<std::uint32_t, br::render::LightTableFamilyCount> strides{
+                sizeof(LightInfo), sizeof(std::uint32_t), sizeof(std::uint32_t) };
             for (std::size_t i = 0; i < desiredLights->tableImages.size() && i < strides.size(); ++i) {
                 const auto& image = desiredLights->tableImages[i];
                 const auto count = image ? image->size() / strides[i] : 0;

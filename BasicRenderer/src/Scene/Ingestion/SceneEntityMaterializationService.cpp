@@ -259,7 +259,7 @@ void SyncCameraDerivedState(
 LightResourceSignature BuildLightSignature(const Components::Light& light, uint16_t shadowResolution, uint8_t directionalCascadeCount, bool hasPrimaryCamera) {
     return LightResourceSignature{
         light.type,
-        light.lightInfo.shadowCaster,
+        light.lightInfo.shadowCaster != 0u,
         shadowResolution,
         directionalCascadeCount,
         hasPrimaryCamera
@@ -268,8 +268,6 @@ LightResourceSignature BuildLightSignature(const Components::Light& light, uint1
 
 void ApplyLightRendererBindings(Components::Light& light, flecs::entity dst) {
     light.lightInfo.shadowViewInfoIndex = -1;
-    light.lightInfo.shadowMapIndex = -1;
-    light.lightInfo.shadowSamplerIndex = -1;
 
     if (const auto* viewInfo = dst.try_get<Components::LightViewInfo>()) {
         light.lightInfo.shadowViewInfoIndex = viewInfo->viewInfoBufferIndex;

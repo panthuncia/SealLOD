@@ -5,10 +5,9 @@
 #include "include/pathTracingRandom.hlsli"
 
 // The narrow light interface of the reference path tracer. A stochastic light system replaces what
-// is behind it; callers only rely on the two functions below.
+// is behind it; callers only rely on the two functions below. Lights are evaluated by lightModel.hlsli,
+// the same model raster's light loop uses.
 
-// Half-angle used when a directional light has no shadowSourceAngleDegrees: roughly the real sun.
-#define PATH_LIGHT_DEFAULT_SUN_CONE_DEGREES 0.27f
 // Shadow ray TMax for directional lights.
 #define PATH_LIGHT_SUN_DISTANCE 1.0e30f
 
@@ -28,21 +27,7 @@ struct PathLightSample
     bool valid; // False means no contribution and no shadow ray is needed.
 };
 
-float3 PathSampleConeDirection(float3 axis, float halfAngleRadians, float2 u)
-{
-    // 1 - cos(theta) through the half-angle identity. Directly, a sun-sized cone would lose most of
-    // its precision to the distance between 1 and cos(theta).
-    const float sinHalf = sin(0.5f * halfAngleRadians);
-    const float oneMinusCos = u.x * 2.0f * sinHalf * sinHalf;
-    const float sinTheta = sqrt(oneMinusCos * (2.0f - oneMinusCos));
-    const float phi = 2.0f * PI * u.y;
-    float3 tangent;
-    float3 bitangent;
-    CLodVirtualShadowBuildOrthonormalBasis(axis, tangent, bitangent);
-    return normalize(axis * (1.0f - oneMinusCos) + (tangent * cos(phi) + bitangent * sin(phi)) * sinTheta);
-}
-
-// Picks the first directional light with probability 1/2 and otherwise one of the remaining active
+// Picks the sun (PerFrameCB::sunLightSlot) with probability 1/2 and otherwise one of the remaining active
 // lights uniformly, or the only available choice when one of those two groups is empty. A half split
 // is deliberately simple: this is one sample per hit, and the sun is what lights most of an exterior
 // while a uniform draw over many local lights gives each a small chance, so neither should starve.
@@ -64,16 +49,7 @@ PathLightSample PathSampleOneLight(float3 position, float3 normal, inout PathRng
         return result;
     }
 
-    // The active list is sorted by buffer offset, not type, and nothing publishes the sun's slot.
-    uint sunSlot = lightCount;
-    for (uint slot = 0u; slot < lightCount; ++slot)
-    {
-        if (lights[activeLightIndices[slot]].type == 2u)
-        {
-            sunSlot = slot;
-            break;
-        }
-    }
+    const uint sunSlot = perFrame.sunLightSlot < lightCount ? perFrame.sunLightSlot : lightCount;
     const bool hasSun = sunSlot < lightCount;
     const uint otherCount = hasSun ? lightCount - 1u : lightCount;
     const float sunProbability = !hasSun ? 0.0f : (otherCount == 0u ? 1.0f : 0.5f);
@@ -94,17 +70,16 @@ PathLightSample PathSampleOneLight(float3 position, float3 normal, inout PathRng
     }
 
     const LightInfo light = lights[activeLightIndices[selectedSlot]];
-    const LightFragmentData fragmentLight = getLightParametersForFragment(light, position);
-    result.radiance = fragmentLight.lightColor.rgb * fragmentLight.intensity * fragmentLight.attenuation * fragmentLight.spotAttenuation;
-    if (light.type == 2u)
+    const LightFragmentData fragmentLight = EvaluateLightAtPoint(light, position);
+    result.radiance = LightIncidentRadiance(fragmentLight);
+    if (light.type == LIGHT_TYPE_DIRECTIONAL)
     {
-        const float coneDegrees = light.shadowSourceAngleDegrees > 0.0f ? light.shadowSourceAngleDegrees : PATH_LIGHT_DEFAULT_SUN_CONE_DEGREES;
-        result.direction = PathSampleConeDirection(normalize(fragmentLight.lightToFrag), radians(coneDegrees), PathRngNext2(rng));
+        result.direction = LightSampleConeDirection(fragmentLight.lightToFrag, LightSourceHalfAngleRadians(light), PathRngNext2(rng));
         result.distance = PATH_LIGHT_SUN_DISTANCE;
     }
     else
     {
-        if (fragmentLight.distance > light.maxRange || fragmentLight.distance <= 0.0f)
+        if (!LightInRange(light, fragmentLight) || fragmentLight.distance <= 0.0f)
         {
             return result;
         }

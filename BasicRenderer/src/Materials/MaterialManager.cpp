@@ -37,7 +37,6 @@ namespace {
 	constexpr uint32_t kTextureStreamingFlagEligible = 1u << 0;
 	constexpr uint32_t kTextureStreamingFlagEnabled = 1u << 1;
 	constexpr uint32_t kTextureStreamingFeedbackUnused = 0xffffffffu;
-	constexpr uint64_t kTextureStreamingIdleFramesBeforeCoarsen = 180u;
 	constexpr std::string_view kTextureStreamingFeedbackReadbackAnchorPass = "MenuRenderPass";
 	constexpr bool kEnableMaterialStateGraph = true;
 
@@ -1830,9 +1829,22 @@ unsigned int MaterialManager::GetMaterialSlotLocked(unsigned int materialID, std
 void MaterialManager::JournalMaterialRow(unsigned int materialSlot) {
 	const auto valid = materialSlot < m_materialUploadSignatures.size() &&
 		m_materialUploadSignatures[materialSlot].valid;
-	const auto base = valid ? m_materialUploadSignatures[materialSlot].materialData : PerMaterialCB{};
-	const auto eval = valid ? m_materialUploadSignatures[materialSlot].evalData : PerMaterialEvalCB{};
+	auto base = valid ? m_materialUploadSignatures[materialSlot].materialData : PerMaterialCB{};
+	auto eval = valid ? m_materialUploadSignatures[materialSlot].evalData : PerMaterialEvalCB{};
 	const auto openPbr = valid ? m_materialUploadSignatures[materialSlot].openPBRData : PerMaterialOpenPBRCB{};
+	// Texture streaming's feedback: a material evaluation writes one footprint to its row's slot, and the streaming
+	// worker turns it into a mip for each texture the row names.
+	base.streamingFeedbackSlot = valid ? materialSlot + 1u : 0u;
+	eval.streamingFeedbackSlot = base.streamingFeedbackSlot;
+	if (m_textureStreamingManager) {
+		const std::array<std::uint32_t, 14> textureIDs{
+			base.baseColorStreamingTextureID, base.normalStreamingTextureID, base.metallicStreamingTextureID,
+			base.roughnessStreamingTextureID, base.emissiveStreamingTextureID, base.aoStreamingTextureID,
+			base.heightStreamingTextureID, base.opacityStreamingTextureID,
+			openPbr.coatColorStreamingTextureID, openPbr.coatWeightStreamingTextureID, openPbr.coatRoughnessStreamingTextureID,
+			openPbr.fuzzColorStreamingTextureID, openPbr.fuzzWeightStreamingTextureID, openPbr.fuzzRoughnessStreamingTextureID };
+		m_textureStreamingManager->SetMaterialFeedbackTextures(materialSlot, valid ? std::span<const std::uint32_t>(textureIDs) : std::span<const std::uint32_t>{});
+	}
 	const auto capacity = (std::max<unsigned int>)(m_materialBufferCapacity, 1u);
 	m_materialBaseJournal.RequestCapacity(capacity);
 	m_materialEvalJournal.RequestCapacity(capacity);

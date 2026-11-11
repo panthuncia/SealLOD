@@ -191,8 +191,6 @@ ClusterRasterBindings ClusterRasterizationPass::Declare(org::PassBuilder& builde
                 Builtin::Environment::InfoBuffer,
                 Builtin::Light::ActiveLightIndices,
                 Builtin::Light::InfoBuffer,
-                Builtin::Light::PointLightCubemapBuffer,
-                Builtin::Light::SpotLightMatrixBuffer,
                 Builtin::Light::DirectionalLightCascadeBuffer,
                 Builtin::Light::ClusterBuffer,
                 Builtin::Light::PagesBuffer,
@@ -409,7 +407,7 @@ ClusterRasterFrame ClusterRasterizationPass::Prepare(
         if (bindings.hasDepth) frame.depthClear = preparation.ClearValue(bindings.depth.Resource());
     }
     if (bindings.avboitShading) {
-        frame.shadows = context->lighting.shadowsEnabled;
+        frame.shadows = context->lighting.shadowingMode == ShadowingMode::VirtualShadowMaps;
         frame.punctualLights = context->lighting.punctualLightingEnabled;
         frame.gtao = context->lighting.gtaoEnabled;
     }
@@ -527,7 +525,7 @@ void ClusterRasterizationPass::Record(const ClusterRasterBindings& bindings, con
 
     br::render::MiscConstants misc{};
     if (bindings.avboitShading) {
-        misc[MiscEnableShadows] = frame.shadows;
+        misc[MiscShadowingMode] = static_cast<uint32_t>(frame.shadows ? ShadowingMode::VirtualShadowMaps : ShadowingMode::None);
         misc[MiscEnablePunctualLights] = frame.punctualLights;
         misc[MiscEnableGTAO] = frame.gtao;
     }
