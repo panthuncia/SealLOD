@@ -393,6 +393,10 @@ set(ORG_MODULE_SERVICES_ENABLE_DXC ON CACHE BOOL "" FORCE)
 set(ORG_MODULE_SERVICES_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/RendererDependencies.cmake")
 basicrenderer_resolve_dependencies("${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}")
+# Before BasicRenderer/: the demo links the scripting host when it is available.
+# Its own binary dir: the default (<build>/BasicRenderer/Scripting) is the runtime root's scripting folder on a
+# case-insensitive filesystem.
+add_subdirectory("Scripting" "${CMAKE_CURRENT_BINARY_DIR}/_scripting")
 add_subdirectory ("BasicRenderer")
 add_subdirectory("CLodCore")
 add_subdirectory("Plugins/ProceduralWind")

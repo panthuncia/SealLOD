@@ -1703,12 +1703,16 @@ uint CLodVirtualShadowLoadLocalFaceDepth(
 
 // Occlusion (0 lit, 1 shadowed) of a receiver by a spot or point light's virtual shadow map. pixelWorldSize is the
 // receiver's screen pixel width in the world. A bilinear-weighted 2x2 comparison softens the edge over a texel.
+// With collectDebug, debugInfo describes the lookup for the VSM debug views, as the sun's lookup does: its clip indices
+// are the face's mips (preferred = selected, sampled = the one that had content) and its pages are the receiver's own.
 float CLodVirtualShadowLookupLocalOcclusion(
     LightInfo light,
     uint firstSlice,
     float3 positionWS,
     float3 normalWS,
-    float pixelWorldSize)
+    float pixelWorldSize,
+    bool collectDebug,
+    inout CLodVirtualShadowDebugInfo debugInfo)
 {
     if (firstSlice < kCLodVirtualShadowFirstLocalSlice || firstSlice >= kCLodVirtualShadowMaxSliceCount)
     {
@@ -1727,6 +1731,11 @@ float CLodVirtualShadowLookupLocalOcclusion(
         return 0.0f;
     }
     const float3 lightPosition = float3(firstInfo.worldOriginX, firstInfo.worldOriginY, firstInfo.worldOriginZ);
+    // Past the range the light adds nothing and marking requested no pages (CLodVirtualShadowMarkLocalFaceBlocks).
+    if (distance(positionWS, lightPosition) > firstInfo.depthNear + firstInfo.depthRange)
+    {
+        return 0.0f;
+    }
     const uint face = (firstInfo.flags & kCLodVirtualShadowClipmapCubeFlag) != 0u
         ? CLodVirtualShadowCubeFace(positionWS - lightPosition)
         : 0u;
@@ -1748,8 +1757,15 @@ float CLodVirtualShadowLookupLocalOcclusion(
     {
         return 0.0f;
     }
-    const uint selectedMip = CLodVirtualShadowLocalSelectMip(
-        CLodVirtualShadowLocalContinuousMip(pixelWorldSize, faceInfo.texelWorldSize * viewDepth, faceInfo.directionalLodBias));
+    const float continuousMip =
+        CLodVirtualShadowLocalContinuousMip(pixelWorldSize, faceInfo.texelWorldSize * viewDepth, faceInfo.directionalLodBias);
+    const uint selectedMip = CLodVirtualShadowLocalSelectMip(continuousMip);
+    if (collectDebug)
+    {
+        debugInfo.preferredClipmapIndex = selectedMip;
+        debugInfo.continuousClipLevel = continuousMip;
+        debugInfo.cameraFootprintWorld = pixelWorldSize;
+    }
 
     [loop]
     for (uint mip = selectedMip; mip < kCLodVirtualShadowLocalMipCount; ++mip)
@@ -1773,6 +1789,32 @@ float CLodVirtualShadowLookupLocalOcclusion(
         uint cachedPageEntry = 0u;
         float shadowedWeight = 0.0f;
         float sampleWeight = 0.0f;
+        bool anyFiniteDepth = false;
+        // The receiver's own texel and page, for the debug views.
+        uint centerDepthBits = kCLodVirtualShadowMissingDepth;
+        uint centerPageEntry = 0u;
+        if (collectDebug)
+        {
+            uint2 centerPageCoord = 0xFFFFFFFFu.xx;
+            centerDepthBits = CLodVirtualShadowLoadLocalFaceDepth(
+                faceFirstSlice, mip, offsetUv, faceInfo, pageTable, physicalPages, centerPageCoord, centerPageEntry);
+            if (mip == selectedMip)
+            {
+                debugInfo.preferredPageEntry = centerPageEntry;
+                if ((centerPageEntry & kCLodVirtualShadowAllocatedMask) != 0u)
+                {
+                    debugInfo.flags |= kCLodVirtualShadowDebugFlagPreferredAllocated;
+                    if (!CLodVirtualShadowPageEntryHasSampleableContent(centerPageEntry))
+                    {
+                        debugInfo.flags |= kCLodVirtualShadowDebugFlagSampledPageUnwritten;
+                    }
+                }
+                if ((centerPageEntry & kCLodVirtualShadowDirtyMask) != 0u)
+                {
+                    debugInfo.flags |= kCLodVirtualShadowDebugFlagPreferredDirty;
+                }
+            }
+        }
         [unroll]
         for (uint tap = 0u; tap < 4u; ++tap)
         {
@@ -1787,6 +1829,7 @@ float CLodVirtualShadowLookupLocalOcclusion(
             }
             const float weight = axisWeights.x * axisWeights.y;
             sampleWeight += weight;
+            anyFiniteDepth = anyFiniteDepth || depthBits != kCLodVirtualShadowClearedDepth;
             if (depthBits != kCLodVirtualShadowClearedDepth &&
                 offsetDepth - depthBias > CLodVirtualShadowDecodeDepth(depthBits, faceInfo))
             {
@@ -1797,7 +1840,45 @@ float CLodVirtualShadowLookupLocalOcclusion(
         {
             continue; // Not resident at this mip: fall back to a coarser one.
         }
-        return shadowedWeight / sampleWeight;
+        const float occlusion = shadowedWeight / sampleWeight;
+        if (collectDebug)
+        {
+            const uint sampledEntry = CLodVirtualShadowPageEntryHasSampleableContent(centerPageEntry)
+                ? centerPageEntry
+                : cachedPageEntry;
+            const uint physicalPageIndex = sampledEntry & kCLodVirtualShadowPhysicalPageIndexMask;
+            debugInfo.sampledClipmapIndex = mip;
+            debugInfo.sampledPageEntry = sampledEntry;
+            debugInfo.sampledPhysicalPageIndex = physicalPageIndex;
+            debugInfo.actualTexelWorldSize = texelWorldSize;
+            debugInfo.sampledPageLocalTexel =
+                (uint2)(offsetUv * mipResolution) % kCLodVirtualShadowPhysicalPageSize;
+            if ((sampledEntry & kCLodVirtualShadowRerenderedThisFrameMask) != 0u)
+            {
+                debugInfo.flags |= kCLodVirtualShadowDebugFlagSampledRerenderedThisFrame;
+            }
+            StructuredBuffer<uint4> pageMetadata =
+                ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Shadows::CLodPageMetadata)];
+            if ((pageMetadata[physicalPageIndex].y & kCLodVirtualShadowClearEpochPendingMask) != 0u)
+            {
+                debugInfo.flags |= kCLodVirtualShadowDebugFlagSyntheticEmptyCompletion;
+            }
+            if (centerDepthBits != kCLodVirtualShadowMissingDepth && centerDepthBits != kCLodVirtualShadowClearedDepth)
+            {
+                debugInfo.depthDeltaTexels =
+                    (offsetDepth - depthBias - CLodVirtualShadowDecodeDepth(centerDepthBits, faceInfo)) /
+                    max(texelWorldSize, 1.0e-6f);
+            }
+            if (!anyFiniteDepth)
+            {
+                // Every tap is a texel no caster reached: lit because the page is empty there.
+                debugInfo.flags |= kCLodVirtualShadowDebugFlagSampledTexelCleared;
+            }
+            debugInfo.flags |= occlusion > 0.01f
+                ? kCLodVirtualShadowDebugFlagFiniteDepthShadowed
+                : kCLodVirtualShadowDebugFlagFiniteDepthLit;
+        }
+        return occlusion;
     }
     return 0.0f;
 }

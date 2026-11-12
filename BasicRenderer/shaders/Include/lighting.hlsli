@@ -428,11 +428,34 @@ struct DirectLightingResult
     float3 lighting; // Every light's contribution, as raster writes it.
     float3 diffuse; // lighting split by lobe.
     float3 specular;
-    bool hasSunShadowDebug; // The first shadow-mapped directional light's lookup, for the VSM debug views.
-    CLodVirtualShadowDebugInfo sunShadowDebug;
+    // The lookup of the light the VSM debug views show (PerFrameBuffer::vsmDebugLightIndex), sun or local.
+    bool hasShadowDebug;
+    CLodVirtualShadowDebugInfo shadowDebug;
     uint clusterIndex; // PSO_CLUSTERED_LIGHTING: the fragment's cluster Z slice and its light count.
     uint clusterLightCount;
 };
+
+// Whether outputType is one of the VSM debug views, which show the debugged light's lookup.
+bool VirtualShadowDebugOutput(uint outputType)
+{
+    switch (outputType)
+    {
+    case OUTPUT_VSM_PREFERRED_CLIPMAP:
+    case OUTPUT_VSM_SAMPLED_CLIPMAP:
+    case OUTPUT_VSM_PAGE_STATE:
+    case OUTPUT_VSM_PHYSICAL_PAGE:
+    case OUTPUT_VSM_RERENDERED_THIS_FRAME:
+    case OUTPUT_VSM_CACHED_BASIS_CORRECTION:
+    case OUTPUT_VSM_PAGE_LOCAL_TEXEL:
+    case OUTPUT_VSM_DEPTH_MARGIN:
+    case OUTPUT_VSM_CLIP_COMPARISON:
+    case OUTPUT_VSM_CLIP_GRID_OFFSET:
+    case OUTPUT_VSM_TRACE_FOOTPRINT:
+        return true;
+    default:
+        return false;
+    }
+}
 
 // One light's occlusion at the fragment: 0 lit, 1 fully shadowed.
 float EvaluateLightOcclusion(
@@ -453,12 +476,23 @@ float EvaluateLightOcclusion(
             // The receiver pixel's width in the world: view depth times the pixel's angular size.
             const float pixelWorldSize = abs(fragmentInfo.fragPosViewSpace.z) * 2.0f /
                 max(abs(mainCamera.projection[1][1]) * (float)max(localPerFrame.screenResY, 1u), 1.0e-6f);
-            return CLodVirtualShadowLookupLocalOcclusion(
+            const bool collectDebug = lightIndex == localPerFrame.vsmDebugLightIndex && !result.hasShadowDebug &&
+                VirtualShadowDebugOutput(localPerFrame.outputType);
+            CLodVirtualShadowDebugInfo localDebugInfo = CLodVirtualShadowInitDebugInfo(0xFFFFFFFFu);
+            const float localOcclusion = CLodVirtualShadowLookupLocalOcclusion(
                 light,
                 (uint)light.shadowViewInfoIndex,
                 fragmentInfo.fragPosWorldSpace.xyz,
                 fragmentInfo.normalWS,
-                pixelWorldSize);
+                pixelWorldSize,
+                collectDebug,
+                localDebugInfo);
+            if (collectDebug)
+            {
+                result.hasShadowDebug = true;
+                result.shadowDebug = localDebugInfo;
+            }
+            return localOcclusion;
         }
 #endif
         return 0.0f;
@@ -506,10 +540,11 @@ float EvaluateLightOcclusion(
                 mainCamera);
         }
 #endif
-        if (!result.hasSunShadowDebug)
+        ConstantBuffer<PerFrameBuffer> debugPerFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+        if (!result.hasShadowDebug && lightIndex == debugPerFrame.vsmDebugLightIndex)
         {
-            result.hasSunShadowDebug = true;
-            result.sunShadowDebug = shadowDebugInfo;
+            result.hasShadowDebug = true;
+            result.shadowDebug = shadowDebugInfo;
         }
     }
     return occlusion;
@@ -548,8 +583,8 @@ void AccumulateDirectLight(
 DirectLightingResult EvaluateDirectLighting(FragmentInfo fragmentInfo, Camera mainCamera, DirectLightingOptions options)
 {
     DirectLightingResult result = (DirectLightingResult)0;
-    result.hasSunShadowDebug = false;
-    result.sunShadowDebug = CLodVirtualShadowInitDebugInfo(0xFFFFFFFFu);
+    result.hasShadowDebug = false;
+    result.shadowDebug = CLodVirtualShadowInitDebugInfo(0xFFFFFFFFu);
     if (!options.punctualLights)
     {
         return result;
@@ -615,14 +650,15 @@ DirectLightingResult EvaluateDirectLighting(FragmentInfo fragmentInfo, Camera ma
     return result;
 }
 
-// The VSM debug views' payload for the sun's lookup, or DEBUG_SENTINEL when the view is not a VSM one.
+// The VSM debug views' payload for the debugged light's lookup, or DEBUG_SENTINEL when the view is not a VSM one or
+// the light does not reach this pixel.
 uint2 VirtualShadowDebugPayload(DirectLightingResult direct, uint outputType)
 {
-    if (!direct.hasSunShadowDebug)
+    if (!direct.hasShadowDebug)
     {
         return uint2(DEBUG_SENTINEL, DEBUG_SENTINEL);
     }
-    const CLodVirtualShadowDebugInfo shadowDebugInfo = direct.sunShadowDebug;
+    const CLodVirtualShadowDebugInfo shadowDebugInfo = direct.shadowDebug;
     switch (outputType)
     {
     case OUTPUT_VSM_PREFERRED_CLIPMAP:

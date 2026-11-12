@@ -54,6 +54,10 @@ architecture rather than in a global pass bucket. TextureFactory retains ownersh
 of its nested passes, whose definitions live in `Assets/Textures/RenderPasses`.
 Shader paths remain under `BasicRenderer/shaders/`.
 
+`Scripting/` is C# scenario scripting: a native host library that loads .NET in-process and a managed runtime that
+compiles loose `.cs` scenarios with Roslyn and runs them one slice per frame (the demo's `--script`). It depends on no
+renderer internals. See [docs/scripting.md](docs/scripting.md); its ABI tables are append-only.
+
 `BasicRHI/`, `OpenRenderGraph/`, `BasicTelemetry/`, `BasicScene/`, and
 `ORGModuleServices/` are first-party dependencies. Other vendored submodules are not
 edited as part of renderer organization work.
@@ -143,12 +147,15 @@ Be aware of what does and does not exist before you go looking:
 - [README.md](README.md) — feature list, dependency model, standalone build. Accurate.
 - [TESTING.md](TESTING.md) — sampling harness, named-pipe experiment control, the CLOD
   virtual-shadow CPU benchmark and its request tracing. Detailed and accurate.
-- `docs/` — eight files, all **performance-experiment writeups** (CLOD compute vs work-graph, VSM
+- `docs/` — mostly **performance-experiment writeups** (CLOD compute vs work-graph, VSM
   rerender, deferred-shading and small-pass optimization rounds). These are lab notebooks tied to
   specific experiments, not architecture references.
 
 [docs/texture-streaming.md](docs/texture-streaming.md) is the reference for material texture streaming: per-material
 feedback, the residency policy and its VRAM budget.
+
+[docs/scripting.md](docs/scripting.md) is the reference for C# scenarios: running them, the threading rule, the
+result document, and the ABI rules for adding API.
 
 [docs/lighting.md](docs/lighting.md) is the reference for analytic lights: the light model, the single direct-light
 loop and its visibility options, and the shadowing modes a new technique slots in beside.

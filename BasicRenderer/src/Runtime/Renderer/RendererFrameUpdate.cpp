@@ -500,8 +500,30 @@ void Renderer::Update(float elapsedSeconds) {
     runCapturedStage("PerFrameBuffer", [&]() {
         BT_ZONE_SCOPE("Renderer::Update::PerFrameBuffer");
         const SunLightSelection sun = m_pLightManager->GetSunLight();
+        // The VSM debug views show the chosen light's virtual shadow map, else the sun's. The lights that have one are
+        // published for the menu's choice when they change.
+        auto& settings = SettingsManager::GetInstance();
+        const auto debugLights = m_pLightManager->GetVirtualShadowDebugLights();
+        std::vector<uint32_t> debugLightIndices;
+        std::vector<std::string> debugLightLabels;
+        debugLightIndices.reserve(debugLights.size());
+        debugLightLabels.reserve(debugLights.size());
+        for (const auto& light : debugLights) {
+            debugLightIndices.push_back(light.lightIndex);
+            debugLightLabels.push_back(light.label);
+        }
+        if (settings.getSettingGetter<std::vector<std::string>>(CLodVirtualShadowDebugLightLabelsSettingName)() != debugLightLabels) {
+            settings.getSettingSetter<std::vector<uint32_t>>(CLodVirtualShadowDebugLightIndicesSettingName)(debugLightIndices);
+            settings.getSettingSetter<std::vector<std::string>>(CLodVirtualShadowDebugLightLabelsSettingName)(debugLightLabels);
+            for (const auto& label : debugLightLabels) {
+                spdlog::info("VSM debug light choice: {}", label);
+            }
+        }
+        const uint32_t requestedDebugLight = settings.getSettingGetter<uint32_t>(CLodVirtualShadowDebugLightSettingName)();
+        const uint32_t vsmDebugLightIndex =
+            std::ranges::find(debugLightIndices, requestedDebugLight) != debugLightIndices.end() ? requestedDebugLight : sun.lightIndex;
         resourceManager.UpdatePerFrameBuffer(cameraIndex, m_pLightManager->GetNumLights(), sun.lightIndex, sun.activeSlot,
-            { res.x, res.y }, m_lightClusterSize, static_cast<uint32_t>(m_totalFramesRendered));
+            vsmDebugLightIndex, { res.x, res.y }, m_lightClusterSize, static_cast<uint32_t>(m_totalFramesRendered));
     });
 
     static const basic_telemetry::Callsite captureFrameInputsCallsite("Renderer::Update::CaptureFrameInputs");

@@ -182,6 +182,32 @@ unsigned int LightManager::GetNumLights() {
 	return m_activeLightIndices->Size();
 }
 
+std::vector<VirtualShadowDebugLight> LightManager::GetVirtualShadowDebugLights() {
+	std::vector<VirtualShadowDebugLight> lights;
+	const SunLightSelection sun = GetSunLight();
+	std::lock_guard<std::mutex> lock(m_lightUpdateMutex);
+	if (const auto it = m_directionalLights.find(sun.lightIndex); it != m_directionalLights.end() && it->second) {
+		lights.push_back({sun.lightIndex, "Sun (light " + std::to_string(sun.lightIndex) + ")"});
+	}
+	for (const auto& [lightIndex, assignment] : m_localShadows) {
+		std::string name;
+		if (m_currentCamera.is_valid()) {
+			const flecs::entity entity = m_currentCamera.world().entity(assignment.entityId);
+			if (entity.is_valid() && entity.name()) {
+				name = entity.name().c_str();
+			}
+		}
+		const char* kind = assignment.faceCount > 1u ? "Point" : "Spot";
+		const uint32_t firstSlice = CLodVirtualShadowFirstLocalSlice + assignment.firstFace * CLodVirtualShadowLocalSlicesPerFace;
+		lights.push_back({lightIndex,
+			std::string(kind) + " light " + std::to_string(lightIndex) + (name.empty() ? "" : " '" + name + "'") + " (" +
+				std::to_string(assignment.faceCount) + (assignment.faceCount == 1u ? " face" : " faces") + ", slices " +
+				std::to_string(firstSlice) + "-" +
+				std::to_string(firstSlice + assignment.faceCount * CLodVirtualShadowLocalSlicesPerFace - 1u) + ")"});
+	}
+	return lights;
+}
+
 SunLightSelection LightManager::GetSunLight() {
 	std::lock_guard<std::mutex> lock(m_lightUpdateMutex);
 	SunLightSelection selection;

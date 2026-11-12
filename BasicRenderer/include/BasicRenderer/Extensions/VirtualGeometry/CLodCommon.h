@@ -107,6 +107,13 @@ inline constexpr const char* CLodDirectionalVirtualShadowUpgradePageRenderBudget
 // Frames a page waits after it was last rendered before a streaming upgrade may render it again. The upgrade stays
 // pending meanwhile, so refinements that arrive in the wait share one re-render and none are lost. 0 disables.
 inline constexpr const char* CLodVirtualShadowUpgradeCooldownFramesSettingName = "clodVirtualShadowUpgradeCooldownFrames";
+// The light whose virtual shadow map the VSM debug views show, by light buffer index; 0xFFFFFFFF is the sun. A light
+// that no longer has a virtual shadow map falls back to the sun.
+inline constexpr const char* CLodVirtualShadowDebugLightSettingName = "clodVirtualShadowDebugLight";
+// The lights that have a virtual shadow map this frame, for choosing one: their light buffer indices and labels, in
+// the same order. Published by the renderer when they change.
+inline constexpr const char* CLodVirtualShadowDebugLightIndicesSettingName = "clodVirtualShadowDebugLightIndices";
+inline constexpr const char* CLodVirtualShadowDebugLightLabelsSettingName = "clodVirtualShadowDebugLightLabels";
 inline constexpr const char* CLodDirectionalVirtualShadowReceiverSubpageMaskSettingName = "clodDirectionalVirtualShadowReceiverSubpageMask";
 inline constexpr const char* CLodDirectionalVirtualShadowReceiverSubpageModeSettingName = "clodDirectionalVirtualShadowReceiverSubpageMode";
 inline constexpr uint32_t CLodVirtualShadowReceiverSubpageModeOff = 0u;

@@ -22,7 +22,11 @@
 #include <ranges>
 #include <set>
 #include <nlohmann/json.hpp>
+#include <format>
 //#include <tracy/Tracy.hpp>
+#if BASICRENDERER_HAS_SCRIPTING
+#include <BasicRendererScripting/ScriptHost.h>
+#endif
 
 #include "BasicRenderer/Assets/Geometry/Mesh.h"
 #include <BasicRenderer/Renderer.h>
@@ -676,6 +680,123 @@ std::optional<std::string> FindCommandLineValue(std::string_view commandLine, st
     const auto path = FindCommandLinePath(commandLine, option);
     return path ? std::optional<std::string>(path->string()) : std::nullopt;
 }
+
+// Where an option appears as a whole token: "--script" does not match inside "--script-exit". npos when absent.
+size_t FindCommandLineOption(std::string_view commandLine, std::string_view option)
+{
+    for (size_t at = commandLine.find(option); at != std::string_view::npos; at = commandLine.find(option, at + 1)) {
+        const bool startsToken = at == 0 || commandLine[at - 1] == ' ' || commandLine[at - 1] == '\t';
+        const size_t end = at + option.size();
+        const bool endsToken = end == commandLine.size() || commandLine[end] == ' ' || commandLine[end] == '\t';
+        if (startsToken && endsToken) return at;
+    }
+    return std::string_view::npos;
+}
+
+bool HasCommandLineOption(std::string_view commandLine, std::string_view option)
+{
+    return FindCommandLineOption(commandLine, option) != std::string_view::npos;
+}
+
+// The value after a whole-token option ("--script <path>"), quoted or not.
+std::optional<std::string> FindCommandLineOptionValue(std::string_view commandLine, std::string_view option)
+{
+    const size_t at = FindCommandLineOption(commandLine, option);
+    if (at == std::string_view::npos) return std::nullopt;
+    return FindCommandLineValue(commandLine.substr(at), option);
+}
+
+#if BASICRENDERER_HAS_SCRIPTING
+// --script <file.cs|dir> [--scenario <name>] [--script-fixed-dt <seconds>] [--script-result <path>] [--script-exit]
+// runs a C# scenario (see Scripting/ and docs/scripting.md). With --script-exit the demo quits when the scenario ends,
+// with exit code 0 passed, 1 failed, 2 compile error, 3 the scripting runtime could not start.
+class DemoScriptRun {
+public:
+    bool Requested() const { return m_requested; }
+    std::optional<double> FixedDeltaSeconds() const { return m_fixedDelta; }
+    std::optional<int> ExitCode() const { return m_exitCode; }
+
+    void Start(std::string_view commandLine, HWND hwnd)
+    {
+        const auto source = FindCommandLineOptionValue(commandLine, "--script");
+        if (!source) return;
+        m_requested = true;
+        m_exitWhenDone = HasCommandLineOption(commandLine, "--script-exit");
+        if (const auto result = FindCommandLineOptionValue(commandLine, "--script-result")) m_resultPath = *result;
+        if (const auto dt = FindCommandLineOptionValue(commandLine, "--script-fixed-dt")) {
+            m_fixedDelta = std::stod(*dt);
+            if (!(*m_fixedDelta > 0.0)) m_fixedDelta.reset();
+        }
+        const auto scenario = FindCommandLineOptionValue(commandLine, "--scenario").value_or("");
+
+        br::scripting::ScriptHostOptions options;
+        options.logSink = [](br::scripting::LogLevel level, std::string_view line) {
+            spdlog::log(static_cast<spdlog::level::level_enum>(static_cast<int>(level)), "[script] {}", line);
+        };
+        std::string error;
+        m_host = br::scripting::ScriptHost::Create(options, error);
+        if (!m_host || !m_host->RunScenario(*source, scenario, error)) {
+            spdlog::error("--script {}: {}", *source, error);
+            m_host.reset();
+            Finish(hwnd, 3);
+            return;
+        }
+        spdlog::info("--script {}: started{}{}", *source, scenario.empty() ? "" : " scenario " + scenario,
+            m_fixedDelta ? std::format(", fixed time step {} s", *m_fixedDelta) : std::string());
+    }
+
+    // Before renderer.Update, with the time step the renderer will also be given.
+    void Tick(uint64_t frameIndex, double deltaSeconds, HWND hwnd)
+    {
+        if (!m_host || m_finished) return;
+        m_host->Tick(frameIndex, deltaSeconds);
+        const auto state = m_host->State();
+        if (const auto requested = m_host->RequestedExitCode()) {
+            WriteResult(state);
+            Finish(hwnd, *requested, true);
+            return;
+        }
+        if (!br::scripting::IsTerminal(state)) return;
+        WriteResult(state);
+        spdlog::info("--script: scenario {}", br::scripting::ToString(state));
+        Finish(hwnd, br::scripting::ScriptHost::ExitCodeFor(state));
+    }
+
+    // Before the renderer shuts down: the runtime's last references to scene state go first.
+    void Shutdown() { m_host.reset(); }
+
+private:
+    void WriteResult(br::scripting::ScenarioState state)
+    {
+        if (!m_resultPath || m_resultWritten) return;
+        m_resultWritten = true;
+        std::error_code ec;
+        if (m_resultPath->has_parent_path()) std::filesystem::create_directories(m_resultPath->parent_path(), ec);
+        std::ofstream out(*m_resultPath, std::ios::binary | std::ios::trunc);
+        out << (m_host ? m_host->ResultJson() : std::string("{}"));
+        if (!out) spdlog::error("--script-result: could not write {}", m_resultPath->string());
+        else spdlog::info("--script-result: {} ({})", m_resultPath->string(), br::scripting::ToString(state));
+    }
+
+    // Without --script-exit the demo keeps running after the scenario ends, unless the script itself asked to exit.
+    void Finish(HWND hwnd, int exitCode, bool scriptRequested = false)
+    {
+        m_finished = true;
+        if (!m_exitWhenDone && !scriptRequested) return;
+        m_exitCode = exitCode;
+        PostMessage(hwnd, WM_CLOSE, 0, 0);
+    }
+
+    std::unique_ptr<br::scripting::ScriptHost> m_host;
+    std::optional<std::filesystem::path> m_resultPath;
+    std::optional<double> m_fixedDelta;
+    std::optional<int> m_exitCode;
+    bool m_requested = false;
+    bool m_exitWhenDone = false;
+    bool m_finished = false;
+    bool m_resultWritten = false;
+};
+#endif
 
 br::telemetry::sampling::ReadinessSnapshot BuildDemoSamplingReadiness(const Renderer& renderer)
 {
@@ -1660,6 +1781,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         }
     }
 
+#if BASICRENDERER_HAS_SCRIPTING
+    // After scene setup: the scenario compiles in the background while the first frames render.
+    DemoScriptRun scriptRun;
+    scriptRun.Start(commandLine, hwnd);
+#endif
+
     MSG msg = {};
     unsigned int frameIndex = 0;
     uint64_t clodStressTelemetrySequence = 0;
@@ -1926,7 +2053,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 PostMessage(hwnd, WM_CLOSE, 0, 0);
             }
             if (staticScene) staticScene->Tick(renderer, frameIndex);
-            renderer.Update(elapsedSeconds.count());
+            float frameSeconds = elapsedSeconds.count();
+#if BASICRENDERER_HAS_SCRIPTING
+            // --script-fixed-dt: the scenario and the renderer both advance by exactly this much per frame.
+            if (const auto fixedDelta = scriptRun.FixedDeltaSeconds()) frameSeconds = static_cast<float>(*fixedDelta);
+            scriptRun.Tick(frameIndex, frameSeconds, hwnd);
+#endif
+            renderer.Update(frameSeconds);
             if (frameIndex % 100 == 0) {
                 spdlog::info("FPS: {}", 1 / elapsedSeconds.count());
             }
@@ -1947,7 +2080,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             [](const std::string& path) { spdlog::warn("Load Model: the static scene has shut down; '{}' was not loaded", path); });
     }
     staticScene.reset();
+#if BASICRENDERER_HAS_SCRIPTING
+    scriptRun.Shutdown();
+#endif
     renderer.Cleanup();
+
+#if BASICRENDERER_HAS_SCRIPTING
+    if (const auto scriptExitCode = scriptRun.ExitCode()) return *scriptExitCode;
+#endif
 
     if (statisticalSampling.ExitCode() != 0) return statisticalSampling.ExitCode();
     return (smokeValidationFailed || clodStressFailed) ? 1 : 0;

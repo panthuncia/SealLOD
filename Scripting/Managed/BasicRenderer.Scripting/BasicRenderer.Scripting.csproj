@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The managed scripting runtime and scenario API. Loaded in-process by BasicRendererScripting (native) through
+       hostfxr; see docs/scripting.md. Source files are listed explicitly, like every other BasicRenderer target. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>BasicRenderer.Scripting</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <!-- A hosted component: writes the runtimeconfig.json hostfxr initializes from, and copies Roslyn beside it. -->
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- Scenario types and members are public API; missing docs are not build errors. -->
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <DebugType>embedded</DebugType>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="ScriptRuntimeTests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.6.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="Api\Scenario.cs" />
+    <Compile Include="Api\ScenarioContext.cs" />
+    <Compile Include="Api\TimeExtensions.cs" />
+    <Compile Include="Interop\Native.cs" />
+    <Compile Include="Interop\NativeAbi.cs" />
+    <Compile Include="Runtime\FrameScheduler.cs" />
+    <Compile Include="Runtime\ScenarioCompiler.cs" />
+    <Compile Include="Runtime\ScenarioLoadContext.cs" />
+    <Compile Include="Runtime\ScenarioResult.cs" />
+    <Compile Include="Runtime\ScenarioRunner.cs" />
+    <Compile Include="Runtime\ScriptRuntime.cs" />
+    <Compile Include="Runtime\ScriptSession.cs" />
+  </ItemGroup>
+</Project>

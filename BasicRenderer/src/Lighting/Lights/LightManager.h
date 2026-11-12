@@ -12,6 +12,7 @@
 #include <array>
 #include <map>
 #include <set>
+#include <string>
 
 #include "BasicRenderer/Extensions/ShaderBuffers.h"
 #include "Resources/ResourceIdentifier.h"
@@ -35,6 +36,12 @@ class SortedUnsignedIntBuffer;
 struct SunLightSelection {
 	uint32_t lightIndex = 0xFFFFFFFFu;
 	uint32_t activeSlot = 0xFFFFFFFFu;
+};
+
+// A light with a virtual shadow map, for the VSM debug views' light choice.
+struct VirtualShadowDebugLight {
+	uint32_t lightIndex = 0xFFFFFFFFu;
+	std::string label;
 };
 
 struct AddLightReturn {
@@ -64,6 +71,8 @@ public:
 	// creating and destroying their face views. Call once a frame, before the light tables are captured.
 	void UpdateLocalShadows();
 	std::vector<br::render::PublishedLocalShadowLight> CaptureLocalShadows();
+	// The sun, if it has a virtual shadow map, then each spot and point light with faces, by light buffer index.
+	std::vector<VirtualShadowDebugLight> GetVirtualShadowDebugLights();
 	unsigned int GetLightPagePoolSize() { return m_lightPagePoolSize; }
 	std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override;
 	std::vector<org::ResourceIdentifier> GetSupportedKeys() override;

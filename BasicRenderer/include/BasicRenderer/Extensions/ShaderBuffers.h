@@ -132,7 +132,8 @@ struct PerFrameCB {
     // sunLightIndex indexes the light buffer and sunLightSlot the active-index list; both are 0xFFFFFFFF without one.
     unsigned int sunLightIndex = 0xFFFFFFFFu;
     unsigned int sunLightSlot = 0xFFFFFFFFu;
-    unsigned int sunLightPad0 = 0u;
+    // The light whose virtual shadow map the VSM debug views show: the vsmDebugLight setting, else the sun.
+    unsigned int vsmDebugLightIndex = 0xFFFFFFFFu;
     unsigned int sunLightPad1 = 0u;
 };
 

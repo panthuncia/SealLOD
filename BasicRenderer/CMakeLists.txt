@@ -783,6 +783,16 @@ else()
 endif()
 add_executable(${BASICRENDERER_DEMO_TARGET} WIN32 "${BASICRENDERER_DEMO_SOURCE}")
 target_include_directories(${BASICRENDERER_DEMO_TARGET} PRIVATE "${BASICRENDERER_SOURCE_ROOT}/src")
+# C# scenarios (--script); see Scripting/ and docs/scripting.md.
+if(BASICRENDERER_SCRIPTING_AVAILABLE)
+    target_link_libraries(${BASICRENDERER_DEMO_TARGET} PRIVATE BasicRenderer::Scripting)
+    target_compile_definitions(${BASICRENDERER_DEMO_TARGET} PRIVATE BASICRENDERER_HAS_SCRIPTING=1)
+    # Beside the exe, and in the runtime root it is run from (D3D\, shaders\ and the rest live there).
+    basicrenderer_scripting_deploy(${BASICRENDERER_DEMO_TARGET}
+        DESTINATIONS "$<TARGET_FILE_DIR:${BASICRENDERER_DEMO_TARGET}>" "${BASICRENDERER_OUTPUT_ROOT}")
+else()
+    target_compile_definitions(${BASICRENDERER_DEMO_TARGET} PRIVATE BASICRENDERER_HAS_SCRIPTING=0)
+endif()
 add_executable(GraphTraceReport
     "${BASICRENDERER_SOURCE_ROOT}/src/Diagnostics/Telemetry/GraphTraceReport.cpp"
     "${BASICRENDERER_SOURCE_ROOT}/src/Runtime/StateGraph/RendererGraphTraceReport.cpp")

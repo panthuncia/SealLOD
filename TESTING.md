@@ -150,6 +150,13 @@ line, its folder, hit, compile and miss counts (misses by reason, and the first
 changed file), and its index and artifact sizes. See SARP's
 `docs/preprocessing.md`.
 
+## C# scenarios
+
+`--script <file.cs|dir> --script-exit` runs a C# scenario and exits with 0 (passed), 1 (failed or timed out), 2
+(compile error) or 3 (the scripting runtime could not start); `--script-result <path>` writes its result document and
+`--script-fixed-dt <s>` makes the run frame-rate independent. See [docs/scripting.md](docs/scripting.md).
+`ScriptRuntimeTests` and `ScriptHostTests` cover the runtime and host without a device.
+
 ## CLOD virtual-shadow CPU benchmark
 
 For repeatable CLOD virtual-shadow CPU measurements, run:

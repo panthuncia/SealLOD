@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- For editing only: IntelliSense, navigation and `dotnet build` as a compile check. The host never builds this
+       project; it compiles the .cs files itself (Runtime/ScenarioCompiler.cs) with the same implicit usings. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <OutputType>Library</OutputType>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <!-- Keep in step with ScenarioCompiler.GlobalUsings. -->
+  <ItemGroup>
+    <Using Include="System" />
+    <Using Include="System.Collections.Generic" />
+    <Using Include="System.Linq" />
+    <Using Include="System.Threading" />
+    <Using Include="System.Threading.Tasks" />
+    <Using Include="BasicRenderer.Scripting" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Managed\BasicRenderer.Scripting\BasicRenderer.Scripting.csproj" Private="false" />
+  </ItemGroup>
+</Project>

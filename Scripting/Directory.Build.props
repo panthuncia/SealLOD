@@ -1,0 +1,11 @@
+<Project>
+  <!-- Keeps bin/ and obj/ out of the source tree. CMake passes -p:ArtifactsPath=<its binary dir>; a bare
+       `dotnet build` (IDE, scenario IntelliSense) lands in the ignored out/ folder instead. -->
+  <PropertyGroup>
+    <ArtifactsPath Condition="'$(ArtifactsPath)' == ''">$(MSBuildThisFileDirectory)..\out\scripting-artifacts</ArtifactsPath>
+    <UseArtifactsOutput>true</UseArtifactsOutput>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+  </PropertyGroup>
+</Project>

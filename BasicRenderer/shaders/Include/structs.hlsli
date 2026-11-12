@@ -287,7 +287,7 @@ struct PerFrameBuffer {
     float objectParallaxHeightScale;
     uint sunLightIndex; // Light buffer index of the sun, LIGHT_INDEX_NONE without one (PerFrameCB).
     uint sunLightSlot; // Its position in the active-index list.
-    uint sunLightPad0;
+    uint vsmDebugLightIndex; // Light buffer index whose virtual shadow map the VSM debug views show (vsmDebugLight).
     uint sunLightPad1;
 };
 

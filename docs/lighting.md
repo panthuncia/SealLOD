@@ -223,6 +223,13 @@ lands inside its cube face's guard band.
 
 The demo takes `BASICRENDERER_DEMO_SHADOW_LIGHT=point|spot|point-unshadowed|spot-unshadowed`, which adds a light
 beside the camera. `BASICRENDERER_DEMO_SHADOW_LIGHT_POSE="x,y,z,dx,dy,dz"` places it instead.
+The VSM debug outputs (`OUTPUT_VSM_*`) show one light's virtual shadow map, chosen with the menu's **VSM Debug
+Light** (`clodVirtualShadowDebugLight`, a light buffer index; `SARP_CLOD_VSM_DEBUG_LIGHT`). The default is the sun.
+For a spot or point light the views describe its lookup at each pixel it reaches: the clipmap views show the face's mips
+(preferred is the mip the receiver selects, sampled the one it read), and the page views show the receiver's own page
+at that mip. The renderer publishes the lights that have a virtual shadow map (`clodVirtualShadowDebugLightLabels`) and
+logs them when they change. `SARP_DEBUG_OUTPUT_TYPE` selects an output at startup.
+
 `SARP_CLOD_VSM_TELEMETRY=1` logs the shadow map's per-frame work. If cluster records keep being emitted but the
 raster's triangle and pixel counts stay near zero, pages are being retried without being written. The ownership
 line's `emptyAdmittedCompleted` and `rasterWorkDropped` show empty completions and the drops that block them.

@@ -160,6 +160,10 @@ else {
 # tracer's lens prescriptions (lenses\, which LensManager reads beside the exe).
 foreach ($name in 'D3D', 'NVSL', 'usd', 'shaders', 'SARPShaders', 'BuiltinTextures', 'textures', 'lenses') { Copy-RuntimeDirectory $name }
 
+# The C# scenario runtime (scripting\, which --script loads beside the exe; nethost.dll is among the DLLs above) and the
+# example scenarios, when the build has scripting (BASICRENDERER_ENABLE_SCRIPTING and a .NET 10 SDK).
+if (Test-Path (Join-Path $runtime 'scripting')) { foreach ($name in 'scripting', 'scenarios') { Copy-RuntimeDirectory $name } }
+
 # CompiledShaders\ is a folder the demo writes, not the cache it reads; earlier deploys copied it.
 $stale = Join-Path $Destination 'CompiledShaders'
 if (Test-Path $stale) { Remove-Item -Recurse -Force $stale }

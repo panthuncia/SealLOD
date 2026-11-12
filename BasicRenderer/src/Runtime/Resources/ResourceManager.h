@@ -29,7 +29,7 @@ public:
     void SetUploadService(std::shared_ptr<org::runtime::IUploadService> uploadService);
     void Cleanup();
 
-    void UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, UINT sunLightIndex, UINT sunLightSlot, DirectX::XMUINT2 screenRes, DirectX::XMUINT3 clusterSizes, unsigned int frameIndex);
+    void UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, UINT sunLightIndex, UINT sunLightSlot, UINT vsmDebugLightIndex, DirectX::XMUINT2 screenRes, DirectX::XMUINT3 clusterSizes, unsigned int frameIndex);
     
     std::shared_ptr<org::Buffer>& GetPerFrameBuffer() {
 		return m_perFrameBuffer;

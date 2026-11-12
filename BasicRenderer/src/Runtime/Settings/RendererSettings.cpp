@@ -485,6 +485,10 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<uint32_t>(
         CLodVirtualShadowUpgradeCooldownFramesSettingName,
         ReadUintEnvironmentValue("SARP_CLOD_VSM_UPGRADE_COOLDOWN_FRAMES", 8u));
+    settingsManager.registerSetting<uint32_t>(
+        CLodVirtualShadowDebugLightSettingName, ReadUintEnvironmentValue("SARP_CLOD_VSM_DEBUG_LIGHT", 0xFFFFFFFFu));
+    settingsManager.registerSetting<std::vector<uint32_t>>(CLodVirtualShadowDebugLightIndicesSettingName, {});
+    settingsManager.registerSetting<std::vector<std::string>>(CLodVirtualShadowDebugLightLabelsSettingName, {});
     settingsManager.registerSetting<bool>(
         CLodDirectionalVirtualShadowReceiverSubpageMaskSettingName,
         false);

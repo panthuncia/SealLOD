@@ -1561,6 +1561,44 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
             setCLodDirectionalVirtualShadowPredictiveLodInvalidation(m_clodDirectionalVirtualShadowPredictiveLodInvalidation);
         }
         {
+            // Which light's virtual shadow map the VSM debug output views show. The list holds only lights that have
+            // one: the sun first, then spot and point lights that cast shadows and won faces in the budget.
+            auto& settings = SettingsManager::GetInstance();
+            const auto indices = settings.getSettingGetter<std::vector<uint32_t>>(CLodVirtualShadowDebugLightIndicesSettingName)();
+            const auto labels = settings.getSettingGetter<std::vector<std::string>>(CLodVirtualShadowDebugLightLabelsSettingName)();
+            const uint32_t requested = settings.getSettingGetter<uint32_t>(CLodVirtualShadowDebugLightSettingName)();
+            const size_t count = (std::min)(indices.size(), labels.size());
+            // The renderer shows the sun (the first entry) for the default or a light that lost its map.
+            size_t shown = 0;
+            for (size_t i = 0; i < count; ++i) {
+                if (indices[i] == requested) {
+                    shown = i;
+                    break;
+                }
+            }
+            if (count == 0) {
+                ImGui::TextDisabled("VSM Debug Light: no light has a virtual shadow map");
+            }
+            else if (ImGui::BeginCombo("VSM Debug Light", labels[shown].c_str())) {
+                for (size_t i = 0; i < count; ++i) {
+                    ImGui::PushID(static_cast<int>(i));
+                    if (ImGui::Selectable(labels[i].c_str(), i == shown)) {
+                        settings.getSettingSetter<uint32_t>(CLodVirtualShadowDebugLightSettingName)(indices[i]);
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::EndCombo();
+            }
+            if (count != 0 && ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("The light the VSM debug outputs (Output panel) show. For a spot or point light, the "
+                    "clipmap views show the face's mips: preferred is the mip the receiver selects, sampled the one it "
+                    "read. Pixels the light does not reach show nothing.");
+            }
+            if (count == 1) {
+                ImGui::TextDisabled("No spot or point light has a virtual shadow map: only shadow-casting ones get faces.");
+            }
+        }
+        {
             // Page render budgets per frame (0: unlimited) and the upgrade cooldown. Read by the admission passes
             // each frame.
             auto& settings = SettingsManager::GetInstance();
