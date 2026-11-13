@@ -25,8 +25,11 @@
 #include <format>
 //#include <tracy/Tracy.hpp>
 #if BASICRENDERER_HAS_SCRIPTING
+#include <BasicRendererScripting/RendererScriptBackend.h>
 #include <BasicRendererScripting/ScriptHost.h>
+#include <atomic>
 #endif
+#include <BasicRenderer/Diagnostics/ControlCommandRegistry.h>
 
 #include "BasicRenderer/Assets/Geometry/Mesh.h"
 #include <BasicRenderer/Renderer.h>
@@ -530,24 +533,6 @@ std::optional<std::filesystem::path> FindCommandLinePath(
     return std::filesystem::path(commandLine.substr(valuePosition, end - valuePosition));
 }
 
-// Every value of a repeatable option, in order.
-std::vector<std::string> FindCommandLineValues(std::string_view commandLine, std::string_view option)
-{
-    std::vector<std::string> values;
-    for (size_t at = commandLine.find(option); at != std::string_view::npos; at = commandLine.find(option, at + option.size())) {
-        if (const auto value = FindCommandLinePath(commandLine.substr(at), option)) values.push_back(value->string());
-    }
-    return values;
-}
-
-// --model <path>[@scale]: the models the demo loads. A directory loads each scene cache (*.brscene.json) in it. Without
-// one, the Bistro exterior if the models folder has it (a build's does, a deployment's doesn't), or nothing: Scene
-// Explorer's Load Model and Load Folder add models while it runs.
-struct DemoModel {
-    std::string path;
-    float scale = 1.0f;
-};
-
 // A model file as it is, or a directory's scene caches.
 std::vector<std::string> ExpandDemoModelPath(const std::string& path)
 {
@@ -559,27 +544,12 @@ std::vector<std::string> ExpandDemoModelPath(const std::string& path)
     return manifests;
 }
 
-std::vector<DemoModel> FindDemoModels(std::string_view commandLine)
-{
-    std::vector<DemoModel> models;
-    for (const auto& value : FindCommandLineValues(commandLine, "--model")) {
-        DemoModel model{value};
-        if (const auto at = value.rfind('@'); at != std::string::npos) {
-            model.path = value.substr(0, at);
-            model.scale = std::stof(value.substr(at + 1));
-        }
-        for (auto& path : ExpandDemoModelPath(model.path)) models.push_back({ std::move(path), model.scale });
-    }
-    std::error_code error;
-    if (models.empty() && std::filesystem::is_regular_file("models/bistroExterior.glb", error)) models.push_back({"models/bistroExterior.glb"});
-    return models;
-}
-
-// The demo's static scene: the --model placements streamed through the static import
-// runtime, which publishes their static parts into the renderer's scene the way SARP's
-// LiveSceneBridge does. Each static part of a model is its own group, so a scene
+// The demo's static scene: Scene Explorer's Load Model placements streamed through the
+// static import runtime, which publishes their static parts into the renderer's scene the
+// way SARP's LiveSceneBridge does. Each static part of a model is its own group, so a scene
 // streams in node by node; models can be added while the runtime runs. Skinned parts are
-// kept by the asset library for the dynamic scene.
+// kept by the asset library for the dynamic scene. The runtime runs even with no models:
+// it publishes the geometry of dynamic (scripted) renderables too.
 struct DemoStaticScene {
     struct Model {
         std::string path;
@@ -707,38 +677,70 @@ std::optional<std::string> FindCommandLineOptionValue(std::string_view commandLi
 }
 
 #if BASICRENDERER_HAS_SCRIPTING
-// --script <file.cs|dir> [--scenario <name>] [--script-fixed-dt <seconds>] [--script-result <path>] [--script-exit]
-// runs a C# scenario (see Scripting/ and docs/scripting.md). With --script-exit the demo quits when the scenario ends,
-// with exit code 0 passed, 1 failed, 2 compile error, 3 the scripting runtime could not start.
+// F5 in the demo window: run the last scenario again from its (re-read) sources.
+std::atomic<bool> g_scriptReloadRequested{ false };
+
+// D3D12 validation messages fail a running scenario. Only with the debug layer (an InfoQueue); the full check runs only
+// when new messages have arrived.
+std::optional<std::string> ProbeD3D12Validation(UINT64& seenMessages)
+{
+    auto device = br::extensions::GetRenderDevice();
+    ID3D12Device* nativeDevice = rhi::dx12::get_device(device);
+    Microsoft::WRL::ComPtr<ID3D12InfoQueue> infoQueue;
+    if (!nativeDevice || FAILED(nativeDevice->QueryInterface(IID_PPV_ARGS(&infoQueue)))) return std::nullopt;
+    const UINT64 count = infoQueue->GetNumStoredMessagesAllowedByRetrievalFilter();
+    if (count == seenMessages) return std::nullopt;
+    seenMessages = count;
+    if (D3D12SmokeValidationFailed()) return std::string("D3D12 validation errors during the scenario (see the log)");
+    return std::nullopt;
+}
+
+// C# scenarios (Scripting/, docs/scripting.md).
+//   --script <file.cs|dir> [--scenario <name>] [--script-fixed-dt <seconds>] [--script-result <path>] [--script-exit]
+// With --script-exit the demo quits when the scenario ends: exit code 0 passed, 1 failed, 2 compile error, 3 the
+// scripting runtime could not start. The control pipe gets script.run, script.reload, script.stop and script.status,
+// and F5 reruns the last scenario.
 class DemoScriptRun {
 public:
-    bool Requested() const { return m_requested; }
     std::optional<double> FixedDeltaSeconds() const { return m_fixedDelta; }
     std::optional<int> ExitCode() const { return m_exitCode; }
+    // A scenario ran: the camera pose it left is not the user's to remember.
+    bool RanScenario() const { return m_ranScenario; }
 
-    void Start(std::string_view commandLine, HWND hwnd)
+    void Start(std::string_view commandLine, HWND hwnd, Renderer& renderer, br::diagnostics::ControlCommandRegistry& commands, bool controlPipe)
     {
+        m_hwnd = hwnd;
+        // The menu runs on the host thread. Start .NET on demand when no command-line scenario or pipe needs it.
+        SettingsManager::GetInstance().getSettingSetter<std::function<void(const std::string&)>>("loadScript")(
+            [this, &renderer, &commands](const std::string& path) {
+                std::string error;
+                if (!InitializeHost(renderer, commands, error) || !Run(path, {}, {}, error)) {
+                    spdlog::error("Load Script '{}': {}", path, error);
+                    return;
+                }
+                spdlog::info("Load Script '{}': started", path);
+            });
         const auto source = FindCommandLineOptionValue(commandLine, "--script");
-        if (!source) return;
-        m_requested = true;
-        m_exitWhenDone = HasCommandLineOption(commandLine, "--script-exit");
+        // Without --script, the runtime still starts when there is a control pipe, so script.run can use it.
+        if (!source && !controlPipe) return;
+        m_exitWhenDone = source && HasCommandLineOption(commandLine, "--script-exit");
         if (const auto result = FindCommandLineOptionValue(commandLine, "--script-result")) m_resultPath = *result;
         if (const auto dt = FindCommandLineOptionValue(commandLine, "--script-fixed-dt")) {
             m_fixedDelta = std::stod(*dt);
             if (!(*m_fixedDelta > 0.0)) m_fixedDelta.reset();
         }
-        const auto scenario = FindCommandLineOptionValue(commandLine, "--scenario").value_or("");
 
-        br::scripting::ScriptHostOptions options;
-        options.logSink = [](br::scripting::LogLevel level, std::string_view line) {
-            spdlog::log(static_cast<spdlog::level::level_enum>(static_cast<int>(level)), "[script] {}", line);
-        };
         std::string error;
-        m_host = br::scripting::ScriptHost::Create(options, error);
-        if (!m_host || !m_host->RunScenario(*source, scenario, error)) {
+        if (!InitializeHost(renderer, commands, error)) {
+            spdlog::error("scripting runtime: {}", error);
+            Finish(3);
+            return;
+        }
+        if (!source) return;
+        const auto scenario = FindCommandLineOptionValue(commandLine, "--scenario").value_or("");
+        if (!Run(*source, scenario, {}, error)) {
             spdlog::error("--script {}: {}", *source, error);
-            m_host.reset();
-            Finish(hwnd, 3);
+            Finish(3);
             return;
         }
         spdlog::info("--script {}: started{}{}", *source, scenario.empty() ? "" : " scenario " + scenario,
@@ -746,30 +748,109 @@ public:
     }
 
     // Before renderer.Update, with the time step the renderer will also be given.
-    void Tick(uint64_t frameIndex, double deltaSeconds, HWND hwnd)
+    void Tick(uint64_t frameIndex, double deltaSeconds)
     {
-        if (!m_host || m_finished) return;
+        if (!m_host) return;
+        if (g_scriptReloadRequested.exchange(false)) {
+            std::string error;
+            if (m_host->Reload(error)) {
+                m_reported = false;
+                spdlog::info("script: reloading {}", m_host->SourcePath().string());
+            } else {
+                spdlog::warn("script: F5 reload: {}", error);
+            }
+        }
         m_host->Tick(frameIndex, deltaSeconds);
         const auto state = m_host->State();
-        if (const auto requested = m_host->RequestedExitCode()) {
+        if (const auto requested = m_host->RequestedExitCode(); requested && !m_exitCode) {
             WriteResult(state);
-            Finish(hwnd, *requested, true);
+            m_exitCode = *requested;
+            PostMessage(m_hwnd, WM_CLOSE, 0, 0);
             return;
         }
-        if (!br::scripting::IsTerminal(state)) return;
+        if (!br::scripting::IsTerminal(state) || m_reported) return;
+        m_reported = true;
         WriteResult(state);
-        spdlog::info("--script: scenario {}", br::scripting::ToString(state));
-        Finish(hwnd, br::scripting::ScriptHost::ExitCodeFor(state));
+        spdlog::info("script: scenario {}", br::scripting::ToString(state));
+        if (m_exitWhenDone) Finish(br::scripting::ScriptHost::ExitCodeFor(state));
     }
 
-    // Before the renderer shuts down: the runtime's last references to scene state go first.
-    void Shutdown() { m_host.reset(); }
+    // Before the renderer shuts down: the backend lets go of the scene first.
+    void Shutdown()
+    {
+        SettingsManager::GetInstance().getSettingSetter<std::function<void(const std::string&)>>("loadScript")({});
+        m_host.reset();
+    }
 
 private:
+    bool InitializeHost(Renderer& renderer, br::diagnostics::ControlCommandRegistry& commands, std::string& error)
+    {
+        if (m_host) return true;
+        br::scripting::ScriptHostOptions options;
+        options.logSink = [](br::scripting::LogLevel level, std::string_view line) {
+            spdlog::log(static_cast<spdlog::level::level_enum>(static_cast<int>(level)), "[script] {}", line);
+        };
+        br::scripting::RendererScriptBackendOptions backend;
+        backend.renderer = &renderer;
+        backend.commands = &commands;
+        options.backend = br::scripting::CreateRendererScriptBackend(backend);
+        options.failureProbe = [seen = UINT64(0)]() mutable { return ProbeD3D12Validation(seen); };
+        m_host = br::scripting::ScriptHost::Create(std::move(options), error);
+        if (!m_host) return false;
+        RegisterCommands(commands);
+        return true;
+    }
+
+    bool Run(const std::filesystem::path& source, std::string_view scenario, std::string_view options, std::string& error)
+    {
+        if (br::scripting::IsBusy(m_host->State())) m_host->Stop("replaced by a new script");
+        if (!m_host->RunScenario(source, scenario, error, options)) return false;
+        m_reported = false;
+        m_ranScenario = true;
+        return true;
+    }
+
+    void RegisterCommands(br::diagnostics::ControlCommandRegistry& commands)
+    {
+        // script.run {path, scenario?, timeout_seconds?}: compiles and runs a scenario (stopping one still running).
+        commands.Register("script.run", [this](const br::diagnostics::ControlRequest& request) {
+            const auto path = request.args.at("path").get<std::string>();
+            const auto scenario = request.args.value("scenario", "");
+            nlohmann::json options = nlohmann::json::object();
+            if (request.args.contains("timeout_seconds")) options["timeout_seconds"] = request.args.at("timeout_seconds");
+            std::string error;
+            if (!Run(path, scenario, options.empty() ? std::string() : options.dump(), error)) throw std::runtime_error(error);
+            return Describe();
+        });
+        commands.Register("script.reload", [this](const br::diagnostics::ControlRequest&) {
+            std::string error;
+            if (!m_host->Reload(error)) throw std::runtime_error(error);
+            m_reported = false;
+            return Describe();
+        });
+        commands.Register("script.stop", [this](const br::diagnostics::ControlRequest& request) {
+            m_host->Stop(request.args.value("reason", "stopped by script.stop"));
+            return Describe();
+        });
+        // script.status: state (idle, compiling, running, passed, failed, compile_error), source, scenario, and the
+        // last result document.
+        commands.Register("script.status", [this](const br::diagnostics::ControlRequest&) { return Describe(); });
+    }
+
+    nlohmann::json Describe() const
+    {
+        nlohmann::json reply = {
+            { "state", br::scripting::ToString(m_host->State()) },
+            { "source", m_host->SourcePath().string() },
+            { "scenario", m_host->ScenarioName() },
+        };
+        if (!m_host->ResultJson().empty()) reply["result"] = nlohmann::json::parse(m_host->ResultJson(), nullptr, false);
+        return reply;
+    }
+
     void WriteResult(br::scripting::ScenarioState state)
     {
-        if (!m_resultPath || m_resultWritten) return;
-        m_resultWritten = true;
+        if (!m_resultPath) return;
         std::error_code ec;
         if (m_resultPath->has_parent_path()) std::filesystem::create_directories(m_resultPath->parent_path(), ec);
         std::ofstream out(*m_resultPath, std::ios::binary | std::ios::trunc);
@@ -778,23 +859,22 @@ private:
         else spdlog::info("--script-result: {} ({})", m_resultPath->string(), br::scripting::ToString(state));
     }
 
-    // Without --script-exit the demo keeps running after the scenario ends, unless the script itself asked to exit.
-    void Finish(HWND hwnd, int exitCode, bool scriptRequested = false)
+    // Without --script-exit the demo keeps running after the scenario ends.
+    void Finish(int exitCode)
     {
-        m_finished = true;
-        if (!m_exitWhenDone && !scriptRequested) return;
+        if (!m_exitWhenDone) return;
         m_exitCode = exitCode;
-        PostMessage(hwnd, WM_CLOSE, 0, 0);
+        PostMessage(m_hwnd, WM_CLOSE, 0, 0);
     }
 
     std::unique_ptr<br::scripting::ScriptHost> m_host;
     std::optional<std::filesystem::path> m_resultPath;
     std::optional<double> m_fixedDelta;
     std::optional<int> m_exitCode;
-    bool m_requested = false;
+    HWND m_hwnd = nullptr;
     bool m_exitWhenDone = false;
-    bool m_finished = false;
-    bool m_resultWritten = false;
+    bool m_reported = false;
+    bool m_ranScenario = false;
 };
 #endif
 
@@ -1167,12 +1247,26 @@ public:
     bool Enabled() const noexcept { return m_configuration.has_value(); }
     int ExitCode() const noexcept { return m_exitCode; }
 
+    // Registers the control commands. Once, after the renderer is initialized; the pipe and scripts use them after that.
+    void RegisterControlCommands(Renderer& renderer, HWND hwnd);
+    br::diagnostics::ControlCommandRegistry& Commands() { return m_commands; }
+
+    // The control pipe without a sampling configuration: every command but profile.run is available.
+    void StartControlServer(const std::string& controlPipe)
+    {
+        const int count = MultiByteToWideChar(CP_UTF8, 0, controlPipe.data(), static_cast<int>(controlPipe.size()), nullptr, 0);
+        std::wstring pipeName(static_cast<std::size_t>(count), L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, controlPipe.data(), static_cast<int>(controlPipe.size()), pipeName.data(), count);
+        m_controlServer.Start(std::move(pipeName));
+        m_persistent = true;
+        spdlog::info("BasicRenderer control server listening on '{}'", controlPipe);
+    }
+
     void AfterFrame(Renderer& renderer, HWND hwnd)
     {
-        if (!m_configuration) return;
-        PumpControlRequests(renderer, hwnd);
+        PumpControlRequests();
         m_hdrCaptures.Pump(renderer);
-        if (m_finished) return;
+        if (!m_configuration || m_finished) return;
         switch (m_phase) {
         case Phase::Warmup:
         {
@@ -1221,7 +1315,7 @@ private:
     std::uint64_t ElapsedMs() const;
     void StartExperiment(std::string label, Renderer* renderer = nullptr);
     const char* PhaseName() const;
-    void PumpControlRequests(Renderer& renderer, HWND hwnd);
+    void PumpControlRequests();
 
     void ArmNextCapture(Renderer& renderer, HWND hwnd)
     {
@@ -1375,6 +1469,7 @@ private:
     std::chrono::steady_clock::time_point m_startedAt{};
     std::filesystem::path m_configurationPath;
     br::telemetry::sampling::ControlServer m_controlServer;
+    br::diagnostics::ControlCommandRegistry m_commands;
     DemoHdrCaptures m_hdrCaptures;
     std::string m_readinessSignature;
     std::string m_stoppingReason;
@@ -1384,8 +1479,8 @@ private:
     std::uint32_t m_nextOrdinal{ 1 };
     std::int64_t m_experimentId{ 0 };
     int m_exitCode{ 0 };
-    bool m_finished{ false };
-    bool m_finalized{ false };
+    bool m_finished{ true };   // No experiment is running until StartExperiment.
+    bool m_finalized{ true };
     bool m_persistent{ false };
     bool m_usesNvPerf{ false };
     bool m_usesRenderGraphGpuTime{ false };
@@ -1510,7 +1605,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     // What the demo loads (shaders, textures) and writes (logs, cache) is beside the exe: run from there, however it was
-    // started (a shortcut's working folder, another directory's command line). Relative --model paths are from there too.
+    // started (a shortcut's working folder, another directory's command line).
     {
         wchar_t exePath[MAX_PATH] = {};
         if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) != 0) {
@@ -1535,17 +1630,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     file_logger->flush_on(spdlog::level::info);
 
     const std::string_view commandLine = lpCmdLine ? std::string_view(lpCmdLine) : std::string_view{};
-    // A scene cache's manifest picks the cache root, which renderer startup resolves: before anything else.
-    for (const auto& model : FindDemoModels(commandLine)) {
-        if (!br::import::IsSceneManifestPath(model.path)) continue;
-        try {
-            (void)br::import::ApplySceneManifestCacheRoot(model.path);
-        }
-        catch (const std::exception& error) {
-            spdlog::error("Scene manifest {}: {}", model.path, error.what());
-        }
-        break;
-    }
     const DemoCameraState cameraState = LoadDemoCameraState();
     DemoStatisticalSamplingRun statisticalSampling;
     if (const auto samplingConfig = FindCommandLinePath(commandLine, "--sampling-config")) {
@@ -1686,12 +1770,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     {
         org::BufferBase::ScopedBackingMutation startupSceneBackingMutation;
 
-        // The models' static parts stream through the static import runtime, like SARP does.
+        // Loaded models' static parts stream through the static import runtime, like SARP does. Scenarios
+        // (--script) place their models as dynamic renderables, which also rely on this runtime.
         renderer.SetCurrentScene(std::make_shared<Scene>());
         staticScene = std::make_unique<DemoStaticScene>();
-        for (const auto& model : FindDemoModels(commandLine)) {
-            staticScene->AddModel(model.path, XMMatrixScaling(model.scale, model.scale, model.scale));
-        }
         // Scene Explorer's Load Model adds to the running static scene. The menu calls it on this thread.
         SettingsManager::GetInstance().getSettingSetter<std::function<void(const std::string&)>>("loadModel")(
             [scene = staticScene.get()](const std::string& path) {
@@ -1781,10 +1863,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         }
     }
 
+    // --no-scene-overlap: the scene update runs on this thread inside Update, not overlapped with the previous frame's
+    // rendering, so a change reaches the very next frame. Switched after the first frames (the switch syncs the scene
+    // bridge, which the first frame sets up).
+    const bool noSceneOverlap = HasCommandLineOption(commandLine, "--no-scene-overlap");
+
+    // The control commands, for the pipe and for scripts. The pipe also runs without a sampling configuration.
+    statisticalSampling.RegisterControlCommands(renderer, hwnd);
+    const auto controlPipe = FindCommandLineValue(commandLine, "--sampling-control-pipe");
+    if (controlPipe && !statisticalSampling.Enabled()) statisticalSampling.StartControlServer(*controlPipe);
+
 #if BASICRENDERER_HAS_SCRIPTING
     // After scene setup: the scenario compiles in the background while the first frames render.
     DemoScriptRun scriptRun;
-    scriptRun.Start(commandLine, hwnd);
+    scriptRun.Start(commandLine, hwnd, renderer, statisticalSampling.Commands(), controlPipe.has_value());
 #endif
 
     MSG msg = {};
@@ -2052,12 +2144,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
                 spdlog::info("CLod streaming cleanup test reached frame {} after graph replacement; closing.", frameIndex);
                 PostMessage(hwnd, WM_CLOSE, 0, 0);
             }
+            if (noSceneOverlap && frameIndex == 3) {
+                renderer.SetSceneRenderOverlapEnabled(false);
+                spdlog::info("--no-scene-overlap: scene updates run synchronously");
+            }
             if (staticScene) staticScene->Tick(renderer, frameIndex);
             float frameSeconds = elapsedSeconds.count();
 #if BASICRENDERER_HAS_SCRIPTING
             // --script-fixed-dt: the scenario and the renderer both advance by exactly this much per frame.
             if (const auto fixedDelta = scriptRun.FixedDeltaSeconds()) frameSeconds = static_cast<float>(*fixedDelta);
-            scriptRun.Tick(frameIndex, frameSeconds, hwnd);
+            scriptRun.Tick(frameIndex, frameSeconds);
 #endif
             renderer.Update(frameSeconds);
             if (frameIndex % 100 == 0) {
@@ -2069,7 +2165,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     }
 
     const bool smokeValidationFailed = graphRebuildSmokeTest && D3D12SmokeValidationFailed();
-    if (const auto& scene = renderer.GetCurrentScene(); scene) {
+    bool keepCameraState = true;
+#if BASICRENDERER_HAS_SCRIPTING
+    keepCameraState = !scriptRun.RanScenario();   // a scenario's camera is not the user's pose to remember
+#endif
+    if (const auto& scene = renderer.GetCurrentScene(); scene && keepCameraState) {
         SaveDemoCameraState(
             *scene,
             br::extensions::MakeSettingGetter<bool>("rememberCameraPose")());
@@ -2129,6 +2229,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         if (toupper(static_cast<int>(wParam)) == VK_ESCAPE) {
             PostQuitMessage(0);
         }
+#if BASICRENDERER_HAS_SCRIPTING
+        if (wParam == VK_F5) g_scriptReloadRequested = true;
+#endif
         break;
     default:
         return DefWindowProc(hWnd, message, wParam, lParam);
@@ -2180,377 +2283,487 @@ const char* DemoStatisticalSamplingRun::PhaseName() const
         return "unknown";
     }
 
-void DemoStatisticalSamplingRun::PumpControlRequests(Renderer& renderer, HWND hwnd)
+void DemoStatisticalSamplingRun::RegisterControlCommands(Renderer& renderer, HWND hwnd)
     {
-        for (const auto& request : m_controlServer.DrainRequests()) {
-            nlohmann::json response;
-            try {
-                response["request_id"] = request->document.at("request_id");
-                const auto command = request->document.value("command", "");
-                if (command == "session.status") {
-                    response["pid"] = GetCurrentProcessId();
-                    response["profile_active"] = !m_finished;
-                    response["experiment_id"] = m_experimentId;
-                    response["pipeline_epoch"] = br::diagnostics::GetPipelineEpoch();
-                } else if (command == "shadercache.stats") {
-                    // The shader store's batch summary and sizes.
-                    response["shader_store"] = nlohmann::json::parse(br::diagnostics::DescribeShaderStore());
-                } else if (command == "pso.list") {
-                    response["pipelines"] = nlohmann::json::array();
-                    for (const auto& pipeline : br::diagnostics::ListPipelines()) {
-                        response["pipelines"].push_back({
-                            { "id", pipeline.id },
-                            { "name", pipeline.displayName },
-                            { "active_generation", pipeline.activeGeneration },
-                            { "source_hash", pipeline.sourceHash },
-                            { "bytecode_hash", pipeline.bytecodeHash },
-                            { "label", pipeline.label },
-                            { "compiling", pipeline.compiling }
-                        });
-                    }
-                } else if (command == "pso.recompile") {
-                    if (!m_finished) throw std::runtime_error("cannot recompile a pipeline while profiling is active");
-                    br::diagnostics::RecompileOptions options;
-                    options.label = request->document.value("label", "pipe-reload");
-                    if (const auto defines = request->document.find("defines");
-                        defines != request->document.end()) {
-                        if (!defines->is_object()) {
-                            throw std::runtime_error("pso.recompile 'defines' must be an object");
-                        }
-                        for (const auto& [name, value] : defines->items()) {
-                            if (!value.is_string()) {
-                                throw std::runtime_error(
-                                    "pso.recompile define values must be strings");
-                            }
-                            options.defineOverrides.emplace(
-                                std::wstring(name.begin(), name.end()),
-                                std::wstring(value.get_ref<const std::string&>().begin(),
-                                             value.get_ref<const std::string&>().end()));
-                        }
-                    }
-                    response["job_id"] = br::diagnostics::RequestRecompile(
-                        request->document.at("pipeline_id").get<std::string>(), std::move(options));
-                } else if (command == "pso.activate") {
-                    if (!m_finished) throw std::runtime_error("cannot activate a pipeline while profiling is active");
-                    response["job_id"] = br::diagnostics::RequestActivation(
-                        request->document.at("pipeline_id").get<std::string>(),
-                        request->document.at("generation").get<std::uint64_t>());
-                } else if (command == "capture.hdr") {
-                    response["job_id"] = m_hdrCaptures.Request(renderer, request->document);
-                } else if (command == "lens.get" || command == "lens.set" || command == "lens.selftest" || command == "lens.selftest.status") {
-                    // The physical lens (SARP's docs/lens_simulation.md). lens.set takes mode, file, focus_m, focus_mode ("manual" or
-                    // "auto"), af_point ([x, y] NDC), af_region, af_speed, monochromatic, f_number, field_mode ("remap" or "physical")
-                    // and polynomial_degree. Focus is per frame; the rest builds off this thread, so lens.get's "state" says when it
-                    // is in use, and its "focus" has the autofocus state.
-                    response["lens"] = nlohmann::json::parse(renderer.HandleLensControl(command, request->document.dump()));
-                } else if (command.starts_with("lens.flare.")) {
-                    // The lens's ghost flares (SARP's docs/lens_simulation.md "Ghost flares"): lens.flare.get, lens.flare.set
-                    // {enabled, max_ghosts, grid, wavelengths, max_lights, intensity, test_source}, lens.flare.selftest and
-                    // lens.flare.selftest.status.
-                    response["flare"] = nlohmann::json::parse(renderer.HandleLensControl(command, request->document.dump()));
-                } else if (command == "upscaler.get") {
-                    // What upscaler runs: "evaluated" is what the last frame's upscaling pass ran, "graph" the mode the graph
-                    // was built with, "setting" the upscalingMode setting. A path traced frame should say DLSS Ray
-                    // Reconstruction in all three unless pathTracingAccumulate is on.
-                    response["upscaler"] = nlohmann::json::parse(renderer.DescribeUpscaler());
-                } else if (command == "upscaler.set") {
-                    // The menu's upscaler settings, for repeated toggling in tests: "quality" 0 DLAA, 1 Quality, 2 Balanced,
-                    // 3 Performance, 4 Ultra Performance; "ray_reconstruction" true or false (DLSS otherwise). Each change sets
-                    // the upscaler up again and rebuilds the graph before the next frame.
-                    if (request->document.contains("quality")) {
-                        const uint32_t quality = request->document.at("quality").get<uint32_t>();
-                        if (quality > static_cast<uint32_t>(UpscaleQualityMode::UltraPerformance)) throw std::runtime_error("quality is 0-4");
-                        br::extensions::MakeSettingSetter<UpscaleQualityMode>("upscalingQualityMode")(static_cast<UpscaleQualityMode>(quality));
-                    }
-                    if (request->document.contains("ray_reconstruction")) {
-                        SettingsManager::GetInstance().getSettingSetter<UpscalingMode>("upscalingMode")(request->document.at("ray_reconstruction").get<bool>()
-                            ? UpscalingMode::DLSSRayReconstruction : UpscalingMode::DLSS);
-                    }
-                    response["upscaler"] = nlohmann::json::parse(renderer.DescribeUpscaler());
-                } else if (command == "upscaler.simulate_failure") {
-                    // Debug: the next out_of_memory_frames DLSS evaluations act as if Streamline reported GPU memory pressure, and
-                    // the next settings_failures requests for Ray Reconstruction's optimal settings fail (the first right away,
-                    // through a reconfiguration). upscaler.get shows what happened.
-                    renderer.SimulateUpscalerFailures(request->document.value("out_of_memory_frames", 0u),
-                        request->document.value("settings_failures", 0u));
-                    response["upscaler"] = nlohmann::json::parse(renderer.DescribeUpscaler());
-                } else if (command == "camera.set") {
-                    // The primary camera's vertical field of view: a lens covers only its design field.
-                    auto& scene = renderer.GetCurrentScene();
-                    if (!scene) throw std::runtime_error("no scene");
-                    const auto* camera = scene->GetPrimaryCamera().try_get<Components::Camera>();
-                    if (!camera) throw std::runtime_error("no primary camera");
-                    if (request->document.contains("fov_deg")) {
-                        const float fovDegrees = request->document.at("fov_deg").get<float>();
-                        if (!(fovDegrees > 1.0f && fovDegrees < 170.0f)) throw std::runtime_error("camera.set 'fov_deg' must be in (1, 170)");
-                        scene->SetCameraProjection(fovDegrees * (XM_PI / 180.0f), camera->aspect, camera->zNear, camera->zFar);
-                        camera = scene->GetPrimaryCamera().try_get<Components::Camera>();
-                    }
-                    response["fov_deg"] = camera->fov * (180.0f / XM_PI);
-                    response["aspect"] = camera->aspect;
-                } else if (command == "job.status" && request->document.at("job_id").get<std::uint64_t>() >= DemoHdrCaptures::kFirstJobId) {
-                    const auto job = m_hdrCaptures.Status(request->document.at("job_id").get<std::uint64_t>());
-                    if (!job) throw std::runtime_error("unknown capture job");
-                    response["job"] = *job;
-                } else if (command == "job.status") {
-                    const auto job = br::diagnostics::GetLiveJob(
-                        request->document.at("job_id").get<std::uint64_t>());
-                    if (!job) throw std::runtime_error("unknown pipeline job");
-                    const auto stateName = [](br::diagnostics::LiveJobState state) {
-                        switch (state) {
-                        case br::diagnostics::LiveJobState::Queued: return "queued";
-                        case br::diagnostics::LiveJobState::Compiling: return "compiling";
-                        case br::diagnostics::LiveJobState::ReadyToPublish: return "ready_to_publish";
-                        case br::diagnostics::LiveJobState::Published: return "published";
-                        case br::diagnostics::LiveJobState::Failed: return "failed";
-                        }
-                        return "unknown";
-                    };
-                    response["job"] = {
-                        { "id", job->id }, { "pipeline_id", job->pipelineId },
-                        { "state", stateName(job->state) }, { "generation", job->generation },
-                        { "error", job->error }
-                    };
-                } else if (command == "clod.phase2_expansion.get") {
-                    const uint32_t pass = request->document.value("pass", 1u);
-                    const char* settingName = pass == 2u
-                        ? CLodPureComputeReplayExpansionFactorSettingName
-                        : CLodPureComputePhase2ExpansionFactorSettingName;
-                    response["value"] = br::extensions::MakeSettingGetter<uint32_t>(settingName)();
-                    response["pass"] = pass == 2u ? 2u : 1u;
-                } else if (command == "clod.phase2_expansion.set") {
-                    if (!m_finished) throw std::runtime_error("cannot change traversal expansion while profiling is active");
-                    const uint32_t pass = request->document.value("pass", 1u);
-                    const char* settingName = pass == 2u
-                        ? CLodPureComputeReplayExpansionFactorSettingName
-                        : CLodPureComputePhase2ExpansionFactorSettingName;
-                    const uint32_t requested = request->document.at("value").get<uint32_t>();
-                    const uint32_t normalized = CLodNormalizePureComputePhase2ExpansionFactor(requested);
-                    br::extensions::MakeSettingSetter<uint32_t>(settingName)(normalized);
-                    response["value"] = normalized;
-                    response["pass"] = pass == 2u ? 2u : 1u;
-                } else if (command == "clod.mode.get") {
-                    const auto culling =
-                        br::extensions::MakeSettingGetter<CLodCullingBackend>(CLodCullingBackendSettingName)();
-                    const auto softwareRaster =
-                        br::extensions::MakeSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)();
-                    response["culling"] =
-                        culling == CLodCullingBackend::WorkGraph ? "work_graph" : "pure_compute";
-                    response["software_raster"] =
-                        softwareRaster == CLodSoftwareRasterMode::WorkGraph ? "work_graph" :
-                        softwareRaster == CLodSoftwareRasterMode::Compute ? "compute" : "disabled";
-                    response["rigid_only"] =
-                        br::extensions::MakeSettingGetter<bool>(CLodWorkGraphRigidOnlySettingName)();
-                } else if (command == "clod.mode.set") {
-                    if (!m_finished) throw std::runtime_error("cannot change CLOD mode while profiling is active");
-                    const std::string cullingName = request->document.at("culling").get<std::string>();
-                    const std::string softwareRasterName =
-                        request->document.at("software_raster").get<std::string>();
-                    const CLodCullingBackend culling =
-                        cullingName == "work_graph" ? CLodCullingBackend::WorkGraph :
-                        cullingName == "pure_compute" ? CLodCullingBackend::PureCompute :
-                        throw std::runtime_error("culling must be 'pure_compute' or 'work_graph'");
-                    const CLodSoftwareRasterMode softwareRaster =
-                        softwareRasterName == "work_graph" ? CLodSoftwareRasterMode::WorkGraph :
-                        softwareRasterName == "compute" ? CLodSoftwareRasterMode::Compute :
-                        softwareRasterName == "disabled" ? CLodSoftwareRasterMode::Disabled :
-                        throw std::runtime_error(
-                            "software_raster must be 'disabled', 'compute', or 'work_graph'");
-                    br::extensions::MakeSettingSetter<CLodCullingBackend>(CLodCullingBackendSettingName)(culling);
-                    br::extensions::MakeSettingSetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)(
-                        softwareRaster);
-                    if (request->document.contains("rigid_only")) {
-                        br::extensions::MakeSettingSetter<bool>(CLodWorkGraphRigidOnlySettingName)(
-                            request->document.at("rigid_only").get<bool>());
-                    }
-                    response["culling"] = cullingName;
-                    response["software_raster"] = softwareRasterName;
-                    response["rigid_only"] =
-                        br::extensions::MakeSettingGetter<bool>(CLodWorkGraphRigidOnlySettingName)();
-                } else if (command == "pathtracing.get" || command == "pathtracing.set") {
-                    // The menu's switch, for switching at runtime without it. It takes effect at the next frame.
-                    if (command == "pathtracing.set") {
-                        if (!m_finished) throw std::runtime_error("cannot switch path tracing while profiling is active");
-                        if (request->document.contains("enabled")) {
-                            br::extensions::MakeSettingSetter<bool>("enablePathTracing")(request->document.at("enabled").get<bool>());
-                        }
-                        // Rebuilds the graph, with the accumulation buffer, when path tracing is on.
-                        if (request->document.contains("accumulate")) {
-                            br::extensions::MakeSettingSetter<bool>("pathTracingAccumulate")(request->document.at("accumulate").get<bool>());
-                        }
-                    }
-                    response["accumulate"] = br::extensions::MakeSettingGetter<bool>("pathTracingAccumulate")();
-                    const auto accumulation = renderer.GetPathTracingAccumulation();
-                    response["accumulating"] = accumulation.buffer != nullptr;
-                    response["accumulated_frames"] = accumulation.framesSinceRestart;
-                    response["accumulation_restarts"] = accumulation.restarts;
-                    const auto& deviceManager = br::DeviceManager::GetInstance();
-                    response["enabled"] = br::extensions::MakeSettingGetter<bool>("enablePathTracing")();
-                    response["supported"] = deviceManager.GetPathTracingSupported();
-                    response["unsupported_reason"] = deviceManager.GetPathTracingUnsupportedReason();
-                } else if (command == "clod.vsm_perf.get" || command == "clod.vsm_perf.set") {
-                    if (command == "clod.vsm_perf.set" && !m_finished) {
-                        throw std::runtime_error("cannot change VSM performance settings while profiling is active");
-                    }
-                    if (command == "clod.vsm_perf.set") {
-						const float requestedWindInner = request->document.value(
-							"dynamic_wind_inner_radius",
-							br::extensions::MakeSettingGetter<float>(ProceduralWindInnerRadiusSettingName)());
-						const float requestedWindOuter = request->document.value(
-							"dynamic_wind_outer_radius",
-							br::extensions::MakeSettingGetter<float>(ProceduralWindOuterRadiusSettingName)());
-						if (requestedWindInner < 0.0f || requestedWindOuter < requestedWindInner) {
-							throw std::runtime_error("DynamicWind radii require 0 <= inner <= outer");
-						}
-						br::extensions::MakeSettingSetter<float>(ProceduralWindInnerRadiusSettingName)(requestedWindInner);
-						br::extensions::MakeSettingSetter<float>(ProceduralWindOuterRadiusSettingName)(requestedWindOuter);
-						if (request->document.contains("skinned_shadow_radius")) {
-							const float radius = request->document.at("skinned_shadow_radius").get<float>();
-							if (radius < 0.0f) throw std::runtime_error("skinned_shadow_radius must be non-negative");
-							const float innerRadius = br::extensions::MakeSettingGetter<float>(ProceduralWindInnerRadiusSettingName)();
-							if (radius < innerRadius) {
-								br::extensions::MakeSettingSetter<float>(ProceduralWindInnerRadiusSettingName)(radius);
-							}
-							br::extensions::MakeSettingSetter<float>(ProceduralWindOuterRadiusSettingName)(radius);
-						}
-						if (request->document.contains("skinned_shadow_dynamic_clipmap_count_override")) {
-							int32_t requestedOverride = request->document.at(
-								"skinned_shadow_dynamic_clipmap_count_override").get<int32_t>();
-							if (requestedOverride < -1) {
-								throw std::runtime_error("skinned shadow clipmap override must be -1 or non-negative");
-							}
-							const uint32_t activeClipmapCount =
-								g_clodSkinnedShadowActiveClipmapCount.load(std::memory_order_relaxed);
-							if (requestedOverride >= 0 && activeClipmapCount != 0u) {
-								requestedOverride = std::min(requestedOverride, static_cast<int32_t>(activeClipmapCount));
-							}
-							br::extensions::MakeSettingSetter<int32_t>(CLodSkinnedShadowDynamicClipmapCountOverrideSettingName)(
-								requestedOverride);
-						}
-                        if (request->document.contains("page_budget")) {
-                            br::extensions::MakeSettingSetter<uint32_t>(
-                                CLodDirectionalVirtualShadowPageRenderBudgetSettingName)(
-                                request->document.at("page_budget").get<uint32_t>());
-                        }
-                        if (request->document.contains("upgrade_budget")) {
-                            br::extensions::MakeSettingSetter<uint32_t>(
-                                CLodDirectionalVirtualShadowUpgradePageRenderBudgetSettingName)(
-                                request->document.at("upgrade_budget").get<uint32_t>());
-                        }
-                        if (request->document.contains("cache_disabled")) {
-                            br::extensions::MakeSettingSetter<bool>(
-                                CLodDisableVirtualShadowPageCachingSettingName)(
-                                request->document.at("cache_disabled").get<bool>());
-                        }
-                        if (request->document.contains("sw_raster_threshold")) {
-                            br::extensions::MakeSettingSetter<uint32_t>(
-                                CLodVirtualShadowSoftwareRasterDiameterThresholdSettingName)(
-                                std::min(
-                                    request->document.at("sw_raster_threshold").get<uint32_t>(),
-                                    0xFFFFu));
-                        }
-                        if (request->document.contains("dynamic_wind_bounds_cache_enabled")) {
-                            br::extensions::MakeSettingSetter<bool>(CLodDynamicWindBoundsCacheEnabledSettingName)(
-                                request->document.at("dynamic_wind_bounds_cache_enabled").get<bool>());
-                        }
-                        if (request->document.contains("dynamic_wind_bounds_cache_mib")) {
-                            br::extensions::MakeSettingSetter<uint32_t>(CLodDynamicWindBoundsCacheMiBSettingName)(
-                                std::min(request->document.at("dynamic_wind_bounds_cache_mib").get<uint32_t>(), 256u));
-                        }
-                        if (request->document.contains("dynamic_wind_vertex_cache_enabled")) {
-                            br::extensions::MakeSettingSetter<bool>(CLodDynamicWindVertexCacheEnabledSettingName)(
-                                request->document.at("dynamic_wind_vertex_cache_enabled").get<bool>());
-                        }
-                        if (request->document.contains("dynamic_wind_vertex_cache_mib")) {
-                            br::extensions::MakeSettingSetter<uint32_t>(CLodDynamicWindVertexCacheMiBSettingName)(
-                                std::min(request->document.at("dynamic_wind_vertex_cache_mib").get<uint32_t>(), 512u));
-                        }
-                        if (request->document.contains("raster_mode")) {
-                            const std::string mode = request->document.at("raster_mode").get<std::string>();
-                            const CLodVSMRasterMode rasterMode =
-                                mode == "hardware" ? CLodVSMRasterMode::HardwareOnly :
-                                mode == "standard" ? CLodVSMRasterMode::Standard :
-                                mode == "reyes" ? CLodVSMRasterMode::Reyes :
-                                throw std::runtime_error(
-                                    "raster_mode must be 'hardware', 'standard', or 'reyes'");
-                            br::extensions::MakeSettingSetter<CLodVSMRasterMode>(
-                                CLodVSMRasterModeSettingName)(rasterMode);
-                        }
-                    }
-                    response["page_budget"] = br::extensions::MakeSettingGetter<uint32_t>(
-                        CLodDirectionalVirtualShadowPageRenderBudgetSettingName)();
-                    response["upgrade_budget"] = br::extensions::MakeSettingGetter<uint32_t>(
-                        CLodDirectionalVirtualShadowUpgradePageRenderBudgetSettingName)();
-                    response["cache_disabled"] = br::extensions::MakeSettingGetter<bool>(
-                        CLodDisableVirtualShadowPageCachingSettingName)();
-                    response["sw_raster_threshold"] = br::extensions::MakeSettingGetter<uint32_t>(
-                        CLodVirtualShadowSoftwareRasterDiameterThresholdSettingName)();
-					response["dynamic_wind_inner_radius"] = br::extensions::MakeSettingGetter<float>(ProceduralWindInnerRadiusSettingName)();
-					response["dynamic_wind_outer_radius"] = br::extensions::MakeSettingGetter<float>(ProceduralWindOuterRadiusSettingName)();
-					response["skinned_shadow_radius"] = br::extensions::MakeSettingGetter<float>(ProceduralWindOuterRadiusSettingName)();
-					response["skinned_shadow_dynamic_clipmap_count_override"] =
-						br::extensions::MakeSettingGetter<int32_t>(CLodSkinnedShadowDynamicClipmapCountOverrideSettingName)();
-					response["skinned_shadow_effective_dynamic_clipmap_count"] =
-						g_clodSkinnedShadowEffectiveDynamicClipmapCount.load(std::memory_order_relaxed);
-					response["skinned_shadow_clipmap_classification"] = nlohmann::json::array();
-					const uint32_t activeShadowClipmapCount =
-						g_clodSkinnedShadowActiveClipmapCount.load(std::memory_order_relaxed);
-					const uint32_t dynamicShadowClipmapMask =
-						g_clodSkinnedShadowDynamicClipmapMask.load(std::memory_order_relaxed);
-					for (uint32_t clipmapIndex = 0u; clipmapIndex < activeShadowClipmapCount; ++clipmapIndex) {
-						response["skinned_shadow_clipmap_classification"].push_back(
-							(dynamicShadowClipmapMask & (1u << clipmapIndex)) != 0u ? "dynamic" : "static");
-					}
-					response["skinned_shadow_classification_generation"] =
-						g_clodSkinnedShadowClassificationGeneration.load(std::memory_order_relaxed);
-					response["skinned_shadow_one_shot_invalidations"] =
-						g_clodSkinnedShadowOneShotInvalidationCount.load(std::memory_order_relaxed);
-                    response["dynamic_wind_bounds_cache_enabled"] = br::extensions::MakeSettingGetter<bool>(
-                        CLodDynamicWindBoundsCacheEnabledSettingName)();
-                    response["dynamic_wind_bounds_cache_mib"] = br::extensions::MakeSettingGetter<uint32_t>(
-                        CLodDynamicWindBoundsCacheMiBSettingName)();
-                    response["dynamic_wind_vertex_cache_enabled"] = br::extensions::MakeSettingGetter<bool>(
-                        CLodDynamicWindVertexCacheEnabledSettingName)();
-                    response["dynamic_wind_vertex_cache_mib"] = br::extensions::MakeSettingGetter<uint32_t>(
-                        CLodDynamicWindVertexCacheMiBSettingName)();
-                    const CLodVSMRasterMode rasterMode = br::extensions::MakeSettingGetter<CLodVSMRasterMode>(
-                        CLodVSMRasterModeSettingName)();
-                    response["raster_mode"] =
-                        rasterMode == CLodVSMRasterMode::HardwareOnly ? "hardware" :
-                        rasterMode == CLodVSMRasterMode::Reyes ? "reyes" : "standard";
-                } else if (command == "clod.workgraph.reload") {
-                    if (!m_finished) throw std::runtime_error("cannot reload CLOD work graphs while profiling is active");
-                    response["reloaded_passes"] = br::diagnostics::ReloadCLodWorkGraphs();
-                    response["pipeline_epoch"] = br::diagnostics::GetPipelineEpoch();
-                } else if (command == "profile.run") {
-                    if (!m_finished) throw std::runtime_error("a profiling experiment is already active");
-                    StartExperiment(request->document.value("label", "experiment"), &renderer);
-                    response["experiment_id"] = m_experimentId;
-                } else if (command == "profile.status") {
-                    response["pid"] = GetCurrentProcessId();
-                    response["experiment_id"] = m_experimentId;
-                    response["active"] = !m_finished;
-                    response["finalized"] = m_finalized;
-                    response["phase"] = PhaseName();
-                    response["readiness_stable_frames"] = m_readyStableFrames;
-                    response["readiness_required_frames"] = m_configuration->readyFrames;
-                    response["readiness_duration_ms"] = m_readinessDurationMs;
-                    response["attempted_samples"] = m_samples.size();
-                    response["accepted_samples"] = std::ranges::count_if(m_samples, [](const auto& sample) { return sample.accepted; });
-                    response["stopping_reason"] = m_stoppingReason;
-                } else if (command == "profile.cancel") {
-                    if (m_finished) throw std::runtime_error("no profiling experiment is active");
-                    Finish(renderer, "cancelled", "cancelled by control request", hwnd, 0);
-                } else if (command == "shutdown") {
-                    PostMessage(hwnd, WM_CLOSE, 0, 0);
-                } else {
-                    throw std::runtime_error("unknown command '" + command + "'");
-                }
-                response["ok"] = true;
-            } catch (const std::exception& exception) {
-                response["ok"] = false;
-                response["error"] = exception.what();
+        // The demo's control commands (TESTING.md). The pipe and C# scenarios (ctx.Command) both reach them through m_commands.
+        m_commands.Register("session.status", [this, &renderer, hwnd](const br::diagnostics::ControlRequest& request) {
+            nlohmann::json response = nlohmann::json::object();
+            response["pid"] = GetCurrentProcessId();
+            response["profile_active"] = !m_finished;
+            response["experiment_id"] = m_experimentId;
+            response["pipeline_epoch"] = br::diagnostics::GetPipelineEpoch();
+            return response;
+        });
+        m_commands.Register("shadercache.stats", [this, &renderer, hwnd](const br::diagnostics::ControlRequest& request) {
+            nlohmann::json response = nlohmann::json::object();
+            // The shader store's batch summary and sizes.
+            response["shader_store"] = nlohmann::json::parse(br::diagnostics::DescribeShaderStore());
+            return response;
+        });
+        m_commands.Register("pso.list", [this, &renderer, hwnd](const br::diagnostics::ControlRequest& request) {
+            nlohmann::json response = nlohmann::json::object();
+            response["pipelines"] = nlohmann::json::array();
+            for (const auto& pipeline : br::diagnostics::ListPipelines()) {
+                response["pipelines"].push_back({
+                    { "id", pipeline.id },
+                    { "name", pipeline.displayName },
+                    { "active_generation", pipeline.activeGeneration },
+                    { "source_hash", pipeline.sourceHash },
+                    { "bytecode_hash", pipeline.bytecodeHash },
+                    { "label", pipeline.label },
+                    { "compiling", pipeline.compiling }
+                });
             }
-            request->response.set_value(std::move(response));
+            return response;
+        });
+        m_commands.Register("pso.recompile", [this, &renderer, hwnd](const br::diagnostics::ControlRequest& request) {
+            nlohmann::json response = nlohmann::json::object();
+            if (!m_finished) throw std::runtime_error("cannot recompile a pipeline while profiling is active");
+            br::diagnostics::RecompileOptions options;
+            options.label = request.args.value("label", "pipe-reload");
+            if (const auto defines = request.args.find("defines");
+                defines != request.args.end()) {
+                if (!defines->is_object()) {
+                    throw std::runtime_error("pso.recompile 'defines' must be an object");
+                }
+                for (const auto& [name, value] : defines->items()) {
+                    if (!value.is_string()) {
+                        throw std::runtime_error(
+                            "pso.recompile define values must be strings");
+                    }
+                    options.defineOverrides.emplace(
+                        std::wstring(name.begin(), name.end()),
+                        std::wstring(value.get_ref<const std::string&>().begin(),
+                                     value.get_ref<const std::string&>().end()));
+                }
+            }
+            response["job_id"] = br::diagnostics::RequestRecompile(
+                request.args.at("pipeline_id").get<std::string>(), std::move(options));
+            return response;
+        });
+        m_commands.Register("pso.activate", [this, &renderer, hwnd](const br::diagnostics::ControlRequest& request) {
+            nlohmann::json response = nlohmann::json::object();
+            if (!m_finished) throw std::runtime_error("cannot activate a pipeline while profiling is active");
+            response["job_id"] = br::diagnostics::RequestActivation(
+                request.args.at("pipeline_id").get<std::string>(),
+                request.args.at("generation").get<std::uint64_t>());
+            return response;
+        });
+        m_commands.Register("capture.hdr", [this, &renderer, hwnd](const br::diagnostics::ControlRequest& request) {
+            nlohmann::json response = nlohmann::json::object();
+            response["job_id"] = m_hdrCaptures.Request(renderer, request.args);
+            return response;
+        });
+        {
+            const br::diagnostics::ControlCommandRegistry::Handler handler = [this, &renderer, hwnd](const br::diagnostics::ControlRequest& request) {
+                nlohmann::json response = nlohmann::json::object();
+                // The physical lens (SARP's docs/lens_simulation.md). lens.set takes mode, file, focus_m, focus_mode ("manual" or
+                // "auto"), af_point ([x, y] NDC), af_region, af_speed, monochromatic, f_number, field_mode ("remap" or "physical")
+                // and polynomial_degree. Focus is per frame; the rest builds off this thread, so lens.get's "state" says when it
+                // is in use, and its "focus" has the autofocus state.
+                response["lens"] = nlohmann::json::parse(renderer.HandleLensControl(std::string(request.command), request.args.dump()));
+                return response;
+            };
+            m_commands.Register("lens.get", handler);
+            m_commands.Register("lens.set", handler);
+            m_commands.Register("lens.selftest", handler);
+            m_commands.Register("lens.selftest.status", handler);
         }
+        {
+            const br::diagnostics::ControlCommandRegistry::Handler handler = [this, &renderer, hwnd](const br::diagnostics::ControlRequest& request) {
+                nlohmann::json response = nlohmann::json::object();
+                // The lens's ghost flares (SARP's docs/lens_simulation.md "Ghost flares"): lens.flare.get, lens.flare.set
+                // {enabled, max_ghosts, grid, wavelengths, max_lights, intensity, test_source}, lens.flare.selftest and
+                // lens.flare.selftest.status.
+                response["flare"] = nlohmann::json::parse(renderer.HandleLensControl(std::string(request.command), request.args.dump()));
+                return response;
+            };
+            m_commands.Register("lens.flare.get", handler);
+            m_commands.Register("lens.flare.set", handler);
+            m_commands.Register("lens.flare.selftest", handler);
+            m_commands.Register("lens.flare.selftest.status", handler);
+        }
+        m_commands.Register("upscaler.get", [this, &renderer, hwnd](const br::diagnostics::ControlRequest& request) {
+            nlohmann::json response = nlohmann::json::object();
+            // What upscaler runs: "evaluated" is what the last frame's upscaling pass ran, "graph" the mode the graph
+            // was built with, "setting" the upscalingMode setting. A path traced frame should say DLSS Ray
+            // Reconstruction in all three unless pathTracingAccumulate is on.
+            response["upscaler"] = nlohmann::json::parse(renderer.DescribeUpscaler());
+            return response;
+        });
+        m_commands.Register("upscaler.set", [this, &renderer, hwnd](const br::diagnostics::ControlRequest& request) {
+            nlohmann::json response = nlohmann::json::object();
+            // The menu's upscaler settings, for repeated toggling in tests: "quality" 0 DLAA, 1 Quality, 2 Balanced,
+            // 3 Performance, 4 Ultra Performance; "ray_reconstruction" true or false (DLSS otherwise). Each change sets
+            // the upscaler up again and rebuilds the graph before the next frame.
+            if (request.args.contains("quality")) {
+                const uint32_t quality = request.args.at("quality").get<uint32_t>();
+                if (quality > static_cast<uint32_t>(UpscaleQualityMode::UltraPerformance)) throw std::runtime_error("quality is 0-4");
+                br::extensions::MakeSettingSetter<UpscaleQualityMode>("upscalingQualityMode")(static_cast<UpscaleQualityMode>(quality));
+            }
+            if (request.args.contains("ray_reconstruction")) {
+                SettingsManager::GetInstance().getSettingSetter<UpscalingMode>("upscalingMode")(request.args.at("ray_reconstruction").get<bool>()
+                    ? UpscalingMode::DLSSRayReconstruction : UpscalingMode::DLSS);
+            }
+            response["upscaler"] = nlohmann::json::parse(renderer.DescribeUpscaler());
+            return response;
+        });
+        m_commands.Register("upscaler.simulate_failure", [this, &renderer, hwnd](const br::diagnostics::ControlRequest& request) {
+            nlohmann::json response = nlohmann::json::object();
+            // Debug: the next out_of_memory_frames DLSS evaluations act as if Streamline reported GPU memory pressure, and
+            // the next settings_failures requests for Ray Reconstruction's optimal settings fail (the first right away,
+            // through a reconfiguration). upscaler.get shows what happened.
+            renderer.SimulateUpscalerFailures(request.args.value("out_of_memory_frames", 0u),
+                request.args.value("settings_failures", 0u));
+            response["upscaler"] = nlohmann::json::parse(renderer.DescribeUpscaler());
+            return response;
+        });
+        m_commands.Register("camera.set", [this, &renderer, hwnd](const br::diagnostics::ControlRequest& request) {
+            nlohmann::json response = nlohmann::json::object();
+            // The primary camera's vertical field of view: a lens covers only its design field.
+            auto& scene = renderer.GetCurrentScene();
+            if (!scene) throw std::runtime_error("no scene");
+            const auto* camera = scene->GetPrimaryCamera().try_get<Components::Camera>();
+            if (!camera) throw std::runtime_error("no primary camera");
+            if (request.args.contains("fov_deg")) {
+                const float fovDegrees = request.args.at("fov_deg").get<float>();
+                if (!(fovDegrees > 1.0f && fovDegrees < 170.0f)) throw std::runtime_error("camera.set 'fov_deg' must be in (1, 170)");
+                scene->SetCameraProjection(fovDegrees * (XM_PI / 180.0f), camera->aspect, camera->zNear, camera->zFar);
+                camera = scene->GetPrimaryCamera().try_get<Components::Camera>();
+            }
+            response["fov_deg"] = camera->fov * (180.0f / XM_PI);
+            response["aspect"] = camera->aspect;
+            return response;
+        });
+        m_commands.Register("job.status", [this, &renderer, hwnd](const br::diagnostics::ControlRequest& request) {
+            nlohmann::json response = nlohmann::json::object();
+            if (request.args.at("job_id").get<std::uint64_t>() >= DemoHdrCaptures::kFirstJobId) {
+                const auto job = m_hdrCaptures.Status(request.args.at("job_id").get<std::uint64_t>());
+                if (!job) throw std::runtime_error("unknown capture job");
+                response["job"] = *job;
+                return response;
+            }
+            const auto job = br::diagnostics::GetLiveJob(
+                request.args.at("job_id").get<std::uint64_t>());
+            if (!job) throw std::runtime_error("unknown pipeline job");
+            const auto stateName = [](br::diagnostics::LiveJobState state) {
+                switch (state) {
+                case br::diagnostics::LiveJobState::Queued: return "queued";
+                case br::diagnostics::LiveJobState::Compiling: return "compiling";
+                case br::diagnostics::LiveJobState::ReadyToPublish: return "ready_to_publish";
+                case br::diagnostics::LiveJobState::Published: return "published";
+                case br::diagnostics::LiveJobState::Failed: return "failed";
+                }
+                return "unknown";
+            };
+            response["job"] = {
+                { "id", job->id }, { "pipeline_id", job->pipelineId },
+                { "state", stateName(job->state) }, { "generation", job->generation },
+                { "error", job->error }
+            };
+            return response;
+        });
+        m_commands.Register("clod.phase2_expansion.get", [this, &renderer, hwnd](const br::diagnostics::ControlRequest& request) {
+            nlohmann::json response = nlohmann::json::object();
+            const uint32_t pass = request.args.value("pass", 1u);
+            const char* settingName = pass == 2u
+                ? CLodPureComputeReplayExpansionFactorSettingName
+                : CLodPureComputePhase2ExpansionFactorSettingName;
+            response["value"] = br::extensions::MakeSettingGetter<uint32_t>(settingName)();
+            response["pass"] = pass == 2u ? 2u : 1u;
+            return response;
+        });
+        m_commands.Register("clod.phase2_expansion.set", [this, &renderer, hwnd](const br::diagnostics::ControlRequest& request) {
+            nlohmann::json response = nlohmann::json::object();
+            if (!m_finished) throw std::runtime_error("cannot change traversal expansion while profiling is active");
+            const uint32_t pass = request.args.value("pass", 1u);
+            const char* settingName = pass == 2u
+                ? CLodPureComputeReplayExpansionFactorSettingName
+                : CLodPureComputePhase2ExpansionFactorSettingName;
+            const uint32_t requested = request.args.at("value").get<uint32_t>();
+            const uint32_t normalized = CLodNormalizePureComputePhase2ExpansionFactor(requested);
+            br::extensions::MakeSettingSetter<uint32_t>(settingName)(normalized);
+            response["value"] = normalized;
+            response["pass"] = pass == 2u ? 2u : 1u;
+            return response;
+        });
+        m_commands.Register("clod.mode.get", [this, &renderer, hwnd](const br::diagnostics::ControlRequest& request) {
+            nlohmann::json response = nlohmann::json::object();
+            const auto culling =
+                br::extensions::MakeSettingGetter<CLodCullingBackend>(CLodCullingBackendSettingName)();
+            const auto softwareRaster =
+                br::extensions::MakeSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)();
+            response["culling"] =
+                culling == CLodCullingBackend::WorkGraph ? "work_graph" : "pure_compute";
+            response["software_raster"] =
+                softwareRaster == CLodSoftwareRasterMode::WorkGraph ? "work_graph" :
+                softwareRaster == CLodSoftwareRasterMode::Compute ? "compute" : "disabled";
+            response["rigid_only"] =
+                br::extensions::MakeSettingGetter<bool>(CLodWorkGraphRigidOnlySettingName)();
+            return response;
+        });
+        m_commands.Register("clod.mode.set", [this, &renderer, hwnd](const br::diagnostics::ControlRequest& request) {
+            nlohmann::json response = nlohmann::json::object();
+            if (!m_finished) throw std::runtime_error("cannot change CLOD mode while profiling is active");
+            const std::string cullingName = request.args.at("culling").get<std::string>();
+            const std::string softwareRasterName =
+                request.args.at("software_raster").get<std::string>();
+            const CLodCullingBackend culling =
+                cullingName == "work_graph" ? CLodCullingBackend::WorkGraph :
+                cullingName == "pure_compute" ? CLodCullingBackend::PureCompute :
+                throw std::runtime_error("culling must be 'pure_compute' or 'work_graph'");
+            const CLodSoftwareRasterMode softwareRaster =
+                softwareRasterName == "work_graph" ? CLodSoftwareRasterMode::WorkGraph :
+                softwareRasterName == "compute" ? CLodSoftwareRasterMode::Compute :
+                softwareRasterName == "disabled" ? CLodSoftwareRasterMode::Disabled :
+                throw std::runtime_error(
+                    "software_raster must be 'disabled', 'compute', or 'work_graph'");
+            br::extensions::MakeSettingSetter<CLodCullingBackend>(CLodCullingBackendSettingName)(culling);
+            br::extensions::MakeSettingSetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)(
+                softwareRaster);
+            if (request.args.contains("rigid_only")) {
+                br::extensions::MakeSettingSetter<bool>(CLodWorkGraphRigidOnlySettingName)(
+                    request.args.at("rigid_only").get<bool>());
+            }
+            response["culling"] = cullingName;
+            response["software_raster"] = softwareRasterName;
+            response["rigid_only"] =
+                br::extensions::MakeSettingGetter<bool>(CLodWorkGraphRigidOnlySettingName)();
+            return response;
+        });
+        {
+            const br::diagnostics::ControlCommandRegistry::Handler handler = [this, &renderer, hwnd](const br::diagnostics::ControlRequest& request) {
+                nlohmann::json response = nlohmann::json::object();
+                // The menu's switch, for switching at runtime without it. It takes effect at the next frame.
+                if (request.command == "pathtracing.set") {
+                    if (!m_finished) throw std::runtime_error("cannot switch path tracing while profiling is active");
+                    if (request.args.contains("enabled")) {
+                        br::extensions::MakeSettingSetter<bool>("enablePathTracing")(request.args.at("enabled").get<bool>());
+                    }
+                    // Rebuilds the graph, with the accumulation buffer, when path tracing is on.
+                    if (request.args.contains("accumulate")) {
+                        br::extensions::MakeSettingSetter<bool>("pathTracingAccumulate")(request.args.at("accumulate").get<bool>());
+                    }
+                }
+                response["accumulate"] = br::extensions::MakeSettingGetter<bool>("pathTracingAccumulate")();
+                const auto accumulation = renderer.GetPathTracingAccumulation();
+                response["accumulating"] = accumulation.buffer != nullptr;
+                response["accumulated_frames"] = accumulation.framesSinceRestart;
+                response["accumulation_restarts"] = accumulation.restarts;
+                const auto& deviceManager = br::DeviceManager::GetInstance();
+                response["enabled"] = br::extensions::MakeSettingGetter<bool>("enablePathTracing")();
+                response["supported"] = deviceManager.GetPathTracingSupported();
+                response["unsupported_reason"] = deviceManager.GetPathTracingUnsupportedReason();
+                return response;
+            };
+            m_commands.Register("pathtracing.get", handler);
+            m_commands.Register("pathtracing.set", handler);
+        }
+        {
+            const br::diagnostics::ControlCommandRegistry::Handler handler = [this, &renderer, hwnd](const br::diagnostics::ControlRequest& request) {
+                nlohmann::json response = nlohmann::json::object();
+                if (request.command == "clod.vsm_perf.set" && !m_finished) {
+                    throw std::runtime_error("cannot change VSM performance settings while profiling is active");
+                }
+                if (request.command == "clod.vsm_perf.set") {
+    						const float requestedWindInner = request.args.value(
+    							"dynamic_wind_inner_radius",
+    							br::extensions::MakeSettingGetter<float>(ProceduralWindInnerRadiusSettingName)());
+    						const float requestedWindOuter = request.args.value(
+    							"dynamic_wind_outer_radius",
+    							br::extensions::MakeSettingGetter<float>(ProceduralWindOuterRadiusSettingName)());
+    						if (requestedWindInner < 0.0f || requestedWindOuter < requestedWindInner) {
+    							throw std::runtime_error("DynamicWind radii require 0 <= inner <= outer");
+    						}
+    						br::extensions::MakeSettingSetter<float>(ProceduralWindInnerRadiusSettingName)(requestedWindInner);
+    						br::extensions::MakeSettingSetter<float>(ProceduralWindOuterRadiusSettingName)(requestedWindOuter);
+    						if (request.args.contains("skinned_shadow_radius")) {
+    							const float radius = request.args.at("skinned_shadow_radius").get<float>();
+    							if (radius < 0.0f) throw std::runtime_error("skinned_shadow_radius must be non-negative");
+    							const float innerRadius = br::extensions::MakeSettingGetter<float>(ProceduralWindInnerRadiusSettingName)();
+    							if (radius < innerRadius) {
+    								br::extensions::MakeSettingSetter<float>(ProceduralWindInnerRadiusSettingName)(radius);
+    							}
+    							br::extensions::MakeSettingSetter<float>(ProceduralWindOuterRadiusSettingName)(radius);
+    						}
+    						if (request.args.contains("skinned_shadow_dynamic_clipmap_count_override")) {
+    							int32_t requestedOverride = request.args.at(
+    								"skinned_shadow_dynamic_clipmap_count_override").get<int32_t>();
+    							if (requestedOverride < -1) {
+    								throw std::runtime_error("skinned shadow clipmap override must be -1 or non-negative");
+    							}
+    							const uint32_t activeClipmapCount =
+    								g_clodSkinnedShadowActiveClipmapCount.load(std::memory_order_relaxed);
+    							if (requestedOverride >= 0 && activeClipmapCount != 0u) {
+    								requestedOverride = std::min(requestedOverride, static_cast<int32_t>(activeClipmapCount));
+    							}
+    							br::extensions::MakeSettingSetter<int32_t>(CLodSkinnedShadowDynamicClipmapCountOverrideSettingName)(
+    								requestedOverride);
+    						}
+                    if (request.args.contains("page_budget")) {
+                        br::extensions::MakeSettingSetter<uint32_t>(
+                            CLodDirectionalVirtualShadowPageRenderBudgetSettingName)(
+                            request.args.at("page_budget").get<uint32_t>());
+                    }
+                    if (request.args.contains("upgrade_budget")) {
+                        br::extensions::MakeSettingSetter<uint32_t>(
+                            CLodDirectionalVirtualShadowUpgradePageRenderBudgetSettingName)(
+                            request.args.at("upgrade_budget").get<uint32_t>());
+                    }
+                    if (request.args.contains("cache_disabled")) {
+                        br::extensions::MakeSettingSetter<bool>(
+                            CLodDisableVirtualShadowPageCachingSettingName)(
+                            request.args.at("cache_disabled").get<bool>());
+                    }
+                    if (request.args.contains("sw_raster_threshold")) {
+                        br::extensions::MakeSettingSetter<uint32_t>(
+                            CLodVirtualShadowSoftwareRasterDiameterThresholdSettingName)(
+                            std::min(
+                                request.args.at("sw_raster_threshold").get<uint32_t>(),
+                                0xFFFFu));
+                    }
+                    if (request.args.contains("dynamic_wind_bounds_cache_enabled")) {
+                        br::extensions::MakeSettingSetter<bool>(CLodDynamicWindBoundsCacheEnabledSettingName)(
+                            request.args.at("dynamic_wind_bounds_cache_enabled").get<bool>());
+                    }
+                    if (request.args.contains("dynamic_wind_bounds_cache_mib")) {
+                        br::extensions::MakeSettingSetter<uint32_t>(CLodDynamicWindBoundsCacheMiBSettingName)(
+                            std::min(request.args.at("dynamic_wind_bounds_cache_mib").get<uint32_t>(), 256u));
+                    }
+                    if (request.args.contains("dynamic_wind_vertex_cache_enabled")) {
+                        br::extensions::MakeSettingSetter<bool>(CLodDynamicWindVertexCacheEnabledSettingName)(
+                            request.args.at("dynamic_wind_vertex_cache_enabled").get<bool>());
+                    }
+                    if (request.args.contains("dynamic_wind_vertex_cache_mib")) {
+                        br::extensions::MakeSettingSetter<uint32_t>(CLodDynamicWindVertexCacheMiBSettingName)(
+                            std::min(request.args.at("dynamic_wind_vertex_cache_mib").get<uint32_t>(), 512u));
+                    }
+                    if (request.args.contains("directional_lod_bias")) {
+                        br::extensions::MakeSettingSetter<float>(CLodDirectionalVirtualShadowLodBiasSettingName)(
+                            request.args.at("directional_lod_bias").get<float>());
+                    }
+                    if (request.args.contains("local_lod_bias")) {
+                        br::extensions::MakeSettingSetter<float>(CLodLocalVirtualShadowLodBiasSettingName)(
+                            request.args.at("local_lod_bias").get<float>());
+                    }
+                    if (request.args.contains("local_moving_lod_bias")) {
+                        br::extensions::MakeSettingSetter<float>(CLodLocalVirtualShadowMovingLodBiasSettingName)(
+                            request.args.at("local_moving_lod_bias").get<float>());
+                    }
+                    if (request.args.contains("local_force_invalidate")) {
+                        br::extensions::MakeSettingSetter<bool>(CLodLocalVirtualShadowForceInvalidateSettingName)(
+                            request.args.at("local_force_invalidate").get<bool>());
+                    }
+                    if (request.args.contains("raster_mode")) {
+                        const std::string mode = request.args.at("raster_mode").get<std::string>();
+                        const CLodVSMRasterMode rasterMode =
+                            mode == "hardware" ? CLodVSMRasterMode::HardwareOnly :
+                            mode == "standard" ? CLodVSMRasterMode::Standard :
+                            mode == "reyes" ? CLodVSMRasterMode::Reyes :
+                            throw std::runtime_error(
+                                "raster_mode must be 'hardware', 'standard', or 'reyes'");
+                        br::extensions::MakeSettingSetter<CLodVSMRasterMode>(
+                            CLodVSMRasterModeSettingName)(rasterMode);
+                    }
+                }
+                response["page_budget"] = br::extensions::MakeSettingGetter<uint32_t>(
+                    CLodDirectionalVirtualShadowPageRenderBudgetSettingName)();
+                response["upgrade_budget"] = br::extensions::MakeSettingGetter<uint32_t>(
+                    CLodDirectionalVirtualShadowUpgradePageRenderBudgetSettingName)();
+                response["cache_disabled"] = br::extensions::MakeSettingGetter<bool>(
+                    CLodDisableVirtualShadowPageCachingSettingName)();
+                response["sw_raster_threshold"] = br::extensions::MakeSettingGetter<uint32_t>(
+                    CLodVirtualShadowSoftwareRasterDiameterThresholdSettingName)();
+                response["directional_lod_bias"] = br::extensions::MakeSettingGetter<float>(
+                    CLodDirectionalVirtualShadowLodBiasSettingName)();
+                response["local_lod_bias"] = br::extensions::MakeSettingGetter<float>(
+                    CLodLocalVirtualShadowLodBiasSettingName)();
+                response["local_moving_lod_bias"] = br::extensions::MakeSettingGetter<float>(
+                    CLodLocalVirtualShadowMovingLodBiasSettingName)();
+                response["local_force_invalidate"] = br::extensions::MakeSettingGetter<bool>(
+                    CLodLocalVirtualShadowForceInvalidateSettingName)();
+    					response["dynamic_wind_inner_radius"] = br::extensions::MakeSettingGetter<float>(ProceduralWindInnerRadiusSettingName)();
+    					response["dynamic_wind_outer_radius"] = br::extensions::MakeSettingGetter<float>(ProceduralWindOuterRadiusSettingName)();
+    					response["skinned_shadow_radius"] = br::extensions::MakeSettingGetter<float>(ProceduralWindOuterRadiusSettingName)();
+    					response["skinned_shadow_dynamic_clipmap_count_override"] =
+    						br::extensions::MakeSettingGetter<int32_t>(CLodSkinnedShadowDynamicClipmapCountOverrideSettingName)();
+    					response["skinned_shadow_effective_dynamic_clipmap_count"] =
+    						g_clodSkinnedShadowEffectiveDynamicClipmapCount.load(std::memory_order_relaxed);
+    					response["skinned_shadow_clipmap_classification"] = nlohmann::json::array();
+    					const uint32_t activeShadowClipmapCount =
+    						g_clodSkinnedShadowActiveClipmapCount.load(std::memory_order_relaxed);
+    					const uint32_t dynamicShadowClipmapMask =
+    						g_clodSkinnedShadowDynamicClipmapMask.load(std::memory_order_relaxed);
+    					for (uint32_t clipmapIndex = 0u; clipmapIndex < activeShadowClipmapCount; ++clipmapIndex) {
+    						response["skinned_shadow_clipmap_classification"].push_back(
+    							(dynamicShadowClipmapMask & (1u << clipmapIndex)) != 0u ? "dynamic" : "static");
+    					}
+    					response["skinned_shadow_classification_generation"] =
+    						g_clodSkinnedShadowClassificationGeneration.load(std::memory_order_relaxed);
+    					response["skinned_shadow_one_shot_invalidations"] =
+    						g_clodSkinnedShadowOneShotInvalidationCount.load(std::memory_order_relaxed);
+                response["dynamic_wind_bounds_cache_enabled"] = br::extensions::MakeSettingGetter<bool>(
+                    CLodDynamicWindBoundsCacheEnabledSettingName)();
+                response["dynamic_wind_bounds_cache_mib"] = br::extensions::MakeSettingGetter<uint32_t>(
+                    CLodDynamicWindBoundsCacheMiBSettingName)();
+                response["dynamic_wind_vertex_cache_enabled"] = br::extensions::MakeSettingGetter<bool>(
+                    CLodDynamicWindVertexCacheEnabledSettingName)();
+                response["dynamic_wind_vertex_cache_mib"] = br::extensions::MakeSettingGetter<uint32_t>(
+                    CLodDynamicWindVertexCacheMiBSettingName)();
+                const CLodVSMRasterMode rasterMode = br::extensions::MakeSettingGetter<CLodVSMRasterMode>(
+                    CLodVSMRasterModeSettingName)();
+                response["raster_mode"] =
+                    rasterMode == CLodVSMRasterMode::HardwareOnly ? "hardware" :
+                    rasterMode == CLodVSMRasterMode::Reyes ? "reyes" : "standard";
+                return response;
+            };
+            m_commands.Register("clod.vsm_perf.get", handler);
+            m_commands.Register("clod.vsm_perf.set", handler);
+        }
+        m_commands.Register("clod.workgraph.reload", [this, &renderer, hwnd](const br::diagnostics::ControlRequest& request) {
+            nlohmann::json response = nlohmann::json::object();
+            if (!m_finished) throw std::runtime_error("cannot reload CLOD work graphs while profiling is active");
+            response["reloaded_passes"] = br::diagnostics::ReloadCLodWorkGraphs();
+            response["pipeline_epoch"] = br::diagnostics::GetPipelineEpoch();
+            return response;
+        });
+        m_commands.Register("profile.run", [this, &renderer, hwnd](const br::diagnostics::ControlRequest& request) {
+            nlohmann::json response = nlohmann::json::object();
+            if (!m_configuration) throw std::runtime_error("profile.run needs --sampling-config");
+            if (!m_finished) throw std::runtime_error("a profiling experiment is already active");
+            StartExperiment(request.args.value("label", "experiment"), &renderer);
+            response["experiment_id"] = m_experimentId;
+            return response;
+        });
+        m_commands.Register("profile.status", [this, &renderer, hwnd](const br::diagnostics::ControlRequest& request) {
+            nlohmann::json response = nlohmann::json::object();
+            response["pid"] = GetCurrentProcessId();
+            response["experiment_id"] = m_experimentId;
+            response["active"] = !m_finished;
+            response["finalized"] = m_finalized;
+            response["phase"] = PhaseName();
+            response["readiness_stable_frames"] = m_readyStableFrames;
+            response["readiness_required_frames"] = m_configuration ? m_configuration->readyFrames : 0u;
+            response["readiness_duration_ms"] = m_readinessDurationMs;
+            response["attempted_samples"] = m_samples.size();
+            response["accepted_samples"] = std::ranges::count_if(m_samples, [](const auto& sample) { return sample.accepted; });
+            response["stopping_reason"] = m_stoppingReason;
+            return response;
+        });
+        m_commands.Register("profile.cancel", [this, &renderer, hwnd](const br::diagnostics::ControlRequest& request) {
+            nlohmann::json response = nlohmann::json::object();
+            if (m_finished) throw std::runtime_error("no profiling experiment is active");
+            Finish(renderer, "cancelled", "cancelled by control request", hwnd, 0);
+            return response;
+        });
+        m_commands.Register("shutdown", [this, &renderer, hwnd](const br::diagnostics::ControlRequest& request) {
+            nlohmann::json response = nlohmann::json::object();
+            PostMessage(hwnd, WM_CLOSE, 0, 0);
+            return response;
+        });
+    }
+
+void DemoStatisticalSamplingRun::PumpControlRequests()
+    {
+        if (m_controlServer.Running()) m_commands.Serve(m_controlServer);
     }

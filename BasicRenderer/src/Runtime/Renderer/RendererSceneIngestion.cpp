@@ -16,7 +16,10 @@
 #include "Utilities/MathUtils.h"
 #include "Utilities/Utilities.h"
 #include <algorithm>
+#include <chrono>
 #include <mutex>
+#include <thread>
+#include <spdlog/spdlog.h>
 
 namespace {
 flecs::entity FindSceneEntityByStableSceneID(flecs::entity node, uint64_t stableSceneID) {
@@ -216,6 +219,11 @@ void Renderer::ApplyPrimaryCameraInput(float elapsedSeconds) {
     if (m_deterministicSamplingMode) {
         return;
     }
+    if (!m_cameraInputEnabled) {
+        verticalAngle = 0.0f;
+        horizontalAngle = 0.0f;
+        return;
+    }
     if (!currentScene || !currentScene->HasUsablePrimaryCamera()) {
         return;
     }
@@ -276,6 +284,57 @@ void Renderer::QueueSceneNodeUniformScaleEdit(uint64_t stableSceneID, float unif
     auto& edit = m_pendingSceneExplorerEdits[stableSceneID];
     edit.hasUniformScale = true;
     edit.uniformScale = uniformScale;
+}
+
+br::render::SceneMutationSubscription Renderer::AddSceneMutationHook(std::function<void(Scene&)> hook,
+    br::render::SceneMutationHookOptions options) {
+    if (!hook) {
+        return {};
+    }
+    const uint64_t id = m_nextSceneMutationHookID++;
+    m_sceneMutationHooks.push_back({ id, std::move(hook), options });
+    return br::render::SceneMutationSubscription([this, id]() {
+        std::erase_if(m_sceneMutationHooks, [id](const SceneMutationHookEntry& entry) { return entry.id == id; });
+    });
+}
+
+void Renderer::SetCameraInputEnabled(bool enabled) {
+    if (m_cameraInputEnabled == enabled) {
+        return;
+    }
+    m_cameraInputEnabled = enabled;
+    // Input gathered while it was off (or on) belongs to the old mode.
+    verticalAngle = 0.0f;
+    horizontalAngle = 0.0f;
+}
+
+void Renderer::WaitForSceneUpdateTask() {
+    // The task is a few milliseconds of transform propagation and snapshot export, usually finished by now.
+    const auto start = std::chrono::steady_clock::now();
+    while (m_sceneTaskInFlight.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+    const auto waitedMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    if (waitedMs > 50.0) {
+        spdlog::warn("Renderer: a scene mutation hook waited {:.1f} ms for the asynchronous scene update", waitedMs);
+    }
+}
+
+void Renderer::RunSceneMutationHooks() {
+    if (!currentScene || m_sceneMutationHooks.empty()) {
+        return;
+    }
+    // A copy: a hook may remove itself or register another.
+    const auto hooks = m_sceneMutationHooks;
+    for (const auto& entry : hooks) {
+        if (m_sceneTaskInFlight.load(std::memory_order_acquire)) {
+            if (!entry.options.waitForInFlightSceneTask) {
+                continue;
+            }
+            WaitForSceneUpdateTask();
+        }
+        entry.hook(*currentScene);
+    }
 }
 
 void Renderer::FlushPendingSceneExplorerEdits() {
@@ -384,6 +443,7 @@ void Renderer::ScheduleSceneUpdateTask(float elapsedSeconds) {
     }
 
     auto scene = currentScene;
+    const bool applyCameraInput = m_cameraInputEnabled;
     const auto movementSnapshot = movementState;
     const float verticalAngleSnapshot = verticalAngle;
     const float horizontalAngleSnapshot = horizontalAngle;
@@ -394,7 +454,7 @@ void Renderer::ScheduleSceneUpdateTask(float elapsedSeconds) {
     verticalAngle = 0.0f;
     horizontalAngle = 0.0f;
 
-    TaskSchedulerManager::GetInstance().Submit(TaskLane::Streaming, TaskDomain::General, "SceneUpdateOverlap", [this, scene, elapsedSeconds, movementSnapshot, verticalAngleSnapshot, horizontalAngleSnapshot, overlapEpoch, snapshotSequence, sourceFrameNumber]() mutable {
+    TaskSchedulerManager::GetInstance().Submit(TaskLane::Streaming, TaskDomain::General, "SceneUpdateOverlap", [this, scene, applyCameraInput, elapsedSeconds, movementSnapshot, verticalAngleSnapshot, horizontalAngleSnapshot, overlapEpoch, snapshotSequence, sourceFrameNumber]() mutable {
         ZoneScopedN("Renderer::SceneUpdateOverlap");
         const auto taskStart = std::chrono::steady_clock::now();
 
@@ -405,7 +465,7 @@ void Renderer::ScheduleSceneUpdateTask(float elapsedSeconds) {
 
         {
             ZoneScopedN("Renderer::SceneUpdateOverlap::ApplyCameraInput");
-            if (scene->HasUsablePrimaryCamera()) {
+            if (applyCameraInput && scene->HasUsablePrimaryCamera()) {
                 Components::Position& cameraPosition = scene->GetPrimaryCameraPosition();
                 Components::Rotation& cameraRotation = scene->GetPrimaryCameraRotation();
                 ApplyMovement(cameraPosition, cameraRotation, movementSnapshot, elapsedSeconds);

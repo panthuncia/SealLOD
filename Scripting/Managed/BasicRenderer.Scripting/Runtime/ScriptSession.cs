@@ -49,8 +49,19 @@ internal sealed class ScriptSession
         _runCount++;
         _pending = new PendingRun(sourcePath, string.IsNullOrWhiteSpace(scenarioName) ? null : scenarioName, options);
         var assemblyName = $"Scenario{_runCount}_{Path.GetFileNameWithoutExtension(sourcePath)}";
-        Native.Log(NativeLogLevel.Info, $"compiling {sources.Count} scenario file(s) from {sourcePath}");
-        _compile = Task.Run(() => ScenarioCompiler.Compile(sources, assemblyName));
+        _compile = Task.Run(() =>
+        {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var key = CompileCache.Key(sources);
+            if (CompileCache.TryGet(key, out var cached)) {
+                Native.Log(NativeLogLevel.Info, $"{sources.Count} scenario file(s) from {sourcePath}: compiled assembly from the cache");
+                return cached;
+            }
+            var output = ScenarioCompiler.Compile(sources, assemblyName);
+            CompileCache.Store(key, output);
+            Native.Log(NativeLogLevel.Info, $"compiled {sources.Count} scenario file(s) from {sourcePath} in {clock.ElapsedMilliseconds} ms");
+            return output;
+        });
         SetState(ScenarioState.Compiling, null);
         return AbiConstants.Ok;
     }

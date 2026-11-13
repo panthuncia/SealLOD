@@ -421,6 +421,14 @@ private:
     std::function<float()> getCLodDirectionalVirtualShadowLodBias;
     std::function<void(float)> setCLodDirectionalVirtualShadowLodBias;
 
+    float m_clodLocalVirtualShadowLodBias = CLodVirtualShadowDefaultLocalLodBias;
+    std::function<float()> getCLodLocalVirtualShadowLodBias;
+    std::function<void(float)> setCLodLocalVirtualShadowLodBias;
+
+    float m_clodLocalVirtualShadowMovingLodBias = CLodVirtualShadowDefaultLocalMovingLodBias;
+    std::function<float()> getCLodLocalVirtualShadowMovingLodBias;
+    std::function<void(float)> setCLodLocalVirtualShadowMovingLodBias;
+
     bool m_clodDirectionalVirtualShadowAutoLodBias = true;
     std::function<bool()> getCLodDirectionalVirtualShadowAutoLodBias;
     std::function<void(bool)> setCLodDirectionalVirtualShadowAutoLodBias;
@@ -774,6 +782,7 @@ private:
 
 	// Read at each use: the host installs its loader after the menu starts.
 	std::function<std::function<void(const std::string&)>()> getLoadModel;
+	std::function<std::function<void(const std::string&)>()> getLoadScript;
 	std::vector<SettingsManager::Subscription> m_settingSubscriptions;
 };
 

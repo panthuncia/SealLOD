@@ -69,6 +69,30 @@ bool CLodTriangleTouchesRenderableVirtualShadowPages(
         (ndc2.x + 1.0f) * 0.5f * visWidth + scissorMinX,
         (1.0f - ndc2.y) * 0.5f * visHeight + scissorMinY);
 
+    // Reject here what the rasterizer would cull, before it takes space in the mesh shader's output: most
+    // shadow triangles are far below a texel. The winding test is softwareRaster.hlsl's (front faces have negative
+    // area in y-down pixels, after reverseWinding), which matches the pipeline's front-CCW, cull-back state.
+    const float2 e01 = s1 - s0;
+    const float2 e02 = s2 - s0;
+    const float twiceArea = e01.x * e02.y - e01.y * e02.x;
+#if defined(PSO_DOUBLE_SIDED)
+    if (twiceArea == 0.0f)
+#else
+    if (twiceArea >= 0.0f)
+#endif
+    {
+        return false;
+    }
+    // No pixel centre (k + 0.5) between the bounds on an axis: the triangle covers no sample. The slack covers the
+    // rasterizer snapping vertices to 1/256 of a pixel.
+    const float kSubpixelSnapSlack = 1.0f / 256.0f;
+    const float2 sampleRangeMin = min(min(s0, s1), s2) - 0.5f - kSubpixelSnapSlack;
+    const float2 sampleRangeMax = max(max(s0, s1), s2) - 0.5f + kSubpixelSnapSlack;
+    if (any(ceil(sampleRangeMin) > floor(sampleRangeMax)))
+    {
+        return false;
+    }
+
     int2 minPx = int2(floor(min(min(s0, s1), s2)));
     int2 maxPx = int2(floor(max(max(s0, s1), s2)));
 

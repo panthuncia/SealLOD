@@ -99,6 +99,8 @@ private:
         uint32_t lightIndex = 0;
         bool dynamicSkinned = false;
         DirectX::XMFLOAT4X4 viewProjection{};
+        // Frames since the face's light last moved; UINT32_MAX for one that has not moved since it got the face.
+        uint32_t framesSinceMoved = UINT32_MAX;
     };
     std::array<LocalFaceState, CLodVirtualShadowMaxLocalFaceCount> m_previousLocalFaces{};
 };

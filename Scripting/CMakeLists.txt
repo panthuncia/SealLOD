@@ -29,11 +29,20 @@ set(BR_SCRIPTING_MANAGED_DIR "${CMAKE_CURRENT_LIST_DIR}/Managed/BasicRenderer.Sc
 set(BR_SCRIPTING_MANAGED_SOURCES
     "${CMAKE_CURRENT_LIST_DIR}/Directory.Build.props"
     "${BR_SCRIPTING_MANAGED_DIR}/BasicRenderer.Scripting.csproj"
+    "${BR_SCRIPTING_MANAGED_DIR}/Animation/Animation.cs"
+    "${BR_SCRIPTING_MANAGED_DIR}/Animation/AnimationBuilder.cs"
+    "${BR_SCRIPTING_MANAGED_DIR}/Animation/Ease.cs"
+    "${BR_SCRIPTING_MANAGED_DIR}/Api/CommandsApi.cs"
+    "${BR_SCRIPTING_MANAGED_DIR}/Api/Entity.cs"
+    "${BR_SCRIPTING_MANAGED_DIR}/Api/Math.cs"
     "${BR_SCRIPTING_MANAGED_DIR}/Api/Scenario.cs"
     "${BR_SCRIPTING_MANAGED_DIR}/Api/ScenarioContext.cs"
+    "${BR_SCRIPTING_MANAGED_DIR}/Api/SceneApi.cs"
+    "${BR_SCRIPTING_MANAGED_DIR}/Api/SettingsApi.cs"
     "${BR_SCRIPTING_MANAGED_DIR}/Api/TimeExtensions.cs"
     "${BR_SCRIPTING_MANAGED_DIR}/Interop/Native.cs"
     "${BR_SCRIPTING_MANAGED_DIR}/Interop/NativeAbi.cs"
+    "${BR_SCRIPTING_MANAGED_DIR}/Runtime/CompileCache.cs"
     "${BR_SCRIPTING_MANAGED_DIR}/Runtime/FrameScheduler.cs"
     "${BR_SCRIPTING_MANAGED_DIR}/Runtime/ScenarioCompiler.cs"
     "${BR_SCRIPTING_MANAGED_DIR}/Runtime/ScenarioLoadContext.cs"
@@ -42,9 +51,19 @@ set(BR_SCRIPTING_MANAGED_SOURCES
     "${BR_SCRIPTING_MANAGED_DIR}/Runtime/ScriptRuntime.cs"
     "${BR_SCRIPTING_MANAGED_DIR}/Runtime/ScriptSession.cs"
 )
+# Deployed as a tree (assets/ included); listed so edits redeploy.
+set(BR_SCRIPTING_SCENARIOS_DIR "${CMAKE_CURRENT_LIST_DIR}/Scenarios" CACHE INTERNAL "")
 set(BR_SCRIPTING_SCENARIO_FILES
     "${CMAKE_CURRENT_LIST_DIR}/Scenarios/Scenarios.csproj"
+    "${CMAKE_CURRENT_LIST_DIR}/Scenarios/CameraPath.cs"
     "${CMAKE_CURRENT_LIST_DIR}/Scenarios/Hello.cs"
+    "${CMAKE_CURRENT_LIST_DIR}/Scenarios/LightSweep.cs"
+    "${CMAKE_CURRENT_LIST_DIR}/Scenarios/SpinningCubes.cs"
+    "${CMAKE_CURRENT_LIST_DIR}/Scenarios/ZorahLights.cs"
+    "${CMAKE_CURRENT_LIST_DIR}/Scenarios/assets/cube.glb"
+    "${CMAKE_CURRENT_LIST_DIR}/Scenarios/assets/make_assets.py"
+    "${CMAKE_CURRENT_LIST_DIR}/Scenarios/assets/plane.glb"
+    "${CMAKE_CURRENT_LIST_DIR}/Scenarios/assets/sphere.glb"
     CACHE INTERNAL "")
 # Cache entries, not variables: basicrenderer_scripting_deploy runs in its caller's directory scope.
 set(BR_SCRIPTING_MANAGED_OUT "${CMAKE_CURRENT_BINARY_DIR}/managed" CACHE INTERNAL "")
@@ -67,6 +86,7 @@ add_custom_target(BasicRendererScriptingManaged ALL DEPENDS "${BR_SCRIPTING_MANA
 
 add_library(BasicRendererScripting STATIC
     "include/BasicRendererScripting/ScriptAbi.h"
+    "include/BasicRendererScripting/ScriptBackend.h"
     "include/BasicRendererScripting/ScriptHost.h"
     "src/DotNetRuntime.h"
     "src/DotNetRuntime.cpp"
@@ -87,6 +107,20 @@ if(MSVC)
     target_compile_options(BasicRendererScripting PRIVATE /EHsc)
 endif()
 
+# The scene backend over BasicRenderer (RendererScriptBackend.h). Separate from the host core, which needs no renderer.
+add_library(BasicRendererScriptingRenderer STATIC
+    "include/BasicRendererScripting/RendererScriptBackend.h"
+    "src/HandleTable.h"
+    "src/Renderer/RendererScriptBackend.cpp"
+)
+add_library(BasicRenderer::ScriptingRenderer ALIAS BasicRendererScriptingRenderer)
+# BasicRenderer is defined after this directory; target names resolve at generation.
+target_link_libraries(BasicRendererScriptingRenderer PUBLIC BasicRendererScripting PRIVATE BasicRenderer)
+target_compile_definitions(BasicRendererScriptingRenderer PRIVATE UNICODE _UNICODE)
+if(MSVC)
+    target_compile_options(BasicRendererScriptingRenderer PRIVATE /EHsc)
+endif()
+
 # basicrenderer_scripting_deploy(<target> [DESTINATIONS <dir>...])
 # Copies the managed runtime to <dir>/scripting, nethost.dll to <dir>, and the example scenarios to <dir>/scenarios
 # whenever any of them changes, independently of whether the target relinks. The default destination is the target's
@@ -101,8 +135,7 @@ function(basicrenderer_scripting_deploy target)
         list(APPEND _commands
             COMMAND "${CMAKE_COMMAND}" -E copy_directory "${BR_SCRIPTING_MANAGED_OUT}" "${_destination}/scripting"
             COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${BR_SCRIPTING_NETHOST_DLL}" "${_destination}"
-            COMMAND "${CMAKE_COMMAND}" -E make_directory "${_destination}/scenarios"
-            COMMAND "${CMAKE_COMMAND}" -E copy ${BR_SCRIPTING_SCENARIO_FILES} "${_destination}/scenarios")
+            COMMAND "${CMAKE_COMMAND}" -E copy_directory "${BR_SCRIPTING_SCENARIOS_DIR}" "${_destination}/scenarios")
     endforeach()
     set(_stamp "${CMAKE_CURRENT_BINARY_DIR}/${target}.scripting-deploy.stamp")
     add_custom_command(
@@ -131,7 +164,8 @@ set(BR_SCRIPTING_TESTS_OUT "${CMAKE_CURRENT_BINARY_DIR}/runtime-tests")
 add_custom_command(
     OUTPUT "${BR_SCRIPTING_TESTS_OUT}/ScriptRuntimeTests.dll"
     COMMAND ${BR_SCRIPTING_DOTNET_BUILD} "${BR_SCRIPTING_TESTS_DIR}/ScriptRuntimeTests.csproj" -o "${BR_SCRIPTING_TESTS_OUT}"
-    DEPENDS ${BR_SCRIPTING_MANAGED_SOURCES} "${BR_SCRIPTING_TESTS_DIR}/ScriptRuntimeTests.csproj" "${BR_SCRIPTING_TESTS_DIR}/Program.cs"
+    DEPENDS ${BR_SCRIPTING_MANAGED_SOURCES} "${BR_SCRIPTING_TESTS_DIR}/ScriptRuntimeTests.csproj" "${BR_SCRIPTING_TESTS_DIR}/FakeHost.cs"
+        "${BR_SCRIPTING_TESTS_DIR}/Program.cs"
     COMMENT "Building the managed scripting tests (ScriptRuntimeTests)"
     VERBATIM)
 add_custom_target(ScriptRuntimeTests ALL DEPENDS "${BR_SCRIPTING_TESTS_OUT}/ScriptRuntimeTests.dll")

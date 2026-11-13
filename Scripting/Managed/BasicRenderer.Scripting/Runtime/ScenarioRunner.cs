@@ -28,7 +28,7 @@ internal sealed class ScenarioRunner
         _scenarioAssembly = scenario.GetType().Assembly;
         _timeoutSeconds = timeoutSeconds;
         _scheduler = new FrameScheduler(_cancellation.Token);
-        Context = new ScenarioContext(_scheduler, name, _cancellation.Token);
+        Context = new ScenarioContext(_scheduler, name, source, _cancellation.Token);
         Result = new ScenarioResult { Scenario = name, Source = source };
     }
 
@@ -54,9 +54,13 @@ internal sealed class ScenarioRunner
                 _run = Start();
             } else {
                 _scheduler.Advance(deltaSeconds);
+                // Animations first, so code resuming this frame sees this frame's animated state.
+                Context.Animator.Evaluate(_scheduler.Time);
                 _scheduler.ResumeDue();
             }
             _scheduler.Drain();
+            // Again for animations started this frame: they apply their starting state now, not a frame late.
+            Context.Animator.Evaluate(_scheduler.Time);
         });
         if (_run!.IsCompleted) {
             Finish(_run);
@@ -116,6 +120,11 @@ internal sealed class ScenarioRunner
     private void Complete(ScenarioState state, ErrorResult? error)
     {
         _wall.Stop();
+        try {
+            RunOnScheduler(Context.Finish);
+        } catch (Exception e) {
+            Native.Log(NativeLogLevel.Warn, $"[{Context.ScenarioName}] error while finishing: {e.Message}");
+        }
         State = state;
         Result.Status = ScenarioResult.StatusName(state);
         Result.Frames = _scheduler.Frame + (_run == null ? 0 : 1);

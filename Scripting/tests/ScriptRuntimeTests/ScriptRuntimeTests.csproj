@@ -6,9 +6,12 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>disable</ImplicitUsings>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <!-- Test scenarios start animations without awaiting them, as scenarios do. -->
+    <NoWarn>$(NoWarn);CS4014</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="FakeHost.cs" />
     <Compile Include="Program.cs" />
   </ItemGroup>
 

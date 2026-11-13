@@ -115,11 +115,12 @@ public:
 	std::uint64_t MakeDeferredRetireFrame() const;
 	std::vector<br::render::ActiveDrawSetDebugStats> SnapshotActiveDrawSetDebugStats() const;
 
-	org::runtime::BulkWriteHandle BeginPerObjectBulkWrite();
+	// minimumSize: the end of the furthest row the caller writes (see DynamicBuffer::BeginBulkWrite).
+	org::runtime::BulkWriteHandle BeginPerObjectBulkWrite(size_t minimumSize = 0);
 	void EndPerObjectBulkWrite(size_t dirtyOffset, size_t dirtySize);
-	org::runtime::BulkWriteHandle BeginPerInstanceTransformBulkWrite();
+	org::runtime::BulkWriteHandle BeginPerInstanceTransformBulkWrite(size_t minimumSize = 0);
 	void EndPerInstanceTransformBulkWrite(size_t dirtyOffset, size_t dirtySize);
-	org::runtime::BulkWriteHandle BeginNormalMatrixBulkWrite();
+	org::runtime::BulkWriteHandle BeginNormalMatrixBulkWrite(size_t minimumSize = 0);
 	void EndNormalMatrixBulkWrite(size_t dirtyOffset, size_t dirtySize);
 
 	std::shared_ptr<org::DynamicBuffer>& GetPerObjectBuffers() {
@@ -166,11 +167,13 @@ public:
 	br::render::ArtifactVersionHandle DesiredBufferStateHandle() const;
 	br::render::DesiredObjectBufferStateCut DesiredBufferStateCut() const;
 	br::render::DesiredObjectBufferGateState DesiredBufferGateState() const;
-	// Static draw records name mesh-template and CLod rows that shaders resolve
-	// through the published Geometry root. Each static transaction records the
-	// geometry mutation sequence current at commit (its templates were accepted
-	// earlier), and every draw-records root carries a minimum publication
-	// dependency on a Geometry root covering that sequence.
+	// Draw records name mesh-template and CLod rows that shaders resolve
+	// through the published Geometry root. Each static transaction and each
+	// dynamic AddObjectsBulk records the geometry mutation sequence current at
+	// commit (its meshes were added earlier), and every draw-records root carries
+	// a minimum publication dependency on a Geometry root covering that sequence.
+	// The static import coordinator publishes those roots, so dynamic objects
+	// depend on a static import runtime being attached.
 	void SetGeometryCoverageSource(std::function<std::uint64_t()> source);
 	[[nodiscard]] std::uint64_t RequiredGeometryCoverage() const noexcept {
 		return m_requiredGeometryCoveragePublished.load(std::memory_order_acquire);
@@ -228,7 +231,7 @@ private:
 	};
 
 	std::uint64_t SealDesiredBufferStateLocked();
-	void RecordStaticGeometryRequirementLocked();
+	void RecordGeometryRequirementLocked();
 
 	struct DeferredBufferRangeRetire {
 		std::shared_ptr<org::DynamicBuffer> buffer;

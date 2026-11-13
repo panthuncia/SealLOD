@@ -15,10 +15,23 @@ struct PSInput {
     float4 tangentWorldSpace : TEXCOORD9;
 };
 
+// The virtual shadow raster's output is kept small: a mesh shader group's outputs are allocated at their declared
+// maximum, out of the same SM memory as groupshared, so every per-vertex word costs groups in flight.
+#if defined(CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW) && CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
+#define CLOD_VSM_RASTER_OUTPUT 1
+#else
+#define CLOD_VSM_RASTER_OUTPUT 0
+#endif
+// Clip distances that cut a block-local record's triangles to its block's active pages. The virtual shadow pixel
+// shader rejects pixels outside them anyway, so these only trade output space for pixel shader invocations.
+#ifndef CLOD_VSM_RASTER_BLOCK_CLIP_DISTANCES
+#define CLOD_VSM_RASTER_BLOCK_CLIP_DISTANCES 1
+#endif
+
 struct VisBufferPSInput
 {
     float4 position : SV_POSITION; // Screen-space position, required for rasterization
-#if defined(CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW) && CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
+#if CLOD_VSM_RASTER_OUTPUT && CLOD_VSM_RASTER_BLOCK_CLIP_DISTANCES
     float4 virtualShadowClipDistances : SV_ClipDistance0;
 #endif
     float linearDepth : TEXCOORD0;
@@ -54,7 +67,9 @@ struct VisBufferPSInput
 #if defined (PSO_ALPHA_TEST)
     float2 texcoord : TEXCOORD1;
     nointerpolation uint materialDataIndex : TEXCOORD2;
+#if !CLOD_VSM_RASTER_OUTPUT
     nointerpolation uint visibleClusterIndex : TEXCOORD3;
+#endif
 #if !defined(CLOD_RASTER_SINGLE_VIEW)
     nointerpolation uint viewID : TEXCOORD4;
 #endif
@@ -62,7 +77,9 @@ struct VisBufferPSInput
     nointerpolation uint shadowClipmapIndex : TEXCOORD5;
 #endif
 #else
+#if !CLOD_VSM_RASTER_OUTPUT
     nointerpolation uint visibleClusterIndex : TEXCOORD1;
+#endif
 #if !defined(CLOD_RASTER_SINGLE_VIEW)
     nointerpolation uint viewID : TEXCOORD2;
 #endif

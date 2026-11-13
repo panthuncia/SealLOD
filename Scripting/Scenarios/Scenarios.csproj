@@ -6,6 +6,9 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <OutputType>Library</OutputType>
     <IsPackable>false</IsPackable>
+    <!-- Animations are awaitable but usually run unawaited. The runtime's compiler allows exactly that and makes an
+         unawaited Task an error (Runtime/ScenarioCompiler.cs); the IDE build cannot tell them apart. -->
+    <NoWarn>$(NoWarn);CS4014</NoWarn>
   </PropertyGroup>
 
   <!-- Keep in step with ScenarioCompiler.GlobalUsings. -->

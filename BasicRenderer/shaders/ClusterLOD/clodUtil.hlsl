@@ -2639,7 +2639,6 @@ void CLodVirtualShadowMarkLocalFaceBlocks(
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Shadows::CLodClipmapInfo)];
     StructuredBuffer<CLodVirtualShadowCompactShadowCameraInfo> shadowCameras =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Shadows::CLodCompactShadowCameras)];
-    const float lodBias = asfloat(CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_LOCAL_LOD_BIAS_AS_UINT);
     // A screen pixel's world width per unit of view depth.
     const float pixelWorldSizePerDepth = 2.0f * abs(mainCamera.projectionInverse[1][1]) / max(screenHeight, 1.0f);
 
@@ -2692,8 +2691,9 @@ void CLodVirtualShadowMarkLocalFaceBlocks(
                 const float2 faceUv = float2(clip.x / clip.w * 0.5f + 0.5f, 0.5f - clip.y / clip.w * 0.5f);
                 uvMin = min(uvMin, faceUv);
                 uvMax = max(uvMax, faceUv);
+                // The face's own bias, as the lookup uses: a moving light's faces are coarser (VirtualShadowMapSetupPass).
                 const float mip = CLodVirtualShadowLocalContinuousMip(
-                    pixelWorldSizePerDepth * depths[i], info.texelWorldSize * clip.w, lodBias);
+                    pixelWorldSizePerDepth * depths[i], info.texelWorldSize * clip.w, info.directionalLodBias);
                 mipMin = min(mipMin, mip);
                 mipMax = max(mipMax, mip);
             }
@@ -4025,6 +4025,7 @@ void CLodVirtualShadowBuildActiveBlocksCSMain(uint3 dispatchThreadId : SV_Dispat
     uint2 minLocalPageCoord = uint2(3u, 3u);
     uint2 maxLocalPageCoord = uint2(0u, 0u);
     bool anyActive = false;
+    uint activePageMask = 0u;
     [unroll]
     for (uint localY = 0u; localY < kCLodVirtualShadowBlockPagesPerAxis; ++localY)
     {
@@ -4048,14 +4049,15 @@ void CLodVirtualShadowBuildActiveBlocksCSMain(uint3 dispatchThreadId : SV_Dispat
             if (pageActive)
             {
                 anyActive = true;
+                activePageMask |= 1u << (localY * kCLodVirtualShadowBlockPagesPerAxis + localX);
                 minLocalPageCoord = min(minLocalPageCoord, localPageCoord);
                 maxLocalPageCoord = max(maxLocalPageCoord, localPageCoord);
             }
         }
     }
     output[blockLinearIndex] = anyActive
-        ? CLodVirtualShadowPackBlockActiveRect(
-            minLocalPageCoord, maxLocalPageCoord, false)
+        ? (CLodVirtualShadowPackBlockActiveRect(minLocalPageCoord, maxLocalPageCoord, false) |
+            (activePageMask << kCLodVirtualShadowBlockActivePageMaskShift))
         : 0xFFFFFFFFu;
 }
 

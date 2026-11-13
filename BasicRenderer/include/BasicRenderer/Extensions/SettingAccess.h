@@ -19,6 +19,11 @@ float ReadFloatSetting(const std::string& name);
 bool ReadBoolSetting(const std::string& name);
 std::uint32_t ReadUnsignedSetting(const std::string& name);
 
+// A setting's stored type, for callers that address settings by name at run time (scripts, control commands). Other is a
+// type with no accessor here (an enum, a callback); Missing is no setting by that name.
+enum class SettingValueType : std::uint8_t { Missing, Bool, Float, UInt32, Int32, UInt8, Other };
+SettingValueType GetSettingValueType(const std::string& name);
+
 
 template <typename T>
 std::function<T()> MakeSettingGetter(const std::string& name);
@@ -30,6 +35,7 @@ template <> std::function<bool()> MakeSettingGetter<bool>(const std::string& nam
 template <> std::function<float()> MakeSettingGetter<float>(const std::string& name);
 template <> std::function<std::uint32_t()> MakeSettingGetter<std::uint32_t>(const std::string& name);
 template <> std::function<std::int32_t()> MakeSettingGetter<std::int32_t>(const std::string& name);
+template <> std::function<std::uint8_t()> MakeSettingGetter<std::uint8_t>(const std::string& name);
 template <> std::function<CLodVSMRasterMode()> MakeSettingGetter<CLodVSMRasterMode>(const std::string& name);
 template <> std::function<CLodSoftwareRasterMode()> MakeSettingGetter<CLodSoftwareRasterMode>(const std::string& name);
 template <> std::function<CLodCullingBackend()> MakeSettingGetter<CLodCullingBackend>(const std::string& name);

@@ -780,6 +780,15 @@ namespace br::staticimport
 				_drains->ScheduleWorkerDrains();
 			}
 		}
+		// Dynamic objects raise the draw records' required geometry coverage outside the
+		// coordinator; wake it so it cuts a scene publishing their geometry rows.
+		if (_shared->hasSceneIngestionServices && _shared->sceneIngestionServices.objects) {
+			const auto required = _shared->sceneIngestionServices.objects->RequiredGeometryCoverage();
+			if (required > _observedRequiredGeometryCoverage) {
+				_observedRequiredGeometryCoverage = required;
+				_drains->ScheduleCoordinatorDrain();
+			}
+		}
 		const auto queueBudget = MakeStaticStreamBudget();
 		std::size_t applied = 0;
 		std::size_t pendingOrSkipped = 0;

@@ -185,6 +185,7 @@ namespace br::staticimport
 			bool didWork = false;
 			didWork = ConsumeHostLivenessChange() || didWork;
 			didWork = DrainGroupAcks() || didWork;
+			didWork = DrainGeometryCoverage() || didWork;
 			didWork = DrainTemplateRefs() || didWork;
 			didWork = DrainGroupChanges() || didWork;
 			for (auto* extension : _extensions) {
@@ -1470,6 +1471,23 @@ namespace br::staticimport
 		_state.graphOwnedLastSceneGroupCount = cutGroupCount;
 		_state.graphOwnedLastSceneGeometryCoverage = geometryCoverage;
 		return true;
+	}
+
+	bool StaticImportCoordinator::DrainGeometryCoverage()
+	{
+		// Dynamic renderables (Scene::ActivateRenderable) add mesh and CLod rows to the
+		// geometry journals, and their draw records require a Geometry root covering
+		// them. The StaticScene is the sole Geometry root, so it must be cut again even
+		// when static membership has not changed. A cut in flight resubmits from
+		// DrainGroupAcks when it publishes.
+		if (!_shared->hasSceneIngestionServices || _state.graphOwnedSceneInFlight) return false;
+		const auto* objects = _shared->sceneIngestionServices.objects;
+		auto* requests = _shared->sceneIngestionServices.execution.stateRequests;
+		if (!objects || !requests ||
+			objects->RequiredGeometryCoverage() <= _state.graphOwnedLastSceneGeometryCoverage) {
+			return false;
+		}
+		return TrySubmitReadyStaticScene(*requests);
 	}
 
 	bool StaticImportCoordinator::DrainGroupAcks()

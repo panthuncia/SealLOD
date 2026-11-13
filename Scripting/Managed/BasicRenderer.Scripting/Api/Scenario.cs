@@ -44,3 +44,19 @@ public enum ScenarioState
 
 /// <summary>Thrown by <see cref="ScenarioContext.Fail"/>: ends the scenario as failed with this message.</summary>
 public sealed class ScenarioFailedException(string message) : Exception(message);
+
+/// <summary>
+/// A host API call failed: a stale entity, a missing setting or file, a type mismatch. <see cref="Status"/> is the
+/// ABI's BR_SCRIPT_E_* code; the message is the host's explanation.
+/// </summary>
+public sealed class ScriptApiException(int status, string operation, string detail)
+    : Exception(string.IsNullOrEmpty(detail) ? $"{operation} failed ({status})" : $"{operation} failed: {detail}")
+{
+    public int Status { get; } = status;
+
+    /// <summary>The entity was destroyed, or belongs to an earlier run.</summary>
+    public bool IsStaleHandle => Status == -2;
+    public bool IsNotFound => Status == -3;
+    public bool IsTypeMismatch => Status == -4;
+    public bool IsUnsupported => Status == -5;
+}

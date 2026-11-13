@@ -82,13 +82,40 @@ internal static class ScenarioCompiler
         var embedded = trees.Where(t => t.FilePath != "<global usings>").Select(t => EmbeddedText.FromSource(t.FilePath, t.GetText()));
         EmitResult emitted = compilation.Emit(peStream, pdbStream, options: emitOptions, embeddedTexts: embedded);
 
-        var diagnostics = emitted.Diagnostics
-            .Where(d => d.Severity is DiagnosticSeverity.Error or DiagnosticSeverity.Warning)
-            .OrderByDescending(d => d.Severity)
-            .Select(ToDiagnostic)
-            .ToList();
-        if (!emitted.Success) return new CompileOutput { Diagnostics = diagnostics };
+        var diagnostics = new List<CompileDiagnostic>();
+        bool unawaitedTask = false;
+        foreach (var diagnostic in emitted.Diagnostics.Where(d => d.Severity is DiagnosticSeverity.Error or DiagnosticSeverity.Warning)) {
+            if (diagnostic.Id == "CS4014") {
+                // Unawaited: fine for an animation (they run alongside the scenario), a mistake for a Task (the wait
+                // would not happen), so that is an error.
+                if (IsAnimation(compilation, diagnostic)) continue;
+                unawaitedTask = true;
+                diagnostics.Add(ToDiagnostic(diagnostic) with
+                {
+                    Severity = "error",
+                    Message = "this Task is not awaited, so the scenario does not wait for it: add 'await' (or '_ =' to run it in the background)",
+                });
+                continue;
+            }
+            diagnostics.Add(ToDiagnostic(diagnostic));
+        }
+        diagnostics = diagnostics.OrderBy(d => d.Severity == "error" ? 0 : 1).ToList();
+        if (!emitted.Success || unawaitedTask) return new CompileOutput { Diagnostics = diagnostics };
         return new CompileOutput { Assembly = peStream.ToArray(), Pdb = pdbStream.ToArray(), Diagnostics = diagnostics };
+    }
+
+    private static bool IsAnimation(CSharpCompilation compilation, Diagnostic diagnostic)
+    {
+        var tree = diagnostic.Location.SourceTree;
+        if (tree == null) return false;
+        var node = tree.GetRoot().FindNode(diagnostic.Location.SourceSpan, getInnermostNodeForTie: true);
+        if (node is Microsoft.CodeAnalysis.CSharp.Syntax.ExpressionStatementSyntax statement) node = statement.Expression;
+        var type = compilation.GetSemanticModel(tree).GetTypeInfo(node).Type;
+        var animation = compilation.GetTypeByMetadataName("BasicRenderer.Scripting.Animation");
+        for (var t = type; t != null; t = t.BaseType) {
+            if (SymbolEqualityComparer.Default.Equals(t, animation)) return true;
+        }
+        return false;
     }
 
     private static CompileDiagnostic ToDiagnostic(Diagnostic diagnostic)

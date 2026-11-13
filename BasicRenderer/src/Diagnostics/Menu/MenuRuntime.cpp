@@ -1,4 +1,5 @@
 #include <BasicRenderer/Scene/Scene.h>
+#include <cmath>
 #include "Render/RenderGraph/RenderGraph.h"
 #include "Diagnostics/Menu/Menu.h"
 #include "Camera/Lens/LensManager.h"
@@ -428,6 +429,16 @@ void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     setCLodDirectionalVirtualShadowLodBias = settingsManager.getSettingSetter<float>(CLodDirectionalVirtualShadowLodBiasSettingName);
     m_clodDirectionalVirtualShadowLodBias = getCLodDirectionalVirtualShadowLodBias();
     observerSetting(m_clodDirectionalVirtualShadowLodBias, CLodDirectionalVirtualShadowLodBiasSettingName);
+
+    getCLodLocalVirtualShadowLodBias = settingsManager.getSettingGetter<float>(CLodLocalVirtualShadowLodBiasSettingName);
+    setCLodLocalVirtualShadowLodBias = settingsManager.getSettingSetter<float>(CLodLocalVirtualShadowLodBiasSettingName);
+    m_clodLocalVirtualShadowLodBias = getCLodLocalVirtualShadowLodBias();
+    observerSetting(m_clodLocalVirtualShadowLodBias, CLodLocalVirtualShadowLodBiasSettingName);
+
+    getCLodLocalVirtualShadowMovingLodBias = settingsManager.getSettingGetter<float>(CLodLocalVirtualShadowMovingLodBiasSettingName);
+    setCLodLocalVirtualShadowMovingLodBias = settingsManager.getSettingSetter<float>(CLodLocalVirtualShadowMovingLodBiasSettingName);
+    m_clodLocalVirtualShadowMovingLodBias = getCLodLocalVirtualShadowMovingLodBias();
+    observerSetting(m_clodLocalVirtualShadowMovingLodBias, CLodLocalVirtualShadowMovingLodBiasSettingName);
 
     getCLodDirectionalVirtualShadowAutoLodBias = settingsManager.getSettingGetter<bool>(CLodDirectionalVirtualShadowAutoLodBiasSettingName);
     setCLodDirectionalVirtualShadowAutoLodBias = settingsManager.getSettingSetter<bool>(CLodDirectionalVirtualShadowAutoLodBiasSettingName);
@@ -880,6 +891,7 @@ void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     observerSetting(m_autoAliasPoolGrowthHeadroom, "autoAliasPoolGrowthHeadroom");
 
 	getLoadModel = settingsManager.getSettingGetter<std::function<void(const std::string&)>>("loadModel");
+	getLoadScript = settingsManager.getSettingGetter<std::function<void(const std::string&)>>("loadScript");
 
     m_meshShadersSupported = DeviceManager::GetInstance().GetMeshShadersSupported();
 
@@ -1550,8 +1562,25 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
         if (ImGui::Checkbox("Auto Directional VSM LOD Bias", &m_clodDirectionalVirtualShadowAutoLodBias)) {
             setCLodDirectionalVirtualShadowAutoLodBias(m_clodDirectionalVirtualShadowAutoLodBias);
         }
-        if (ImGui::SliderFloat("Directional VSM Manual LOD Bias", &m_clodDirectionalVirtualShadowLodBias, -4.0f, 4.0f, "%.2f")) {
+        // Texel density, as a bias in mips: +1 halves the shadow texels per unit length, -1 doubles them. The sun picks
+        // its clip from distance to the camera, so this scales its density everywhere by the same factor.
+        if (ImGui::SliderFloat("Directional VSM Texel Density", &m_clodDirectionalVirtualShadowLodBias, -4.0f, 4.0f, "%+.2f mips")) {
             setCLodDirectionalVirtualShadowLodBias(m_clodDirectionalVirtualShadowLodBias);
+        }
+        ImGui::TextDisabled("  x%.2f texels per unit length%s", std::exp2(-m_clodDirectionalVirtualShadowLodBias),
+            m_clodDirectionalVirtualShadowAutoLodBias ? ", before the automatic budget bias" : "");
+        // A local light face's receivers each use the finest mip whose texels are at most this many screen pixels
+        // wide (CLodVirtualShadowLocalContinuousMip), so this is the shadow's on-screen texel size.
+        float localTexelPixels = std::exp2(m_clodLocalVirtualShadowLodBias);
+        if (ImGui::SliderFloat("Local VSM Texel Size", &localTexelPixels, 0.25f, 16.0f, "%.2f px", ImGuiSliderFlags_Logarithmic)) {
+            localTexelPixels = std::clamp(localTexelPixels, 0.25f, 16.0f);
+            m_clodLocalVirtualShadowLodBias = std::log2(localTexelPixels);
+            setCLodLocalVirtualShadowLodBias(m_clodLocalVirtualShadowLodBias);
+        }
+        ImGui::TextDisabled("  at most this many screen pixels per shadow texel (%+.2f mips)", m_clodLocalVirtualShadowLodBias);
+        if (ImGui::SliderFloat("Local VSM Moving-Light Coarsening", &m_clodLocalVirtualShadowMovingLodBias, 0.0f, 4.0f, "%+.2f mips")) {
+            m_clodLocalVirtualShadowMovingLodBias = std::max(m_clodLocalVirtualShadowMovingLodBias, 0.0f);
+            setCLodLocalVirtualShadowMovingLodBias(m_clodLocalVirtualShadowMovingLodBias);
         }
         if (ImGui::SliderFloat("Directional VSM Auto Bias Scale", &m_clodDirectionalVirtualShadowAutoLodBiasScale, 0.0f, 4.0f, "%.2f")) {
             m_clodDirectionalVirtualShadowAutoLodBiasScale = std::max(m_clodDirectionalVirtualShadowAutoLodBiasScale, 0.0f);

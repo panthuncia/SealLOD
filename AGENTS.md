@@ -54,9 +54,11 @@ architecture rather than in a global pass bucket. TextureFactory retains ownersh
 of its nested passes, whose definitions live in `Assets/Textures/RenderPasses`.
 Shader paths remain under `BasicRenderer/shaders/`.
 
-`Scripting/` is C# scenario scripting: a native host library that loads .NET in-process and a managed runtime that
-compiles loose `.cs` scenarios with Roslyn and runs them one slice per frame (the demo's `--script`). It depends on no
-renderer internals. See [docs/scripting.md](docs/scripting.md); its ABI tables are append-only.
+`Scripting/` is C# scenario scripting: a native host library that loads .NET in-process, a renderer backend
+(`BasicRendererScriptingRenderer`) that applies scripts' scene writes from a `Renderer::AddSceneMutationHook`, and a
+managed runtime that compiles loose `.cs` scenarios with Roslyn and runs them one slice per frame (the demo's
+`--script`). It uses only public renderer headers. See [docs/scripting.md](docs/scripting.md); its ABI tables are
+append-only.
 
 `BasicRHI/`, `OpenRenderGraph/`, `BasicTelemetry/`, `BasicScene/`, and
 `ORGModuleServices/` are first-party dependencies. Other vendored submodules are not

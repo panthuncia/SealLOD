@@ -1,4 +1,4 @@
-"""Write a self-contained .glb lens test scene for the BasicRenderer demo (`--model <path>`). See README.md here.
+"""Write a self-contained .glb lens test scene for the BasicRenderer demo (load it from a `--script` scenario or Scene Explorer). See README.md here.
 
 Everything is built from geometry and factor-only materials (no textures), so the scene needs no texture processing
 and every radiance in it is exact. Charts are self-lit (emissive white, black base colour) and sit in front of a black

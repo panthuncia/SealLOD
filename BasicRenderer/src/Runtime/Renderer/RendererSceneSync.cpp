@@ -109,9 +109,15 @@ void Renderer::RunRenderResourceSyncStage() {
 
     // Pre-size scratch buffers single-threaded so the parallel loop can
     // memcpy into non-overlapping regions without any synchronization.
-    auto perObjectHandle = objectManager->BeginPerObjectBulkWrite();
-    auto perInstanceTransformHandle = objectManager->BeginPerInstanceTransformBulkWrite();
-    auto normalMatrixHandle = objectManager->BeginNormalMatrixBulkWrite();
+    // Sized to cover every row written below: new objects' rows can lie past the buffers' current backing.
+    const auto rangesEnd = [](const std::vector<std::pair<size_t, size_t>>& ranges) {
+        size_t end = 0;
+        for (const auto& range : ranges) end = (std::max)(end, range.second);
+        return end;
+    };
+    auto perObjectHandle = objectManager->BeginPerObjectBulkWrite(rangesEnd(perObjectDirtyRanges));
+    auto perInstanceTransformHandle = objectManager->BeginPerInstanceTransformBulkWrite(rangesEnd(perInstanceTransformDirtyRanges));
+    auto normalMatrixHandle = objectManager->BeginNormalMatrixBulkWrite(rangesEnd(normalMatrixDirtyRanges));
 
     {
         BT_ZONE_SCOPE("Renderer::Update::RenderResourceSync::ObjectSync");

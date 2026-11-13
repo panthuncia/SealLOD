@@ -153,9 +153,16 @@ changed file), and its index and artifact sizes. See SARP's
 ## C# scenarios
 
 `--script <file.cs|dir> --script-exit` runs a C# scenario and exits with 0 (passed), 1 (failed or timed out), 2
-(compile error) or 3 (the scripting runtime could not start); `--script-result <path>` writes its result document and
-`--script-fixed-dt <s>` makes the run frame-rate independent. See [docs/scripting.md](docs/scripting.md).
+(compile error) or 3 (the scripting runtime could not start). `--script-result <path>` writes its result document,
+`--script-fixed-dt <s>` makes the run frame-rate independent and `--no-scene-overlap` makes writes reach the next
+frame. With `--sampling-control-pipe` the pipe also takes `script.run {path, scenario?, timeout_seconds?}`,
+`script.reload`, `script.stop {reason?}` and `script.status`; F5 in the window reruns the last scenario. Scenarios
+reach every command in this file through `ctx.Commands`. See [docs/scripting.md](docs/scripting.md).
 `ScriptRuntimeTests` and `ScriptHostTests` cover the runtime and host without a device.
+
+The control pipe no longer needs `--sampling-config`: `--sampling-control-pipe <name>` alone serves every command
+except `profile.run`. Commands are registered once in a `ControlCommandRegistry`
+(`Diagnostics/ControlCommandRegistry.h`) that the pipe and scripts share.
 
 ## CLOD virtual-shadow CPU benchmark
 

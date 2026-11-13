@@ -18,6 +18,7 @@
 #include "BasicRenderer/Pipeline/RasterBucketFlags.h"
 
 namespace org { class DynamicGloballyIndexedResource; }
+namespace br::import { struct ImportedAssetPayload; }
 class Material;
 
 class Scene {
@@ -43,6 +44,12 @@ public:
         std::optional<std::uint64_t> stableSceneID,
         const std::vector<DirectX::XMMATRIX>& instanceMatrices,
         bool assignNames = true);
+    // A loaded model as movable entities: a root carrying the model's transform (world, its initial local transform
+    // under the scene root), with one renderable child per part at the part's own placement. Moving the root moves the
+    // whole model. Parts without meshes are skipped; skinned parts are skinned entities.
+    flecs::entity InstantiateModel(const br::import::ImportedAssetPayload& payload, std::wstring name, DirectX::XMMATRIX world);
+    // Releases a model InstantiateModel created: its renderables go back to the pool, then the root is destroyed.
+    void ReleaseModel(flecs::entity root);
     void ReserveRenderableEntityPool(std::size_t count);
     void ReleaseRenderableEntityECS(flecs::entity entity);
     void BeginRenderableActivationBatch();

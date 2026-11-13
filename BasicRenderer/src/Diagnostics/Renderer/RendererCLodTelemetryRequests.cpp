@@ -1403,7 +1403,7 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                     return decoded.counters[static_cast<size_t>(index)];
                 };
                 spdlog::info(
-                "CLOD VSM work frame={}: object(total={},inRange={},visible={},staleRejected={},frustumRejected={},occlusionRejected={},emitted={}) traverse(internal={},leaf={},culled={},emitted={}) cluster(visibleWrites={},skinnedBounds={},dirtyQueries={},dirtyHits={},cleanRejected={}) sort(inputs={},emitted={}) raster(groups={},triangles={},pixels={},pageRejected={},writes={})",
+                "CLOD VSM work frame={}: object(total={},inRange={},visible={},staleRejected={},frustumRejected={},occlusionRejected={},emitted={}) traverse(internal={},leaf={},culled={},emitted={}) cluster(visibleWrites={},skinnedBounds={},dirtyQueries={},dirtyHits={},cleanRejected={}) sort(inputs={},emitted={}) raster(groups={},inRange={},zeroTriangleGroups={},triangles={},pixels={},pageRejected={},writes={})",
                     requestedFrame,
                     counter(CLodWorkGraphCounterIndex::ObjectCullThreads),
                     counter(CLodWorkGraphCounterIndex::ObjectCullInRangeThreads),
@@ -1424,6 +1424,8 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
                     counter(CLodWorkGraphCounterIndex::RasterSortCompactionInputs),
                     counter(CLodWorkGraphCounterIndex::RasterSortCompactionTriangleEmitted),
                     counter(CLodWorkGraphCounterIndex::RasterMeshShaderGroups),
+                    counter(CLodWorkGraphCounterIndex::RasterMeshShaderInRange),
+                    counter(CLodWorkGraphCounterIndex::RasterMeshShaderZeroTriangleOutputs),
                     counter(CLodWorkGraphCounterIndex::RasterMeshShaderOutputTriangles),
                     counter(CLodWorkGraphCounterIndex::RasterPixelShaderInvocations),
                     counter(CLodWorkGraphCounterIndex::RasterPixelVirtualShadowPageRejected),

@@ -103,6 +103,38 @@ namespace org::runtime {
 class IUploadPolicyService;
 }
 
+namespace br::render {
+// Keeps a Renderer::AddSceneMutationHook registration alive; destroying it removes the hook.
+class SceneMutationSubscription {
+public:
+    SceneMutationSubscription() = default;
+    explicit SceneMutationSubscription(std::function<void()> remove) : m_remove(std::move(remove)) {}
+    SceneMutationSubscription(SceneMutationSubscription&& other) noexcept : m_remove(std::exchange(other.m_remove, nullptr)) {}
+    SceneMutationSubscription& operator=(SceneMutationSubscription&& other) noexcept {
+        if (this != &other) {
+            Reset();
+            m_remove = std::exchange(other.m_remove, nullptr);
+        }
+        return *this;
+    }
+    SceneMutationSubscription(const SceneMutationSubscription&) = delete;
+    SceneMutationSubscription& operator=(const SceneMutationSubscription&) = delete;
+    ~SceneMutationSubscription() { Reset(); }
+    void Reset() {
+        if (m_remove) std::exchange(m_remove, nullptr)();
+    }
+
+private:
+    std::function<void()> m_remove;
+};
+
+struct SceneMutationHookOptions {
+    // Waits for an asynchronous scene update still running from the previous frame, so the hook runs every frame.
+    // Without it, a frame whose update is still running skips the hook.
+    bool waitForInFlightSceneTask = true;
+};
+}
+
 class DeferredFunctions {
 public:
     // enqueue any void() callable
@@ -155,6 +187,15 @@ public:
     // pipelines, queued ones included. A pass or material whose pipeline is pending draws nothing yet.
     uint32_t GetPendingShaderCompileCount() const;
     void SetDeterministicSamplingMode(bool enabled);
+    // Callbacks that change the current scene: create, move and destroy entities, set components. Each runs once per
+    // Update on the calling thread, before the frame's scene update, at a point where no asynchronous scene update is
+    // touching the scene, in registration order. Not called for frames that skip their update, nor in external scene
+    // mode. With overlap on, what a hook writes is rendered by the next frame, like camera input.
+    br::render::SceneMutationSubscription AddSceneMutationHook(std::function<void(Scene&)> hook,
+        br::render::SceneMutationHookOptions options = {});
+    // The fly camera: keyboard and mouse moving the primary camera. A script that drives the camera turns it off.
+    void SetCameraInputEnabled(bool enabled);
+    bool GetCameraInputEnabled() const { return m_cameraInputEnabled; }
     bool GetDeterministicSamplingMode() const { return m_deterministicSamplingMode; }
     br::render::SceneIngestionServices& GetSceneIngestionServices() { return m_sceneIngestionServices; }
     const br::render::SceneIngestionServices& GetSceneIngestionServices() const { return m_sceneIngestionServices; }
@@ -398,6 +439,8 @@ private:
     void InvalidateSceneOverlapState();
     void RunRenderResourceSyncStage();
     void FlushPendingSceneExplorerEdits();
+    void RunSceneMutationHooks();
+    void WaitForSceneUpdateTask();
     void QueueSceneNodePositionEdit(uint64_t stableSceneID, DirectX::XMFLOAT3 position);
     void QueueSceneNodeUniformScaleEdit(uint64_t stableSceneID, float uniformScale);
     void BeginFrameTaskGraphCapture();
@@ -507,6 +550,15 @@ private:
         bool hasUniformScale = false;
         float uniformScale = 1.0f;
     };
+
+    struct SceneMutationHookEntry {
+        uint64_t id = 0;
+        std::function<void(Scene&)> hook;
+        br::render::SceneMutationHookOptions options;
+    };
+    std::vector<SceneMutationHookEntry> m_sceneMutationHooks;
+    uint64_t m_nextSceneMutationHookID = 1;
+    bool m_cameraInputEnabled = true;
 
     std::mutex m_pendingSceneExplorerEditsMutex;
     std::unordered_map<uint64_t, PendingSceneExplorerEdit> m_pendingSceneExplorerEdits;

@@ -23,6 +23,18 @@ std::uint32_t ReadUnsignedSetting(const std::string& name)
     return SettingsManager::GetInstance().getSettingGetter<std::uint32_t>(name)();
 }
 
+SettingValueType GetSettingValueType(const std::string& name)
+{
+    const std::type_info* type = SettingsManager::GetInstance().tryGetSettingType(name);
+    if (!type) return SettingValueType::Missing;
+    if (*type == typeid(bool)) return SettingValueType::Bool;
+    if (*type == typeid(float)) return SettingValueType::Float;
+    if (*type == typeid(std::uint32_t)) return SettingValueType::UInt32;
+    if (*type == typeid(std::int32_t)) return SettingValueType::Int32;
+    if (*type == typeid(std::uint8_t)) return SettingValueType::UInt8;
+    return SettingValueType::Other;
+}
+
 template <> std::function<bool()> MakeSettingGetter<bool>(const std::string& name)
 {
 	return SettingsManager::GetInstance().getSettingGetter<bool>(name);
@@ -36,6 +48,11 @@ template <> std::function<float()> MakeSettingGetter<float>(const std::string& n
 template <> std::function<std::uint32_t()> MakeSettingGetter<std::uint32_t>(const std::string& name)
 {
 	return SettingsManager::GetInstance().getSettingGetter<std::uint32_t>(name);
+}
+
+template <> std::function<std::uint8_t()> MakeSettingGetter<std::uint8_t>(const std::string& name)
+{
+	return SettingsManager::GetInstance().getSettingGetter<std::uint8_t>(name);
 }
 
 template <> std::function<std::int32_t()> MakeSettingGetter<std::int32_t>(const std::string& name)

@@ -698,6 +698,7 @@ add_library(BasicRendererPublicHeaderSmoke OBJECT
     "tests/PublicHeaders/Diagnostics_NvPerfIntegration.cpp"
     "tests/PublicHeaders/Diagnostics_StatisticalSampler.cpp"
     "tests/PublicHeaders/Diagnostics_SamplingControlServer.cpp"
+    "tests/PublicHeaders/Diagnostics_ControlCommandRegistry.cpp"
     "tests/PublicHeaders/Extensions_RenderGraphExtensionRegistration.cpp"
     "tests/PublicHeaders/Extensions_RenderDeviceAccess.cpp"
     "tests/PublicHeaders/Extensions_PipelineDescs.cpp"
@@ -785,7 +786,7 @@ add_executable(${BASICRENDERER_DEMO_TARGET} WIN32 "${BASICRENDERER_DEMO_SOURCE}"
 target_include_directories(${BASICRENDERER_DEMO_TARGET} PRIVATE "${BASICRENDERER_SOURCE_ROOT}/src")
 # C# scenarios (--script); see Scripting/ and docs/scripting.md.
 if(BASICRENDERER_SCRIPTING_AVAILABLE)
-    target_link_libraries(${BASICRENDERER_DEMO_TARGET} PRIVATE BasicRenderer::Scripting)
+    target_link_libraries(${BASICRENDERER_DEMO_TARGET} PRIVATE BasicRenderer::ScriptingRenderer)
     target_compile_definitions(${BASICRENDERER_DEMO_TARGET} PRIVATE BASICRENDERER_HAS_SCRIPTING=1)
     # Beside the exe, and in the runtime root it is run from (D3D\, shaders\ and the rest live there).
     basicrenderer_scripting_deploy(${BASICRENDERER_DEMO_TARGET}

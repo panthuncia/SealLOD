@@ -519,9 +519,10 @@ void ObjectManager::SetGeometryCoverageSource(std::function<std::uint64_t()> sou
 	m_geometryCoverageSource = std::move(source);
 }
 
-void ObjectManager::RecordStaticGeometryRequirementLocked() {
-	// Read at commit, after the transaction's templates were accepted into the
-	// geometry journals, so any Geometry root covering this value contains them.
+void ObjectManager::RecordGeometryRequirementLocked() {
+	// Read at commit, after the transaction's templates (or a dynamic object's
+	// meshes, added by Scene::ActivateRenderable) were written into the geometry
+	// journals, so any Geometry root covering this value contains them.
 	if (!m_geometryCoverageSource) return;
 	m_requiredGeometryCoverage = (std::max)(m_requiredGeometryCoverage, m_geometryCoverageSource());
 	m_requiredGeometryCoveragePublished.store(m_requiredGeometryCoverage, std::memory_order_release);
@@ -1691,6 +1692,13 @@ std::vector<Components::ObjectDrawInfo> ObjectManager::AddObjectsBulk(const std:
 	// the generation check while its transform row is still empty, and the
 	// object draws near the origin until the next cut.
 	std::lock_guard mutationLock(m_staticPublicationMutationMutex);
+	// These records name mesh and CLod rows the caller already added to the
+	// geometry journals. Only a Geometry root publishes those rows, and the
+	// StaticScene is the sole Geometry root: requiring coverage here makes the
+	// draw records wait for it and makes the static import coordinator cut a
+	// geometry-only scene (StaticImportCoordinator::DrainGeometryCoverage).
+	// A host without a static import runtime never gets that cut.
+	RecordGeometryRequirementLocked();
 
 	++m_stats.bulkAddCalls;
 	m_stats.objectsSubmitted += objects.size();
@@ -2866,7 +2874,7 @@ void ObjectManager::StageStaticImportTransactionUploads(
 br::render::StaticImportPublishResult ObjectManager::PublishStaticImportTransaction(br::render::MaterializedStaticImportTransaction transaction) {
 	ZoneScopedN("ObjectManager::PublishStaticImportTransaction");
 	std::lock_guard mutationLock(m_staticPublicationMutationMutex);
-	RecordStaticGeometryRequirementLocked();
+	RecordGeometryRequirementLocked();
 	ZoneValue(static_cast<int64_t>(transaction.reservation.drawRecords));
 	br::render::StaticImportPublishResult result;
 	result.transactionID = transaction.reservation.id;
@@ -2942,7 +2950,7 @@ br::render::StaticImportBulkPublishResult ObjectManager::PublishStaticImportTran
 	if (transactions.empty()) {
 		return result;
 	}
-	RecordStaticGeometryRequirementLocked();
+	RecordGeometryRequirementLocked();
 	ZoneValue(static_cast<int64_t>(transactions.size()));
 
 	std::uint64_t inputGroups = 0;
@@ -4135,24 +4143,24 @@ void ObjectManager::UpdateNormalMatrixBuffer(org::BufferView* view, void* data) 
 	m_normalMatrixBuffer->UpdateView(view, data);
 }
 
-org::runtime::BulkWriteHandle ObjectManager::BeginPerObjectBulkWrite() {
-	return m_perObjectBuffers->BeginBulkWrite();
+org::runtime::BulkWriteHandle ObjectManager::BeginPerObjectBulkWrite(size_t minimumSize) {
+	return m_perObjectBuffers->BeginBulkWrite(minimumSize);
 }
 
 void ObjectManager::EndPerObjectBulkWrite(size_t dirtyOffset, size_t dirtySize) {
 	m_perObjectBuffers->EndBulkWrite(dirtyOffset, dirtySize);
 }
 
-org::runtime::BulkWriteHandle ObjectManager::BeginPerInstanceTransformBulkWrite() {
-	return m_perInstanceTransformBuffers->BeginBulkWrite();
+org::runtime::BulkWriteHandle ObjectManager::BeginPerInstanceTransformBulkWrite(size_t minimumSize) {
+	return m_perInstanceTransformBuffers->BeginBulkWrite(minimumSize);
 }
 
 void ObjectManager::EndPerInstanceTransformBulkWrite(size_t dirtyOffset, size_t dirtySize) {
 	m_perInstanceTransformBuffers->EndBulkWrite(dirtyOffset, dirtySize);
 }
 
-org::runtime::BulkWriteHandle ObjectManager::BeginNormalMatrixBulkWrite() {
-	return m_normalMatrixBuffer->BeginBulkWrite();
+org::runtime::BulkWriteHandle ObjectManager::BeginNormalMatrixBulkWrite(size_t minimumSize) {
+	return m_normalMatrixBuffer->BeginBulkWrite(minimumSize);
 }
 
 void ObjectManager::EndNormalMatrixBulkWrite(size_t dirtyOffset, size_t dirtySize) {

@@ -30,6 +30,7 @@
 #include "Resources/PixelBuffer.h"
 #include "BasicRenderer/Pipeline/MeshDrawWorkload.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
+#include <BasicRenderer/Assets/ImportedAsset.h>
 
 namespace {
 	std::atomic<uint64_t> globalStableSceneId = 0;
@@ -698,6 +699,74 @@ flecs::entity Scene::CreateInstancedRenderableEntityECS(
 
 	m_renderableEntitySetupUs += ElapsedUs(setupBegin);
 	return entity;
+}
+
+namespace {
+	// Marks the parts InstantiateModel created, so ReleaseModel releases exactly those.
+	struct ModelPart {};
+}
+
+flecs::entity Scene::InstantiateModel(const br::import::ImportedAssetPayload& payload, std::wstring name, DirectX::XMMATRIX world) {
+	auto& world_ = GetSceneWorld();
+	DirectX::XMVECTOR scale{ DirectX::XMVectorSet(1.0f, 1.0f, 1.0f, 0.0f) };
+	DirectX::XMVECTOR rotation{ DirectX::XMQuaternionIdentity() };
+	DirectX::XMVECTOR translation{ DirectX::XMVectorZero() };
+	DirectX::XMMatrixDecompose(&scale, &rotation, &translation, world);
+	const auto narrowName = ws2s(name);
+	flecs::entity root = world_.entity();
+	root.child_of(ECSSceneRoot)
+		.set<Components::Rotation>({ rotation })
+		.set<Components::Position>({ translation })
+		.set<Components::Scale>({ scale })
+		.set<Components::Matrix>(world)
+		.set<Components::Name>(narrowName);
+	root.set_name((narrowName + "_" + std::to_string(root.id())).c_str());
+	if (ECSSceneRoot.has<Components::ActiveScene>()) {
+		root.add<Components::Active>();
+	}
+
+	std::size_t partNumber = 0;
+	for (const auto& part : payload.parts) {
+		if (part.meshes.empty()) {
+			continue;
+		}
+		const std::wstring partName = name + L"/" + (part.name.empty() ? std::to_wstring(partNumber) : s2ws(part.name));
+		++partNumber;
+		flecs::entity child;
+		if (part.instanceMatrices.empty()) {
+			child = CreateRenderableEntityECS(part.meshes, partName, std::nullopt, part.localMatrix);
+		} else {
+			std::vector<DirectX::XMMATRIX> instances;
+			instances.reserve(part.instanceMatrices.size());
+			for (const auto& matrix : part.instanceMatrices) {
+				instances.push_back(DirectX::XMLoadFloat4x4(&matrix));
+			}
+			child = CreateInstancedRenderableEntityECS(part.meshes, partName, std::nullopt, instances);
+		}
+		// The part's placement becomes local to the root; the transform cascade composes the root's matrix onto it.
+		child.child_of(root).add<ModelPart>().add<Components::TransformDirty>();
+	}
+	root.add<Components::TransformDirty>();
+	return root;
+}
+
+void Scene::ReleaseModel(flecs::entity root) {
+	if (!root.is_alive()) {
+		return;
+	}
+	std::vector<flecs::entity> parts;
+	root.children([&](flecs::entity child) {
+		if (child.has<ModelPart>()) {
+			parts.push_back(child);
+		}
+	});
+	for (auto& part : parts) {
+		// Pooled entities outlive the root: detach them first, or destroying the root would destroy them too.
+		part.remove<ModelPart>();
+		part.child_of(ECSSceneRoot);
+		ReleaseRenderableEntityECS(part);
+	}
+	root.destruct();
 }
 
 void Scene::ReleaseRenderableEntityECS(flecs::entity entity) {

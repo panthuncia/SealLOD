@@ -320,5 +320,19 @@ void Menu::DrawLoadModelButton() {
             getLoadModel()(ws2s(selectedFolder));
         }
     }
+    ImGui::SameLine();
+    const auto loadScript = getLoadScript();
+    ImGui::BeginDisabled(!loadScript);
+    if (ImGui::Button("Load Script"))
+    {
+        std::wstring selectedFile;
+        using namespace std::string_literals;
+        const std::wstring filter = L"C# Scripts\0*.cs\0\0"s;
+        if (OpenFileDialog(selectedFile, filter))
+        {
+            loadScript(ws2s(selectedFile));
+        }
+    }
+    ImGui::EndDisabled();
 }
 

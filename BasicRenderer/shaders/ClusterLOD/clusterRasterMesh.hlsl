@@ -198,14 +198,17 @@ VisBufferPSInput MSBuildVertex(CLodRasterCluster cluster, MSVertexContext contex
     result.position = MSApplyViewportScale(CLodRasterClipPosition(cluster, position), context.viewportScale, context.viewportOffset);
     result.linearDepth = CLodRasterLinearDepth(cluster, position);
 #if CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
+#if CLOD_VSM_RASTER_BLOCK_CLIP_DISTANCES
     result.virtualShadowClipDistances = CLodVirtualShadowBuildBlockClipDistances(result.position, context.shadowVsmPayload);
+#endif
     result.shadowClipmapIndex = context.shadowVsmPayload;
+#else
+    result.visibleClusterIndex = context.visibleClusterIndex;
 #endif
 #if defined(PSO_ALPHA_TEST)
     result.texcoord = CLodDecodeUv(slab, context.uvStream0, vertexIndex);
     result.materialDataIndex = cluster.materialDataIndex;
 #endif
-    result.visibleClusterIndex = context.visibleClusterIndex;
 #if !defined(CLOD_RASTER_SINGLE_VIEW)
     result.viewID = cluster.viewID;
 #endif
@@ -250,9 +253,34 @@ MSVertexContext MSLoadVertexContext(
 #if CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
 static const uint kMSInvalidTriangleOutputIndex = 0xFFFFFFFFu;
 
-groupshared VisBufferPSInput gs_vertices[MS_MESHLET_SIZE];
+// Only what varies per vertex. Groupshared comes out of the same SM memory as the mesh shader's outputs, so the full
+// output vertex is rebuilt from these and the cluster's constants (MSVirtualShadowOutputVertex).
+groupshared float4 gs_positions[MS_MESHLET_SIZE];
+groupshared float gs_linearDepths[MS_MESHLET_SIZE];
+#if defined(PSO_ALPHA_TEST)
+groupshared float2 gs_texcoords[MS_MESHLET_SIZE];
+#endif
 groupshared uint gs_triangleOutputIndex[MS_MESHLET_SIZE];
 groupshared uint gs_keptTriangleCount;
+
+VisBufferPSInput MSVirtualShadowOutputVertex(CLodRasterCluster cluster, MSVertexContext context, uint vertexIndex)
+{
+    VisBufferPSInput result = (VisBufferPSInput)0;
+    result.position = gs_positions[vertexIndex];
+    result.linearDepth = gs_linearDepths[vertexIndex];
+#if CLOD_VSM_RASTER_BLOCK_CLIP_DISTANCES
+    result.virtualShadowClipDistances = CLodVirtualShadowBuildBlockClipDistances(result.position, context.shadowVsmPayload);
+#endif
+    result.shadowClipmapIndex = context.shadowVsmPayload;
+#if defined(PSO_ALPHA_TEST)
+    result.texcoord = gs_texcoords[vertexIndex];
+    result.materialDataIndex = cluster.materialDataIndex;
+#endif
+#if !defined(CLOD_RASTER_SINGLE_VIEW)
+    result.viewID = cluster.viewID;
+#endif
+    return result;
+}
 
 // Projects the vertices into groupshared memory, then decides which triangles to keep. Returns
 // how many were kept. All lanes of a group call this together, since they share a cluster.
@@ -272,7 +300,12 @@ uint MSFilterVirtualShadowTriangles(
 
     for (uint vertexIndex = laneIndex; vertexIndex < cluster.vertexCount; vertexIndex += MS_THREAD_GROUP_SIZE)
     {
-        gs_vertices[vertexIndex] = MSBuildVertex(cluster, context, slab, vertexIndex);
+        const VisBufferPSInput vertex = MSBuildVertex(cluster, context, slab, vertexIndex);
+        gs_positions[vertexIndex] = vertex.position;
+        gs_linearDepths[vertexIndex] = vertex.linearDepth;
+#if defined(PSO_ALPHA_TEST)
+        gs_texcoords[vertexIndex] = vertex.texcoord;
+#endif
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -302,9 +335,9 @@ uint MSFilterVirtualShadowTriangles(
 
         if (hasClipmapInfo &&
             CLodTriangleTouchesRenderableVirtualShadowPages(
-                gs_vertices[vertices.x].position,
-                gs_vertices[vertices.y].position,
-                gs_vertices[vertices.z].position,
+                gs_positions[vertices.x],
+                gs_positions[vertices.y],
+                gs_positions[vertices.z],
                 viewRasterInfo,
                 context.shadowVsmPayload,
                 clipmapInfo,
@@ -332,8 +365,12 @@ void ClusterLODBucketMSMain(
     const uint laneIndex : SV_GroupThreadID,
     const uint3 groupID : SV_GroupID,
     out vertices VisBufferPSInput outputVertices[MS_MESHLET_SIZE],
-    out indices uint3 outputTriangles[MS_MESHLET_SIZE],
-    out primitives VisibilityPerPrimitive primitiveInfo[MS_MESHLET_SIZE])
+    out indices uint3 outputTriangles[MS_MESHLET_SIZE]
+#if !CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW
+    // The virtual shadow pixel shader needs no primitive ID, so its variant outputs no primitive attributes.
+    , out primitives VisibilityPerPrimitive primitiveInfo[MS_MESHLET_SIZE]
+#endif
+    )
 {
     if (laneIndex == 0u)
     {
@@ -429,7 +466,7 @@ void ClusterLODBucketMSMain(
 
     for (uint vertexIndex = laneIndex; vertexIndex < outputVertexCount; vertexIndex += MS_THREAD_GROUP_SIZE)
     {
-        outputVertices[vertexIndex] = gs_vertices[vertexIndex];
+        outputVertices[vertexIndex] = MSVirtualShadowOutputVertex(cluster, context, vertexIndex);
     }
     if (draw)
     {
@@ -440,7 +477,6 @@ void ClusterLODBucketMSMain(
             {
                 const uint3 vertices = CLodDecodeTriangle(slab, triangleStreamAddress, triangleIndex);
                 outputTriangles[outputIndex] = reverseWinding ? vertices.xzy : vertices;
-                primitiveInfo[outputIndex].triangleIndex = triangleIndex;
             }
         }
     }

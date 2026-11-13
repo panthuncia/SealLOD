@@ -202,6 +202,7 @@ void Renderer::Update(float elapsedSeconds) {
     runCapturedStage("SceneExplorerEdits", [&]() {
         BT_ZONE_SCOPE("Renderer::Update::SceneExplorerEdits");
         if (!m_externalSceneMode) {
+            RunSceneMutationHooks();
             FlushPendingSceneExplorerEdits();
         }
     });

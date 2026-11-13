@@ -12,8 +12,8 @@
 #define CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_COUNT_DESCRIPTOR_INDEX UintRootConstant8
 #define CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_RECEIVER_MASK_DESCRIPTOR_INDEX UintRootConstant9
 #define CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_RECEIVER_MASK_ENABLED UintRootConstant10
-// Local light faces with slices this frame (g_clodVirtualShadowActiveLocalFaceCount), and their LOD bias.
+// Local light faces with slices this frame (g_clodVirtualShadowActiveLocalFaceCount). Each face's LOD bias is its
+// clipmap info's directionalLodBias.
 #define CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_LOCAL_FACE_COUNT UintRootConstant11
-#define CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_LOCAL_LOD_BIAS_AS_UINT UintRootConstant12
 
 #endif // CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_ROOT_CONSTANTS_H

@@ -57,7 +57,7 @@ Both need only numpy.
 ```powershell
 python scripts/lens/make_lens_test_scene.py --variant chart --focus-distance 3 --out models/lens_tests/chart.glb --validate
 python scripts/lens/make_lens_test_scene.py --variant all --write-camera logs/demo_camera_state.json
-BasicRenderer.exe --model models/lens_tests/chart.glb
+BasicRenderer.exe --script my_lens_scenario.cs   # the scenario loads models/lens_tests/chart.glb (ctx.Scene.LoadModel)
 python scripts/lens/compare_lens_images.py polynomial.dds explicit.dds --threshold-mape 0.05 --diff diff.png --json report.json
 python scripts/lens/compare_lens_images.py --self-test
 ```

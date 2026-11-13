@@ -25,11 +25,20 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Include="Animation\Animation.cs" />
+    <Compile Include="Animation\AnimationBuilder.cs" />
+    <Compile Include="Animation\Ease.cs" />
+    <Compile Include="Api\CommandsApi.cs" />
+    <Compile Include="Api\Entity.cs" />
+    <Compile Include="Api\Math.cs" />
     <Compile Include="Api\Scenario.cs" />
     <Compile Include="Api\ScenarioContext.cs" />
+    <Compile Include="Api\SceneApi.cs" />
+    <Compile Include="Api\SettingsApi.cs" />
     <Compile Include="Api\TimeExtensions.cs" />
     <Compile Include="Interop\Native.cs" />
     <Compile Include="Interop\NativeAbi.cs" />
+    <Compile Include="Runtime\CompileCache.cs" />
     <Compile Include="Runtime\FrameScheduler.cs" />
     <Compile Include="Runtime\ScenarioCompiler.cs" />
     <Compile Include="Runtime\ScenarioLoadContext.cs" />

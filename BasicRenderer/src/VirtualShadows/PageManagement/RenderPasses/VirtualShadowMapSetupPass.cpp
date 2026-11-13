@@ -453,6 +453,10 @@ void VirtualShadowMapSetupPass::Update(const org::UpdateExecutionContext& execut
     uint32_t activeLocalFaceCount = 0u;
     std::array<bool, CLodVirtualShadowMaxLocalFaceCount> localFaceSeen{};
     const float localLodBias = SettingsManager::GetInstance().getSettingGetter<float>(CLodLocalVirtualShadowLodBiasSettingName)();
+    const float localMovingLodBias =
+        SettingsManager::GetInstance().getSettingGetter<float>(CLodLocalVirtualShadowMovingLodBiasSettingName)();
+    const bool forceLocalInvalidation =
+        SettingsManager::GetInstance().getSettingGetter<bool>(CLodLocalVirtualShadowForceInvalidateSettingName)();
     const auto& publishedLocalLights = updateContext ? updateContext->lightTables : nullptr;
     if (publishedLocalLights) {
         // As for the sun's clips: skinned and wind-deformed casters render into a face's dynamic layer every frame only
@@ -475,10 +479,16 @@ void VirtualShadowMapSetupPass::Update(const org::UpdateExecutionContext& execut
                 DirectX::XMFLOAT4X4 viewProjection;
                 DirectX::XMStoreFloat4x4(&viewProjection, view.cameraInfo.viewProjection);
                 auto& previous = m_previousLocalFaces[face];
-                const bool changed = !previous.valid || previous.lightIndex != local.lightIndex ||
-                    previous.dynamicSkinned != dynamicSkinned ||
-                    std::memcmp(&previous.viewProjection, &viewProjection, sizeof(viewProjection)) != 0;
-                previous = {true, local.lightIndex, dynamicSkinned, viewProjection};
+                const bool sameLight = previous.valid && previous.lightIndex == local.lightIndex;
+                const bool viewChanged = std::memcmp(&previous.viewProjection, &viewProjection, sizeof(viewProjection)) != 0;
+                const bool changed = forceLocalInvalidation || !sameLight || previous.dynamicSkinned != dynamicSkinned ||
+                    viewChanged;
+                // A face given to another light starts over but has not moved: only the same light's view moving counts.
+                const uint32_t framesSinceMoved = (forceLocalInvalidation || (sameLight && viewChanged))
+                    ? 0u
+                    : (sameLight && previous.framesSinceMoved != UINT32_MAX ? previous.framesSinceMoved + 1u : UINT32_MAX);
+                const bool moving = framesSinceMoved < CLodVirtualShadowLocalMovingHoldFrames;
+                previous = {true, local.lightIndex, dynamicSkinned, viewProjection, framesSinceMoved};
                 localFaceSeen[face] = true;
                 const uint32_t firstSlice = CLodVirtualShadowFirstLocalSlice + face * CLodVirtualShadowLocalSlicesPerFace;
                 // A face's texels widen with depth: texelWorldSize is mip 0's at unit view depth.
@@ -499,7 +509,8 @@ void VirtualShadowMapSetupPass::Update(const org::UpdateExecutionContext& execut
                         (dynamicSkinned ? CLodVirtualShadowClipmapDynamicSkinnedFlag : 0u) |
                         (changed ? CLodVirtualShadowClipmapInvalidateFlag : 0u) |
                         (local.viewIDs.size() > 1u ? CLodVirtualShadowClipmapCubeFlag : 0u);
-                    info.directionalLodBias = localLodBias;
+                    // Receivers mark this face's pages, and the lookup picks its mip, with this bias.
+                    info.directionalLodBias = localLodBias + (moving ? localMovingLodBias : 0.0f);
                     info.depthNear = view.cameraInfo.zNear;
                     info.depthRange = std::max(view.cameraInfo.zFar - view.cameraInfo.zNear, 1.0e-6f);
                     compactShadowCameras[slice].view = view.cameraInfo.view;

@@ -1,7 +1,5 @@
 #include "VirtualShadows/PageManagement/RenderPasses/VirtualShadowMapMarkPagesPass.h"
 
-#include <bit>
-
 #include "Render/PassBuilders.h"
 
 #include "Runtime/Device/DeviceManager.h"
@@ -86,7 +84,6 @@ VirtualShadowMarkFrameData VirtualShadowMapMarkPagesPass::Prepare(
         throw std::logic_error("receiver subpage mode requires a declared mask");
     return {context->renderResolution.x, context->renderResolution.y, m_activeClipmapCount, m_receiverSubpageMode,
         g_clodVirtualShadowActiveLocalFaceCount.load(std::memory_order_relaxed),
-        SettingsManager::GetInstance().getSettingGetter<float>(CLodLocalVirtualShadowLodBiasSettingName)(),
         CLodVirtualShadowActiveSliceCount()};
 }
 
@@ -139,6 +136,5 @@ void VirtualShadowMapMarkPagesPass::Record(const VirtualShadowMapMarkPagesBindin
     mark[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_RECEIVER_MASK_DESCRIPTOR_INDEX] = bindings.receiverMask ? recording.Index(*bindings.receiverMask) : 0u;
     mark[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_RECEIVER_MASK_ENABLED] = frame.receiverSubpageMode;
     mark[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_LOCAL_FACE_COUNT] = frame.localFaceCount;
-    mark[CLOD_VIRTUAL_SHADOW_MARK_BLOCKS_LOCAL_LOD_BIAS_AS_UINT] = std::bit_cast<uint32_t>(frame.localLodBias);
     br::render::DispatchComputeIndirect(recording, bindings.markPipeline, mark, bindings.commandSignature, bindings.indirectArgs);
 }

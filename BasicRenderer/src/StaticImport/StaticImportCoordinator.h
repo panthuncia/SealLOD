@@ -154,6 +154,10 @@ namespace br::staticimport
 
 		bool TrySubmitReadyStaticScene(br::render::RendererStateRequestService& requests);
 
+		// Cuts a geometry-only scene while draw records (dynamic objects included) require
+		// geometry rows newer than the last cut's. StaticImportStreamingPump wakes it.
+		bool DrainGeometryCoverage();
+
 		bool DrainGroupAcks();
 
 		// Group changes (StaticImportRuntime::AddOrUpdateGroups / RemoveGroups /

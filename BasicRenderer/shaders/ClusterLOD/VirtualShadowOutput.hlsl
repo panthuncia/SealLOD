@@ -97,10 +97,9 @@ CLodVirtualShadowClipmapInfo WaveLoadVirtualShadowClipmapInfo(
 }
 
 [shader("pixel")]
-void VirtualShadowBufferPSMain(VisBufferPSInput input, bool isFrontFace : SV_IsFrontFace, uint primID : SV_PrimitiveID)
+void VirtualShadowBufferPSMain(VisBufferPSInput input, bool isFrontFace : SV_IsFrontFace)
 {
     (void)isFrontFace;
-    (void)primID;
     CLodRasterPixelTelemetryAdd(WG_COUNTER_RASTER_PIXEL_SHADER_INVOCATIONS, 1u);
 
     StructuredBuffer<ClodViewRasterInfo> viewRasterInfoBuffer = ResourceDescriptorHeap[CLOD_RASTER_VIEW_RASTER_INFO_BUFFER_DESCRIPTOR_INDEX];

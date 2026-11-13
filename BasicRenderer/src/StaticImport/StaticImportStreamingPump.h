@@ -134,6 +134,8 @@ namespace br::staticimport
 		void LogStaticStreamStatus();
 		void LogStaticPublicationAdmissionStall(std::chrono::steady_clock::time_point now);
 
+		// The draw records' required geometry coverage last seen; a rise wakes the coordinator.
+		std::uint64_t _observedRequiredGeometryCoverage = 0;
 		StaticImportShared* _shared;
 		StaticImportWorkBus* _bus;
 		StaticImportPipelineState* _importState;

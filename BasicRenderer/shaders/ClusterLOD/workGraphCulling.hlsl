@@ -933,13 +933,16 @@ float CLodVirtualShadowLocalLodErrorScale(float3 worldCenter, float worldRadius)
     return exp2(-(float)mip);
 }
 
-// For the clip CLodVirtualShadowClipmapIndexForView resolved.
+// For the clip CLodVirtualShadowClipmapIndexForView resolved. For a local light face, finestLocalMip is the finest mip
+// with active pages under the bounds (kCLodVirtualShadowLocalMipCount when none); for a sun clip it is 0.
 bool CLodVirtualShadowBoundsTouchActivePagesInClip(
     float3 worldCenter,
     float radiusWorld,
     uint clipmapIndex,
-    bool dynamicLayer)
+    bool dynamicLayer,
+    out uint finestLocalMip)
 {
+    finestLocalMip = 0u;
     WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_SHADOW_DIRTY_QUERIES, 1);
 
     CLodVirtualShadowClipmapInfo clipmapInfo;
@@ -957,8 +960,9 @@ bool CLodVirtualShadowBoundsTouchActivePagesInClip(
         : kCLodVirtualShadowHierarchyStaticMask;
     if (clipmapIndex >= kCLodVirtualShadowFirstLocalSlice)
     {
-        return CLodVirtualShadowBoundsTouchActiveLocalFacePages(
+        finestLocalMip = CLodVirtualShadowFinestActiveLocalFaceMip(
             worldCenter, radiusWorld, clipmapIndex, hierarchyMask, dirtyHierarchy);
+        return finestLocalMip < kCLodVirtualShadowLocalMipCount;
     }
     if ((dirtyHierarchy.Load(int4(0, 0, clipmapInfo.pageTableLayer, hierarchyTopMip)) & hierarchyMask) == 0u)
     {
@@ -1006,6 +1010,16 @@ bool CLodVirtualShadowBoundsTouchActivePagesInClip(
     }
 
     return touchesDirtyPages;
+}
+
+bool CLodVirtualShadowBoundsTouchActivePagesInClip(
+    float3 worldCenter,
+    float radiusWorld,
+    uint clipmapIndex,
+    bool dynamicLayer)
+{
+    uint finestLocalMip;
+    return CLodVirtualShadowBoundsTouchActivePagesInClip(worldCenter, radiusWorld, clipmapIndex, dynamicLayer, finestLocalMip);
 }
 
 bool CLodVirtualShadowBoundsTouchActivePages(
@@ -1214,21 +1228,32 @@ bool CLodVirtualShadowBuildVisibleClusterBlockPayloadWithField(
         return false;
     }
     const uint2 blockOriginPageCoord = CLodVirtualShadowBlockOriginFromBlockCoord(blockCoord);
+    if (any(meshletMaxPageCoord < blockOriginPageCoord) ||
+        any(meshletMinPageCoord > blockOriginPageCoord + kCLodVirtualShadowBlockPagesPerAxis - 1u))
+    {
+        return false;
+    }
     const uint2 meshletMinLocalPageCoord =
         max(meshletMinPageCoord, blockOriginPageCoord) - blockOriginPageCoord;
     const uint2 meshletMaxLocalPageCoord =
         min(meshletMaxPageCoord, blockOriginPageCoord + kCLodVirtualShadowBlockPagesPerAxis - 1u) -
         blockOriginPageCoord;
-    const uint2 minLocalPageCoord = max(
-        CLodVirtualShadowUnpackBlockActiveRectMin(packedActiveRect),
-        meshletMinLocalPageCoord);
-    const uint2 maxLocalPageCoord = min(
-        CLodVirtualShadowUnpackBlockActiveRectMax(packedActiveRect),
-        meshletMaxLocalPageCoord);
-    if (any(minLocalPageCoord > maxLocalPageCoord))
+    if (any(meshletMinLocalPageCoord > meshletMaxLocalPageCoord))
     {
         return false;
     }
+    // Only the active pages under the meshlet: its rect can meet the block's active rect over inactive pages alone,
+    // and a record there draws nothing. The record's rect (and its clip distances) bound just the pages it can write.
+    const uint overlappedActivePages =
+        CLodVirtualShadowBlockPageRectMask(meshletMinLocalPageCoord, meshletMaxLocalPageCoord) &
+        CLodVirtualShadowBlockActivePageMask(packedActiveRect);
+    if (overlappedActivePages == 0u)
+    {
+        return false;
+    }
+    uint2 minLocalPageCoord;
+    uint2 maxLocalPageCoord;
+    CLodVirtualShadowBlockPageMaskBounds(overlappedActivePages, minLocalPageCoord, maxLocalPageCoord);
 
     vsmPayload = CLodPackVisibleClusterVsmPayloadForBlock(
         payloadField,
@@ -4697,6 +4722,9 @@ void ClusterCullBody(
         float3 meshletCenterWorld = 0.0f.xxx;
         float meshletRadiusWorld = 0.0f;
         bool meshletNeedsReyesDisplacement = reyesDisplacementCandidate;
+        // A local light face's finest mip with active pages under the meshlet; 0 (mip 0's size, the conservative
+        // choice for routing) when the query is skipped or this is a sun clip.
+        uint meshletFinestLocalMip = 0u;
 #if CLOD_WG_RIGID_ONLY
         const bool skinnedMesh = false;
 #else
@@ -4870,7 +4898,9 @@ void ClusterCullBody(
                             meshletCenterWorld,
                             meshletRadiusWorld,
                             bucketShadowClipmapIndex,
-                            dynamicShadowLayer);
+                            dynamicShadowLayer,
+                            meshletFinestLocalMip);
+                        meshletFinestLocalMip = min(meshletFinestLocalMip, kCLodVirtualShadowLocalMipCount - 1u);
                     }
 
                     if (!touchesActivePages)
@@ -5257,7 +5287,12 @@ void ClusterCullBody(
                     meshletCenterViewSpace.z,
                     cullCam.zNear,
                     cullCameraIsOrtho);
-                isSW = projectedDiameter < swDiameterThreshold && (!vsmLocalFace || vsmLocalFaceSoftwareRasterable);
+                // A local face's projection is mip 0's; a meshlet with no active pages that fine rasterizes into
+                // coarser mips only, where it is 2^mip times smaller. Route it by the size it is drawn at.
+                const float routedDiameter = vsmLocalFace
+                    ? projectedDiameter * exp2(-(float)meshletFinestLocalMip)
+                    : projectedDiameter;
+                isSW = routedDiameter < swDiameterThreshold && (!vsmLocalFace || vsmLocalFaceSoftwareRasterable);
             } else {
                 WGTelemetryAdd(WG_COUNTER_CLASSIFY_SW_DISABLED, 1);
             }

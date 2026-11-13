@@ -332,6 +332,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<std::function<void(const std::string&)>>("loadModel", [](const std::string& path) {
         spdlog::warn("Load Model: no model loader is installed; '{}' was not loaded", path);
         });
+    settingsManager.registerSetting<std::function<void(const std::string&)>>("loadScript", {});
 	settingsManager.registerSetting<bool>("enableScreenSpaceReflections", m_screenSpaceReflections);
     // For headless runs: these choose what the first render graph is built with.
     if (ReadTruthyEnvironmentFlag("SARP_RT_REFLECTIONS")) m_rayTracedReflections = true;
@@ -505,6 +506,8 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<float>(CLodDirectionalVirtualShadowSourceAngleDegreesSettingName, CLodVirtualShadowDefaultDirectionalSourceAngleDegrees);
     settingsManager.registerSetting<uint32_t>(CLodLocalVirtualShadowMaxFacesSettingName, CLodVirtualShadowDefaultLocalMaxFaces);
     settingsManager.registerSetting<float>(CLodLocalVirtualShadowLodBiasSettingName, CLodVirtualShadowDefaultLocalLodBias);
+    settingsManager.registerSetting<float>(CLodLocalVirtualShadowMovingLodBiasSettingName, CLodVirtualShadowDefaultLocalMovingLodBias);
+    settingsManager.registerSetting<bool>(CLodLocalVirtualShadowForceInvalidateSettingName, false);
     settingsManager.registerSetting<uint32_t>(CLodDirectionalVirtualShadowSmrtRayCountDirectionalSettingName, CLodVirtualShadowDefaultSmrtRayCountDirectional);
     settingsManager.registerSetting<uint32_t>(CLodDirectionalVirtualShadowSmrtSamplesPerRayDirectionalSettingName, CLodVirtualShadowDefaultSmrtSamplesPerRayDirectional);
     settingsManager.registerSetting<float>(CLodDirectionalVirtualShadowSmrtMaxRayAngleFromLightDegreesSettingName, CLodVirtualShadowDefaultSmrtMaxRayAngleFromLightDegrees);

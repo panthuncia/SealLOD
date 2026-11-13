@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
+using System.IO;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -10,22 +11,33 @@ using BasicRenderer.Scripting.Runtime;
 namespace BasicRenderer.Scripting;
 
 /// <summary>
-/// Everything a running scenario can do: wait for frames or time, log, record checks, and (from M1) reach the scene,
-/// camera, lights and settings. One context per scenario run.
+/// Everything a running scenario can do: wait for frames, time or conditions; reach the scene, camera, settings and
+/// control commands; animate; log; record checks. One context per scenario run.
 /// </summary>
 public sealed class ScenarioContext
 {
     private readonly FrameScheduler _scheduler;
     private readonly List<CheckRecord> _checks = new();
+    private Camera? _camera;
 
-    internal ScenarioContext(FrameScheduler scheduler, string scenarioName, CancellationToken cancellation)
+    internal ScenarioContext(FrameScheduler scheduler, string scenarioName, string source, CancellationToken cancellation)
     {
         _scheduler = scheduler;
         ScenarioName = scenarioName;
         Cancellation = cancellation;
+        ScenarioDirectory = Directory.Exists(source) ? Path.GetFullPath(source)
+            : Path.GetDirectoryName(Path.GetFullPath(string.IsNullOrEmpty(source) ? "." : source)) ?? Environment.CurrentDirectory;
+        Animator = new Animator();
+        Scene = new SceneApi(this);
+        Settings = new SettingsApi();
+        Commands = new CommandsApi(this);
+        Capture = new CaptureApi(this);
     }
 
     public string ScenarioName { get; }
+
+    /// <summary>The folder holding the scenario's source; relative model paths are looked up here first.</summary>
+    public string ScenarioDirectory { get; }
 
     /// <summary>Frames since the scenario started; 0 during its first frame.</summary>
     public long Frame => _scheduler.Frame;
@@ -38,6 +50,19 @@ public sealed class ScenarioContext
 
     /// <summary>Cancelled when the scenario is stopped, reloaded or times out.</summary>
     public CancellationToken Cancellation { get; }
+
+    public SceneApi Scene { get; }
+
+    /// <summary>The primary camera. Moving it takes it from the fly camera until the scenario ends.</summary>
+    public Camera Camera => _camera ??= new Camera(this, Native.Api.GetCamera());
+
+    public SettingsApi Settings { get; }
+
+    public CommandsApi Commands { get; }
+
+    public CaptureApi Capture { get; }
+
+    internal Animator Animator { get; }
 
     internal IReadOnlyList<CheckRecord> Checks => _checks;
 
@@ -67,6 +92,34 @@ public sealed class ScenarioContext
         return _scheduler.WaitUntil(condition, timeout?.TotalSeconds ?? 0);
     }
 
+    /// <summary>
+    /// Resumes once the renderer has settled: nothing streaming, uploading or compiling, no model still loading, and
+    /// the workload (resident geometry, full-resolution textures, draw records) unchanged for <paramref name="frames"/>
+    /// frames in a row. The demo's sampling harness waits for the same thing. Throws TimeoutException after
+    /// <paramref name="timeout"/> (default 120 s of scenario time).
+    /// </summary>
+    public Task WaitUntilStable(int frames = 30, TimeSpan? timeout = null)
+    {
+        int stableFrames = 0;
+        ulong? signature = null;
+        return Until(() =>
+        {
+            var status = Scene.Status;
+            if (status.NothingPending && status.WorkloadSignature == signature) stableFrames++;
+            else stableFrames = 0;
+            signature = status.WorkloadSignature;
+            return stableFrames >= frames;
+        }, timeout ?? TimeSpan.FromSeconds(120));
+    }
+
+    // --- Animation -----------------------------------------------------------------------------------------------
+
+    /// <summary>Animates a number from <paramref name="from"/> to <paramref name="to"/>, handing each frame's value to <paramref name="apply"/>.</summary>
+    public Tween Tween(double from, double to, double seconds, Action<double> apply, Easing? ease = null) => new(this, from, to, seconds, apply, ease);
+
+    /// <summary>Animates an entity (same as <c>entity.Animate()</c>).</summary>
+    public AnimationBuilder Animate(Entity entity) => entity.Animate();
+
     // --- Logging -------------------------------------------------------------------------------------------------
 
     public void Log(string message) => Native.Log(NativeLogLevel.Info, Prefix(message));
@@ -86,10 +139,15 @@ public sealed class ScenarioContext
         _checks.Add(new CheckRecord(message, condition, Frame, Time, file, line));
         if (!condition) {
             AnyCheckFailed = true;
-            Native.Log(NativeLogLevel.Error, Prefix($"check failed: {message} ({System.IO.Path.GetFileName(file)}:{line})"));
+            Native.Log(NativeLogLevel.Error, Prefix($"check failed: {message} ({Path.GetFileName(file)}:{line})"));
         }
         return condition;
     }
+
+    /// <summary>Checks that two vectors agree within <paramref name="tolerance"/> on every component.</summary>
+    public bool CheckNear(Vec3 actual, Vec3 expected, float tolerance, string message,
+        [CallerFilePath] string file = "", [CallerLineNumber] int line = 0) =>
+        Check(actual.ApproximatelyEquals(expected, tolerance), $"{message}: {actual} vs {expected} (±{tolerance})", file, line);
 
     /// <summary>Records a check and, if it fails, ends the scenario immediately.</summary>
     public void Require([DoesNotReturnIf(false)] bool condition, string message,
@@ -104,6 +162,30 @@ public sealed class ScenarioContext
 
     /// <summary>Asks the host application to exit with this code when the scenario ends.</summary>
     public void RequestExit(int exitCode = 0) => Native.RequestExit(exitCode);
+
+    // --- Internals -----------------------------------------------------------------------------------------------
+
+    /// <summary>A relative path beside the scenario's source if it exists there, else from the working directory.</summary>
+    internal string ResolvePath(string path)
+    {
+        if (Path.IsPathRooted(path)) return path;
+        var beside = Path.GetFullPath(Path.Combine(ScenarioDirectory, path));
+        if (File.Exists(beside) || Directory.Exists(beside)) return beside;
+        var working = Path.GetFullPath(path);
+        return File.Exists(working) || Directory.Exists(working) ? working : beside;
+    }
+
+    /// <summary>The scenario has ended: stop its animations and put back what it changed.</summary>
+    internal void Finish()
+    {
+        Animator.CancelAll(Cancellation);
+        Settings.Restore();
+        try {
+            _camera?.ReleaseControl();
+        } catch (ScriptApiException) {
+            // The host restores the fly camera itself.
+        }
+    }
 }
 
 internal sealed record CheckRecord(string Message, bool Passed, long Frame, double Time, string File, int Line);

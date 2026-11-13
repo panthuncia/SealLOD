@@ -55,6 +55,12 @@ public:
         };
     }
 
+    // The type a setting was registered with, or null when there is no setting by that name.
+    const std::type_info* tryGetSettingType(const std::string& name) const {
+        const auto it = settings.find(name);
+        return it == settings.end() ? nullptr : &it->second->getType();
+    }
+
     using Subscription = br::extensions::SettingSubscription;
 
     template<typename T>

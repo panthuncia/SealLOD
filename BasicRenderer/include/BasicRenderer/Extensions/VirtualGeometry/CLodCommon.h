@@ -149,6 +149,13 @@ inline constexpr const char* CLodDirectionalVirtualShadowSourceAngleDegreesSetti
 inline constexpr const char* CLodLocalVirtualShadowMaxFacesSettingName = "clodLocalVirtualShadowMaxFaces";
 // Added to the mip a local light face's receivers request: positive is coarser.
 inline constexpr const char* CLodLocalVirtualShadowLodBiasSettingName = "clodLocalVirtualShadowLodBias";
+// Added to CLodLocalVirtualShadowLodBias for a face whose light moved in the last CLodVirtualShadowLocalMovingHoldFrames
+// frames. A moving light's faces start over every frame, so every page they need renders every frame: drawing them
+// coarser keeps that bounded. The finer pages follow once the light stops.
+inline constexpr const char* CLodLocalVirtualShadowMovingLodBiasSettingName = "clodLocalVirtualShadowMovingLodBias";
+// Diagnostic: every local light face starts over every frame and counts as moving, as if its light moved. Measures the
+// cost of moving lights repeatably with the lights held still.
+inline constexpr const char* CLodLocalVirtualShadowForceInvalidateSettingName = "clodLocalVirtualShadowForceInvalidate";
 inline constexpr const char* CLodDirectionalVirtualShadowSmrtRayCountDirectionalSettingName = "clodDirectionalVirtualShadowSmrtRayCountDirectional";
 inline constexpr const char* CLodDirectionalVirtualShadowSmrtSamplesPerRayDirectionalSettingName = "clodDirectionalVirtualShadowSmrtSamplesPerRayDirectional";
 inline constexpr const char* CLodDirectionalVirtualShadowSmrtMaxRayAngleFromLightDegreesSettingName = "clodDirectionalVirtualShadowSmrtMaxRayAngleFromLightDegrees";
@@ -396,6 +403,8 @@ inline constexpr float CLodVirtualShadowDefaultDirectionalLodBias = 1.2f;
 inline constexpr float CLodVirtualShadowDefaultDirectionalSourceAngleDegrees = 6.0f;
 inline constexpr uint32_t CLodVirtualShadowDefaultLocalMaxFaces = 24u;
 inline constexpr float CLodVirtualShadowDefaultLocalLodBias = 0.0f;
+inline constexpr float CLodVirtualShadowDefaultLocalMovingLodBias = 1.0f;
+inline constexpr uint32_t CLodVirtualShadowLocalMovingHoldFrames = 30u;
 inline constexpr uint32_t CLodVirtualShadowDefaultSmrtRayCountDirectional = 2u;
 inline constexpr uint32_t CLodVirtualShadowDefaultSmrtSamplesPerRayDirectional = 3u;
 inline constexpr float CLodVirtualShadowDefaultSmrtMaxRayAngleFromLightDegrees = 5.0f;

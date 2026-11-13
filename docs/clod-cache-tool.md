@@ -61,13 +61,15 @@ pass the scene file itself.
 
 ## Opening one
 
-```powershell
-BasicRenderer.exe --model D:\Caches\zorah
-BasicRenderer.exe --model D:\Caches\zorah\zorah_textured_public.v1.brscene.json
+In the demo, open a manifest (or a folder of them) with Scene Explorer's Load Model, or place one from a scenario
+(see [scripting.md](scripting.md)):
+
+```csharp
+var zorah = await ctx.Scene.LoadModel(@"D:\Caches\zorah\zorah_textured_public.v1.brscene.json");
 ```
 
-A directory opens each scene cache (`*.brscene.json`) in it. `br::import::LoadImportedAsset` takes a directory only when
-it holds exactly one manifest.
+Load Model on a directory opens each scene cache (`*.brscene.json`) in it. `br::import::LoadImportedAsset` takes a
+directory only when it holds exactly one manifest.
 
 For a manifest, the loader:
 
@@ -88,9 +90,8 @@ the source is gone, the scene loads without those primitives and logs how many w
 The source's location still matters without the source itself, because texture paths are relative to the source's
 directory. Textures moved with the source go on working.
 
-The cache root is one per process, and renderer startup resolves it. The demo therefore applies the first manifest
-among its `--model`s before initializing. The renderer's other caches (shaders) then live in the scene cache
-directory too.
+The cache root is one per process, and renderer startup resolves it. A manifest opened after startup still points
+the CLod cache at its directory, but the renderer's other caches (shaders) stay in the root chosen at startup.
 
 ### What makes a cache portable
 

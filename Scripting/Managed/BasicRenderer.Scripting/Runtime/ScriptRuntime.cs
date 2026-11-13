@@ -41,9 +41,9 @@ public static unsafe class ScriptRuntime
                 Refuse($"host API table v{api->Version} ({api->StructSize} bytes) is older than this runtime needs (v{AbiConstants.Version}, {sizeof(BRScriptApiV1)} bytes)");
                 return AbiConstants.Unsupported;
             }
-            if (api->Vec3Size != sizeof(BRVec3) || api->QuatSize != sizeof(BRQuat) || api->TransformSize != sizeof(BRTransform)) {
+            if (api->Vec3Size != sizeof(Vec3) || api->QuatSize != sizeof(Quat) || api->TransformSize != sizeof(Transform)) {
                 Refuse($"value layout mismatch: host vec3/quat/transform {api->Vec3Size}/{api->QuatSize}/{api->TransformSize} bytes, " +
-                    $"runtime {sizeof(BRVec3)}/{sizeof(BRQuat)}/{sizeof(BRTransform)}");
+                    $"runtime {sizeof(Vec3)}/{sizeof(Quat)}/{sizeof(Transform)}");
                 return AbiConstants.Unsupported;
             }
             if (callbacks->StructSize < (uint)sizeof(BRScriptRuntimeCallbacks)) {
@@ -51,7 +51,7 @@ public static unsafe class ScriptRuntime
                 return AbiConstants.Unsupported;
             }
 
-            Native.Attach(api);
+            Native.Host = new NativeHost(api);
             InstallDependencyResolver();
             s_session = new ScriptSession();
 
@@ -96,10 +96,11 @@ public static unsafe class ScriptRuntime
     }
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
-    private static void Stop()
+    private static void Stop(byte* reason)
     {
         try {
-            s_session?.Stop("stopped by the host");
+            var text = Native.FromUtf8(reason);
+            s_session?.Stop(string.IsNullOrEmpty(text) ? "stopped" : text);
         } catch (Exception e) {
             Native.Log(NativeLogLevel.Error, $"stop: {e}");
         }
@@ -114,7 +115,7 @@ public static unsafe class ScriptRuntime
             // Shutting down regardless.
         }
         s_session = null;
-        Native.Detach();
+        Native.Host = null;
     }
 
     private static bool s_resolverInstalled;

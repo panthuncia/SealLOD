@@ -96,11 +96,13 @@ public:
     std::vector<PagedAllocation> AddDataPaged(const void* data, size_t count, size_t elementSize, size_t pageElementCount);
 	std::vector<std::shared_ptr<BufferView>> AddDataBatch(const void* data, size_t count, size_t elementSize);
 	void UpdateView(BufferView* view, const void* data) override;
-    org::runtime::BulkWriteHandle BeginBulkWrite() {
+    // minimumSize: the end of the furthest row the caller writes. Rows can lie past the backing: a versioned-graph
+    // buffer's allocations go to its journal only, so neither the backing nor the shadow has grown to cover them.
+    org::runtime::BulkWriteHandle BeginBulkWrite(size_t minimumSize = 0) {
         auto lock = std::make_shared<std::unique_lock<std::recursive_mutex>>(m_uploadPolicyMirrorMutex);
         SyncUploadPolicyState();
         EnsureUploadPolicyRegistration();
-        EnsureCpuShadowSize(GetBufferSize());
+        EnsureCpuShadowSize((std::max)(GetBufferSize(), minimumSize));
         org::runtime::BulkWriteHandle handle{
             reinterpret_cast<uint8_t*>(m_cpuShadowData.data()),
             m_cpuShadowData.size()

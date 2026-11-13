@@ -765,6 +765,42 @@ bool CLodVirtualShadowBlockActiveRectOverflowed(uint packedActiveRect)
     return ((packedActiveRect >> 8u) & 0x1u) != 0u;
 }
 
+// A block's active-block metadata also holds which of its pages are active, one bit per page (bit y * 4 + x) above
+// bit 16: its active rect bounds them, but can hold inactive pages too.
+static const uint kCLodVirtualShadowBlockActivePageMaskShift = 16u;
+
+uint CLodVirtualShadowBlockActivePageMask(uint packedActiveBlock)
+{
+    return packedActiveBlock >> kCLodVirtualShadowBlockActivePageMaskShift;
+}
+
+// The pages of a rect of a block's pages, as an active page mask.
+uint CLodVirtualShadowBlockPageRectMask(uint2 minLocalPageCoord, uint2 maxLocalPageCoord)
+{
+    const uint rowBits = ((1u << (maxLocalPageCoord.x + 1u)) - 1u) & ~((1u << minLocalPageCoord.x) - 1u);
+    uint mask = 0u;
+    [unroll]
+    for (uint y = 0u; y < kCLodVirtualShadowBlockPagesPerAxis; ++y)
+    {
+        if (y >= minLocalPageCoord.y && y <= maxLocalPageCoord.y)
+        {
+            mask |= rowBits << (y * kCLodVirtualShadowBlockPagesPerAxis);
+        }
+    }
+    return mask;
+}
+
+// The bounding rect of the pages in a non-empty page mask.
+void CLodVirtualShadowBlockPageMaskBounds(uint pageMask, out uint2 minLocalPageCoord, out uint2 maxLocalPageCoord)
+{
+    const uint columns = (pageMask | (pageMask >> 4u) | (pageMask >> 8u) | (pageMask >> 12u)) & 0xFu;
+    const uint rows =
+        ((pageMask & 0x000Fu) != 0u ? 1u : 0u) | ((pageMask & 0x00F0u) != 0u ? 2u : 0u) |
+        ((pageMask & 0x0F00u) != 0u ? 4u : 0u) | ((pageMask & 0xF000u) != 0u ? 8u : 0u);
+    minLocalPageCoord = uint2(firstbitlow(columns), firstbitlow(rows));
+    maxLocalPageCoord = uint2(firstbithigh(columns), firstbithigh(rows));
+}
+
 bool CLodVirtualShadowBlockActiveRectContainsPage(uint packedActiveRect, uint2 localPageCoord)
 {
     const uint2 minLocalPageCoord = CLodVirtualShadowUnpackBlockActiveRectMin(packedActiveRect);
