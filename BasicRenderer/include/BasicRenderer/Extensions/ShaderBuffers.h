@@ -88,7 +88,7 @@ struct PerFrameCB {
 
     unsigned int lightClusterGridSizeY;
 	unsigned int lightClusterGridSizeZ;
-    unsigned int nearClusterCount; // how many uniform slices up close
+    unsigned int lightGridTileSize; // light grid tile, pixels square (lightGrid.hlsli)
     float clusterZSplitDepth; // view-space depth to switch to log
 
     unsigned int frameIndex; // 0 to 63
@@ -134,7 +134,7 @@ struct PerFrameCB {
     unsigned int sunLightSlot = 0xFFFFFFFFu;
     // The light whose virtual shadow map the VSM debug views show: the vsmDebugLight setting, else the sun.
     unsigned int vsmDebugLightIndex = 0xFFFFFFFFu;
-    unsigned int sunLightPad1 = 0u;
+    unsigned int numDirectionalLights = 0u; // Directional lights in the light buffer.
 };
 
 static_assert(offsetof(PerFrameCB, shadowVirtualReceiverTraceEnabled) == 100, "PerFrameCB layout mismatch.");
@@ -648,20 +648,13 @@ struct LightInfo {
 
 static_assert(sizeof(LightInfo) == 112, "LightInfo must match the HLSL LightInfo stride.");
 
-#define LIGHTS_PER_PAGE 12
-struct LightPage {
-    unsigned int ptrNextPage;
-    unsigned int numLightsInPage;
-    unsigned int lightIndices[LIGHTS_PER_PAGE];
+// One active light as the light grid culls it (lightCulling.hlsl, Builtin::Light::CullingRecords).
+struct LightCullingRecord {
+    DirectX::XMFLOAT4 sphere; // View-space centre and radius; negative radius: directional.
+    unsigned int lightIndex;
+    unsigned int pad[3];
 };
-
-struct Cluster {
-    DirectX::XMVECTOR minPoint;
-    DirectX::XMVECTOR maxPoint;
-    unsigned int numLights;
-    unsigned int ptrFirstPage;
-    unsigned int pad[2];
-};
+static_assert(sizeof(LightCullingRecord) == 32, "LightCullingRecord must match the HLSL stride.");
 
 typedef unsigned int uint;
 

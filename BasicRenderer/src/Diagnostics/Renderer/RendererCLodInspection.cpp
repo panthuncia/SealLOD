@@ -155,13 +155,39 @@ std::shared_ptr<Renderer::CLodInspectionRequest> Renderer::StartCLodInspectionFr
 
 	// Optional inputs: each one present is read in the same pass, so all of them describe one frame.
 	auto records = currentRenderGraph->RequestResourcePtr(org::ResourceIdentifier{ std::string(Builtin::Surface::Records) }, true);
+	// identity.x per pixel names its record (several pixels can share one), and the target's size is the frame's.
+	const auto readIdentity = [&, anchor](org::Resource* identity) {
+		readback->RequestReadbackCapture(anchor, identity, org::RangeSpec{}, [pending](org::ReadbackCaptureResult&& result) {
+			std::scoped_lock lock(pending->mutex);
+			if (result.format == rhi::Format::R32G32_UInt && !result.layouts.empty() && result.width != 0u && result.height != 0u) {
+				const auto& layout = result.layouts.front();
+				const auto rowPitch = static_cast<std::size_t>(layout.rowPitch);
+				const auto offset = static_cast<std::size_t>(layout.offset);
+				const std::size_t rowBytes = static_cast<std::size_t>(result.width) * sizeof(std::uint32_t) * 2u;
+				if (offset + rowPitch * (result.height - 1u) + rowBytes <= result.data.size()) {
+					if (pending->frame.width == 0u) {
+						pending->frame.width = result.width;
+						pending->frame.height = result.height;
+					}
+					auto& indices = pending->frame.surfaceRecordIndices;
+					indices.resize(static_cast<std::size_t>(result.width) * result.height);
+					for (std::uint32_t row = 0; row < result.height; ++row) {
+						const std::byte* source = result.data.data() + offset + rowPitch * row;
+						for (std::uint32_t column = 0; column < result.width; ++column) {
+							std::memcpy(&indices[static_cast<std::size_t>(row) * result.width + column], source + column * 8u, sizeof(std::uint32_t));
+						}
+					}
+				}
+			}
+			pending->Arrived("surface identity");
+		});
+	};
 	const auto sideBand = m_materialEvaluationInputs.visibleClusterTransformIndices;
 	const auto diceQueue = m_materialEvaluationInputs.reyesDiceQueue;
 	if (pathTraced) {
 		if (!records) {
 			return nullptr;
 		}
-		// Records are a flat buffer with one row per pixel; the identity target gives the frame's size.
 		auto identity = currentRenderGraph->RequestResourcePtr(org::ResourceIdentifier{ std::string(Builtin::Surface::Identity) }, true);
 		if (!identity) {
 			return nullptr;
@@ -172,18 +198,16 @@ std::shared_ptr<Renderer::CLodInspectionRequest> Renderer::StartCLodInspectionFr
 			pending->frame.surfaceRecords = std::move(result.data);
 			pending->Arrived("surface records");
 		});
-		readback->RequestReadbackCapture(anchor, identity.get(), org::RangeSpec{}, [pending](org::ReadbackCaptureResult&& result) {
-			std::scoped_lock lock(pending->mutex);
-			pending->frame.width = result.width;
-			pending->frame.height = result.height;
-			pending->Arrived("surface identity");
-		});
+		readIdentity(identity.get());
 		return pending;
 	}
 	pending->waiting = pending->required = { "visibility", "visible clusters" };
 	if (sideBand) pending->waiting.push_back("side band");
 	if (diceQueue) pending->waiting.push_back("reyes dice queue");
+	auto identity = records
+		? currentRenderGraph->RequestResourcePtr(org::ResourceIdentifier{ std::string(Builtin::Surface::Identity) }, true) : nullptr;
 	if (records) pending->waiting.push_back("surface records");
+	if (identity) pending->waiting.push_back("surface identity");
 
 	readback->RequestReadbackCapture(anchor, visibility.get(), org::RangeSpec{},
 		[pending](org::ReadbackCaptureResult&& result) {
@@ -221,6 +245,9 @@ std::shared_ptr<Renderer::CLodInspectionRequest> Renderer::StartCLodInspectionFr
 	}
 	if (records) {
 		readBuffer(records.get(), &CLodInspectionFrame::surfaceRecords, "surface records");
+	}
+	if (identity) {
+		readIdentity(identity.get());
 	}
 	return pending;
 }

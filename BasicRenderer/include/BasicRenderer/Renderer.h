@@ -239,7 +239,9 @@ public:
         std::vector<std::byte> visibleClusterSideBand;  // uint2 per visible cluster: assembly transform, palette index
         std::vector<std::byte> reyesDiceQueue;          // CLodReyesDiceQueueEntry rows, for patch keys
         std::uint32_t reyesPatchIndexBase = 0xFFFFFFFFu; // key clusters at or above this are dice-queue entries
-        std::vector<std::byte> surfaceRecords;          // SARPSurfaceRecordV1 per pixel (32 bytes, row-major)
+        std::vector<std::byte> surfaceRecords;          // SARPSurfaceRecordV1 rows (32 bytes), as many as pixels
+        // identity.x per pixel (width * height): the record a pixel uses. Pixels of a wave with equal records share one.
+        std::vector<std::uint32_t> surfaceRecordIndices;
         std::vector<std::string> missingReadbacks;      // optional readbacks that had not arrived when it was handed over
         bool pathTraced = false;  // read after PathTracePass: surface records only, no visibility or clusters
     };
@@ -374,6 +376,14 @@ private:
     // 0 raster, 1 raytraced, 2 raster with agreement against rays counted. See "rayTracedPrimaryVisibilityMode".
     uint32_t m_rayTracedPrimaryVisibilityMode = 0u;
     bool m_rayTracedShadows = false;
+    // Stochastic lighting is asked for: its technique and the shadow map's are in a raster recipe, on a device that can trace
+    // clusters. It runs (ShadowingMode::StochasticRayTraced) once the BVH it traces exists too. RendererGraphConstruction.cpp.
+    bool StochasticLightingRequested() const;
+    bool StochasticLightingActive() const;
+    // Shadows are on and the virtual shadow map is built for them: stochastic lighting, when it runs, shadows every light
+    // itself, the sun included, and no shadow map pass runs. Published as the "virtualShadowMapsActive" setting at graph
+    // build for passes that declare the shadow map's resources.
+    bool VirtualShadowMapsActive() const;
     // The renderer's versioned-buffer retirement clock and pools (advanced by frame-slot and graph retirement).
     std::shared_ptr<br::render::VersionedBufferRuntime> m_versionedBuffers;
     std::unique_ptr<br::render::AsyncStateGraph> m_asyncStateGraph;
@@ -394,7 +404,6 @@ private:
 	br::render::StaticObjectRequestService m_staticObjectRequestService;
 	br::render::StaticGeometryRequestService m_staticGeometryRequestService;
 	br::render::StaticMaterialRequestService m_staticMaterialRequestService;
-    DirectX::XMUINT3 m_lightClusterSize = { 12, 12, 24 };
     FrameTimer m_frameTimer;
 
     void LoadPipeline(HWND hwnd, UINT x_res, UINT y_res);

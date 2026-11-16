@@ -67,6 +67,13 @@ StatisticalSamplingControl.exe --pipe <name> --json capture.hdr '{"path":"D:/cap
 | `target` | `accumulation` when path tracing is accumulating, else `hdr` | `accumulation`: the path tracer's accumulation buffer at render resolution. `hdr`: `Builtin::PostProcessing::UpscaledHDR` as `TonemappingPass` reads it, at output resolution, after the upscaler and before bloom and tonemapping. |
 | `spp` | `0` | Samples per pixel to wait for. `0` captures the next frame. Anything above 0 needs accumulation on. |
 | `timeout_seconds` | `300` | The job fails after this long. |
+| `targets` | `[target]` | Several targets read in the same frame (not `accumulation`). `stochastic_diffuse` and `stochastic_specular` are stochastic lighting's output as the deferred pass reads it, at render resolution. |
+| `frames` | `1` | That many consecutive frames (1 to 256), each frame's readbacks requested on its own frame (a frame without a graph is skipped). |
+| `luminance` | `false` | Write one R32F channel, the Rec. 709 luminance, instead of RGBA32F (a quarter the size). |
+
+With more than one target `path` needs the placeholder `{target}`, and with more than one frame `{frame}` (1-based), for
+example `D:/cap/run_{target}_{frame}.dds`. The job is published when every file is written. Stochastic lighting's
+post-DLSS noise metric uses it (`scripts/stochastic_scaling.sh dlss`, docs/stochastic_lighting.md "Noise after DLSS").
 
 For `accumulation`, rgb is already the average radiance (the shader keeps a
 running mean), so nothing needs dividing; alpha is the per-pixel sample count.

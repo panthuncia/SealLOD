@@ -74,6 +74,8 @@ public:
 	void SubmitTextureStreamingFeedbackReadback(org::ExternalClient& client, uint32_t queueSlot) override;
 	void SetTextureStreamingFeedbackSuppressed(bool suppressed) { m_textureStreamingFeedbackSuppressed = suppressed; }
 	MaterialTextureStreamingStats GetMaterialTextureStreamingStats() const;
+	// Rows the material tables can hold; every published material index is below it.
+	unsigned int GetMaterialBufferCapacity() const { return m_materialBufferCapacity.load(std::memory_order_acquire); }
 	MaterialTextureStreamingReadinessStats GetMaterialTextureStreamingReadinessStats() const;
 	void RegisterStreamingTexture(const std::shared_ptr<TextureAsset>& texture, TextureFactory& textureFactory);
 	TextureStreamingManager* GetTextureStreamingManager() const { return m_textureStreamingManager.get(); }

@@ -35,6 +35,9 @@ enum MaterialCompileFlags : uint64_t {
 	MaterialCompileClodSkinning = 1ull << 24,
 	MaterialCompileTerrainRvtTelemetry = 1ull << 25,
 	MaterialCompileMaterialEvalColorOnly = 1ull << 26,
+	MaterialCompileObjectTriplanar = 1ull << 27, // Object triplanar stochastic sampling (UsesObjectTriplanarStochastic).
+	MaterialCompileMultipleUvSets = 1ull << 28, // Textures on more than one UV set (SamplesMultipleUvSets).
+	MaterialCompileObjectSpaceNormalMap = 1ull << 29, // A model-space normal map (UsesObjectSpaceNormalMap).
 };
 
 inline MaterialCompileFlags operator|=(MaterialCompileFlags& a, MaterialCompileFlags b) {

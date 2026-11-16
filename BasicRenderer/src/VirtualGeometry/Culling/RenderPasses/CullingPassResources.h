@@ -37,6 +37,11 @@ struct CullingPassConfig {
     // Filled when rayTracingView is set: the ray tracing system's coarse cut, which the pass writes (and declares).
     std::shared_ptr<org::Buffer> rtCoarseCut;
     uint32_t rtCoarseCutDescriptor = 0u;
+    // The unified main view (CLOD_UNIFIED_RT): raster's culling also writes the ray tracing view's cluster list, in phase 1.
+    // Set on both phases (the shaders are shared); the buffers only on phase 1.
+    bool unifiedRayTracing = false;
+    std::shared_ptr<org::Buffer> rtVisibleClusters, rtVisibleClusterTransformIndices, rtVisibleClustersCounter;
+    uint32_t rtVisibleClusterCapacity = 0u;
 
     // Clusters are classified into hardware and software raster lists.
     bool UsesSWClassification() const { return CLodSoftwareRasterEnabled(softwareRaster); }

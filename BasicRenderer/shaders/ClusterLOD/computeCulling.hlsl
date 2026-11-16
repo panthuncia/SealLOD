@@ -235,7 +235,7 @@ void SeedPureComputeReplayClustersCS(const uint3 dispatchThreadID : SV_DispatchT
     outFrontier[index] = PackPureComputeClusterRunRecord(record);
 }
 
-#if CLOD_RT_VIEW
+#if CLOD_RT_VIEW || CLOD_UNIFIED_RT
 // An instance for which even the most detailed group below the coarsest level is within the error threshold, and every
 // coarsest group is outside it, selects exactly the coarsest level, wherever it is. The first of a mesh is traversed
 // as normal. The rest would produce the same list, so they skip that and use its BLAS.
@@ -404,6 +404,12 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
         return;
     }
 #endif
+#if CLOD_UNIFIED_RT
+    const bool unifiedRt = CLodDrawIsRayTracingCovered(perMesh, clodMeshMetadata);
+#else
+    const bool unifiedRt = false;
+#endif
+    bool unifiedInFrustum = true;
     // Voxel-root classification only feeds debug telemetry. Avoid fetching the
     // first group for every object when telemetry is disabled.
     const bool voxelRootCandidate =
@@ -443,6 +449,18 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
                 culled = true;
             }
         }
+    }
+#endif
+#if CLOD_UNIFIED_RT
+    else if (unifiedRt) {
+        // Covered: traversed wherever it is, as by the ray tracing view, but for its off-screen distance limit.
+        for (uint planeIndex = 0u; planeIndex < 6u; ++planeIndex) {
+            const float4 plane = camera.clippingPlanes[planeIndex].plane;
+            if (dot(plane.xyz, viewSpaceCenter) + plane.w < -worldRadius) {
+                unifiedInFrustum = false;
+            }
+        }
+        culled = !unifiedInFrustum && length(viewSpaceCenter) - worldRadius > CLOD_RT_OFFSCREEN_MAX_DISTANCE;
     }
 #endif
     else if (CLodWorkGraphFrustumCullingEnabled()) {
@@ -487,7 +505,7 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
 
     const uint rootNodeId = CLodResolveTraversalRootNode(clodMeshMetadata);
     bool occlusionCulled = false;
-    if (CLodWorkGraphOcclusionEnabled() && !camera.isOrtho) {
+    if (!unifiedRt && CLodWorkGraphOcclusionEnabled() && !camera.isOrtho) {
         StructuredBuffer<CLodViewDepthSRVIndex> viewDepthSRVIndices =
             ResourceDescriptorHeap[CLOD_WG_VIEW_DEPTH_SRV_INDICES_DESCRIPTOR_INDEX];
         const uint depthMapDescriptorIndex =
@@ -520,6 +538,12 @@ void PureComputeObjectCullCS(const uint3 vDispatchThreadID : SV_DispatchThreadID
 
 #if CLOD_RT_VIEW
     if (CLodRtTakeCoarseCutWithoutTraversal(clodMeshMetadata, off.clodMeshMetadataIndex, drawRecordIndex, objectModelMatrix, CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX)) {
+        return;
+    }
+#elif CLOD_UNIFIED_RT
+    // Only off screen: raster needs the clusters of what it sees.
+    if (unifiedRt && !unifiedInFrustum
+        && CLodRtTakeCoarseCutWithoutTraversal(clodMeshMetadata, off.clodMeshMetadataIndex, drawRecordIndex, objectModelMatrix, CLOD_PC_OBJECT_CULL_VIEW_DATA_INDEX)) {
         return;
     }
 #endif
@@ -625,6 +649,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
 
     const uint nodeLocalId = UnpackNodeId(rec.nodeIdPacked);
     const ClusterLODNode node = lodNodes[nodeLocalId];
+    g_clodUnifiedRt = CLodUnifiedRtCovered(instanceData.perMeshBufferIndex, clodMeshMetadata);
     CLodTelemetryTraverseWaveClassification(
         node.range.isLeaf == CLOD_NODE_INTERNAL,
         isSkinned);
@@ -680,7 +705,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
     const float nodeLodRadiusObjectSpace = node.metric.lodCenterAndRadius.w;
     const float3 nodeCenterViewSpace = ToViewSpace(nodeCullCenterObjectSpace, objectModelMatrix, cullCamera.view);
     const float nodeRadiusWorld = nodeCullRadiusObjectSpace * cullUniformScale;
-    const bool nodeCulled =
+    bool nodeCulled =
         CLodWorkGraphFrustumCullingEnabled() &&
         !replaySource &&
         UnpackBoundsTested(rec.nodeIdPacked) == 0u &&
@@ -691,6 +716,27 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
             objectModelMatrix,
             cullUniformScale,
             cullCamera);
+#if CLOD_UNIFIED_RT
+    // A covered draw's node is traversed off screen and behind occluders too, but streams only where raster would have
+    // gone: in the frustum and not occluded in last frame's depth (raster's phase 1 test). Elsewhere it uses what is
+    // resident, as the ray tracing view always did.
+    if (g_clodUnifiedRt) {
+        bool streamOccluded = false;
+        if (!nodeCulled && !replaySource && !deformForTraversal && CLodWorkGraphOcclusionEnabled() && !cullCamera.isOrtho) {
+            StructuredBuffer<CLodViewDepthSRVIndex> streamDepthIndices = ResourceDescriptorHeap[CLOD_WG_VIEW_DEPTH_SRV_INDICES_DESCRIPTOR_INDEX];
+            const uint streamDepthMap = streamDepthIndices[cullViewId].linearDepthSRVIndex;
+            if (streamDepthMap != 0u) {
+                const row_major matrix streamPrevModel = instanceTransform.prevModel;
+                const float3 streamPrevCenter = ToViewSpace(nodeCullCenterObjectSpace, streamPrevModel, cullCamera.prevView);
+                OcclusionCullingPerspectiveTexture2D(
+                    streamOccluded, cullCamera, streamPrevCenter, -streamPrevCenter.z,
+                    nodeCullRadiusObjectSpace * MaxAxisScale_RowVector(streamPrevModel), streamDepthMap, cullCamera.prevUnjitteredProjection);
+            }
+        }
+        g_clodMayStream = !nodeCulled && !streamOccluded;
+        nodeCulled = false;
+    }
+#endif
 
     bool dirtyPageCullingEnabled = false;
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
@@ -958,7 +1004,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
 #endif
 
     bool occlusionCulled = false;
-    if (!deformForTraversal && CLodWorkGraphOcclusionEnabled() && (!cullCamera.isOrtho || CLOD_VSM_OCCLUSION_CULLING)) {
+    if (!g_clodUnifiedRt && !deformForTraversal && CLodWorkGraphOcclusionEnabled() && (!cullCamera.isOrtho || CLOD_VSM_OCCLUSION_CULLING)) {
         StructuredBuffer<CLodViewDepthSRVIndex> viewDepthSRVIndices =
             ResourceDescriptorHeap[CLOD_WG_VIEW_DEPTH_SRV_INDICES_DESCRIPTOR_INDEX];
         const uint depthMapDescriptorIndex = viewDepthSRVIndices[cullViewId].linearDepthSRVIndex;
@@ -1033,7 +1079,8 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
             const float3 childCullCenterOS = childCullBounds.sphere.xyz;
             const float childCullRadiusOS = childCullBounds.sphere.w;
             const float childRadiusWorld = childCullRadiusOS * cullUniformScale;
-            if (CLodWorkGraphFrustumCullingEnabled() &&
+            if (!g_clodUnifiedRt &&
+                CLodWorkGraphFrustumCullingEnabled() &&
                 !replaySource &&
                 CLodNodeBoundsOutsideFrustum(
                     childCullClassification,

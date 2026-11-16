@@ -53,8 +53,8 @@ the lens flare sources all evaluate lights through it. A change to falloff or co
 ## The light loop
 
 `shaders/Include/lighting.hlsli` has one direct-light loop, `EvaluateDirectLighting`. With
-`PSO_CLUSTERED_LIGHTING` it walks the fragment's cluster pages, which hold light buffer indices
-(`lightCulling.hlsl`); otherwise it walks the whole active list. Per light it evaluates occlusion, the light model and
+`PSO_CLUSTERED_LIGHTING` it walks the fragment's froxel in the light grid (below), a contiguous run of light buffer
+indices; otherwise it walks the whole active list. Per light it evaluates occlusion, the light model and
 the OpenPBR BRDF (`EvaluateDirectLightContribution`), and accumulates:
 
 - `lighting`: the sum raster writes, computed exactly as before the loop was unified.
@@ -74,6 +74,7 @@ The loop reads no root constants. Callers pass `DirectLightingOptions`:
 | `virtualShadowMaps` | Look up occlusion in the virtual shadow map, for the sun and for spot and point lights with faces; its resources must be bound. |
 | `sunOcclusion` | Sun occlusion known before the loop, combined with the shadow map's by max. |
 | `sunLightIndex` | Which light `sunOcclusion` is for. |
+| `stochasticLights` | Skip every analytic light: stochastic lighting shades them, and the caller adds its result. |
 
 `DirectLightingOptionsFromRoot()` builds them from a lighting pass's root switches (`MiscEnablePunctualLights`,
 `MiscShadowingMode`). A pass whose root constants mean something else in those slots must build its options with
@@ -84,9 +85,67 @@ Current callers:
 
 | Pass | Options |
 |---|---|
-| Deferred (`deferred.hlsl`) | From root, plus the ray traced sun mask as `sunOcclusion` when it runs. |
-| AVBOIT shading, deep visibility resolve | From root. |
+| Deferred (`deferred.hlsl`) | From root, plus the ray traced sun mask as `sunOcclusion` when it runs. In `StochasticRayTraced`, no analytic light: it adds stochastic lighting's result. |
+| AVBOIT shading, deep visibility resolve | From root. In `StochasticRayTraced` there is no shadow map, so every light is unshadowed here. |
 | Ray traced reflections | Every light; the sun's occlusion from one ray; no shadow map. |
+
+## The light grid
+
+Every consumer of per-pixel light lists reads one structure, built each frame by three compute passes in
+`shaders/lightCulling.hlsl` (`src/Lighting/Clustered/RenderPasses/LightCullingPass.h`, registered by
+`BuildLightClusteringPipeline`). It replaced the linked light pages (12 lights a page from a fixed pool) on 2026-11-15:
+the pool silently dropped up to 310,000 (cluster, light) pairs at 4,096 lights.
+
+**Shape.** Froxels are tiles of `lightGridTileSize` pixels square (default 32, a multiple of 16;
+`SARP_LIGHT_GRID_TILE`) by `lightGridSlices` depth slices (default 24; `SARP_LIGHT_GRID_SLICES`): 4 uniform slices
+to `PerFrameCB::clusterZSplitDepth` (6 m), logarithmic beyond. `PerFrameCB::lightClusterGridSize*` hold the counts and
+`lightGridTileSize` the tile; `MakeLightGridShape` (`lightCullingRootConstants.h`) derives them from the render resolution.
+Changing either setting rebuilds the graph.
+
+**Passes.**
+
+| Pass | Work |
+|---|---|
+| `LightGridPreparePass` | One 32-byte `LightCullingRecord` per active light (`Builtin::Light::CullingRecords`): its bounding sphere in view space and its light buffer index; directional lights get a negative radius, meaning "everywhere". Resets the depth bounds. |
+| `LightGridDepthBoundsPass` | Each opaque pixel of `LinearDepthMap` widens its froxel's nearest and farthest depth, and its tile's farthest depth (`Builtin::Light::GridDepthBounds`), through group-shared bounds per 16×16 pixels. A background pixel makes the tile's farthest depth unbounded. |
+| `LightCullingPass` | One thread group per 4×4×4 froxels, one thread per froxel. Each batch of 64 lights is tested against the union of the group's froxel boxes and compacted in group-shared memory; each froxel then tests the survivors against its own boxes. A first sweep counts, one wave-aggregated atomic per wave allocates each froxel's run in `Builtin::Light::GridIndices`, and a second sweep fills it, in active-list order. |
+
+**Two runs per froxel.** `Builtin::Light::GridCells` holds a `uint2` per froxel: the run's first index, then two
+16-bit counts.
+
+- The *opaque* count covers the lights whose sphere touches the froxel's box between its nearest and farthest opaque
+  pixel. Only the primary surface's own pixels may read it: deferred shading and stochastic lighting.
+- The *forward* count covers the whole froxel in front of the tile's farthest opaque pixel (a pixel of slack for
+  jittered fragments), with the opaque lights first. Forward passes (AVBOIT shading, deep visibility resolve) define
+  `LIGHT_GRID_FORWARD 1` to read it: a transparent fragment can lie anywhere in front of the opaque surface. It is built
+  only when the recipe has `ClusterLodAlphaTechnique`; otherwise it equals the opaque count.
+
+Froxels behind every opaque pixel of their tile get no lights at all, and froxels with no opaque pixel get only forward
+lights.
+
+**Readers** use `shaders/Include/lightGrid.hlsli`: `LightGridLoadRange(pixel, viewZ, perFrame, camera)` returns
+`{first, count, slice}` and `LightGridLight(range, i)` the i-th light buffer index. The deferred loop, stochastic
+lighting's estimator and reference, the AVBOIT and deep visibility forward passes and the light cluster debug outputs
+(12: the froxel's slice, 13: its light count) all go through it. The depth bounds pass computes a pixel's slice with the
+same function from the same depth as its readers, and a pixel within 0.1% of a slice boundary also widens the
+neighbouring slice, so a reader whose arithmetic rounds differently still lands in a froxel that holds its lights.
+
+**Capacity.** Nothing is dropped unless `GridIndices` is full. `CullingStats` (`LIGHT_CULLING_STATS_*`) counts the
+entries needed (the allocator), the pairs dropped, the froxels that dropped any, and the pairs stored;
+`LightManager::PollCullingStats` reads it back every 30 frames, logs it every 300
+(`Light culling: N (froxel, light) pairs dropped in M froxels, at most K in a sampled frame ...; at most E index entries
+needed`) and warns the first time anything is dropped. `Renderer::Update` grows `lightGridIndexCapacity` (from 4M entries, 16 MB)
+past the most needed so far, and `lightGridRecordCapacity` past the active light count, by doubling and a graph rebuild,
+as the material resolved-texture table grows. A froxel that finds no room keeps its opaque lights first.
+
+**Measured (2026-11-15, ZorahLights, range 18).** Overhead still camera, 1024 lights: a pixel's froxel holds 200 lights
+of which 185 reach it (92.5%; the pages held 279, 66%). Tile 64 gives 86.5%, tile 128 77.6%; the slice count barely
+matters (86.0–86.9% for 16–48 slices at tile 64), since the depth bounds already shrink each froxel to its surface. Moving
+camera, all three passes together: 0.02 + 0.12 + 0.08 = 0.22 ms at 1024 lights and 0.02 + 0.12 + 0.31 = 0.45 ms at
+4096, against 0.68 and 2.16 ms for the pages with cluster generation, which also dropped 261,000 pairs at 4096. At 16
+lights the grid costs 0.15 ms against 0.05: the depth bounds pass is most of it, and its floor, reading the depth alone,
+is 0.09 ms. In VSM mode at 1024 lights the deferred loop over the opaque runs took 35.0 ms with 32-pixel tiles against
+36.2 with 64-pixel ones (moving camera; [stochastic_lighting.md](stochastic_lighting.md) "After the light grid").
 
 ## Spot and point light shadows
 
@@ -252,10 +311,15 @@ shadowed. It follows the pipeline recipe and reaches shaders as `MiscShadowingMo
 |---|---|---|
 | `None` | no `ClusterLodShadowTechnique` | No occlusion. |
 | `VirtualShadowMaps` | `ClusterLodShadowTechnique` | The sun through the virtual shadow map, plus the ray traced sun mask where `enableRayTracedShadows` is on. Spot and point lights the budget selected, through their faces in the same shadow map; others unshadowed. |
+| `StochasticRayTraced` | `ClusterLodShadowTechnique` and `StochasticDirectLightingTechnique`, on a device that traces clusters | Stochastic lighting samples, traces and shades every analytic light, the sun included, and the deferred pass adds its result ([stochastic_lighting.md](stochastic_lighting.md)). No shadow map is built: no faces, no clipmaps, no ray traced sun mask. Forward passes light unshadowed. |
 
-The `enableShadows` setting (the menu's Shadows checkbox) adds or removes `ClusterLodShadowTechnique`.
-`LightingFrameSettings::shadowingMode` carries the mode to passes. `DeferredShadingPass` declares the shadow map's
-resources only in `VirtualShadowMaps`.
+The `enableShadows` setting (the menu's Shadows checkbox) adds or removes `ClusterLodShadowTechnique`, and
+`enableStochasticLighting` (Stochastic Lighting) adds or removes `StochasticDirectLightingTechnique`. In
+`StochasticRayTraced`, `ClusterLodShadowTechnique` stays in the recipe as the "shadows on" switch, but its graph
+extension (`CLodShadow`) is not registered. `Renderer::VirtualShadowMapsActive` says whether the shadow map is built, and
+the renderer publishes it at graph build as the `virtualShadowMapsActive` setting, which the passes that declare its
+resources read. `LightingFrameSettings::shadowingMode` carries the mode to passes. `DeferredShadingPass` declares the
+shadow map's resources only in `VirtualShadowMaps`.
 
 ### Adding a mode
 
@@ -269,8 +333,8 @@ A new mode, such as stochastic direct lighting, comes as a technique in the reci
 - What forward and ray-hit paths get. They cannot read a screen-space result for their own fragments. In
   `VirtualShadowMaps` they share the primary pass's shadow map; in a mode without one they would be unshadowed unless
   they trace.
-- Light selection. The clustered lists cover only the primary camera's frustum and loop over every light per cluster.
-  Ray hits have no world-space light structure.
+- Light selection. The light grid covers only the primary camera's frustum, and only its visible surfaces (the forward
+  runs extend to transparent fragments in front of them). Ray hits have no world-space light structure.
 - Temporal reuse needs `LightInfo::generation` to validate stored slots. It also needs history this renderer does not
   keep yet: only linear depth has a previous-frame copy.
 - Denoising. DLSS Ray Reconstruction's guides are produced only by the path tracer today.

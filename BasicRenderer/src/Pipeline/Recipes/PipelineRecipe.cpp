@@ -174,6 +174,17 @@ PipelineValidationResult PipelineRecipe::Validate() const
         Options<ClusterLodVoxelTechnique>().workRecordCapacity == 0u) {
         result.errors.emplace_back("CLod voxel rasterization work-record capacity must be greater than zero");
     }
+    if (Contains<StochasticDirectLightingTechnique>()) {
+        if (!Contains<ClusterLodTechnique>()) {
+            result.errors.emplace_back("Stochastic direct lighting requires the CLod technique, which builds its BVH");
+        }
+        if (!Contains<PrimaryLightingTechnique>()) {
+            result.errors.emplace_back("Stochastic direct lighting requires primary lighting, which adds its result");
+        }
+        if (!Contains<ClusteredLightingTechnique>()) {
+            result.errors.emplace_back("Stochastic direct lighting requires clustered lighting, which supplies its candidate lights");
+        }
+    }
     if (Contains<MaterialEvaluationTechnique>() && !Contains<CanonicalSurfaceResourcesTechnique>()) {
         result.errors.emplace_back("Material evaluation requires canonical surface resources");
     }
@@ -288,6 +299,7 @@ PipelineRecipe MakePathTracedRecipe(const PipelineRecipe& base)
         .Remove<ClusteredLightingTechnique>()
         .Remove<PrimaryLightingTechnique>()
         .Remove<ReflectionsTechnique>()
+        .Remove<StochasticDirectLightingTechnique>()
         .Remove<DepthHistoryTechnique>();
     recipe.Configure<ClusterLodTechnique>(ClusterLodOptions{ .reyes = ReyesMode::Disabled, .primaryRasterization = false });
 

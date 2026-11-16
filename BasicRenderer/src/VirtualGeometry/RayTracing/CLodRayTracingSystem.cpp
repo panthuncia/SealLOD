@@ -317,6 +317,32 @@ bool CLodRayTracingSystem::EnsureInitialized(rhi::Device device, const RayTracin
         spdlog::warn("CLod RT: opacity micromaps requested, but this device has none; alpha tests stay in any-hit");
     }
     m_stats.ommEnabled = m_ommEnabled;
+    {
+        char* value = nullptr;
+        size_t length = 0;
+        // Opt-in: on Zorah with a moving camera the classic TLAS builds in 0.16 ms against 0.30 ms and traces faster (the
+        // stochastic sample pass 2.08 ms against 2.65 ms): partitions are grid cells of instance origins, and the meshes
+        // reach far past their cells, so the partitions overlap (4 m cells: 11.6 ms).
+        const bool wantPartitioned = _dupenv_s(&value, &length, "SARP_RT_PARTITIONED_TLAS") == 0 && value && value[0] == '1';
+        std::free(value);
+        m_partitionedTlas = features.partitionedAccelerationStructure && features.gpuRtasOperations && wantPartitioned;
+        const auto readEnv = [](const char* key) -> std::string {
+            char* text = nullptr;
+            size_t size = 0;
+            std::string result;
+            if (_dupenv_s(&text, &size, key) == 0 && text) result = text;
+            std::free(text);
+            return result;
+        };
+        if (const std::string v = readEnv("SARP_RT_PTLAS_PARTITIONS"); !v.empty())
+            m_ptlasPartitions = std::bit_ceil(std::clamp<uint32_t>(static_cast<uint32_t>(std::strtoul(v.c_str(), nullptr, 10)), 16u, 1u << 20));
+        if (const std::string v = readEnv("SARP_RT_PTLAS_PARTITION_INSTANCES"); !v.empty())
+            m_ptlasPartitionCapacity = std::clamp<uint32_t>(static_cast<uint32_t>(std::strtoul(v.c_str(), nullptr, 10)), 1u, 65535u);
+        if (const std::string v = readEnv("SARP_RT_PTLAS_CELL"); !v.empty()) {
+            const float cell = std::strtof(v.c_str(), nullptr);
+            if (cell > 0.0f) m_ptlasCellSize = cell;
+        }
+    }
     m_clusterInfoStride = dxr2
         ? sizeof(rhi::PackedDxr2ClusterBuildTriangleInfo)
         : sizeof(rhi::PackedRayTracingClusterBuildTriangleInfo);
@@ -374,6 +400,7 @@ bool CLodRayTracingSystem::EnsureInitialized(rhi::Device device, const RayTracin
     rhi::RayTracingRtasPrebuildInfo blasPrebuild{};
     if (!rhi::IsOk(device.GetRayTracingAccelerationStructureOperationPrebuildInfo(blasInputs, blasPrebuild))) return false;
     m_stats.blasResultBytes = blasPrebuild.resultDataMaxSizeInBytes;
+
 
     // Pages, CLAS ID chunks and entries; after the cached IDs, a region of IDs per transient arena.
     m_protectedFrames = std::min<uint32_t>(std::max(m_limits.protectedFrames, m_framesInFlight), CLOD_RT_CACHE_HISTORY - 1u);
@@ -447,10 +474,101 @@ bool CLodRayTracingSystem::EnsureInitialized(rhi::Device device, const RayTracin
     m_blasResult->SetAllowAlias(true);
     m_blasResult->SetName("CLod RT BLAS data");
     org::memory::SetResourceUsageHint(*m_blasResult, "Cluster LOD ray tracing");
-    m_blasScratch = makeScratch(blasPrebuild.scratchDataSizeInBytes, "CLod RT BLAS scratch");
+    // ---- The BLAS cache's size classes: a block holds the largest BLAS of its class, as an explicit-destination build of
+    // one BLAS of that many clusters sizes it. The pool is split evenly by bytes between the classes.
+    {
+        char* text = nullptr;
+        size_t size = 0;
+        if (_dupenv_s(&text, &size, "SARP_RT_BLAS_CACHE_MB") == 0 && text && text[0] != '\0') m_bcPoolBytes = std::strtoull(text, nullptr, 10) << 20u;
+        std::free(text);
+        text = nullptr;
+        if (_dupenv_s(&text, &size, "SARP_RT_BLAS_CACHE_KEEP") == 0 && text && text[0] != '\0') m_bcKeepFrames = std::max(2u, static_cast<uint32_t>(std::strtoul(text, nullptr, 10)));
+        std::free(text);
+    }
+    uint64_t explicitScratchBytes = 0u;
+    m_bcEnabled = m_bcPoolBytes != 0u;
+    if (m_bcEnabled) {
+        const uint32_t classes = static_cast<uint32_t>(m_bcClassBytes.size());
+        uint64_t poolBytes = 0u;
+        m_bcRingItems = 0u;
+        for (uint32_t c = 0; c < classes; ++c) {
+            const uint32_t clusters = 1u << c;
+            rhi::RayTracingClusterBottomLevelInputsDesc one{ clusters, clusters };
+            rhi::RayTracingRtasOperationInputs oneInputs = blasInputs;
+            oneInputs.operationMode = rhi::RayTracingRtasOperationMode::ExplicitDestinations;
+            oneInputs.maxAccelerationStructureCount = 1u;
+            oneInputs.clustersBottomLevel = &one;
+            rhi::RayTracingRtasPrebuildInfo onePrebuild{};
+            if (!rhi::IsOk(device.GetRayTracingAccelerationStructureOperationPrebuildInfo(oneInputs, onePrebuild)) || onePrebuild.resultDataMaxSizeInBytes == 0u) {
+                m_bcEnabled = false;
+                break;
+            }
+            m_bcClassBytes[c] = AlignUp(onePrebuild.resultDataMaxSizeInBytes, 256u);
+            m_bcClassBlocks[c] = static_cast<uint32_t>(std::min<uint64_t>(m_bcEntries, (m_bcPoolBytes / classes) / m_bcClassBytes[c]));
+            poolBytes += m_bcClassBytes[c] * m_bcClassBlocks[c];
+            m_bcRingItems += m_bcClassBlocks[c];
+        }
+        if (m_bcEnabled) {
+            rhi::RayTracingRtasOperationInputs explicitInputs = blasInputs;
+            explicitInputs.operationMode = rhi::RayTracingRtasOperationMode::ExplicitDestinations;
+            rhi::RayTracingRtasPrebuildInfo explicitPrebuild{};
+            if (!rhi::IsOk(device.GetRayTracingAccelerationStructureOperationPrebuildInfo(explicitInputs, explicitPrebuild))) return false;
+            explicitScratchBytes = explicitPrebuild.scratchDataSizeInBytes;
+            ok = ok && CreateBuffer(m_bcPool, AlignUp(std::max<uint64_t>(poolBytes, 256u), 256u), local, AsStorageFlags(), "CLod RT BLAS cache", View::None, 0u, true);
+            ok = ok && CreateBuffer(m_bcEntryTable, uint64_t(m_bcEntries) * CLOD_RT_BC_ENTRY_BYTES, local, uavFlag, "CLod RT BLAS cache entries", View::Raw, 0u, true);
+            ok = ok && CreateBuffer(m_bcIndex, uint64_t(m_bcEntries) * 2u * 4u, local, uavFlag, "CLod RT BLAS cache index", View::Structured, 4u);
+            ok = ok && CreateBuffer(m_bcRings, (uint64_t(m_bcRingItems) + m_bcEntries) * 4u, local, uavFlag, "CLod RT BLAS cache rings", View::Structured, 4u);
+            ok = ok && CreateBuffer(m_bcCtrl, CLOD_RT_BC_CTRL_BYTES, local, uavFlag, "CLod RT BLAS cache control", View::Raw, 0u, true);
+            ok = ok && CreateBuffer(m_bcClasses, uint64_t(classes) * 16u, rhi::HeapType::Upload, {}, "CLod RT BLAS cache classes", View::Structured, 16u);
+            const uint64_t argBytes = sizeof(rhi::PackedRayTracingClusterBuildBottomLevelInfo);
+            ok = ok && CreateBuffer(m_bcExplicitArgs, uint64_t(m_limits.maxBlases) * argBytes, local, uavFlag, "CLod RT BLAS cache build args", View::Structured, static_cast<uint32_t>(argBytes));
+            ok = ok && CreateBuffer(m_bcExplicitDst, uint64_t(m_limits.maxBlases) * 8u, local, uavFlag, "CLod RT BLAS cache destinations", View::Structured, 8u);
+            ok = ok && CreateBuffer(m_bcBatchArgs, uint64_t(m_limits.maxBlases) * argBytes, local, uavFlag, "CLod RT BLAS batch args", View::Structured, static_cast<uint32_t>(argBytes));
+            ok = ok && CreateBuffer(m_bcBatchMap, uint64_t(m_limits.maxBlases) * 4u, local, uavFlag, "CLod RT BLAS batch map", View::Structured, 4u);
+            ok = ok && CreateBuffer(m_bcBatchAddresses, uint64_t(m_limits.maxBlases) * 8u, local, uavFlag, "CLod RT BLAS batch addresses", View::Structured, 8u);
+            if (ok) {
+                uint32_t ringOffset = 0u;
+                uint64_t poolOffset = 0u;
+                auto* rows = reinterpret_cast<uint32_t*>(m_bcClasses.mapped);
+                for (uint32_t c = 0; c < classes; ++c) {
+                    rows[c * 4u + 0u] = static_cast<uint32_t>(m_bcClassBytes[c]);
+                    rows[c * 4u + 1u] = m_bcClassBlocks[c];
+                    rows[c * 4u + 2u] = ringOffset;
+                    rows[c * 4u + 3u] = static_cast<uint32_t>(poolOffset / 256u);
+                    ringOffset += m_bcClassBlocks[c];
+                    poolOffset += m_bcClassBytes[c] * m_bcClassBlocks[c];
+                }
+                spdlog::info("CLod RT BLAS cache: {} MiB pool, {} entries, keep {} frames; blocks per class (1..65536 clusters): {}", poolBytes >> 20u, m_bcEntries,
+                    m_bcKeepFrames, [&] { std::string t; for (uint32_t c = 0; c < classes; ++c) t += std::to_string(m_bcClassBlocks[c]) + "x" + std::to_string(m_bcClassBytes[c] >> 10u) + "K "; return t; }());
+            }
+        }
+    }
+    if (!m_bcEnabled) { // Tracing passes declare the pool by name either way.
+        ok = ok && CreateBuffer(m_bcPool, 256u, local, AsStorageFlags(), "CLod RT BLAS cache (off)", View::None, 0u, false);
+    }
+    // Allocate and Place write the cache's keys whether or not it is on.
+    ok = ok && CreateBuffer(m_bcKeys, uint64_t(m_limits.maxBlases) * CLOD_RT_BC_KEY_BYTES, local, uavFlag, "CLod RT BLAS keys", View::Raw, 0u, true);
+    m_blasScratch = makeScratch(std::max(blasPrebuild.scratchDataSizeInBytes, explicitScratchBytes), "CLod RT BLAS scratch"); // Both builds, in turn.
     ok = ok && CreateBuffer(m_blasAddresses, uint64_t(m_limits.maxBlases) * 8u, local, uavFlag, "CLod RT BLAS addresses", View::Structured, 8u, true);
     ok = ok && CreateBuffer(m_blasSizes, uint64_t(m_limits.maxBlases) * 8u, local, uavFlag, "CLod RT BLAS sizes");
-    m_tlasInstances = CreateAliasedUnmaterializedStructuredBuffer(m_limits.maxInstances, sizeof(rhi::PackedRayTracingInstanceDesc), true);
+    // A partitioned TLAS reads WRITE_INSTANCE arguments, a classic one instance descs. Both backends' write layouts are 104 B.
+    static_assert(sizeof(rhi::PackedDxr2PartitionedTlasWriteInstanceData) == sizeof(rhi::PackedRayTracingPartitionedTlasWriteInstanceData));
+    const uint32_t tlasRowBytes = m_partitionedTlas ? uint32_t(sizeof(rhi::PackedDxr2PartitionedTlasWriteInstanceData)) : uint32_t(sizeof(rhi::PackedRayTracingInstanceDesc));
+    if (m_partitionedTlas) {
+        // Write arguments, then update arguments, each up to the instance capacity (clodRayTracingSetupRootConstants.h).
+        m_tlasInstances = CreateAliasedUnmaterializedRawBuffer(uint64_t(m_limits.maxInstances) * (tlasRowBytes + sizeof(rhi::PackedRayTracingPartitionedTlasUpdateInstanceData)), true);
+        ok = ok && CreateBuffer(m_tlasOps, CLOD_RT_PTLAS_CTRL_BYTES, local, uavFlag, "CLod RT TLAS operations", View::Raw, 0u, true);
+        const uint64_t keys = uint64_t(m_limits.maxDrawRecords) + m_limits.maxPortalOccurrences;
+        ok = ok && CreateBuffer(m_ptlasKeySlots, keys * 4u, local, uavFlag, "CLod RT TLAS key slots", View::Structured, 4u, true);
+        ok = ok && CreateBuffer(m_ptlasSlots, uint64_t(m_limits.maxInstances) * CLOD_RT_PTLAS_SLOT_BYTES, local, uavFlag, "CLod RT TLAS slots", View::Raw, 0u, true);
+        ok = ok && CreateBuffer(m_ptlasSlotRows, uint64_t(m_limits.maxInstances) * 16u, local, uavFlag, "CLod RT TLAS slot rows", View::Structured, 16u, true);
+        ok = ok && CreateBuffer(m_ptlasRing, uint64_t(m_limits.maxInstances) * 4u, local, uavFlag, "CLod RT TLAS free slots", View::Structured, 4u);
+        ok = ok && CreateBuffer(m_ptlasCells, uint64_t(m_ptlasPartitions) * 2u * CLOD_RT_PTLAS_CELL_BYTES, local, uavFlag, "CLod RT TLAS cells", View::Raw);
+        ok = ok && CreateBuffer(m_ptlasFill, uint64_t(m_ptlasPartitions) * 4u, local, uavFlag, "CLod RT TLAS partition fill", View::Structured, 4u);
+    }
+    else {
+        m_tlasInstances = CreateAliasedUnmaterializedStructuredBuffer(m_limits.maxInstances, tlasRowBytes, true);
+    }
     m_tlasInstances->SetName("CLod RT TLAS instances");
     org::memory::SetResourceUsageHint(*m_tlasInstances, "Cluster LOD ray tracing scratch");
     ok = ok && CreateBuffer(m_visibilityHash, uint64_t(m_limits.visibilityHashEntries) * 8u, local, uavFlag, "CLod RT visible cluster hash", View::Raw);
@@ -478,7 +596,10 @@ bool CLodRayTracingSystem::EnsureInitialized(rhi::Device device, const RayTracin
     }
 
     // The scene build's slice: counters, the cache's control words, timers, micromap requests and releases.
-    m_readbackSliceBytes = AlignUp(uint64_t(kCountersBytes) + kCtrlBytes + kSceneTimers * 8u + uint64_t(budget) * 8u + kReleaseBytes, 256u);
+    // ..., then the partitioned TLAS's control words.
+    m_readbackPtlasOffset = kReadbackOmmWanted + uint64_t(budget) * 8u + kReleaseBytes;
+    m_readbackBcOffset = m_readbackPtlasOffset + CLOD_RT_PTLAS_CTRL_BYTES;
+    m_readbackSliceBytes = AlignUp(m_readbackBcOffset + CLOD_RT_BC_CTRL_BYTES, 256u);
     ok = ok && CreateBuffer(m_readback, m_readbackSliceBytes * m_framesInFlight, rhi::HeapType::Readback, {}, "CLod RT readback");
     ok = ok && CreateBuffer(m_statsReadback, uint64_t(kStatsSliceBytes) * m_framesInFlight, rhi::HeapType::Readback, {}, "CLod RT visibility comparison readback");
     if (m_watchBright > 0.0f) {
@@ -487,30 +608,54 @@ bool CLodRayTracingSystem::EnsureInitialized(rhi::Device device, const RayTracin
     if (!ok) return false;
     std::memset(m_slabAddresses.mapped, 0, m_slabAddresses.bytes);
 
-    rhi::RayTracingGeometryDesc tlasGeometry{};
-    tlasGeometry.type = rhi::RayTracingGeometryType::Instances;
-    // Sizing reads no instances, but wants a buffer: the rows the TLAS pass writes into are placed by the graph, not made yet.
-    tlasGeometry.instances.instanceBuffer = { m_instanceRows.Handle(), 0u, m_instanceRows.bytes };
-    tlasGeometry.instances.stride = sizeof(rhi::PackedRayTracingInstanceDesc);
-    tlasGeometry.instances.count = m_limits.maxInstances;
-    rhi::AccelerationStructureBuildInputs tlasInputs{};
-    tlasInputs.type = rhi::RayTracingAccelerationStructureType::TopLevel;
-    tlasInputs.flags = rhi::RTASBuild_PreferFastBuild;
-    tlasInputs.geometries = { &tlasGeometry, 1u };
-    rhi::AccelerationStructurePrebuildInfo tlasPrebuild{};
-    if (!rhi::IsOk(device.GetAccelerationStructurePrebuildInfo(tlasInputs, tlasPrebuild))) return false;
-    m_stats.tlasBytes = tlasPrebuild.resultDataMaxSizeInBytes;
-    ok = ok && CreateBuffer(m_tlasStorage, tlasPrebuild.resultDataMaxSizeInBytes, local, AsStorageFlags(), "CLod RT TLAS", View::None, 0u, true);
-    m_tlasScratch = makeScratch(tlasPrebuild.scratchDataSizeInBytes, "CLod RT TLAS scratch");
-    if (!ok) return false;
+    uint64_t tlasBytes = 0u;
+    if (m_partitionedTlas) {
+        // Kept from frame to frame: static instances in partitions by grid cell, moving ones and overflow in the global
+        // partition, which can take every instance.
+        m_ptlasInputs = {};
+        m_ptlasInputs.flags = rhi::RTASBuild_PreferFastTrace;
+        m_ptlasInputs.instanceCount = m_limits.maxInstances;
+        m_ptlasInputs.maxInstancePerPartitionCount = m_ptlasPartitionCapacity;
+        m_ptlasInputs.partitionCount = m_ptlasPartitions;
+        m_ptlasInputs.maxInstanceInGlobalPartitionCount = m_limits.maxInstances;
+        rhi::RayTracingRtasOperationInputs ptlasOperation{};
+        ptlasOperation.operationType = rhi::RayTracingRtasOperationType::BuildPartitionedTopLevel;
+        ptlasOperation.partitionedTopLevel = &m_ptlasInputs;
+        rhi::RayTracingRtasPrebuildInfo ptlasPrebuild{};
+        if (!rhi::IsOk(device.GetRayTracingAccelerationStructureOperationPrebuildInfo(ptlasOperation, ptlasPrebuild))) return false;
+        tlasBytes = AlignUp(ptlasPrebuild.resultDataMaxSizeInBytes, 256u);
+        m_stats.tlasBytes = tlasBytes;
+        ok = ok && CreateBuffer(m_tlasStorage, tlasBytes, local, AsStorageFlags(), "CLod RT TLAS", View::None, 0u, true);
+        m_tlasScratch = makeScratch(ptlasPrebuild.scratchDataSizeInBytes, "CLod RT TLAS scratch");
+        if (!ok) return false;
+    }
+    else {
+        rhi::RayTracingGeometryDesc tlasGeometry{};
+        tlasGeometry.type = rhi::RayTracingGeometryType::Instances;
+        // Sizing reads no instances, but wants a buffer: the rows the TLAS pass writes into are placed by the graph, not made yet.
+        tlasGeometry.instances.instanceBuffer = { m_instanceRows.Handle(), 0u, m_instanceRows.bytes };
+        tlasGeometry.instances.stride = sizeof(rhi::PackedRayTracingInstanceDesc);
+        tlasGeometry.instances.count = m_limits.maxInstances;
+        rhi::AccelerationStructureBuildInputs tlasInputs{};
+        tlasInputs.type = rhi::RayTracingAccelerationStructureType::TopLevel;
+        tlasInputs.flags = rhi::RTASBuild_PreferFastBuild;
+        tlasInputs.geometries = { &tlasGeometry, 1u };
+        rhi::AccelerationStructurePrebuildInfo tlasPrebuild{};
+        if (!rhi::IsOk(device.GetAccelerationStructurePrebuildInfo(tlasInputs, tlasPrebuild))) return false;
+        m_stats.tlasBytes = tlasPrebuild.resultDataMaxSizeInBytes;
+        ok = ok && CreateBuffer(m_tlasStorage, tlasPrebuild.resultDataMaxSizeInBytes, local, AsStorageFlags(), "CLod RT TLAS", View::None, 0u, true);
+        m_tlasScratch = makeScratch(tlasPrebuild.scratchDataSizeInBytes, "CLod RT TLAS scratch");
+        if (!ok) return false;
 
-    rhi::AccelerationStructureDesc tlasDesc{};
-    tlasDesc.type = rhi::RayTracingAccelerationStructureType::TopLevel;
-    tlasDesc.storage = m_tlasStorage.Handle();
-    tlasDesc.sizeBytes = tlasPrebuild.resultDataMaxSizeInBytes;
-    tlasDesc.flags = rhi::RTASBuild_PreferFastBuild;
-    tlasDesc.debugName = "CLod RT TLAS";
-    if (!rhi::IsOk(device.CreateAccelerationStructure(tlasDesc, m_tlas)) || !m_tlas) return false;
+        rhi::AccelerationStructureDesc tlasDesc{};
+        tlasDesc.type = rhi::RayTracingAccelerationStructureType::TopLevel;
+        tlasDesc.storage = m_tlasStorage.Handle();
+        tlasDesc.sizeBytes = tlasPrebuild.resultDataMaxSizeInBytes;
+        tlasDesc.flags = rhi::RTASBuild_PreferFastBuild;
+        tlasDesc.debugName = "CLod RT TLAS";
+        if (!rhi::IsOk(device.CreateAccelerationStructure(tlasDesc, m_tlas)) || !m_tlas) return false;
+        tlasBytes = tlasPrebuild.resultDataMaxSizeInBytes;
+    }
 
     auto& descriptorHeap = org::DescriptorHeapManager::GetInstance().GetCBVSRVUAVHeap();
     m_tlasSrv = descriptorHeap->AllocateDescriptor();
@@ -519,9 +664,11 @@ bool CLodRayTracingSystem::EnsureInitialized(rhi::Device device, const RayTracin
     // A union member: SrvDesc{} leaves these fields unset.
     tlasSrv.accel.deviceAddress = 0u;
     tlasSrv.accel.address = {};
-    tlasSrv.accel.partitioned = false;
-    tlasSrv.accel.accelerationStructure = m_tlas->GetHandle();
-    tlasSrv.accel.sizeBytes = tlasPrebuild.resultDataMaxSizeInBytes;
+    tlasSrv.accel.partitioned = m_partitionedTlas;
+    tlasSrv.accel.accelerationStructure = {};
+    if (m_partitionedTlas) tlasSrv.accel.deviceAddress = m_tlasStorage.address;
+    else tlasSrv.accel.accelerationStructure = m_tlas->GetHandle();
+    tlasSrv.accel.sizeBytes = tlasBytes;
     if (!rhi::IsOk(device.CreateShaderResourceView({ descriptorHeap->GetHeap().GetHandle(), m_tlasSrv }, {}, tlasSrv))) return false;
 
     rhi::QueryPoolDesc timerDesc{};
@@ -532,17 +679,19 @@ bool CLodRayTracingSystem::EnsureInitialized(rhi::Device device, const RayTracin
     }
 
     m_tlasInstanceCount = m_limits.maxInstances;
+    m_tlasBuildCount = m_tlasInstanceCount; // Until a count has been read back.
+    m_sliceTlasBuildCount.assign(m_framesInFlight, m_tlasBuildCount);
     m_stats.initialized = true;
     if (m_ommEnabled) {
         spdlog::info("CLod RT: baked opacity micromaps, {} MiB of arrays, {} clusters of indices, {} MiB uploaded a frame at most",
             m_limits.ommArrayPoolBytes >> 20u, m_limits.ommIndexUnits, m_limits.ommUploadBytesPerFrame >> 20u);
     }
     spdlog::info(
-        "CLod RT: {} MiB CLAS cache in {} pages of {} KiB, {} CLAS IDs, {} entries, {} clusters built a frame into a {} MiB arena, {} of them transient in {} arenas of {} MiB, BLAS batch {} MiB + {} MiB scratch, TLAS {} MiB + {} MiB scratch, total {} MiB",
+        "CLod RT: {} MiB CLAS cache in {} pages of {} KiB, {} CLAS IDs, {} entries, {} clusters built a frame into a {} MiB arena, {} of them transient in {} arenas of {} MiB, BLAS batch {} MiB + {} MiB scratch, {} TLAS {} MiB + {} MiB scratch, total {} MiB",
         (uint64_t(m_pageCount) * kPageBytes) >> 20u, m_pageCount, kPageBytes >> 10u, uint64_t(m_chunkCount) * CLOD_RT_CACHE_CHUNK_IDS, m_limits.maxEntries, budget, m_arenaBytes >> 20u,
         m_limits.transientBuildBudget, m_transientSlices, m_transientSliceBytes >> 20u,
-        blasPrebuild.resultDataMaxSizeInBytes >> 20u, blasPrebuild.scratchDataSizeInBytes >> 20u,
-        tlasPrebuild.resultDataMaxSizeInBytes >> 20u, tlasPrebuild.scratchDataSizeInBytes >> 20u, m_stats.totalMemoryBytes >> 20u);
+        blasPrebuild.resultDataMaxSizeInBytes >> 20u, blasPrebuild.scratchDataSizeInBytes >> 20u, m_partitionedTlas ? "partitioned" : "classic",
+        tlasBytes >> 20u, m_tlasScratch->GetSize() >> 20u, m_stats.totalMemoryBytes >> 20u);
     // The render graph's memory introspection does not see these buffers: name the large ones here.
     std::sort(m_allocations.begin(), m_allocations.end(), [](const auto& a, const auto& b) { return std::get<1>(a) > std::get<1>(b); });
     std::string largest;
@@ -563,9 +712,10 @@ std::shared_ptr<org::Buffer> CLodRayTracingSystem::GetCoarseCut() const {
 void CLodRayTracingSystem::RegisterGraphResources(org::RenderGraph& graph) {
     graph.RegisterResource(Builtin::RayTracing::Tlas, m_tlasStorage.buffer);
     graph.RegisterResource(Builtin::RayTracing::BlasData, m_blasResult);
+    graph.RegisterResource(Builtin::RayTracing::BlasCache, m_bcPool.buffer);
     graph.RegisterResource(Builtin::RayTracing::ClasPool, m_clasPool.buffer);
     graph.RegisterResource(Builtin::RayTracing::ClasInfo, m_clasInfo.buffer);
-    graph.RegisterResource(Builtin::RayTracing::InstanceRows, m_instanceRows.buffer);
+    graph.RegisterResource(Builtin::RayTracing::InstanceRows, m_partitionedTlas ? m_ptlasSlotRows.buffer : m_instanceRows.buffer);
     graph.RegisterResolver(Builtin::RayTracing::MicromapArrays, std::make_shared<ResourceGroupResolver>(m_ommArrays));
 }
 
@@ -573,6 +723,7 @@ void CLodRayTracingSystem::DeclareTracing(org::RenderPassBuilder& builder) {
     // Rays reach the BLAS batch through the TLAS, the CLAS in the pool through the BLASes, and micromaps through those.
     builder.AccelerationStructureRead(Builtin::RayTracing::Tlas);
     builder.AccelerationStructureRead(Builtin::RayTracing::BlasData);
+    builder.AccelerationStructureRead(Builtin::RayTracing::BlasCache); // A placeholder when the cache is off.
     builder.AccelerationStructureRead(Builtin::RayTracing::ClasPool);
     builder.AccelerationStructureRead(Builtin::RayTracing::MicromapArrays);
     builder.ShaderResource(Builtin::RayTracing::ClasInfo);
@@ -611,17 +762,34 @@ void CLodRayTracingSystem::DeclareSceneBlas(org::RenderPassBuilder& builder) con
     // Allocate, coarse consumers, place.
     for (const GraphBuffer* buffer : { &m_counters, &m_drawTable, &m_instanceList, &m_instanceBlas, &m_shareTable, &m_instanceRows, &m_coarseCut,
              &m_cacheCtrl, &m_cacheEntries, &m_transient, &m_groupState, &m_clasAddresses, &m_slotOmmKeys, &m_blasOmmKeys, &m_blasArgs,
-             &m_blasAddressArray }) {
+             &m_blasAddressArray, &m_bcKeys }) {
         builder.UnorderedAccess(buffer->buffer);
     }
     // The BLAS build, from the CLAS in the pool.
     builder.AccelerationStructureRead(m_clasPool.buffer);
     builder.AccelerationStructureBuild(m_blasResult);
     builder.AccelerationStructureBuildOutput(m_blasScratch);
-    builder.AccelerationStructureBuildOutput(m_blasAddresses.buffer);
     builder.AccelerationStructureBuildOutput(m_blasSizes.buffer);
-    for (const GraphBuffer* buffer : { &m_blasArgs, &m_blasAddressArray, &m_counters }) {
-        builder.InternalTransition(buffer->buffer, kLeftAsBuildInput);
+    if (m_bcEnabled) {
+        // The cache: its tables, then two builds, into its blocks and into the batch; then where the batch's BLASes went.
+        for (const GraphBuffer* buffer : { &m_bcEntryTable, &m_bcIndex, &m_bcRings, &m_bcCtrl, &m_blasAddresses }) {
+            builder.UnorderedAccess(buffer->buffer);
+        }
+        builder.ShaderResource(m_bcClasses.buffer);
+        builder.AccelerationStructureBuild(m_bcPool.buffer);
+        builder.AccelerationStructureBuildOutput(m_bcBatchAddresses.buffer);
+        for (const GraphBuffer* buffer : { &m_bcExplicitArgs, &m_bcExplicitDst, &m_bcBatchArgs, &m_bcBatchMap }) {
+            builder.UnorderedAccess(buffer->buffer);
+        }
+        for (const GraphBuffer* buffer : { &m_blasAddressArray, &m_bcExplicitArgs, &m_bcExplicitDst, &m_bcBatchArgs }) {
+            builder.InternalTransition(buffer->buffer, kLeftAsBuildInput);
+        }
+    }
+    else {
+        builder.AccelerationStructureBuildOutput(m_blasAddresses.buffer);
+        for (const GraphBuffer* buffer : { &m_blasArgs, &m_blasAddressArray, &m_counters }) {
+            builder.InternalTransition(buffer->buffer, kLeftAsBuildInput);
+        }
     }
 }
 
@@ -639,6 +807,17 @@ org::DeclaredViewToken CLodRayTracingSystem::DeclareSceneTlas(org::RenderPassBui
     builder.AccelerationStructureBuildOutput(m_tlasScratch);
     builder.CopyDestination(m_readback.buffer);
     builder.InternalTransition(m_tlasInstances, kLeftAsBuildInput);
+    if (m_tlasOps) { // Written by the instance passes, then read by the build.
+        builder.UnorderedAccess(m_tlasOps.buffer);
+        builder.InternalTransition(m_tlasOps.buffer, kLeftAsCopySource); // Read by the build, then copied for the stats.
+        for (const GraphBuffer* buffer : { &m_ptlasKeySlots, &m_ptlasSlots, &m_ptlasSlotRows, &m_ptlasRing, &m_ptlasCells, &m_ptlasFill }) {
+            builder.UnorderedAccess(buffer->buffer);
+        }
+    }
+    if (m_bcEnabled) { // Copied for the stats.
+        builder.UnorderedAccess(m_bcCtrl.buffer);
+        builder.InternalTransition(m_bcCtrl.buffer, kLeftAsCopySource);
+    }
     for (const GraphBuffer* buffer : { &m_counters, &m_ommWanted, &m_ommRelease }) {
         builder.InternalTransition(buffer->buffer, kLeftAsCopySource);
     }
@@ -698,6 +877,55 @@ void CLodRayTracingSystem::BeginFrame(MeshManager& meshManager) {
     uint32_t counters[CLOD_RT_COUNTER_WORDS]{};
     std::memcpy(counters, base, sizeof(counters));
     m_stats.instances = std::min(counters[CLOD_RT_COUNTER_INSTANCES], m_limits.maxInstances);
+    if (m_bcEnabled) {
+        uint32_t bc[CLOD_RT_BC_CTRL_BYTES / 4u]{};
+        std::memcpy(bc, base + m_readbackBcOffset, sizeof(bc));
+        const auto last = [&](uint32_t word) { return bc[word + CLOD_RT_BC_LAST_OFFSET]; };
+        m_stats.bcHits = last(CLOD_RT_BC_HITS);
+        m_stats.bcBuilt = last(CLOD_RT_BC_EXPLICIT_COUNT);
+        m_stats.bcBatch = last(CLOD_RT_BC_IMPLICIT_COUNT);
+        m_stats.bcUncacheable = last(CLOD_RT_BC_UNCACHEABLE);
+        m_stats.bcNoRoom = last(CLOD_RT_BC_NO_ROOM);
+        m_stats.bcEvicted = last(CLOD_RT_BC_EVICTED);
+        m_stats.bcLive = last(CLOD_RT_BC_LIVE);
+        m_bcClassUsed.fill(0u);
+        for (uint32_t c = 0; c < m_bcClassBlocks.size(); ++c) {
+            m_bcClassUsed[c] = m_bcClassBlocks[c] - std::min(m_bcClassBlocks[c], bc[c * 2u + 1u] - bc[c * 2u]);
+        }
+    }
+    if (m_partitionedTlas) {
+        uint32_t ptlas[CLOD_RT_PTLAS_CTRL_BYTES / 4u]{};
+        std::memcpy(ptlas, base + m_readbackPtlasOffset, sizeof(ptlas));
+        m_stats.ptlasWrites = ptlas[CLOD_RT_PTLAS_LAST_WRITES];
+        m_stats.ptlasUpdates = ptlas[CLOD_RT_PTLAS_LAST_UPDATES];
+        m_stats.ptlasRetired = ptlas[CLOD_RT_PTLAS_LAST_RETIRED];
+        m_stats.ptlasDropped = ptlas[CLOD_RT_PTLAS_LAST_DROPPED];
+        m_stats.ptlasPartitions = std::min(ptlas[CLOD_RT_PTLAS_PARTITIONS], m_ptlasPartitions);
+        m_stats.ptlasGlobal = ptlas[CLOD_RT_PTLAS_GLOBAL];
+        m_stats.ptlasFreeSlots = ptlas[CLOD_RT_PTLAS_TAIL] - ptlas[CLOD_RT_PTLAS_HEAD];
+    }
+    {
+        // The next TLAS covers what this slice counted with a quarter more and 4k rows of headroom, rounded to 4k. It grows at
+        // once, and shrinks only after it has been twice too large for 120 frames in a row. A count past the bound the slice
+        // was built with lost the rows past it for that frame.
+        const uint32_t built = m_sliceTlasBuildCount[sliceIndex];
+        if (m_stats.instances > built) m_stats.clippedInstancesTotal += m_stats.instances - built;
+        const uint64_t wanted = ((uint64_t(m_stats.instances) * 5u / 4u + 4096u + 4095u) / 4096u) * 4096u;
+        const uint32_t target = static_cast<uint32_t>(std::min<uint64_t>(wanted, m_tlasInstanceCount));
+        if (target > m_tlasBuildCount) {
+            m_tlasBuildCount = target;
+            m_tlasShrinkFrames = 0;
+        }
+        else if (target * 2u < m_tlasBuildCount) {
+            if (++m_tlasShrinkFrames >= 120u) {
+                m_tlasBuildCount = target;
+                m_tlasShrinkFrames = 0;
+            }
+        }
+        else {
+            m_tlasShrinkFrames = 0;
+        }
+    }
     m_stats.clustersInBvh = counters[CLOD_RT_COUNTER_CLUSTERS];
     m_stats.distinctBlases = counters[CLOD_RT_COUNTER_BLAS_ARGS];
     m_stats.droppedInstances = counters[CLOD_RT_COUNTER_DROPPED_INSTANCES];
@@ -1161,17 +1389,33 @@ void CLodRayTracingSystem::LogStats() {
     BT_ZONE_SCOPE("CLodRT::LogStats");
     const Stats& s = m_stats;
     spdlog::info(
-        "CLod RT: instances={} untraversed={} BLASes={} clusters={} list={} (dropped {} instances, {} clusters, {} BLASes) CLAS {} of {} MiB ({} groups, {} clusters, {:.0f}% of page space unused), free pages={} chunks={} entries={}, built={} freed={} | "
+        "CLod RT: instances={} (TLAS rows {}, {} clipped in all) untraversed={} BLASes={} clusters={} list={} (dropped {} instances, {} clusters, {} BLASes) CLAS {} of {} MiB ({} groups, {} clusters, {:.0f}% of page space unused), free pages={} chunks={} entries={}, built={} freed={} | "
         "last frame: requests={} admitted={} built={} clusters, cached={} transient={} ({} clusters) refused={} evicted={} (stale {}), no CLAS: not built={} discarded={} ({} clusters) missing clusters={} | "
         "evicted {} transient clusters {} not built {} discarded {} missing clusters {} in all, keep age={} | "
         "GPU ms: count {:.2f} cache+CLAS {:.2f} allocate {:.2f} place {:.2f} BLAS {:.2f} instances {:.2f} TLAS {:.2f}",
-        s.instances, s.coarseConsumers, s.distinctBlases, s.clustersInBvh, s.listClusters, s.droppedInstances, s.droppedClusters, s.droppedBlases,
+        s.instances, s.tlasBuildRows, s.clippedInstancesTotal, s.coarseConsumers, s.distinctBlases, s.clustersInBvh, s.listClusters, s.droppedInstances, s.droppedClusters, s.droppedBlases,
         s.clasBytesUsed >> 20u, s.clasPoolBytes >> 20u, s.cachedGroups, s.cachedClusters, s.packingWaste * 100.0f, s.freePages, s.freeChunks, s.freeEntries,
         s.clasBuildsTotal, s.clasFreedTotal,
         s.requestsLastFrame, s.admittedLastFrame, s.clasBuildsLastFrame, s.persistentLastFrame, s.transientLastFrame, s.transientClustersLastFrame, s.refusedLastFrame,
         s.evictedLastFrame, s.staleLastFrame, s.notBuiltLastFrame, s.discardedLastFrame, s.discardedClustersLastFrame, s.missingClustersLastFrame,
         s.evictedTotal, s.transientClustersTotal, s.notBuiltTotal, s.discardedTotal, s.missingClustersTotal, s.keepAge,
         s.msCount, s.msClasBuild, s.msAllocate, s.msPlace, s.msBlasBuild, s.msWriteInstances, s.msTlasBuild);
+    if (m_bcEnabled) {
+        spdlog::info("CLod RT BLAS cache: last frame reused={} built into blocks={} built into the batch={} (can't keep {}, no room {}) evicted={} entries={}",
+            s.bcHits, s.bcBuilt, s.bcBatch, s.bcUncacheable, s.bcNoRoom, s.bcEvicted, s.bcLive);
+        std::string used;
+        uint64_t usedBytes = 0u;
+        for (uint32_t c = 0; c < m_bcClassBlocks.size(); ++c) {
+            used += std::to_string(m_bcClassUsed[c]) + "/" + std::to_string(m_bcClassBlocks[c]) + " ";
+            usedBytes += uint64_t(m_bcClassUsed[c]) * m_bcClassBytes[c];
+        }
+        spdlog::info("CLod RT BLAS cache blocks in use per class (1..65536 clusters), {} MiB: {}", usedBytes >> 20u, used);
+    }
+    if (m_partitionedTlas) {
+        spdlog::info("CLod RT partitioned TLAS: last frame writes={} updates={} retired={} dropped={} | partitions {} of {} ({} instances each at most, {} m cells), global partition {}, free slots {}",
+            s.ptlasWrites, s.ptlasUpdates, s.ptlasRetired, s.ptlasDropped, s.ptlasPartitions, m_ptlasPartitions, m_ptlasPartitionCapacity, m_ptlasCellSize,
+            s.ptlasGlobal, s.ptlasFreeSlots);
+    }
     if (m_ommEnabled) {
         spdlog::info("CLod RT micromaps: groups loaded={} without={} (no container {}, no file {}, not in file {}, cluster mismatch {}, too large {}) pending={} waiting for room={} released={} pressure={} rebuilt last frame={} micromaps={} uploaded {} MiB, arrays {} of {} MiB, index clusters {} of {}, files {} | instances alpha={} with={} disabled={}",
             s.ommGroupsLoaded, s.ommGroupsWithout, s.ommWithoutReasons[0], s.ommWithoutReasons[1], s.ommWithoutReasons[2], s.ommWithoutReasons[3],
@@ -1355,13 +1599,25 @@ MiscConstants CLodRayTracingSystem::SceneConstants(const SceneInputs& inputs) co
     scene[CLOD_RT_SCENE_COARSE_CUT_UAV] = m_coarseCut.uav;
     scene[CLOD_RT_SCENE_BLAS_ADDRESSES_SRV] = m_blasAddresses.srv;
     scene[CLOD_RT_SCENE_TLAS_INSTANCES_UAV] = inputs.tlasInstancesUav;
-    scene[CLOD_RT_SCENE_TLAS_INSTANCE_COUNT] = m_tlasInstanceCount;
+    scene[CLOD_RT_SCENE_TLAS_INSTANCE_COUNT] = m_tlasBuildCount;
     scene[CLOD_RT_SCENE_INSTANCE_BLAS_UAV] = m_instanceBlas.uav;
     scene[CLOD_RT_SCENE_SHARE_TABLE_UAV] = m_shareTable.uav;
     scene[CLOD_RT_SCENE_SHARE_TABLE_ENTRIES] = m_limits.blasShareEntries;
     scene[CLOD_RT_SCENE_SLOT_OMM_KEYS_UAV] = m_slotOmmKeys.uav;
     scene[CLOD_RT_SCENE_BLAS_OMM_KEYS_UAV] = m_blasOmmKeys.uav;
     scene[CLOD_RT_SCENE_OMM_ACTIVE] = OpacityMicromapsActive() ? 1u : 0u;
+    scene[CLOD_RT_SCENE_TLAS_PARTITIONED] = m_partitionedTlas ? 1u : 0u;
+    scene[CLOD_RT_SCENE_TLAS_OPS_UAV] = m_tlasOps.uav;
+    if (m_partitionedTlas) {
+        scene[CLOD_RT_SCENE_PTLAS_KEY_SLOTS_UAV] = m_ptlasKeySlots.uav;
+        scene[CLOD_RT_SCENE_PTLAS_SLOTS_UAV] = m_ptlasSlots.uav;
+        scene[CLOD_RT_SCENE_PTLAS_SLOT_ROWS_UAV] = m_ptlasSlotRows.uav;
+        scene[CLOD_RT_SCENE_PTLAS_RING_UAV] = m_ptlasRing.uav;
+        scene[CLOD_RT_SCENE_PTLAS_CELLS_UAV] = m_ptlasCells.uav;
+        scene[CLOD_RT_SCENE_PTLAS_FILL_UAV] = m_ptlasFill.uav;
+        scene[CLOD_RT_SCENE_PTLAS_CELL_SIZE] = std::bit_cast<uint32_t>(m_ptlasCellSize);
+        scene[CLOD_RT_SCENE_PTLAS_LIMITS] = (m_ptlasPartitions / 16u) | (m_ptlasPartitionCapacity << 16u);
+    }
     return scene;
 }
 
@@ -1444,7 +1700,8 @@ void CLodRayTracingSystem::RecordSceneClas(org::RecordingContext& recording, con
 
 void CLodRayTracingSystem::RecordSceneBlas(org::RecordingContext& recording, const ScenePipelines& pipelines, const SceneInputs& inputs) {
     auto& commands = recording.Commands();
-    const MiscConstants scene = SceneConstants(inputs);
+    MiscConstants scene = SceneConstants(inputs);
+    scene[CLOD_RT_SCENE_BC_KEYS_UAV] = m_bcKeys.uav;
     const uint32_t clusterGroups = (scene[CLOD_RT_SCENE_CLUSTER_CAPACITY] + 255u) / 256u;
 
     recording.BindComputePipeline(pipelines.allocate);
@@ -1466,6 +1723,11 @@ void CLodRayTracingSystem::RecordSceneBlas(org::RecordingContext& recording, con
     recording.BindComputePipeline(pipelines.place);
     PushMiscConstants(recording, scene);
     commands.Dispatch(clusterGroups, 1u, 1u);
+    if (m_bcEnabled) {
+        GlobalUavBarrier(commands);
+        RecordBlasCache(recording, pipelines);
+        return;
+    }
     SceneStamp(commands, 4u);
 
     // ---- BLASes: the build reads the arguments, the CLAS references they point into, and their count. The pass leaves them
@@ -1490,31 +1752,163 @@ void CLodRayTracingSystem::RecordSceneBlas(org::RecordingContext& recording, con
     SceneStamp(commands, 5u);
 }
 
+void CLodRayTracingSystem::RecordBlasCache(org::RecordingContext& recording, const ScenePipelines& pipelines) {
+    auto& commands = recording.Commands();
+    MiscConstants bc{};
+    bc[CLOD_RT_BC_COUNTERS_UAV] = m_counters.uav;
+    bc[CLOD_RT_BC_BLAS_ARGS_UAV] = m_blasArgs.uav;
+    bc[CLOD_RT_BC_BLAS_ADDRESSES_UAV] = m_blasAddresses.uav;
+    bc[CLOD_RT_BC_KEYS_UAV] = m_bcKeys.uav;
+    bc[CLOD_RT_BC_ENTRIES_UAV] = m_bcEntryTable.uav;
+    bc[CLOD_RT_BC_INDEX_UAV] = m_bcIndex.uav;
+    bc[CLOD_RT_BC_RINGS_UAV] = m_bcRings.uav;
+    bc[CLOD_RT_BC_CTRL_UAV] = m_bcCtrl.uav;
+    bc[CLOD_RT_BC_EXPLICIT_ARGS_UAV] = m_bcExplicitArgs.uav;
+    bc[CLOD_RT_BC_EXPLICIT_DST_UAV] = m_bcExplicitDst.uav;
+    bc[CLOD_RT_BC_IMPLICIT_ARGS_UAV] = m_bcBatchArgs.uav;
+    bc[CLOD_RT_BC_IMPLICIT_MAP_UAV] = m_bcBatchMap.uav;
+    bc[CLOD_RT_BC_IMPLICIT_ADDRESSES_UAV] = m_bcBatchAddresses.uav;
+    bc[CLOD_RT_BC_ENTRY_CAPACITY] = m_bcEntries;
+    bc[CLOD_RT_BC_FRAME] = m_frame;
+    bc[CLOD_RT_BC_KEEP_FRAMES] = m_bcKeepFrames;
+    bc[CLOD_RT_BC_BLAS_CAPACITY] = m_limits.maxBlases;
+    bc[CLOD_RT_BC_POOL_LOW] = Low(m_bcPool.address);
+    bc[CLOD_RT_BC_POOL_HIGH] = High(m_bcPool.address);
+    bc[CLOD_RT_BC_CLASSES_SRV] = m_bcClasses.srv;
+    bc[CLOD_RT_BC_ENTRY_RING_OFFSET] = m_bcRingItems;
+    const auto run = [&](const org::PipelineState& pipeline, uint32_t threads, uint32_t width) {
+        recording.BindComputePipeline(pipeline);
+        PushMiscConstants(recording, bc);
+        commands.Dispatch((threads + width - 1u) / width, 1u, 1u);
+        GlobalUavBarrier(commands);
+    };
+    if (!m_bcInitialized) {
+        RecordSceneClear(recording, pipelines, m_bcEntryTable, m_bcEntryTable.bytes);
+        RecordSceneClear(recording, pipelines, m_bcCtrl, m_bcCtrl.bytes);
+        GlobalUavBarrier(commands);
+        run(pipelines.bcInit, m_bcRingItems + m_bcEntries, 64u);
+        m_bcInitialized = true;
+    }
+    RecordSceneClear(recording, pipelines, m_bcIndex, m_bcIndex.bytes);
+    run(pipelines.bcBegin, 1u, 1u);
+    run(pipelines.bcIndex, m_bcEntries, 64u);
+    run(pipelines.bcLookup, m_limits.maxBlases, 64u);
+    run(pipelines.bcFinish, 1u, 1u);
+    SceneStamp(commands, 4u);
+
+    // Misses into their blocks, then the rest into the frame's batch. They share the scratch, so the second waits for the
+    // first. Both read their counts from the cache's control words.
+    Transition(commands, { m_blasAddressArray.Handle(), m_bcExplicitArgs.Handle(), m_bcExplicitDst.Handle(), m_bcBatchArgs.Handle(), m_bcCtrl.Handle() },
+        kUav, kBuildInput);
+    constexpr uint64_t argStride = sizeof(rhi::PackedRayTracingClusterBuildBottomLevelInfo);
+    rhi::RayTracingClusterBottomLevelInputsDesc blasInputs{ m_limits.maxClusterReferences, m_limits.maxClustersPerInstance };
+    rhi::RayTracingRtasOperationDesc blas{};
+    blas.inputs.operationType = rhi::RayTracingRtasOperationType::BuildClustersBottomLevel;
+    blas.inputs.operationMode = rhi::RayTracingRtasOperationMode::ExplicitDestinations;
+    blas.inputs.flags = rhi::RTASBuild_PreferFastBuild;
+    blas.inputs.maxAccelerationStructureCount = m_limits.maxBlases;
+    blas.inputs.clustersBottomLevel = &blasInputs;
+    blas.inputs.allowOpacityMicromaps = m_ommEnabled;
+    blas.batched.scratchData = { m_blasScratch->GetAPIResource().GetHandle(), 0u };
+    blas.batched.dstAddressesArray = { m_bcExplicitDst.Handle(), 0u, m_bcExplicitDst.bytes, 8u };
+    blas.batched.srcInfosArray = { m_bcExplicitArgs.Handle(), 0u, m_bcExplicitArgs.bytes, argStride };
+    blas.batched.srcInfosCount = { m_bcCtrl.Handle(), CLOD_RT_BC_EXPLICIT_COUNT * 4u };
+    commands.ExecuteIndirectRtasOperations(&blas, 1u);
+    GlobalUavBarrier(commands);
+
+    blas.inputs.operationMode = rhi::RayTracingRtasOperationMode::ImplicitDestinations;
+    blas.batched.dstImplicitData = { m_blasResult->GetAPIResource().GetHandle(), 0u };
+    blas.batched.dstAddressesArray = { m_bcBatchAddresses.Handle(), 0u, m_bcBatchAddresses.bytes, 8u };
+    blas.batched.dstSizesArray = { m_blasSizes.Handle(), 0u, m_blasSizes.bytes, 8u };
+    blas.batched.srcInfosArray = { m_bcBatchArgs.Handle(), 0u, m_bcBatchArgs.bytes, argStride };
+    blas.batched.srcInfosCount = { m_bcCtrl.Handle(), CLOD_RT_BC_IMPLICIT_COUNT * 4u };
+    commands.ExecuteIndirectRtasOperations(&blas, 1u);
+    SceneStamp(commands, 5u);
+
+    // Where the batch's BLASes went. The arguments stay build inputs (DeclareSceneBlas); the control words go back.
+    Transition(commands, { m_bcCtrl.Handle() }, kBuildInput, kUav);
+    Transition(commands, { m_bcBatchAddresses.Handle() }, kBuildOutput, kUav);
+    run(pipelines.bcScatter, m_limits.maxBlases, 64u);
+    Transition(commands, { m_bcBatchAddresses.Handle() }, kUav, kBuildOutput);
+}
+
 void CLodRayTracingSystem::RecordSceneTlas(org::RecordingContext& recording, const ScenePipelines& pipelines, const SceneInputs& inputs) {
     auto& commands = recording.Commands();
     const uint32_t sliceIndex = m_frame % m_framesInFlight;
     const MiscConstants scene = SceneConstants(inputs);
 
     // ---- TLAS: the rows are written, then the build's input, and stay that way (DeclareSceneTlas).
-    recording.BindComputePipeline(pipelines.writeInstances);
-    PushMiscConstants(recording, scene);
-    commands.Dispatch((m_tlasInstanceCount + 63u) / 64u, 1u, 1u);
-    Transition(commands, { m_tlasInstances->GetAPIResource().GetHandle() }, kUav, kBuildInput);
-    SceneStamp(commands, 6u);
+    if (m_partitionedTlas) {
+        // The rows go where the graph placed them this frame; the operation the instance pass writes points there. The pass
+        // covers the capacity, since only the GPU knows the count; threads past it leave at once.
+        MiscConstants tlasScene = scene;
+        const uint64_t rowsAddress = m_device.GetBufferDeviceAddress({ m_tlasInstances->GetAPIResource().GetHandle(), 0u });
+        tlasScene[CLOD_RT_SCENE_TLAS_ROWS_LOW] = Low(rowsAddress);
+        tlasScene[CLOD_RT_SCENE_TLAS_ROWS_HIGH] = High(rowsAddress);
+        tlasScene[CLOD_RT_SCENE_TLAS_INSTANCE_COUNT] = m_tlasInstanceCount;
+        m_stats.tlasBuildRows = m_stats.instances;
+        const uint32_t slotGroups = (m_limits.maxInstances + 63u) / 64u;
+        const auto run = [&](const org::PipelineState& pipeline, uint32_t groups) {
+            recording.BindComputePipeline(pipeline);
+            PushMiscConstants(recording, tlasScene);
+            commands.Dispatch(groups, 1u, 1u);
+            GlobalUavBarrier(commands);
+        };
+        if (!m_ptlasBuilt) {
+            for (const GraphBuffer* buffer : { &m_tlasOps, &m_ptlasKeySlots, &m_ptlasSlots, &m_ptlasSlotRows, &m_ptlasCells, &m_ptlasFill }) {
+                RecordSceneClear(recording, pipelines, *buffer, buffer->bytes);
+            }
+            GlobalUavBarrier(commands);
+            run(pipelines.ptlasInit, slotGroups);
+        }
+        // New keys claim their cells, new cells take partitions, listed rows write or update what changed, unlisted slots
+        // are retired, and the operations are written. Every pass but the cell pass covers the capacity, since only the GPU
+        // knows the counts; threads past them leave at once.
+        run(pipelines.ptlasClaimCells, slotGroups);
+        run(pipelines.ptlasAssignCells, (m_ptlasPartitions * 2u + 63u) / 64u);
+        run(pipelines.writeInstances, slotGroups);
+        run(pipelines.ptlasRetire, slotGroups);
+        run(pipelines.ptlasFinish, 1u);
+        Transition(commands, { m_tlasInstances->GetAPIResource().GetHandle(), m_tlasOps.Handle() }, kUav, kBuildInput);
+        SceneStamp(commands, 6u);
 
-    rhi::RayTracingGeometryDesc geometry{};
-    geometry.type = rhi::RayTracingGeometryType::Instances;
-    geometry.instances.instanceBuffer = { m_tlasInstances->GetAPIResource().GetHandle(), 0u, uint64_t(m_tlasInstanceCount) * sizeof(rhi::PackedRayTracingInstanceDesc) };
-    geometry.instances.stride = sizeof(rhi::PackedRayTracingInstanceDesc);
-    geometry.instances.count = m_tlasInstanceCount;
-    rhi::AccelerationStructureBuildDesc build{};
-    build.mode = rhi::RayTracingAccelerationStructureBuildMode::Build;
-    build.destination = m_tlas->GetHandle();
-    build.inputs.type = rhi::RayTracingAccelerationStructureType::TopLevel;
-    build.inputs.flags = rhi::RTASBuild_PreferFastBuild; // Measured: 0.2 ms cheaper, and no slower to trace.
-    build.inputs.geometries = { &geometry, 1u };
-    build.scratch = { m_tlasScratch->GetAPIResource().GetHandle(), 0u, m_tlasScratch->GetSize() };
-    commands.BuildAccelerationStructures(&build, 1u);
+        rhi::RayTracingRtasOperationDesc ptlas{};
+        ptlas.inputs.operationType = rhi::RayTracingRtasOperationType::BuildPartitionedTopLevel;
+        ptlas.inputs.partitionedTopLevel = &m_ptlasInputs;
+        ptlas.partitionedTopLevel.input = m_ptlasInputs;
+        // In place after the first build, which starts from empty: only the operations change it.
+        if (m_ptlasBuilt) ptlas.partitionedTopLevel.srcAccelerationStructureData = { m_tlasStorage.Handle(), 0u };
+        ptlas.partitionedTopLevel.dstAccelerationStructureData = { m_tlasStorage.Handle(), 0u };
+        ptlas.partitionedTopLevel.scratchData = { m_tlasScratch->GetAPIResource().GetHandle(), 0u };
+        ptlas.partitionedTopLevel.srcInfos = { m_tlasOps.Handle(), 0u };
+        ptlas.partitionedTopLevel.srcInfosCount = { m_tlasOps.Handle(), CLOD_RT_TLAS_OPS_COUNT_OFFSET };
+        commands.ExecuteIndirectRtasOperations(&ptlas, 1u);
+        m_ptlasBuilt = true;
+    }
+    else {
+        recording.BindComputePipeline(pipelines.writeInstances);
+        PushMiscConstants(recording, scene);
+        const uint32_t buildRows = m_tlasBuildCount;
+        m_sliceTlasBuildCount[sliceIndex] = buildRows;
+        m_stats.tlasBuildRows = buildRows;
+        commands.Dispatch((buildRows + 63u) / 64u, 1u, 1u);
+        Transition(commands, { m_tlasInstances->GetAPIResource().GetHandle() }, kUav, kBuildInput);
+        SceneStamp(commands, 6u);
+
+        rhi::RayTracingGeometryDesc geometry{};
+        geometry.type = rhi::RayTracingGeometryType::Instances;
+        geometry.instances.instanceBuffer = { m_tlasInstances->GetAPIResource().GetHandle(), 0u, uint64_t(buildRows) * sizeof(rhi::PackedRayTracingInstanceDesc) };
+        geometry.instances.stride = sizeof(rhi::PackedRayTracingInstanceDesc);
+        geometry.instances.count = buildRows;
+        rhi::AccelerationStructureBuildDesc build{};
+        build.mode = rhi::RayTracingAccelerationStructureBuildMode::Build;
+        build.destination = m_tlas->GetHandle();
+        build.inputs.type = rhi::RayTracingAccelerationStructureType::TopLevel;
+        build.inputs.flags = rhi::RTASBuild_PreferFastBuild; // Measured: 0.2 ms cheaper, and no slower to trace.
+        build.inputs.geometries = { &geometry, 1u };
+        build.scratch = { m_tlasScratch->GetAPIResource().GetHandle(), 0u, m_tlasScratch->GetSize() };
+        commands.BuildAccelerationStructures(&build, 1u);
+    }
     m_tlasBuilt = true;
     SceneStamp(commands, 7u);
 
@@ -1526,6 +1920,14 @@ void CLodRayTracingSystem::RecordSceneTlas(org::RecordingContext& recording, con
     commands.CopyBufferRegion(m_readback.Handle(), readbackBase + kReadbackCtrl, m_cacheCtrl.Handle(), 0u, kCtrlBytes);
     commands.CopyBufferRegion(m_readback.Handle(), readbackBase + kReadbackOmmWanted, m_ommWanted.Handle(), 0u, m_ommWanted.bytes);
     commands.CopyBufferRegion(m_readback.Handle(), readbackBase + kReadbackOmmWanted + m_ommWanted.bytes, m_ommRelease.Handle(), 0u, kReleaseBytes);
+    if (m_bcEnabled) {
+        Transition(commands, { m_bcCtrl.Handle() }, kUav, kCopySource);
+        commands.CopyBufferRegion(m_readback.Handle(), readbackBase + m_readbackBcOffset, m_bcCtrl.Handle(), 0u, CLOD_RT_BC_CTRL_BYTES);
+    }
+    if (m_partitionedTlas) {
+        Transition(commands, { m_tlasOps.Handle() }, kBuildInput, kCopySource);
+        commands.CopyBufferRegion(m_readback.Handle(), readbackBase + m_readbackPtlasOffset, m_tlasOps.Handle(), 0u, CLOD_RT_PTLAS_CTRL_BYTES);
+    }
     if (m_timers) {
         commands.ResolveQueryData(m_timers->GetHandle(), sliceIndex * kSceneTimers, kSceneTimers, m_readback.Handle(), readbackBase + kReadbackTimers);
     }

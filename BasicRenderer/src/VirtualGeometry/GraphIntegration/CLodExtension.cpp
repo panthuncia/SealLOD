@@ -710,9 +710,12 @@ void CLodExtension::AppendRayTracingPasses(const CLodVariantTraits& traits, std:
     for (const auto& [stage, name] : { std::pair{ CLodRayTracingSceneStage::Clas, "SceneClasPass" },
              std::pair{ CLodRayTracingSceneStage::Blas, "SceneBlasPass" }, std::pair{ CLodRayTracingSceneStage::Tlas, "SceneTlasPass" } }) {
         const std::string passName = MakeVariantPassName(traits, name);
+        const bool unified = m_rtVisibleClustersBuffer != nullptr;
         auto sceneDesc = org::ExternalPassDesc::Compute(passName, std::make_shared<CLodRayTracingScenePass>(
-            m_options.rayTracingSystem, stage, m_visibleClustersBuffer, m_visibleClusterTransformIndicesBuffer, m_visibleClustersCounterBuffer,
-            m_options.slabResourceGroup, m_visibleClusterCapacity));
+            m_options.rayTracingSystem, stage, unified ? m_rtVisibleClustersBuffer : m_visibleClustersBuffer,
+            unified ? m_rtVisibleClusterTransformIndicesBuffer : m_visibleClusterTransformIndicesBuffer,
+            unified ? m_rtVisibleClustersCounterBuffer : m_visibleClustersCounterBuffer,
+            m_options.slabResourceGroup, unified ? m_rtVisibleClusterCapacity : m_visibleClusterCapacity));
         auto sceneInsertPoint = org::ExternalInsertPoint::After(previous);
         if (m_options.pathTraced) {
             sceneInsertPoint.AlsoBefore("PathTraceArgsPass");
@@ -782,6 +785,15 @@ void CLodExtension::InitializeCoreResources()
 
     m_visibleClustersCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(unsigned int), true, false, false, false);
     m_visibleClustersCounterBuffer->SetName(MakeVariantResourceName(traits, "Visible Clusters Counter Buffer"));
+    if (m_options.unifiedRayTracingCulling && m_options.rayTracingSystem) {
+        m_rtVisibleClusterCapacity = m_options.rayTracingSystem->GetLimits().maxClustersInBvh;
+        m_rtVisibleClustersBuffer = CreateAliasedUnmaterializedRawBuffer(static_cast<uint64_t>(m_rtVisibleClusterCapacity) * PackedVisibleClusterStrideBytes, true, false, true);
+        m_rtVisibleClustersBuffer->SetName(MakeVariantResourceName(traits, "Ray Tracing Visible Clusters Buffer"));
+        m_rtVisibleClusterTransformIndicesBuffer = CreateAliasedUnmaterializedStructuredBuffer(m_rtVisibleClusterCapacity, CLodVisibleClusterSideBandStride, true, false, false, true);
+        m_rtVisibleClusterTransformIndicesBuffer->SetName(MakeVariantResourceName(traits, "Ray Tracing Visible Cluster Transform Indices Buffer"));
+        m_rtVisibleClustersCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(unsigned int), true, false, false, false);
+        m_rtVisibleClustersCounterBuffer->SetName(MakeVariantResourceName(traits, "Ray Tracing Visible Clusters Counter Buffer"));
+    }
     m_visibleClustersCounterBuffer->GetECSEntity()
         .set<Components::Resource>({ m_visibleClustersCounterBuffer })
         .add<VisibleClustersCounterTag>()
@@ -1809,6 +1821,17 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
             else if (traits.type == CLodExtensionType::VisiblityBuffer && m_options.rayTracedPrimaryVisibility) {
                 config.skipRayTracingCoveredDraws = true;
             }
+            else if (traits.type == CLodExtensionType::VisiblityBuffer && m_rtVisibleClustersBuffer) {
+                config.unifiedRayTracing = true;
+                if (isPhase1) {
+                    config.rtVisibleClusters = m_rtVisibleClustersBuffer;
+                    config.rtVisibleClusterTransformIndices = m_rtVisibleClusterTransformIndicesBuffer;
+                    config.rtVisibleClustersCounter = m_rtVisibleClustersCounterBuffer;
+                    config.rtVisibleClusterCapacity = m_rtVisibleClusterCapacity;
+                    config.rtCoarseCut = m_options.rayTracingSystem->GetCoarseCut();
+                    config.rtCoarseCutDescriptor = m_options.rayTracingSystem->GetCoarseCutUav();
+                }
+            }
         }
 
         std::shared_ptr<org::RenderPass> cullPass;
@@ -2370,6 +2393,10 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
 
     if (traits.scheduleMode != CLodVariantTraits::ScheduleMode::SinglePassCullOnly) {
         appendRasterBucketCompactionPasses(1u, reyesOwnershipBitsetBuffer);
+    }
+    // Unified culling: the BVH is built from phase 1's ray tracing list, right after phase 1.
+    if (traits.type == CLodExtensionType::VisiblityBuffer && m_rtVisibleClustersBuffer) {
+        AppendRayTracingPasses(traits, outPasses);
     }
 
     if (traits.scheduleMode == CLodVariantTraits::ScheduleMode::SinglePassCullOnly) {

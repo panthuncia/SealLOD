@@ -49,9 +49,9 @@ float2 DecodeCompressedUV(uint meshletLocalVertex, MeshletUvDecodeInfo uvInfo, M
     uint bitCursor = uvInfo.uvBitstreamBase * 8u + uvInfo.uvDesc.uvBitOffset + meshletLocalVertex * bitsPerVertex;
 
     ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(d.pagePoolSlabDescriptorIndex)];
-    uint encodedU = ReadPackedBits32_BA(slab, bitCursor, uvBitsU);
-    bitCursor += uvBitsU;
-    uint encodedV = ReadPackedBits32_BA(slab, bitCursor, uvBitsV);
+    const uint2 encoded = ReadPackedBitPair32_BA(slab, bitCursor, uvBitsU, uvBitsV);
+    const uint encodedU = encoded.x;
+    const uint encodedV = encoded.y;
 
     return float2(
         uvInfo.uvDesc.uvMinU + float(encodedU) * uvInfo.uvDesc.uvScaleU,
@@ -89,9 +89,27 @@ void AppendClodMaterialUvSample(
     sample.dUVdx = float2(interpU.y, interpV.y);
     sample.dUVdy = float2(interpU.z, interpV.z);
 
+#if defined(MATERIAL_EVAL_SINGLE_UV_SET)
+    if (cache.count == 0u) // One UV set: only the first append holds a set the slots can bind (MaterialUvCacheAt).
+    {
+        cache.samples[0] = sample;
+    }
+#else
     cache.samples[cache.count] = sample;
+#endif
     cache.count++;
 }
+
+// The eval builder's UV set -> cache index map. With one UV set it is one value, so no array is indexed at run time.
+#if defined(MATERIAL_EVAL_SINGLE_UV_SET)
+#define CLOD_EVAL_UV_SET_MAP_DECLARE uint clodEvalSingleCacheIndex = MATERIAL_INVALID_UV_CACHE_INDEX
+#define CLOD_EVAL_UV_SET_MAP_GET(uvSet) clodEvalSingleCacheIndex
+#define CLOD_EVAL_UV_SET_MAP_SET(uvSet, value) clodEvalSingleCacheIndex = (value)
+#else
+#define CLOD_EVAL_UV_SET_MAP_DECLARE uint cacheIndexByUvSet[MATERIAL_MAX_UNIQUE_UV_SETS];     [unroll] for (uint uvSetInit = 0u; uvSetInit < MATERIAL_MAX_UNIQUE_UV_SETS; ++uvSetInit) cacheIndexByUvSet[uvSetInit] = MATERIAL_INVALID_UV_CACHE_INDEX
+#define CLOD_EVAL_UV_SET_MAP_GET(uvSet) cacheIndexByUvSet[uvSet]
+#define CLOD_EVAL_UV_SET_MAP_SET(uvSet, value) cacheIndexByUvSet[uvSet] = (value)
+#endif
 
 void BuildClodMaterialUvData(
     MaterialInfo materialInfo,
@@ -266,13 +284,10 @@ void BuildClodMaterialUvData(
     cache = (MaterialUvCache)0;
     InitializeMaterialUvBindings(bindings);
 
-    uint cacheIndexByUvSet[MATERIAL_MAX_UNIQUE_UV_SETS];
-
-    [unroll]
-    for (uint uvSetIndex = 0u; uvSetIndex < MATERIAL_MAX_UNIQUE_UV_SETS; ++uvSetIndex)
-    {
-        cacheIndexByUvSet[uvSetIndex] = MATERIAL_INVALID_UV_CACHE_INDEX;
-    }
+    CLOD_EVAL_UV_SET_MAP_DECLARE;
+#if defined(MATERIAL_EVAL_SINGLE_UV_SET)
+    uint singleUvSet = MATERIAL_INVALID_UV_CACHE_INDEX;
+#endif
 
     [unroll]
     for (uint slot = 0u; slot < MATERIAL_TEXTURE_SLOT_COUNT; ++slot)
@@ -333,21 +348,37 @@ void BuildClodMaterialUvData(
 
         const uint uvSetIndex = MaterialSlotUvSetIndex(materialInfo, textureSlot);
         if (uvSetIndex < MATERIAL_MAX_UNIQUE_UV_SETS &&
-            cacheIndexByUvSet[uvSetIndex] != MATERIAL_INVALID_UV_CACHE_INDEX)
+            CLOD_EVAL_UV_SET_MAP_GET(uvSetIndex) != MATERIAL_INVALID_UV_CACHE_INDEX)
         {
             continue;
         }
 
+#if defined(MATERIAL_EVAL_SINGLE_UV_SET)
+        // Every bound slot shares the first one's set: note it, and decode it once after the loop (an append here was
+        // inlined once a slot, four UV decodes in a four-texture variant).
+        if (singleUvSet == MATERIAL_INVALID_UV_CACHE_INDEX)
+        {
+            singleUvSet = uvSetIndex;
+        }
+#else
         const uint cacheIndex = cache.count;
         const MeshletUvDecodeInfo uvInfo = LoadMeshletUvDecodeInfo(uvSetIndex, md);
         AppendClodMaterialUvSample(cache, uvSetIndex, triIdx, uvInfo, md, bary);
         if (cache.count > cacheIndex && uvSetIndex < MATERIAL_MAX_UNIQUE_UV_SETS)
         {
-            cacheIndexByUvSet[uvSetIndex] = cacheIndex;
+            CLOD_EVAL_UV_SET_MAP_SET(uvSetIndex, cacheIndex);
         }
+#endif
     }
 
-    const uint uv0CacheIndex = cacheIndexByUvSet[0u];
+#if defined(MATERIAL_EVAL_SINGLE_UV_SET)
+    if (singleUvSet != MATERIAL_INVALID_UV_CACHE_INDEX)
+    {
+        AppendClodMaterialUvSample(cache, singleUvSet, triIdx, LoadMeshletUvDecodeInfo(singleUvSet, md), md, bary);
+        CLOD_EVAL_UV_SET_MAP_SET(singleUvSet, 0u);
+    }
+#endif
+    const uint uv0CacheIndex = CLOD_EVAL_UV_SET_MAP_GET(0u);
 
 #if defined(PSO_OPENPBR_COAT_COLOR_TEXTURE) || defined(PSO_OPENPBR_COAT_WEIGHT_TEXTURE) || defined(PSO_OPENPBR_COAT_ROUGHNESS_TEXTURE) || defined(PSO_OPENPBR_FUZZ_COLOR_TEXTURE) || defined(PSO_OPENPBR_FUZZ_WEIGHT_TEXTURE) || defined(PSO_OPENPBR_FUZZ_ROUGHNESS_TEXTURE)
     const OpenPBRMaterialInfo openPBRMaterialInfo = LoadOpenPBRMaterialInfo(materialInfo.openPBRMaterialDataIndex);
@@ -386,18 +417,26 @@ void BuildClodMaterialUvData(
 
         const uint uvSetIndex = uvSetIndices[i];
         if (uvSetIndex < MATERIAL_MAX_UNIQUE_UV_SETS &&
-            cacheIndexByUvSet[uvSetIndex] != MATERIAL_INVALID_UV_CACHE_INDEX)
+            CLOD_EVAL_UV_SET_MAP_GET(uvSetIndex) != MATERIAL_INVALID_UV_CACHE_INDEX)
         {
             continue;
         }
 
+#if defined(MATERIAL_EVAL_SINGLE_UV_SET)
+        if (cache.count == 0u) // Only OpenPBR textures are bound.
+        {
+            AppendClodMaterialUvSample(cache, uvSetIndex, triIdx, LoadMeshletUvDecodeInfo(uvSetIndex, md), md, bary);
+            CLOD_EVAL_UV_SET_MAP_SET(uvSetIndex, 0u);
+        }
+#else
         const uint cacheIndex = cache.count;
         const MeshletUvDecodeInfo uvInfo = LoadMeshletUvDecodeInfo(uvSetIndex, md);
         AppendClodMaterialUvSample(cache, uvSetIndex, triIdx, uvInfo, md, bary);
         if (cache.count > cacheIndex && uvSetIndex < MATERIAL_MAX_UNIQUE_UV_SETS)
         {
-            cacheIndexByUvSet[uvSetIndex] = cacheIndex;
+            CLOD_EVAL_UV_SET_MAP_SET(uvSetIndex, cacheIndex);
         }
+#endif
     }
 
     [unroll]
@@ -412,7 +451,7 @@ void BuildClodMaterialUvData(
         const uint uvSetIndex = uvSetIndices[slot];
         if (uvSetIndex < MATERIAL_MAX_UNIQUE_UV_SETS)
         {
-            cacheIndex = cacheIndexByUvSet[uvSetIndex];
+            cacheIndex = CLOD_EVAL_UV_SET_MAP_GET(uvSetIndex);
         }
         if (cacheIndex == MATERIAL_INVALID_UV_CACHE_INDEX)
         {
@@ -484,7 +523,7 @@ void BuildClodMaterialUvData(
         const uint uvSetIndex = MaterialSlotUvSetIndex(materialInfo, textureSlot);
         if (uvSetIndex < MATERIAL_MAX_UNIQUE_UV_SETS)
         {
-            cacheIndex = cacheIndexByUvSet[uvSetIndex];
+            cacheIndex = CLOD_EVAL_UV_SET_MAP_GET(uvSetIndex);
         }
         if (cacheIndex == MATERIAL_INVALID_UV_CACHE_INDEX)
         {

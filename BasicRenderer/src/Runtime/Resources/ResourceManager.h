@@ -9,6 +9,7 @@
 #include "spdlog/spdlog.h"
 #include "Utilities/Utilities.h"
 #include "Runtime/Device/DeviceManager.h"
+#include "../shaders/PerPassRootConstants/lightCullingRootConstants.h"
 
 using namespace Microsoft::WRL;
 
@@ -29,7 +30,7 @@ public:
     void SetUploadService(std::shared_ptr<org::runtime::IUploadService> uploadService);
     void Cleanup();
 
-    void UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, UINT sunLightIndex, UINT sunLightSlot, UINT vsmDebugLightIndex, DirectX::XMUINT2 screenRes, DirectX::XMUINT3 clusterSizes, unsigned int frameIndex);
+    void UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, UINT sunLightIndex, UINT sunLightSlot, UINT numDirectionalLights, UINT vsmDebugLightIndex, DirectX::XMUINT2 screenRes, const LightGridShape& lightGrid, unsigned int frameIndex);
     
     std::shared_ptr<org::Buffer>& GetPerFrameBuffer() {
 		return m_perFrameBuffer;

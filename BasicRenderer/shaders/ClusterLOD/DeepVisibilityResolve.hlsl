@@ -1,3 +1,5 @@
+// Transparent fragments lie anywhere in front of the opaque surface: read the light grid's forward runs (lightGrid.hlsli).
+#define LIGHT_GRID_FORWARD 1
 #include "include/cbuffers.hlsli"
 #include "include/structs.hlsli"
 #include "include/lighting.hlsli"

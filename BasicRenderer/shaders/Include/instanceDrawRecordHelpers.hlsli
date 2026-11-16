@@ -130,6 +130,58 @@ PerObjectBuffer ComposeAssemblyTransformForDrawRecord(InstanceDrawRecordBuffer r
     return objectData;
 }
 
+// ComposeAssemblyTransformForDrawRecord's pieces one at a time, from the instance transform's index, so a caller composes
+// each where it uses it rather than holding all three and their inputs at once.
+row_major float4x4 ComposeAssemblyModel(uint instanceTransformIndex, uint assemblyTransformIndex)
+{
+    StructuredBuffer<PerObjectBuffer> instanceTransforms = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerInstanceTransformBuffer)];
+    const row_major float4x4 model = instanceTransforms[instanceTransformIndex].model;
+    if (assemblyTransformIndex == CLOD_ASSEMBLY_TRANSFORM_SENTINEL)
+    {
+        return model;
+    }
+    StructuredBuffer<ClusterLODAssemblyTransform> assemblyTransforms = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::AssemblyTransforms)];
+    return mul(CLodAssemblyTransformToMatrix(assemblyTransforms[assemblyTransformIndex]), model);
+}
+
+// The part's assembly transform, or the identity for a draw without one.
+ClusterLODAssemblyTransform LoadAssemblyTransformOrIdentity(uint assemblyTransformIndex)
+{
+    ClusterLODAssemblyTransform assembly;
+    assembly.row0 = float4(1.0f, 0.0f, 0.0f, 0.0f);
+    assembly.row1 = float4(0.0f, 1.0f, 0.0f, 0.0f);
+    assembly.row2 = float4(0.0f, 0.0f, 1.0f, 0.0f);
+    if (assemblyTransformIndex != CLOD_ASSEMBLY_TRANSFORM_SENTINEL)
+    {
+        StructuredBuffer<ClusterLODAssemblyTransform> assemblyTransforms = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::AssemblyTransforms)];
+        assembly = assemblyTransforms[assemblyTransformIndex];
+    }
+    return assembly;
+}
+
+// Last frame's world position of a point in the part's space: the assembly (from LoadAssemblyTransformOrIdentity), then
+// the previous model, as two vector-matrix products. Composing the matrices, or loading the assembly again here inside a
+// branch, cost material evaluation ~35 registers on Zorah (129 against 94 without).
+float3 AssemblyPrevWorldPosition(uint instanceTransformIndex, ClusterLODAssemblyTransform assembly, float3 positionLocal)
+{
+    StructuredBuffer<PerObjectBuffer> instanceTransforms = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerInstanceTransformBuffer)];
+    const float4 p = float4(positionLocal, 1.0f);
+    const float3 positionObject = float3(dot(assembly.row0, p), dot(assembly.row1, p), dot(assembly.row2, p));
+    return mul(float4(positionObject, 1.0f), instanceTransforms[instanceTransformIndex].prevModel).xyz;
+}
+
+row_major float4x4 ComposeAssemblyModelInverse(uint instanceTransformIndex, uint assemblyTransformIndex)
+{
+    StructuredBuffer<PerObjectBuffer> instanceTransforms = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerInstanceTransformBuffer)];
+    const row_major float4x4 modelInverse = instanceTransforms[instanceTransformIndex].modelInverse;
+    if (assemblyTransformIndex == CLOD_ASSEMBLY_TRANSFORM_SENTINEL)
+    {
+        return modelInverse;
+    }
+    StructuredBuffer<ClusterLODAssemblyTransform> assemblyTransforms = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::AssemblyTransforms)];
+    return mul(modelInverse, CLodAssemblyTransformToMatrix(CLodInvertAssemblyTransform(assemblyTransforms[assemblyTransformIndex])));
+}
+
 PerObjectBuffer LoadInstanceTransformForDrawRecordWithAssemblyTransform(InstanceDrawRecordBuffer record, uint assemblyTransformIndex)
 {
     return ComposeAssemblyTransformForDrawRecord(record, assemblyTransformIndex);

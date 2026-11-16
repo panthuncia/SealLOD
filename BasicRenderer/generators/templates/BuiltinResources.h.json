@@ -101,9 +101,11 @@
     "CullingCameraBuffer": {},
     "Light": {
       "BufferGroup": {},
-      "ClusterBuffer": {},
-      "PagesBuffer": {},
-      "PagesCounter": {},
+      "GridCells": {},
+      "GridIndices": {},
+      "GridDepthBounds": {},
+      "CullingRecords": {},
+      "CullingStats": {},
       "ActiveLightIndices": {},
       "InfoBuffer": {},
       "DirectionalLightCascadeBuffer": {}
@@ -148,6 +150,7 @@
       "OutputAOTerm": {}
     },
     "RayTracing": {
+      "BlasCache": {},
       "BlasData": {},
       "ClasInfo": {},
       "ClasPool": {},
@@ -159,6 +162,10 @@
       "SpecularHitDistance": {},
       "SunShadow": {},
       "Tlas": {}
+    },
+    "StochasticLighting": {
+      "Diffuse": {},
+      "Specular": {}
     },
     "Shadows": {
       "CLodClipmapInfo": {},

@@ -53,6 +53,7 @@
 #include "BasicRenderer/Assets/MaterialTextureStreaming.h"
 #include "Lighting/Environment/RenderPasses/SkyboxRenderPass.h"
 #include "Lighting/PathTracing/RenderPasses/PathTracePass.h"
+#include "Lighting/Stochastic/StochasticLightingExtension.h"
 #include "Camera/Lens/RenderPasses/LensSelfTestPass.h"
 #include "Camera/Lens/RenderPasses/LensFocusPass.h"
 #include "Camera/Lens/RenderPasses/LensFlarePasses.h"
@@ -164,6 +165,21 @@ std::string Renderer::HandleLensControl(const std::string& command, const std::s
     return m_lensManager->HandleControl(command, requestJson);
 }
 
+bool Renderer::StochasticLightingRequested() const {
+    return m_pipelineRecipe.Contains<br::pipeline::StochasticDirectLightingTechnique>()
+        && m_pipelineRecipe.Contains<br::pipeline::ClusterLodShadowTechnique>()
+        && !m_pipelineRecipe.Contains<br::pipeline::PathTracingTechnique>()
+        && m_clodRayTracingSystem && DeviceManager::GetInstance().GetCLodRayTracingSupported();
+}
+
+bool Renderer::StochasticLightingActive() const {
+    return StochasticLightingRequested() && m_clodRayTracingSystem->IsInitialized();
+}
+
+bool Renderer::VirtualShadowMapsActive() const {
+    return m_pipelineRecipe.Contains<br::pipeline::ClusterLodShadowTechnique>() && !StochasticLightingActive();
+}
+
 void Renderer::CreateRenderGraph() {
     BT_ZONE_SCOPE("Renderer::CreateRenderGraph");
     if (!IsSceneReadyForFrame()) {
@@ -272,6 +288,9 @@ void Renderer::CreateRenderGraph() {
         RegisterPipelineExtensions();
         m_pipelineExtensionsDirty = false;
     }
+    // RegisterPipelineExtensions made the BVH if anything traces it, which decides StochasticLightingActive. Passes built
+    // below read this to know whether the shadow map's resources exist.
+    SettingsManager::GetInstance().getSettingSetter<bool>("virtualShadowMapsActive")(VirtualShadowMapsActive());
 
     auto& newGraph = currentRenderGraph;
 	org::runtime::ScopedActiveGraphServices activeGraphServices(
@@ -451,7 +470,8 @@ void Renderer::CreateRenderGraph() {
                 // What passes which trace read of the ray tracing scene (CLodRayTracingSystem::DeclareTracing) they declare by
                 // name, so it is registered here, before any pass declares. The extensions below set up the rest of ray tracing.
                 const bool pathTraced = m_pipelineRecipe.Contains<br::pipeline::PathTracingTechnique>();
-                const bool wantsRayTracing = pathTraced || m_rayTracedPrimaryVisibilityMode != 0u || m_rayTracedReflections || m_rayTracedShadows;
+                const bool wantsRayTracing = pathTraced || m_rayTracedPrimaryVisibilityMode != 0u || m_rayTracedReflections || m_rayTracedShadows
+                    || StochasticLightingRequested();
                 auto& deviceManager = DeviceManager::GetInstance();
                 if (wantsRayTracing && m_clodRayTracingSystem && deviceManager.GetCLodRayTracingSupported()) {
                     // Only the path tracer's alpha test is the one micromaps are baked against. Read when the BVH is first made.
@@ -479,7 +499,8 @@ void Renderer::CreateRenderGraph() {
                 visibilityBuffer->SetName("Visibility Buffer");
                 org::memory::SetResourceUsageHint(*visibilityBuffer, "Canonical surface visibility");
                 newGraph->RegisterResource(Builtin::PrimaryCamera::VisibilityTexture, visibilityBuffer);
-                if (m_rayTracedShadows && DeviceManager::GetInstance().GetCLodRayTracingSupported()) {
+                // Stochastic lighting traces the sun itself.
+                if (m_rayTracedShadows && DeviceManager::GetInstance().GetCLodRayTracingSupported() && !StochasticLightingActive()) {
                     org::TextureDescription sunDesc;
                     sunDesc.channels = 1;
                     sunDesc.format = rhi::Format::R8_UNorm;
@@ -488,6 +509,20 @@ void Renderer::CreateRenderGraph() {
                     auto sunMask = org::PixelBuffer::CreateSharedUnmaterialized(sunDesc);
                     sunMask->SetName("CLod RT sun shadow");
                     newGraph->RegisterResource(Builtin::RayTracing::SunShadow, sunMask);
+                }
+                if (StochasticLightingActive()) {
+                    // Spot and point lights' diffuse and specular radiance, which the deferred pass adds.
+                    for (const auto& [id, name] : { std::pair{ Builtin::StochasticLighting::Diffuse, "Stochastic lighting diffuse" },
+                             std::pair{ Builtin::StochasticLighting::Specular, "Stochastic lighting specular" } }) {
+                        org::TextureDescription lightingDesc;
+                        lightingDesc.channels = 4;
+                        lightingDesc.format = rhi::Format::R16G16B16A16_Float;
+                        lightingDesc.hasSRV = lightingDesc.hasUAV = true;
+                        lightingDesc.imageDimensions.emplace_back(resolution.x, resolution.y, 0, 0);
+                        auto lighting = org::PixelBuffer::CreateSharedUnmaterialized(lightingDesc);
+                        lighting->SetName(name);
+                        newGraph->RegisterResource(id, lighting);
+                    }
                 }
                 if (!br::runtime::renderer_settings::CLodVirtualShadowFrameTelemetryPath().empty()) {
                     // VSM flicker telemetry: the deferred pass reprojects each pixel's
@@ -533,11 +568,12 @@ void Renderer::CreateRenderGraph() {
                 BuildGTAOPipeline(newGraph, primaryCameraEntity.try_get<Components::Camera>());
                 break;
             case ClusteredLighting:
-                BuildLightClusteringPipeline(newGraph);
+                // Forward runs only when a transparency pass reads them (AVBOIT shading, deep visibility resolve).
+                BuildLightClusteringPipeline(newGraph, m_pipelineRecipe.Contains<br::pipeline::ClusterLodAlphaTechnique>());
                 break;
             case PrimaryLighting:
                 BuildPrimaryPass(newGraph, m_currentEnvironment.get(),
-                    m_pipelineRecipe.Bindings().Contains(Builtin::Environment::CurrentCubemap));
+                    m_pipelineRecipe.Bindings().Contains(Builtin::Environment::CurrentCubemap), StochasticLightingActive());
                 break;
             case Reflections: {
                 const bool rayTraced = m_rayTracedReflections && DeviceManager::GetInstance().GetCLodRayTracingSupported();
@@ -642,6 +678,8 @@ void Renderer::CreateRenderGraph() {
             case DepthHistory:
                 BuildLinearDepthHistoryCopyPass(newGraph, &m_depthHistory);
                 break;
+            case StochasticDirectLighting:
+                break; // Its passes come from a graph extension (RegisterPipelineExtensions).
             case Present:
                 newGraph->BuildPass<PresentationReadyPass>("PresentationReadyPass");
                 newGraph->SetPassTechnique("PresentationReadyPass", "Frame::Present");
@@ -841,9 +879,29 @@ void Renderer::RegisterPipelineExtensions() {
                 extensionId = "CLodAlpha";
                 break;
             case br::pipeline::TechniqueId::ClusterLodShadow:
+                // Stochastic lighting shadows every light by ray, the sun included, so no shadow map is built. The ClusterLod
+                // case above made the BVH it decides on.
+                if (StochasticLightingActive()) {
+                    return;
+                }
                 extensionType = CLodExtensionType::Shadow;
                 extensionId = "CLodShadow";
                 break;
+            case br::pipeline::TechniqueId::StochasticDirectLighting:
+                // The ClusterLod case above made the BVH it traces, if it could; without one it stays off.
+                if (StochasticLightingActive()) {
+                    currentRenderGraph->RegisterExtension(
+                        std::make_unique<br::render::StochasticLightingExtension>(
+                            m_clodRayTracingSystem,
+                            m_pMeshManager ? m_pMeshManager->GetCLodSlabResourceGroup() : nullptr,
+                            br::render::StochasticLightingOptions{
+                                .reference = SettingsManager::GetInstance().getSettingGetter<bool>("stochasticLightingReference")(),
+                                .accumulate = SettingsManager::GetInstance().getSettingGetter<bool>("stochasticLightingAccumulate")(),
+                                .denoise = SettingsManager::GetInstance().getSettingGetter<bool>("stochasticLightingDenoise")(),
+                                .downsample = SettingsManager::GetInstance().getSettingGetter<uint32_t>("stochasticLightingDownsample")() }),
+                        "StochasticLighting");
+                }
+                return;
             default:
                 return;
             }
@@ -862,7 +920,8 @@ void Renderer::RegisterPipelineExtensions() {
             // The BVH exists when anything traces it.
             auto& deviceManager = DeviceManager::GetInstance();
             const bool pathTraced = m_pipelineRecipe.Contains<br::pipeline::PathTracingTechnique>();
-            const bool wantsRayTracing = pathTraced || m_rayTracedPrimaryVisibilityMode != 0u || m_rayTracedReflections || m_rayTracedShadows;
+            const bool wantsRayTracing = pathTraced || m_rayTracedPrimaryVisibilityMode != 0u || m_rayTracedReflections || m_rayTracedShadows
+                || StochasticLightingRequested();
             if (m_clodRayTracingSystem) {
                 // Only the path tracer's alpha test is the one micromaps are baked against.
                 auto& settings = SettingsManager::GetInstance();
@@ -874,6 +933,17 @@ void Renderer::RegisterPipelineExtensions() {
                 spdlog::warn("CLod ray tracing requested but unavailable on this device; rendering with raster and shadow maps.");
             }
             const auto rayTracingSystem = rayTracing ? m_clodRayTracingSystem : nullptr;
+            // One culling for raster and the BVH (docs/clod_raytracing.md, "Unified culling"), where raster takes the
+            // triangle branch with the pure compute backend and nothing replaces raster. SARP_CLOD_UNIFIED_CULLING=0 keeps
+            // the separate ray tracing view.
+            const bool unifiedCulling = [&] {
+                if (!rayTracingSystem || id != br::pipeline::TechniqueId::ClusterLod || pathTraced || m_rayTracedPrimaryVisibilityMode != 0u) return false;
+                const uint32_t forced = GetClusterLODForcedViewBranch();
+                if (forced == 2u || (forced == 0u && voxelRasterizationEnabled)) return false;
+                if (SettingsManager::GetInstance().getSettingGetter<CLodCullingBackend>(CLodCullingBackendSettingName)() != CLodCullingBackend::PureCompute) return false;
+                const char* env = std::getenv("SARP_CLOD_UNIFIED_CULLING");
+                return !(env && env[0] == '0');
+            }();
             if (id == br::pipeline::TechniqueId::ClusterLod) {
                 // Forked DAGs: raster views with voxel output take the voxel branch, every other view the triangle branch.
                 const uint32_t forcedBranch = GetClusterLODForcedViewBranch();
@@ -898,10 +968,12 @@ void Renderer::RegisterPipelineExtensions() {
                             ? m_pMeshManager->GetCLodSlabResourceGroup() : nullptr,
                         .rayTracingSystem = id == br::pipeline::TechniqueId::ClusterLod ? rayTracingSystem : nullptr,
                         .rayTracedPrimaryVisibility = !pathTraced && m_rayTracedPrimaryVisibilityMode == 1u,
-                        .pathTraced = pathTraced }),
+                        .pathTraced = pathTraced,
+                        .rayTracedShadows = unifiedCulling && m_rayTracedShadows && !StochasticLightingActive(),
+                        .unifiedRayTracingCulling = unifiedCulling }),
                 extensionId);
 
-            if (id == br::pipeline::TechniqueId::ClusterLod && rayTracingSystem) {
+            if (id == br::pipeline::TechniqueId::ClusterLod && rayTracingSystem && !unifiedCulling) {
                 const uint32_t rayTracingClusters = rayTracingSystem->GetLimits().maxClustersInBvh;
                 currentRenderGraph->RegisterExtension(
                     std::make_unique<CLodExtension>(
@@ -921,7 +993,7 @@ void Renderer::RegisterPipelineExtensions() {
                             .pathTraced = pathTraced,
                             .scheduleRayTracedVisibility = !pathTraced && m_rayTracedPrimaryVisibilityMode != 0u,
                             .rayTracedVisibilityMode = m_rayTracedPrimaryVisibilityMode == 2u ? 1u : 0u,
-                            .rayTracedShadows = !pathTraced && m_rayTracedShadows }),
+                            .rayTracedShadows = !pathTraced && m_rayTracedShadows && !StochasticLightingActive() }),
                     "CLodRayTracing");
             }
         });

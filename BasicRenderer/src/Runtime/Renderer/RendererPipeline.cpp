@@ -57,6 +57,10 @@ void Renderer::ApplyPendingPipelineReplacement() {
         m_pipelineRecipe.Contains<br::pipeline::TerrainRegionMaterialEvaluationTechnique>());
     settings.getSettingSetter<bool>("enableShadows")(
         m_pipelineRecipe.Contains<br::pipeline::ClusterLodShadowTechnique>());
+    if (!m_pipelineRecipe.Contains<br::pipeline::PathTracingTechnique>()) {
+        settings.getSettingSetter<bool>("enableStochasticLighting")(
+            m_pipelineRecipe.Contains<br::pipeline::StochasticDirectLightingTechnique>());
+    }
     settings.getSettingSetter<bool>("rayReconstructionGuidesAvailable")(
         m_pipelineRecipe.Contains<br::pipeline::PathTracingTechnique>());
     m_syncingPipelineTopologySettings = false;
@@ -98,6 +102,10 @@ void Renderer::HandlePipelineReplacementFailure(const std::exception& error) {
         m_pipelineRecipe.Contains<br::pipeline::TerrainRegionMaterialEvaluationTechnique>());
     settings.getSettingSetter<bool>("enableShadows")(
         m_pipelineRecipe.Contains<br::pipeline::ClusterLodShadowTechnique>());
+    if (!m_pipelineRecipe.Contains<br::pipeline::PathTracingTechnique>()) {
+        settings.getSettingSetter<bool>("enableStochasticLighting")(
+            m_pipelineRecipe.Contains<br::pipeline::StochasticDirectLightingTechnique>());
+    }
     // Switching path tracing on or off is what failed: go back to the mode the restored recipe is in.
     const bool pathTraced = m_pipelineRecipe.Contains<br::pipeline::PathTracingTechnique>();
     if (pathTraced != m_pathTracing) {

@@ -43,6 +43,11 @@
 // Bound only when CLOD_RT_VIEW is set. Raw: [consumer count, 3 unused][consumers: draw, provider draw][one word per mesh:
 // the first draw + 1 that qualified].
 #define CLOD_WG_RT_COARSE_CUT_DESCRIPTOR_INDEX UintRootConstant47
+// Unified main view (CLOD_UNIFIED_RT): the ray tracing view's cluster list, which phase 1 also writes.
+#define CLOD_WG_RT_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX UintRootConstant17
+#define CLOD_WG_RT_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX UintRootConstant43
+#define CLOD_WG_RT_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX UintRootConstant44
+#define CLOD_WG_RT_VISIBLE_CLUSTERS_CAPACITY UintRootConstant45
 #include "clodRayTracingSetupRootConstants.h" // The layout of what this points at.
 
 #define CLOD_WG_FORCED_TRAVERSAL_DEPTH_ROOT_DISABLED 0xFFFFFFFFu

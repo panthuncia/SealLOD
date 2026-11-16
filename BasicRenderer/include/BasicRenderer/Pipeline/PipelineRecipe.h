@@ -125,6 +125,9 @@ enum class TechniqueId : uint8_t {
     DebugUi,
     DepthHistory,
     Present,
+    // Point and spot lights sampled stochastically and shadowed by ray (docs/stochastic_lighting.md). Its passes come from a
+    // graph extension placed before DeferredShadingPass, so its position in the recipe does not matter.
+    StochasticDirectLighting,
 };
 
 enum class ReyesMode : uint8_t {
@@ -200,6 +203,7 @@ BR_DECLARE_PIPELINE_TECHNIQUE(DebugOutputTechnique, DebugOutput);
 BR_DECLARE_PIPELINE_TECHNIQUE(DebugUiTechnique, DebugUi);
 BR_DECLARE_PIPELINE_TECHNIQUE(DepthHistoryTechnique, DepthHistory);
 BR_DECLARE_PIPELINE_TECHNIQUE(PresentTechnique, Present);
+BR_DECLARE_PIPELINE_TECHNIQUE(StochasticDirectLightingTechnique, StochasticDirectLighting);
 
 #undef BR_DECLARE_PIPELINE_TECHNIQUE
 

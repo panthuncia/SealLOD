@@ -930,9 +930,39 @@ public:
         }
         const auto accumulation = renderer.GetPathTracingAccumulation();
         const std::string target = document.value("target", accumulation.buffer ? std::string("accumulation") : std::string("hdr"));
-        if (target != "accumulation" && target != "hdr") throw std::runtime_error("capture.hdr 'target' must be 'accumulation' or 'hdr'");
+        // stochastic_diffuse / stochastic_specular: stochastic lighting's output (docs/stochastic_lighting.md), as the deferred
+        // pass reads it, at render resolution.
+        const auto checkTarget = [](const std::string& name) {
+            if (name != "accumulation" && name != "hdr" && name != "stochastic_diffuse" && name != "stochastic_specular") {
+                throw std::runtime_error("capture.hdr 'target' must be 'accumulation', 'hdr', 'stochastic_diffuse' or 'stochastic_specular'");
+            }
+        };
+        // "targets": several targets read in the same frame, and "frames": that many consecutive frames. The path then names
+        // each file with the placeholders {target} (needed with more than one target) and {frame} (1-based; needed with more
+        // than one frame). "luminance": true writes one R32F channel, the Rec. 709 luminance, instead of RGBA32F.
+        std::vector<std::string> targets;
+        if (document.contains("targets")) {
+            for (const auto& entry : document.at("targets")) targets.push_back(entry.get<std::string>());
+            if (targets.empty()) throw std::runtime_error("capture.hdr 'targets' must not be empty");
+        } else {
+            targets.push_back(target);
+        }
+        for (const auto& name : targets) checkTarget(name);
+        const std::uint32_t frames = document.value("frames", std::uint32_t{ 1 });
+        if (frames == 0u || frames > 256u) throw std::runtime_error("capture.hdr 'frames' must be 1 to 256");
+        const std::string pathPattern = pathField.get<std::string>();
+        if (targets.size() > 1u && pathPattern.find("{target}") == std::string::npos) {
+            throw std::runtime_error("capture.hdr: a path for several targets needs {target}");
+        }
+        if (frames > 1u && pathPattern.find("{frame}") == std::string::npos) {
+            throw std::runtime_error("capture.hdr: a path for several frames needs {frame}");
+        }
+        const bool multiple = targets.size() > 1u || frames > 1u;
+        if (multiple && std::ranges::find(targets, std::string("accumulation")) != targets.end()) {
+            throw std::runtime_error("capture.hdr: the accumulation target takes one frame on its own");
+        }
         const std::uint64_t spp = document.value("spp", std::uint64_t{ 0 });
-        if ((target == "accumulation" || spp > 0u) && !accumulation.buffer) {
+        if ((targets.front() == "accumulation" || spp > 0u) && !accumulation.buffer) {
             throw std::runtime_error("path tracing is not accumulating: set enablePathTracing and pathTracingAccumulate first");
         }
         const double timeoutSeconds = document.value("timeout_seconds", 300.0);
@@ -940,8 +970,12 @@ public:
 
         auto job = std::make_shared<Job>();
         job->id = m_nextId++;
-        job->path = std::filesystem::absolute(std::filesystem::path(pathField.get<std::string>()));
-        job->accumulation = target == "accumulation";
+        job->path = std::filesystem::absolute(std::filesystem::path(pathPattern));
+        job->accumulation = targets.front() == "accumulation";
+        job->target = targets.front();
+        job->targets = targets;
+        job->frames = frames;
+        job->luminance = document.value("luminance", false);
         job->spp = spp;
         job->deadline = std::chrono::steady_clock::now()
             + std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(timeoutSeconds));
@@ -963,7 +997,8 @@ public:
         std::scoped_lock lock(job->mutex);
         return nlohmann::json{
             { "id", job->id }, { "kind", "capture.hdr" }, { "state", StateName(job->state) }, { "error", job->error },
-            { "path", job->path.string() }, { "target", job->accumulation ? "accumulation" : "hdr" },
+            { "path", job->path.string() }, { "target", job->target }, { "targets", job->targets },
+            { "frames", job->frames }, { "frames_issued", job->issuedFrames }, { "files_written", job->written },
             { "spp_requested", job->spp }, { "width", job->width }, { "height", job->height },
             { "samples_min", job->samplesMin }, { "samples_max", job->samplesMax }, { "reads", job->reads },
             { "frames_since_restart", job->framesSinceRestart },
@@ -1004,6 +1039,12 @@ private:
         std::uint64_t id = 0;
         std::filesystem::path path;
         bool accumulation = true;
+        std::string target;
+        // Several targets over consecutive frames (not the accumulation): each frame's readbacks are requested on its own
+        // frame, so the frames are consecutive unless one passes without a graph.
+        std::vector<std::string> targets;
+        std::uint32_t frames = 1, issuedFrames = 0, outstanding = 0, written = 0;
+        bool luminance = false;
         std::uint64_t spp = 0;
         std::chrono::steady_clock::time_point deadline;
         State state = State::Waiting;
@@ -1045,26 +1086,89 @@ private:
             // A graph rebuild (an accumulation toggle) has no buffer until it is built.
             if (!accumulation.buffer || accumulation.framesSinceRestart < job->spp) return;
         }
-        auto callback = [job](org::ReadbackCaptureResult&& result) { OnRead(job, std::move(result)); };
-        job->state = State::Reading;
         ++job->reads;
         if (job->accumulation) {
+            auto callback = [job](org::ReadbackCaptureResult&& result) { OnRead(job, std::move(result)); };
+            job->state = State::Reading;
             // Not aliased (it is the history), so it can be read after the whole graph without interrupting it.
             readbacks->RequestReadbackCaptureAfterGraph(accumulation.buffer.get(), org::RangeSpec{}, std::move(callback));
             return;
         }
-        // The upscaled HDR colour aliases, so it is read where tonemapping reads it, after the upscaler's write: output
-        // resolution, without bloom (tonemapping adds that).
-        constexpr const char* kAnchor = "TonemappingPass";
-        if (const auto* statistics = graph->GetStatisticsService()) {
-            const auto& names = statistics->GetPassNames();
-            if (!names.empty() && std::ranges::find(names, std::string(kAnchor)) == names.end()) {
-                throw std::runtime_error("the render graph has no TonemappingPass to read the HDR colour at");
+        // Resolve every target before requesting any, so a frame is read whole or not at all.
+        struct Read { std::shared_ptr<org::Resource> resource; const char* anchor; std::string target; };
+        std::vector<Read> reads;
+        for (const auto& target : job->targets) {
+            if (target == "stochastic_diffuse" || target == "stochastic_specular") {
+                const org::ResourceIdentifier id{ target == "stochastic_diffuse"
+                    ? Builtin::StochasticLighting::Diffuse : Builtin::StochasticLighting::Specular };
+                auto texture = graph->RequestResourcePtr(id, true);
+                if (!texture) throw std::runtime_error("stochastic lighting is not running (no " + target + " texture)");
+                reads.push_back({ std::move(texture), "DeferredShadingPass", target });
+                continue;
             }
+            // The upscaled HDR colour aliases, so it is read where tonemapping reads it, after the upscaler's write: output
+            // resolution, without bloom (tonemapping adds that).
+            constexpr const char* kAnchor = "TonemappingPass";
+            if (const auto* statistics = graph->GetStatisticsService()) {
+                const auto& names = statistics->GetPassNames();
+                if (!names.empty() && std::ranges::find(names, std::string(kAnchor)) == names.end()) {
+                    throw std::runtime_error("the render graph has no TonemappingPass to read the HDR colour at");
+                }
+            }
+            auto hdr = graph->RequestResourcePtr(org::ResourceIdentifier{ Builtin::PostProcessing::UpscaledHDR }, true);
+            if (!hdr) throw std::runtime_error("the render graph has no Builtin::PostProcessing::UpscaledHDR");
+            reads.push_back({ std::move(hdr), kAnchor, target });
         }
-        auto hdr = graph->RequestResourcePtr(org::ResourceIdentifier{ Builtin::PostProcessing::UpscaledHDR }, true);
-        if (!hdr) throw std::runtime_error("the render graph has no Builtin::PostProcessing::UpscaledHDR");
-        readbacks->RequestReadbackCapture(kAnchor, hdr.get(), org::RangeSpec{}, std::move(callback));
+        const std::uint32_t frame = ++job->issuedFrames;
+        for (auto& read : reads) {
+            ++job->outstanding;
+            auto path = FilePath(*job, read.target, frame);
+            readbacks->RequestReadbackCapture(read.anchor, read.resource.get(), org::RangeSpec{},
+                [job, path = std::move(path)](org::ReadbackCaptureResult&& result) { OnFrameRead(job, path, std::move(result)); });
+        }
+        // Waiting until the last frame's readbacks are requested, so Pump calls this again next frame.
+        if (job->issuedFrames == job->frames) job->state = State::Reading;
+    }
+
+    static std::filesystem::path FilePath(const Job& job, const std::string& target, std::uint32_t frame)
+    {
+        std::string path = job.path.string();
+        const auto replace = [&path](const std::string& key, const std::string& value) {
+            for (auto at = path.find(key); at != std::string::npos; at = path.find(key, at + value.size())) path.replace(at, key.size(), value);
+        };
+        replace("{target}", target);
+        replace("{frame}", std::to_string(frame));
+        return path;
+    }
+
+    static void OnFrameRead(const std::shared_ptr<Job>& job, const std::filesystem::path& path, org::ReadbackCaptureResult&& result)
+    {
+        std::scoped_lock lock(job->mutex);
+        if (job->state == State::Failed || job->state == State::Published) return;
+        try {
+            std::vector<float> pixels = ToRgba32F(result);
+            job->width = result.width;
+            job->height = result.height;
+            if (job->luminance) {
+                for (std::size_t pixel = 0; pixel < pixels.size() / 4u; ++pixel) {
+                    const float* rgba = pixels.data() + pixel * 4u;
+                    pixels[pixel] = 0.2126f * rgba[0] + 0.7152f * rgba[1] + 0.0722f * rgba[2];
+                }
+                pixels.resize(pixels.size() / 4u);
+                WriteDds(path, result.width, result.height, pixels, 1u);
+            } else {
+                WriteDds(path, result.width, result.height, pixels, 4u);
+            }
+            --job->outstanding;
+            ++job->written;
+            if (job->issuedFrames == job->frames && job->outstanding == 0u) {
+                job->state = State::Published;
+                spdlog::info("capture.hdr {}: wrote {} files of {}x{} over {} frames to '{}'", job->id, job->written, result.width,
+                    result.height, job->frames, job->path.string());
+            }
+        } catch (const std::exception& exception) {
+            Fail(*job, exception.what());
+        }
     }
 
     static void OnRead(const std::shared_ptr<Job>& job, org::ReadbackCaptureResult&& result)
@@ -1086,10 +1190,10 @@ private:
                     return;
                 }
             }
-            WriteRgba32FDds(job->path, result.width, result.height, pixels);
+            WriteDds(job->path, result.width, result.height, pixels, 4u);
             job->state = State::Published;
             spdlog::info("capture.hdr {}: wrote {}x{} {} to '{}' (samples {}..{})", job->id, result.width, result.height,
-                job->accumulation ? "accumulation" : "hdr", job->path.string(), job->samplesMin, job->samplesMax);
+                job->target, job->path.string(), job->samplesMin, job->samplesMax);
         } catch (const std::exception& exception) {
             Fail(*job, exception.what());
         }
@@ -1140,7 +1244,9 @@ private:
     }
 
     // Written beside the target and renamed over it, so a file at the path is always a whole one.
-    static void WriteRgba32FDds(const std::filesystem::path& path, std::uint32_t width, std::uint32_t height, const std::vector<float>& pixels)
+    // channels 4: RGBA32F; 1: R32F.
+    static void WriteDds(const std::filesystem::path& path, std::uint32_t width, std::uint32_t height, const std::vector<float>& pixels,
+        std::uint32_t channels)
     {
         constexpr std::uint32_t kCaps = 0x1, kHeight = 0x2, kWidth = 0x4, kPitch = 0x8, kPixelFormat = 0x1000, kMipCount = 0x20000;
         constexpr std::uint32_t kFourCc = 0x4, kCapsTexture = 0x1000, kDimensionTexture2D = 3;
@@ -1149,13 +1255,13 @@ private:
         header[1] = kCaps | kHeight | kWidth | kPitch | kPixelFormat | kMipCount;
         header[2] = height;
         header[3] = width;
-        header[4] = width * 16u;
+        header[4] = width * 4u * channels;
         header[6] = 1; // mip count
         header[18] = 32; // pixel format size
         header[19] = kFourCc;
         header[20] = 0x30315844; // "DX10"
         header[26] = kCapsTexture;
-        const std::array<std::uint32_t, 5> dx10{ static_cast<std::uint32_t>(DXGI_FORMAT_R32G32B32A32_FLOAT), kDimensionTexture2D, 0, 1, 0 };
+        const std::array<std::uint32_t, 5> dx10{ static_cast<std::uint32_t>(channels == 1u ? DXGI_FORMAT_R32_FLOAT : DXGI_FORMAT_R32G32B32A32_FLOAT), kDimensionTexture2D, 0, 1, 0 };
         auto temporary = path;
         temporary += ".partial";
         {
@@ -1280,6 +1386,15 @@ public:
             });
             if (noPendingWork && signature == m_readinessSignature) ++m_readyStableFrames;
             else m_readyStableFrames = 0;
+            // What keeps readiness from settling, every 5 s: pending work, or the signature moving.
+            if (m_readyStableFrames == 0 && (ElapsedMs() >= m_lastReadinessLogMs + 5000u || ElapsedMs() < m_lastReadinessLogMs)) {
+                m_lastReadinessLogMs = ElapsedMs();
+                std::string blocking;
+                for (const auto& [key, value] : readiness.values) {
+                    blocking += key + "=" + std::to_string(value) + " ";
+                }
+                spdlog::info("BasicRenderer sampling: waiting for readiness ({}): {}", signature == m_readinessSignature ? "pending work" : "signature changed", blocking);
+            }
             m_readinessSignature = signature;
             if (m_readyStableFrames >= m_configuration->readyFrames) {
                 renderer.SetDeterministicSamplingMode(true);
@@ -1313,6 +1428,7 @@ private:
     enum class Phase { Warmup, Settling, Capturing, RenderGraphSampling };
 
     std::uint64_t ElapsedMs() const;
+    std::uint64_t m_lastReadinessLogMs = 0u;
     void StartExperiment(std::string label, Renderer* renderer = nullptr);
     const char* PhaseName() const;
     void PumpControlRequests();
@@ -1372,7 +1488,14 @@ private:
         sample.before = BuildDemoSamplingReadiness(renderer);
         sample.after = sample.before;
         sample.capture.success = true;
+        // The newest frame any configured pass has timestamps for. A pass a graph rebuild removed keeps its old name and
+        // serial: an optional pass that is behind is skipped rather than holding up every sample.
         std::uint64_t sampleSerial = 0;
+        for (const auto& pass : m_configuration->passes) {
+            const auto found = std::ranges::find(names, pass.name);
+            const auto index = found == names.end() ? stats.size() : static_cast<std::size_t>(std::distance(names.begin(), found));
+            if (index < stats.size()) sampleSerial = (std::max)(sampleSerial, stats[index].gpuSampleSerial);
+        }
         for (const auto& pass : m_configuration->passes) {
             const auto found = std::ranges::find(names, pass.name);
             if (found == names.end()) {
@@ -1380,9 +1503,11 @@ private:
                 continue;
             }
             const auto index = static_cast<std::size_t>(std::distance(names.begin(), found));
-            if (index >= stats.size() || stats[index].gpuSampleSerial == 0) return;
-            if (sampleSerial == 0) sampleSerial = stats[index].gpuSampleSerial;
-            if (stats[index].gpuSampleSerial != sampleSerial) return;
+            const bool current = index < stats.size() && stats[index].gpuSampleSerial != 0 && stats[index].gpuSampleSerial == sampleSerial;
+            if (!current) {
+                if (pass.required) return;
+                continue;
+            }
             for (const auto& metricId : pass.metricIds) {
                 sample.measurements.push_back({ pass.id, metricId, stats[index].gpuTimeMs });
             }
@@ -1598,6 +1723,54 @@ void SaveDemoCameraState(Scene& scene, bool rememberCameraPose) {
     }
 }
 
+// BasicRenderer.launch.json beside the exe, when present, gives a bare launch the setup a wrapper script would: a debugger
+// or profiler (Nsight) starting the exe with no arguments and its own environment.
+//   { "environment": { "NAME": "value", ... }, "arguments": "--script ..." }
+// An environment entry never replaces a variable the process already has. The arguments are used only when the command line
+// is empty. The file is optional; the demo doesn't ship one.
+struct DemoLaunchDefaults {
+    std::string commandLine;
+    bool loaded = false;
+    std::string error;
+    std::vector<std::string> appliedEnvironment;
+    bool usedArguments = false;
+};
+
+DemoLaunchDefaults ApplyDemoLaunchDefaults(std::string_view commandLine)
+{
+    DemoLaunchDefaults result;
+    result.commandLine = std::string(commandLine);
+    std::ifstream file("BasicRenderer.launch.json");
+    if (!file) return result;
+    nlohmann::json launch;
+    try {
+        launch = nlohmann::json::parse(file, nullptr, true, true);
+    } catch (const std::exception& e) {
+        result.error = e.what();
+        return result;
+    }
+    result.loaded = true;
+    if (const auto environment = launch.find("environment"); environment != launch.end() && environment->is_object()) {
+        for (const auto& [name, value] : environment->items()) {
+            if (!value.is_string()) continue;
+            char* existing = nullptr;
+            size_t existingLength = 0;
+            const bool present = _dupenv_s(&existing, &existingLength, name.c_str()) == 0 && existing != nullptr;
+            std::free(existing);
+            if (present) continue;
+            const std::string text = value.get<std::string>();
+            if (_putenv_s(name.c_str(), text.c_str()) == 0) result.appliedEnvironment.push_back(name + "=" + text);
+        }
+    }
+    if (commandLine.find_first_not_of(" 	") == std::string_view::npos) {
+        if (const auto arguments = launch.find("arguments"); arguments != launch.end() && arguments->is_string()) {
+            result.commandLine = arguments->get<std::string>();
+            result.usedArguments = true;
+        }
+    }
+    return result;
+}
+
 } // namespace
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nShowCmd) {
@@ -1613,6 +1786,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
             std::filesystem::current_path(std::filesystem::path(exePath).parent_path(), error);
         }
     }
+    // Before anything reads the environment (the log path below, the renderer's settings, scenarios).
+    const DemoLaunchDefaults launchDefaults = ApplyDemoLaunchDefaults(lpCmdLine ? std::string_view(lpCmdLine) : std::string_view{});
     std::filesystem::path logPath = "logs/log.txt";
     char* configuredLogPath = nullptr;
     size_t configuredLogPathLength = 0;
@@ -1629,7 +1804,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     spdlog::set_default_logger(file_logger);
     file_logger->flush_on(spdlog::level::info);
 
-    const std::string_view commandLine = lpCmdLine ? std::string_view(lpCmdLine) : std::string_view{};
+    if (!launchDefaults.error.empty()) {
+        spdlog::error("BasicRenderer.launch.json: {}", launchDefaults.error);
+    } else if (launchDefaults.loaded) {
+        spdlog::info("BasicRenderer.launch.json: environment [{}]{}", [&] {
+            std::string joined;
+            for (const auto& entry : launchDefaults.appliedEnvironment) joined += (joined.empty() ? "" : ", ") + entry;
+            return joined;
+        }(), launchDefaults.usedArguments ? ", arguments '" + launchDefaults.commandLine + "'" : std::string());
+    }
+    const std::string_view commandLine = launchDefaults.commandLine;
     const DemoCameraState cameraState = LoadDemoCameraState();
     DemoStatisticalSamplingRun statisticalSampling;
     if (const auto samplingConfig = FindCommandLinePath(commandLine, "--sampling-config")) {
@@ -2405,7 +2589,52 @@ void DemoStatisticalSamplingRun::RegisterControlCommands(Renderer& renderer, HWN
                 SettingsManager::GetInstance().getSettingSetter<UpscalingMode>("upscalingMode")(request.args.at("ray_reconstruction").get<bool>()
                     ? UpscalingMode::DLSSRayReconstruction : UpscalingMode::DLSS);
             }
+            // "mode": "none", "fsr3", "dlss" or "dlss_rr" picks the upscaler outright ("none" renders at output resolution).
+            if (request.args.contains("mode")) {
+                const auto mode = request.args.at("mode").get<std::string>();
+                UpscalingMode value;
+                if (mode == "none") value = UpscalingMode::None;
+                else if (mode == "fsr3") value = UpscalingMode::FSR3;
+                else if (mode == "dlss") value = UpscalingMode::DLSS;
+                else if (mode == "dlss_rr") value = UpscalingMode::DLSSRayReconstruction;
+                else throw std::runtime_error("mode is none, fsr3, dlss or dlss_rr");
+                SettingsManager::GetInstance().getSettingSetter<UpscalingMode>("upscalingMode")(value);
+            }
             response["upscaler"] = nlohmann::json::parse(renderer.DescribeUpscaler());
+            return response;
+        });
+        m_commands.Register("settings.set", [this, &renderer, hwnd](const br::diagnostics::ControlRequest& request) {
+            // Any bool, float or unsigned/signed integer setting by name, for A/B within one run: {"name": ..., "value": ...}.
+            // The response has the value read back. Settings that rebuild the graph or pipeline do so before a coming frame.
+            const auto name = request.args.at("name").get<std::string>();
+            const auto& value = request.args.at("value");
+            nlohmann::json response = nlohmann::json::object();
+            switch (br::extensions::GetSettingValueType(name)) {
+            case br::extensions::SettingValueType::Bool:
+                br::extensions::MakeSettingSetter<bool>(name)(value.get<bool>());
+                response["value"] = br::extensions::MakeSettingGetter<bool>(name)();
+                break;
+            case br::extensions::SettingValueType::Float:
+                br::extensions::MakeSettingSetter<float>(name)(value.get<float>());
+                response["value"] = br::extensions::MakeSettingGetter<float>(name)();
+                break;
+            case br::extensions::SettingValueType::UInt32:
+                br::extensions::MakeSettingSetter<std::uint32_t>(name)(value.get<std::uint32_t>());
+                response["value"] = br::extensions::MakeSettingGetter<std::uint32_t>(name)();
+                break;
+            case br::extensions::SettingValueType::Int32:
+                br::extensions::MakeSettingSetter<std::int32_t>(name)(value.get<std::int32_t>());
+                response["value"] = br::extensions::MakeSettingGetter<std::int32_t>(name)();
+                break;
+            case br::extensions::SettingValueType::UInt8:
+                br::extensions::MakeSettingSetter<std::uint8_t>(name)(value.get<std::uint8_t>());
+                response["value"] = br::extensions::MakeSettingGetter<std::uint8_t>(name)();
+                break;
+            case br::extensions::SettingValueType::Missing:
+                throw std::runtime_error("no setting named '" + name + "'");
+            default:
+                throw std::runtime_error("setting '" + name + "' has a type settings.set cannot write");
+            }
             return response;
         });
         m_commands.Register("upscaler.simulate_failure", [this, &renderer, hwnd](const br::diagnostics::ControlRequest& request) {

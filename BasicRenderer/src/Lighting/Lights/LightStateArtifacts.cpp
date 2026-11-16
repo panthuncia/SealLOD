@@ -19,7 +19,6 @@ ArtifactBuildResult BuildLightTable(const ArtifactBuildContext& context) {
     auto root = std::make_shared<RendererStateFragmentArtifact>();
     state->revision = input->revision;
     state->lightCount = input->lightCount;
-    state->lightPagePoolSize = input->lightPagePoolSize;
     state->directionalShadows = input->directionalShadows;
     state->localShadows = input->localShadows;
     state->retainedResources = input->retainedResources;

@@ -8,6 +8,7 @@
 #include "Scene/Views/RenderPasses/PrimaryDepthCopyPass.h"
 #include "Materials/Evaluation/RenderPasses/BuildPixelListPass.h"
 #include "Materials/Evaluation/RenderPasses/EvaluateMaterialGroupsPass.h"
+#include "Materials/Evaluation/RenderPasses/ResolveMaterialTextureDescriptorsPass.h"
 #include "Materials/Evaluation/RenderPasses/MaterialHistogramPass.h"
 #include "Materials/Evaluation/RenderPasses/MaterialPixelCounterResetPass.h"
 #include "Materials/Evaluation/RenderPasses/MaterialBlockScanPass.h"
@@ -21,7 +22,6 @@
 #include "PostProcessing/AmbientOcclusion/RenderPasses/XeGTAOFilterPass.h"
 #include "PostProcessing/AmbientOcclusion/RenderPasses/XeGTAOMainPass.h"
 #include "Lighting/Clustered/RenderPasses/LightCullingPass.h"
-#include "Lighting/Clustered/RenderPasses/ClusterGenerationPass.h"
 #include "Lighting/Shading/RenderPasses/DeferredShadingPass.h"
 #include "Lighting/Environment/RenderPasses/SkyboxRenderPass.h"
 #include "PostProcessing/Reflections/RenderPasses/ScreenSpaceReflectionsPass.h"
@@ -105,6 +105,21 @@ inline void RegisterVisUtilResources(
     pixelListBuffer->SetName("VisUtil::PixelListBuffer");
     org::memory::SetResourceUsageHint(*pixelListBuffer, "Visibility Buffer Resources");
     graph->RegisterResource("Builtin::VisUtil::PixelListBuffer", pixelListBuffer);
+
+    // Per material evaluation table row, the descriptor each texture slot samples this frame (ResolveMaterialTextureDescriptorsPass).
+    const uint32_t resolvedTextureRows = std::max(MATERIAL_RESOLVED_TEXTURE_MIN_CAPACITY,
+        SettingsManager::GetInstance().getSettingGetter<uint32_t>(MaterialResolvedTextureCapacitySettingName)());
+    auto resolvedTextureDescriptors = org::Buffer::CreateUnmaterializedStructuredBuffer(
+        resolvedTextureRows * MATERIAL_RESOLVED_TEXTURE_UINT4_PER_ROW,
+        sizeof(uint32_t) * 4u,
+        true,
+        false,
+        false,
+        rhi::HeapType::DeviceLocal);
+    resolvedTextureDescriptors->SetAllowAlias(true);
+    resolvedTextureDescriptors->SetName("Material::ResolvedTextureDescriptors");
+    org::memory::SetResourceUsageHint(*resolvedTextureDescriptors, "Material evaluation buffers");
+    graph->RegisterResource(kMaterialResolvedTextureDescriptorsResource, resolvedTextureDescriptors);
 
     constexpr uint32_t maxTerrainRegions = 65536u;
     auto terrainRegionPixelCountBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
@@ -725,8 +740,15 @@ inline void BuildTerrainRegionMaterialEvaluationPipeline(org::RenderGraph* graph
     TagPassTechnique(graph, "EvaluateTerrainRegionMaterialGroupsPass", "Primary Visibility::GBuffer Construction::Terrain Regions");
 }
 
+inline void BuildResolveMaterialTextureDescriptorsPass(org::RenderGraph* graph)
+{
+    graph->BuildPass<ResolveMaterialTextureDescriptorsPass>("ResolveMaterialTextureDescriptorsPass");
+    TagPassTechnique(graph, "ResolveMaterialTextureDescriptorsPass", "Primary Visibility::GBuffer Construction::Material Groups");
+}
+
 inline void BuildMaterialEvaluationPipeline(org::RenderGraph* graph, const MaterialEvaluationBuildInputs& inputs, bool terrainRvt)
 {
+    BuildResolveMaterialTextureDescriptorsPass(graph);
     graph->BuildPass<EvaluateMaterialGroupsPass>("EvaluateMaterialGroupsPass", inputs, terrainRvt);
     TagPassTechnique(graph, "EvaluateMaterialGroupsPass", "Primary Visibility::GBuffer Construction::Material Groups");
 }
@@ -834,6 +856,7 @@ inline void BuildCanonicalSurfacePipeline(
 
         // Evaluate material groups
         if (materialEvaluation) {
+            BuildResolveMaterialTextureDescriptorsPass(graph);
             graph->BuildPass<EvaluateMaterialGroupsPass>("EvaluateMaterialGroupsPass", inputs, terrainRvt);
             TagPassTechnique(graph, "EvaluateMaterialGroupsPass", "Primary Visibility::GBuffer Construction::Material Groups");
         }
@@ -919,22 +942,34 @@ inline void BuildGTAOPipeline(org::RenderGraph* graph, const Components::Camera*
     TagPassTechnique(graph, "GTAODenoisePass", "Post Process::GTAO");
 }
 
-inline void BuildLightClusteringPipeline(org::RenderGraph* graph) {
-    // light pages counter
-    auto lightPagesCounter = org::Buffer::CreateUnmaterializedStructuredBuffer(
-        1,
-        sizeof(unsigned int),
-        true,
-        false,
-        false,
-        rhi::HeapType::DeviceLocal);
-    lightPagesCounter->SetName("Light Pages Counter");
-    graph->RegisterResource(Builtin::Light::PagesCounter, lightPagesCounter);
+// The light grid (docs/lighting.md "The light grid"): its buffers, sized from the render resolution, the grid settings and
+// the capacities Renderer::Update grows, and its three passes.
+inline void BuildLightClusteringPipeline(org::RenderGraph* graph, bool forwardLists) {
+    auto& settings = SettingsManager::GetInstance();
+    const auto resolution = settings.getSettingGetter<DirectX::XMUINT2>("renderResolution")();
+    const LightGridShape shape = MakeLightGridShape(resolution.x, resolution.y,
+        settings.getSettingGetter<uint32_t>(LightGridTileSizeSettingName)(), settings.getSettingGetter<uint32_t>(LightGridSlicesSettingName)());
+    LightGridCapacities capacities;
+    capacities.indices = std::max(LightGridMinIndexCapacity, settings.getSettingGetter<uint32_t>(LightGridIndexCapacitySettingName)());
+    capacities.records = std::max(LightGridMinRecordCapacity, settings.getSettingGetter<uint32_t>(LightGridRecordCapacitySettingName)());
 
-    graph->BuildPass<ClusterGenerationPass>("ClusterGenerationPass");
-    TagPassTechnique(graph, "ClusterGenerationPass", "Lighting::Clustered Lighting");
+    const auto registerBuffer = [&](std::string_view id, uint32_t elements, uint32_t stride, const char* name) {
+        auto buffer = org::Buffer::CreateUnmaterializedStructuredBuffer(elements, stride, true, false, false, rhi::HeapType::DeviceLocal);
+        buffer->SetAllowAlias(true);
+        buffer->SetName(name);
+        org::memory::SetResourceUsageHint(*buffer, "Lighting buffers");
+        graph->RegisterResource(id, buffer);
+    };
+    registerBuffer(Builtin::Light::GridCells, shape.Cells(), sizeof(uint32_t) * 2u, "Light grid cells");
+    registerBuffer(Builtin::Light::GridDepthBounds, shape.Cells() + shape.Tiles(), sizeof(uint32_t) * 2u, "Light grid depth bounds");
+    registerBuffer(Builtin::Light::GridIndices, capacities.indices, sizeof(uint32_t), "Light grid indices");
+    registerBuffer(Builtin::Light::CullingRecords, capacities.records, sizeof(LightCullingRecord), "Light culling records");
 
-    graph->BuildPass<LightCullingPass>("LightCullingPass");
+    graph->BuildPass<LightGridPreparePass>("LightGridPreparePass", capacities);
+    TagPassTechnique(graph, "LightGridPreparePass", "Lighting::Clustered Lighting");
+    graph->BuildPass<LightGridDepthBoundsPass>("LightGridDepthBoundsPass");
+    TagPassTechnique(graph, "LightGridDepthBoundsPass", "Lighting::Clustered Lighting");
+    graph->BuildPass<LightCullingPass>("LightCullingPass", capacities, forwardLists);
     TagPassTechnique(graph, "LightCullingPass", "Lighting::Clustered Lighting");
 }
 
@@ -948,12 +983,13 @@ inline void BuildLinearDepthHistoryCopyPass(org::RenderGraph* graph, br::render:
     TagPassTechnique(graph, "LinearDepthHistoryCopyPass", "Post Process::Depth History");
 }
 
-inline void BuildPrimaryPass(org::RenderGraph* graph, Environment* currentEnvironment, bool hasBoundEnvironment = false) {
+inline void BuildPrimaryPass(org::RenderGraph* graph, Environment* currentEnvironment, bool hasBoundEnvironment = false,
+    bool stochasticLighting = false) {
 
 	bool gtaoEnabled = SettingsManager::GetInstance().getSettingGetter<bool>("enableGTAO")();
 	// Uses existing GBuffer resources
     const bool renderSkybox = currentEnvironment != nullptr || hasBoundEnvironment;
-    graph->BuildPass<DeferredShadingPass>("DeferredShadingPass", renderSkybox);
+    graph->BuildPass<DeferredShadingPass>("DeferredShadingPass", renderSkybox, stochasticLighting);
     TagPassTechnique(graph, "DeferredShadingPass", "Lighting::Primary Shading");
 
     // DeferredShading's background branch renders the skybox using the same

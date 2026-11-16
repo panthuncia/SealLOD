@@ -747,6 +747,23 @@ void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     m_rayTracedReflectionsEnabled = getRayTracedReflectionsEnabled();
     setRayTracedShadowsEnabled = settingsManager.getSettingSetter<bool>("enableRayTracedShadows");
     m_rayTracedShadowsEnabled = settingsManager.getSettingGetter<bool>("enableRayTracedShadows")();
+    setStochasticLightingEnabled = settingsManager.getSettingSetter<bool>("enableStochasticLighting");
+    m_stochasticLightingEnabled = settingsManager.getSettingGetter<bool>("enableStochasticLighting")();
+    observerSetting(m_stochasticLightingEnabled, "enableStochasticLighting");
+    setStochasticLightingReference = settingsManager.getSettingSetter<bool>("stochasticLightingReference");
+    m_stochasticLightingReference = settingsManager.getSettingGetter<bool>("stochasticLightingReference")();
+    observerSetting(m_stochasticLightingReference, "stochasticLightingReference");
+    setStochasticLightingAccumulate = settingsManager.getSettingSetter<bool>("stochasticLightingAccumulate");
+    m_stochasticLightingAccumulate = settingsManager.getSettingGetter<bool>("stochasticLightingAccumulate")();
+    observerSetting(m_stochasticLightingAccumulate, "stochasticLightingAccumulate");
+    getStochasticLightingSamples = settingsManager.getSettingGetter<uint32_t>("stochasticLightingSamplesPerPixel");
+    setStochasticLightingSamples = settingsManager.getSettingSetter<uint32_t>("stochasticLightingSamplesPerPixel");
+    getStochasticLightingDownsample = settingsManager.getSettingGetter<uint32_t>("stochasticLightingDownsample");
+    setStochasticLightingDownsample = settingsManager.getSettingSetter<uint32_t>("stochasticLightingDownsample");
+    getStochasticLightingGuiding = settingsManager.getSettingGetter<bool>("stochasticLightingGuiding");
+    setStochasticLightingGuiding = settingsManager.getSettingSetter<bool>("stochasticLightingGuiding");
+    getStochasticLightingDenoise = settingsManager.getSettingGetter<bool>("stochasticLightingDenoise");
+    setStochasticLightingDenoise = settingsManager.getSettingSetter<bool>("stochasticLightingDenoise");
     setPathTracingEnabled = settingsManager.getSettingSetter<bool>("enablePathTracing");
     m_pathTracingEnabled = settingsManager.getSettingGetter<bool>("enablePathTracing")();
     // The renderer can turn it back off (no support, or a failed switch).
@@ -1999,6 +2016,38 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
         }
         if (ImGui::Checkbox("Enable Ray Traced Sun Shadows", &m_rayTracedShadowsEnabled)) {
             setRayTracedShadowsEnabled(m_rayTracedShadowsEnabled);
+        }
+        // Every analytic light, the sun included, sampled stochastically and shadowed by ray, in place of the shadow map. Needs
+        // Shadows on.
+        if (ImGui::Checkbox("Stochastic Lighting", &m_stochasticLightingEnabled)) {
+            setStochasticLightingEnabled(m_stochasticLightingEnabled);
+        }
+        if (m_stochasticLightingEnabled) {
+            ImGui::SameLine();
+            if (ImGui::Checkbox("Reference", &m_stochasticLightingReference)) {
+                setStochasticLightingReference(m_stochasticLightingReference);
+            }
+            ImGui::SameLine();
+            if (ImGui::Checkbox("Accumulate", &m_stochasticLightingAccumulate)) {
+                setStochasticLightingAccumulate(m_stochasticLightingAccumulate);
+            }
+            int samples = static_cast<int>(getStochasticLightingSamples());
+            if (ImGui::SliderInt("Stochastic Samples per Pixel", &samples, 1, 4)) {
+                setStochasticLightingSamples(static_cast<uint32_t>(samples));
+            }
+            // Reduced resolution: one pixel of each 2x2 sampled a frame (rebuilds the graph).
+            bool halfResolution = getStochasticLightingDownsample() > 1u;
+            if (ImGui::Checkbox("Stochastic Half-Resolution Sampling", &halfResolution)) {
+                setStochasticLightingDownsample(halfResolution ? 2u : 1u);
+            }
+            bool guiding = getStochasticLightingGuiding();
+            if (ImGui::Checkbox("Stochastic Guiding (visible-light lists)", &guiding)) {
+                setStochasticLightingGuiding(guiding);
+            }
+            bool denoise = getStochasticLightingDenoise();
+            if (ImGui::Checkbox("Stochastic Denoiser", &denoise)) {
+                setStochasticLightingDenoise(denoise);
+            }
         }
         constexpr const char* primaryVisibilityModes[] = { "Raster", "Ray traced", "Raster, compare against rays (see log)" };
         int primaryVisibilityMode = static_cast<int>(m_rayTracedPrimaryVisibilityMode);

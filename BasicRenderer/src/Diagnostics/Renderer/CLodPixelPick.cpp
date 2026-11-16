@@ -71,9 +71,11 @@ namespace br::diagnostics {
 		}
 		const std::size_t pixelIndex = static_cast<std::size_t>(y) * frame.width + x;
 
-		if ((pixelIndex + 1u) * kSurfaceRecordBytes <= frame.surfaceRecords.size()) {
+		// identity.x names the pixel's record; pixels with equal records can share one.
+		const std::size_t recordIndex = pixelIndex < frame.surfaceRecordIndices.size() ? frame.surfaceRecordIndices[pixelIndex] : pixelIndex;
+		if ((recordIndex + 1u) * kSurfaceRecordBytes <= frame.surfaceRecords.size()) {
 			std::array<std::uint32_t, 8> words{};
-			std::memcpy(words.data(), frame.surfaceRecords.data() + pixelIndex * kSurfaceRecordBytes, sizeof(words));
+			std::memcpy(words.data(), frame.surfaceRecords.data() + recordIndex * kSurfaceRecordBytes, sizeof(words));
 			pick.hasRecord = true;
 			pick.recordObjectId = static_cast<std::uint64_t>(words[0]) | (static_cast<std::uint64_t>(words[1]) << 32u);
 			pick.recordSourceMaterialId = static_cast<std::uint64_t>(words[2]) | (static_cast<std::uint64_t>(words[3]) << 32u);

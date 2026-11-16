@@ -38,7 +38,8 @@ DeepVisibilityResolvePass::DeepVisibilityResolvePass(
 {
     auto& settingsManager = SettingsManager::GetInstance();
     m_getPunctualLightingEnabled = settingsManager.getSettingGetter<bool>("enablePunctualLighting");
-    m_getShadowsEnabled = settingsManager.getSettingGetter<bool>("enableShadows");
+    // Whether the virtual shadow map is built, not just shadows on: stochastic lighting replaces it (Renderer::VirtualShadowMapsActive).
+    m_getShadowsEnabled = settingsManager.getSettingGetter<bool>("virtualShadowMapsActive");
     m_gtaoEnabled = settingsManager.getSettingGetter<bool>("enableGTAO")();
 }
 
@@ -64,8 +65,8 @@ DeepVisibilityResolveBindings DeepVisibilityResolvePass::Declare(org::PassBuilde
             Builtin::Light::ActiveLightIndices,
             Builtin::Light::InfoBuffer,
             Builtin::Light::DirectionalLightCascadeBuffer,
-            Builtin::Light::ClusterBuffer,
-            Builtin::Light::PagesBuffer,
+            Builtin::Light::GridCells,
+            Builtin::Light::GridIndices,
             Builtin::OpenPBR::FuzzLTC,
             Builtin::OpenPBR::IdealMetalEnergyComplement,
             Builtin::OpenPBR::IdealMetalAverageEnergyComplement,

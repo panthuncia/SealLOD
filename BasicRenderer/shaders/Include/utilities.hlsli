@@ -1369,6 +1369,34 @@ struct MaterialUvCache
     MaterialUvSample samples[MATERIAL_MAX_UNIQUE_UV_SETS];
 };
 
+// The sample at a cache index. A material evaluation variant whose material samples one UV set (MATERIAL_EVAL_SINGLE_UV_SET:
+// MaterialCompileMultipleUvSets is clear) holds that set at index 0 and reads it with a constant index. A runtime index
+// into the cache kept its arrays in indexable memory: on Zorah, about 50 registers of the eval shader's 244.
+MaterialUvSample MaterialUvCacheAt(in MaterialUvCache cache, uint index)
+{
+#if defined(MATERIAL_EVAL_SINGLE_UV_SET)
+    return cache.samples[0];
+#else
+    return cache.samples[index];
+#endif
+}
+
+// Object-space (model-space) normal maps. In material evaluation this is a property of the variant
+// (MaterialCompileObjectSpaceNormalMap -> PSO_OBJECT_SPACE_NORMAL_MAP), so the others don't compile that path: it samples
+// outside the streaming feedback scope and holds the normal matrix across the sampling.
+bool MaterialUsesObjectSpaceNormalMap(uint materialFlags)
+{
+#if defined(VISUTIL_SPECIALIZED_MATERIAL_EVAL) && !defined(PSO_TERRAIN)
+#if defined(PSO_OBJECT_SPACE_NORMAL_MAP)
+    return true;
+#else
+    return false;
+#endif
+#else
+    return (materialFlags & MATERIAL_OBJECT_SPACE_NORMAL_MAP) != 0u;
+#endif
+}
+
 struct MaterialUvBindings
 {
     uint cacheIndexBySlot[MATERIAL_TEXTURE_SLOT_COUNT];
@@ -1499,7 +1527,7 @@ MaterialUvSample ResolveOpenPBRTextureUv(
         return MakeDefaultMaterialUvSample();
     }
 
-    return uvCache.samples[cacheIndex];
+    return MaterialUvCacheAt(uvCache, cacheIndex);
 }
 
 float4 SampleOpenPBRTexture(uint textureIndex, uint samplerIndex, uint streamingTextureID, MaterialUvSample uvSample, inout MaterialInputs materialInputs)
@@ -2106,7 +2134,7 @@ MaterialUvSample GetBoundUvSample(in MaterialUvCache cache, in MaterialUvBinding
         return MakeDefaultMaterialUvSample();
     }
 
-    return cache.samples[cacheIndex];
+    return MaterialUvCacheAt(cache, cacheIndex);
 }
 
 MaterialUvSample ResolveMaterialUvSample(
@@ -2147,6 +2175,9 @@ void BeginMaterialStreamingFeedback(uint streamingFeedbackSlot, in MaterialUvCac
         return;
     }
     float finest = 3.0e38f;
+#if defined(MATERIAL_EVAL_SINGLE_UV_SET)
+    finest = MaterialStreamingFootprintLog2(cache.samples[0].dUVdx, cache.samples[0].dUVdy);
+#else
     [unroll]
     for (uint index = 0u; index < MATERIAL_MAX_UNIQUE_UV_SETS; ++index)
     {
@@ -2155,6 +2186,7 @@ void BeginMaterialStreamingFeedback(uint streamingFeedbackSlot, in MaterialUvCac
             finest = min(finest, MaterialStreamingFootprintLog2(cache.samples[index].dUVdx, cache.samples[index].dUVdy));
         }
     }
+#endif
     RecordMaterialStreamingFootprint(streamingFeedbackSlot, finest);
 }
 
@@ -2179,7 +2211,7 @@ float3x3 BuildMaterialTBN(
     in float3 dpdx,
     in float3 dpdy)
 {
-    MaterialUvSample tbnUv = cache.samples[bindings.tbnCacheIndex];
+    MaterialUvSample tbnUv = MaterialUvCacheAt(cache, bindings.tbnCacheIndex);
     return cotangent_frame_from_derivs(normalWSBase.xyz, dpdx, dpdy, tbnUv.dUVdx, tbnUv.dUVdy);
 }
 
@@ -3390,6 +3422,20 @@ void SampleMaterialFromUvCache(
     EndMaterialStreamingFeedback();
 }
 
+// A material evaluation texture whose descriptor ResolveMaterialTextureDescriptor already resolved (the streamed image when
+// there is one). Inside the material's streaming feedback scope a sample records nothing, so in color-only evaluation it is a
+// plain sample; SampleMaterialTexture2DGrad read the streaming row again and compiled a second sample for the same image.
+// Debug outputs keep it, for the selected-mip view.
+float4 SampleResolvedMaterialTexture2DGrad(Texture2D<float4> tex, SamplerState samp, uint streamingTextureID, float2 uv, float2 dUVdx,
+    float2 dUVdy, inout MaterialTextureFeedback feedback)
+{
+#if defined(VISUTIL_COLOR_ONLY_GBUFFER_EVAL)
+    return Sample2DGrad(tex, samp, uv, dUVdx, dUVdy);
+#else
+    return SampleMaterialTexture2DGrad(tex, samp, streamingTextureID, uv, dUVdx, dUVdy, feedback);
+#endif
+}
+
 void SampleMaterialEvalFromUvCacheBody(
     in MaterialUvCache uvCache,
     in MaterialUvBindings uvBindings,
@@ -3447,7 +3493,7 @@ void SampleMaterialEvalFromUvCacheBody(
                 (uint)ceil(16.0f * parallaxFade));
             if ((materialFlags & MATERIAL_HEIGHT_FROM_BASE_ALPHA) != 0u)
             {
-                Texture2D<float4> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialTextureDescriptor(materialInfo.baseColorTextureIndex, materialInfo.baseColorStreamingTextureID))];
+                Texture2D<float4> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialEvalTextureDescriptor(MATERIAL_RESOLVED_TEXTURE_BASE_COLOR, materialInfo.baseColorTextureIndex, materialInfo.baseColorStreamingTextureID))];
                 SamplerState parallaxSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorSamplerIndex)];
                 parallaxUv = ParallaxOcclusionUv(
                     parallaxTexture,
@@ -3463,7 +3509,7 @@ void SampleMaterialEvalFromUvCacheBody(
             }
             else
             {
-                Texture2D<float4> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialTextureDescriptor(materialInfo.heightMapIndex, materialInfo.heightStreamingTextureID))];
+                Texture2D<float4> parallaxTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialEvalTextureDescriptor(MATERIAL_RESOLVED_TEXTURE_HEIGHT, materialInfo.heightMapIndex, materialInfo.heightStreamingTextureID))];
                 SamplerState parallaxSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.heightSamplerIndex)];
                 parallaxUv = ParallaxOcclusionUv(
                     parallaxTexture,
@@ -3490,7 +3536,7 @@ void SampleMaterialEvalFromUvCacheBody(
     float4 baseColor = materialInfo.baseColorFactor;
 
 #if defined(PSO_BASE_COLOR_TEXTURE)
-    Texture2D<float4> baseColorTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialTextureDescriptor(materialInfo.baseColorTextureIndex, materialInfo.baseColorStreamingTextureID))];
+    Texture2D<float4> baseColorTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialEvalTextureDescriptor(MATERIAL_RESOLVED_TEXTURE_BASE_COLOR, materialInfo.baseColorTextureIndex, materialInfo.baseColorStreamingTextureID))];
     SamplerState baseColorSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.baseColorSamplerIndex)];
 #if defined(PSO_PARALLAX)
     const MaterialUvSample baseColorUv = ResolveMaterialUvSample(
@@ -3504,12 +3550,12 @@ void SampleMaterialEvalFromUvCacheBody(
 #else
     const MaterialUvSample baseColorUv = ResolveMaterialUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_BASE_COLOR);
 #endif
-    float4 sampledColor = SampleMaterialTexture2DGrad(baseColorTexture, baseColorSamplerState, materialInfo.baseColorStreamingTextureID, baseColorUv.uv, baseColorUv.dUVdx, baseColorUv.dUVdy, textureFeedback);
+    float4 sampledColor = SampleResolvedMaterialTexture2DGrad(baseColorTexture, baseColorSamplerState, materialInfo.baseColorStreamingTextureID, baseColorUv.uv, baseColorUv.dUVdx, baseColorUv.dUVdy, textureFeedback);
     baseColor *= sampledColor;
 #endif
 
 #if defined(PSO_OPACITY_TEXTURE)
-    Texture2D<float4> opacityTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialTextureDescriptor(materialInfo.opacityTextureIndex, materialInfo.opacityStreamingTextureID))];
+    Texture2D<float4> opacityTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialEvalTextureDescriptor(MATERIAL_RESOLVED_TEXTURE_OPACITY, materialInfo.opacityTextureIndex, materialInfo.opacityStreamingTextureID))];
     SamplerState opacitySamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.opacitySamplerIndex)];
 #if defined(PSO_PARALLAX)
     const MaterialUvSample opacityUv = ResolveMaterialUvSample(
@@ -3523,7 +3569,7 @@ void SampleMaterialEvalFromUvCacheBody(
 #else
     const MaterialUvSample opacityUv = ResolveMaterialUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_OPACITY);
 #endif
-    float4 opacitySample = SampleMaterialTexture2DGrad(opacityTexture, opacitySamplerState, materialInfo.opacityStreamingTextureID, opacityUv.uv, opacityUv.dUVdx, opacityUv.dUVdy, textureFeedback);
+    float4 opacitySample = SampleResolvedMaterialTexture2DGrad(opacityTexture, opacitySamplerState, materialInfo.opacityStreamingTextureID, opacityUv.uv, opacityUv.dUVdx, opacityUv.dUVdy, textureFeedback);
     baseColor.a *= opacitySample.a;
 #endif
 
@@ -3531,7 +3577,7 @@ void SampleMaterialEvalFromUvCacheBody(
     float roughness = materialInfo.roughnessFactor;
 
 #if defined(PSO_METALLIC_TEXTURE)
-    Texture2D<float4> metallicTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialTextureDescriptor(materialInfo.metallicTextureIndex, materialInfo.metallicStreamingTextureID))];
+    Texture2D<float4> metallicTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialEvalTextureDescriptor(MATERIAL_RESOLVED_TEXTURE_METALLIC, materialInfo.metallicTextureIndex, materialInfo.metallicStreamingTextureID))];
     SamplerState metallicSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.metallicSamplerIndex)];
 #if defined(PSO_PARALLAX)
     const MaterialUvSample metallicUv = ResolveMaterialUvSample(
@@ -3545,12 +3591,12 @@ void SampleMaterialEvalFromUvCacheBody(
 #else
     const MaterialUvSample metallicUv = ResolveMaterialUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_METALLIC);
 #endif
-    float4 metallicSample = SampleMaterialTexture2DGrad(metallicTexture, metallicSamplerState, materialInfo.metallicStreamingTextureID, metallicUv.uv, metallicUv.dUVdx, metallicUv.dUVdy, textureFeedback);
+    float4 metallicSample = SampleResolvedMaterialTexture2DGrad(metallicTexture, metallicSamplerState, materialInfo.metallicStreamingTextureID, metallicUv.uv, metallicUv.dUVdx, metallicUv.dUVdy, textureFeedback);
     metallic = DynamicSwizzle(metallicSample, materialInfo.metallicChannel) * materialInfo.metallicFactor;
 #endif
 
 #if defined(PSO_ROUGHNESS_TEXTURE)
-    Texture2D<float4> roughnessTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialTextureDescriptor(materialInfo.roughnessTextureIndex, materialInfo.roughnessStreamingTextureID))];
+    Texture2D<float4> roughnessTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialEvalTextureDescriptor(MATERIAL_RESOLVED_TEXTURE_ROUGHNESS, materialInfo.roughnessTextureIndex, materialInfo.roughnessStreamingTextureID))];
     SamplerState roughnessSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.roughnessSamplerIndex)];
 #if defined(PSO_PARALLAX)
     const MaterialUvSample roughnessUv = ResolveMaterialUvSample(
@@ -3564,17 +3610,17 @@ void SampleMaterialEvalFromUvCacheBody(
 #else
     const MaterialUvSample roughnessUv = ResolveMaterialUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_ROUGHNESS);
 #endif
-    float4 roughnessSample = SampleMaterialTexture2DGrad(roughnessTexture, roughnessSamplerState, materialInfo.roughnessStreamingTextureID, roughnessUv.uv, roughnessUv.dUVdx, roughnessUv.dUVdy, textureFeedback);
+    float4 roughnessSample = SampleResolvedMaterialTexture2DGrad(roughnessTexture, roughnessSamplerState, materialInfo.roughnessStreamingTextureID, roughnessUv.uv, roughnessUv.dUVdx, roughnessUv.dUVdy, textureFeedback);
     roughness = DynamicSwizzle(roughnessSample, materialInfo.roughnessChannel) * materialInfo.roughnessFactor;
 #endif
 
     float3 normalWS = normalWSBase;
 
 #if defined(PSO_NORMAL_MAP)
-    if (uvBindings.hasTbnSource && (materialFlags & MATERIAL_OBJECT_SPACE_NORMAL_MAP) == 0u)
+    if (uvBindings.hasTbnSource && !MaterialUsesObjectSpaceNormalMap(materialFlags))
     {
         const float3x3 normalTBN = BuildMaterialTBN(uvCache, uvBindings, normalWSBase, dpdx, dpdy);
-        Texture2D<float4> normalTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialTextureDescriptor(materialInfo.normalTextureIndex, materialInfo.normalStreamingTextureID))];
+        Texture2D<float4> normalTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialEvalTextureDescriptor(MATERIAL_RESOLVED_TEXTURE_NORMAL, materialInfo.normalTextureIndex, materialInfo.normalStreamingTextureID))];
         SamplerState normalSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.normalSamplerIndex)];
 #if defined(PSO_PARALLAX)
         const MaterialUvSample normalUv = ResolveMaterialUvSample(
@@ -3588,7 +3634,7 @@ void SampleMaterialEvalFromUvCacheBody(
 #else
         const MaterialUvSample normalUv = ResolveMaterialUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_NORMAL);
 #endif
-        float4 textureNormal = SampleMaterialTexture2DGrad(normalTexture, normalSamplerState, materialInfo.normalStreamingTextureID, normalUv.uv, normalUv.dUVdx, normalUv.dUVdy, textureFeedback);
+        float4 textureNormal = SampleResolvedMaterialTexture2DGrad(normalTexture, normalSamplerState, materialInfo.normalStreamingTextureID, normalUv.uv, normalUv.dUVdx, normalUv.dUVdy, textureFeedback);
         float3 tangentSpaceNormal = DecodeMaterialNormalSample(textureNormal, materialInfo.normalChannels, materialFlags);
 
         normalWS = normalize(mul(tangentSpaceNormal, normalTBN));
@@ -3597,7 +3643,7 @@ void SampleMaterialEvalFromUvCacheBody(
 
     float ao = 1.0f;
 #if defined(PSO_AO_TEXTURE)
-    Texture2D<float4> aoTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialTextureDescriptor(materialInfo.aoMapIndex, materialInfo.aoStreamingTextureID))];
+    Texture2D<float4> aoTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialEvalTextureDescriptor(MATERIAL_RESOLVED_TEXTURE_AO, materialInfo.aoMapIndex, materialInfo.aoStreamingTextureID))];
     SamplerState aoSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.aoSamplerIndex)];
 #if defined(PSO_PARALLAX)
     const MaterialUvSample aoUv = ResolveMaterialUvSample(
@@ -3611,13 +3657,13 @@ void SampleMaterialEvalFromUvCacheBody(
 #else
     const MaterialUvSample aoUv = ResolveMaterialUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_AO);
 #endif
-    float4 aoSample = SampleMaterialTexture2DGrad(aoTexture, aoSamplerState, materialInfo.aoStreamingTextureID, aoUv.uv, aoUv.dUVdx, aoUv.dUVdy, textureFeedback);
+    float4 aoSample = SampleResolvedMaterialTexture2DGrad(aoTexture, aoSamplerState, materialInfo.aoStreamingTextureID, aoUv.uv, aoUv.dUVdx, aoUv.dUVdy, textureFeedback);
     ao = DynamicSwizzle(aoSample, materialInfo.aoChannel);
 #endif
 
     float3 emissive = materialInfo.emissiveFactor.rgb;
 #if defined(PSO_EMISSIVE_TEXTURE)
-    Texture2D<float4> emissiveTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialTextureDescriptor(materialInfo.emissiveTextureIndex, materialInfo.emissiveStreamingTextureID))];
+    Texture2D<float4> emissiveTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialEvalTextureDescriptor(MATERIAL_RESOLVED_TEXTURE_EMISSIVE, materialInfo.emissiveTextureIndex, materialInfo.emissiveStreamingTextureID))];
     SamplerState emissiveSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.emissiveSamplerIndex)];
 #if defined(PSO_PARALLAX)
     const MaterialUvSample emissiveUv = ResolveMaterialUvSample(
@@ -3631,7 +3677,7 @@ void SampleMaterialEvalFromUvCacheBody(
 #else
     const MaterialUvSample emissiveUv = ResolveMaterialUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_EMISSIVE);
 #endif
-    float4 emissiveSample = SampleMaterialTexture2DGrad(emissiveTexture, emissiveSamplerState, materialInfo.emissiveStreamingTextureID, emissiveUv.uv, emissiveUv.dUVdx, emissiveUv.dUVdy, textureFeedback);
+    float4 emissiveSample = SampleResolvedMaterialTexture2DGrad(emissiveTexture, emissiveSamplerState, materialInfo.emissiveStreamingTextureID, emissiveUv.uv, emissiveUv.dUVdx, emissiveUv.dUVdy, textureFeedback);
     emissive = float3(
         DynamicSwizzle(emissiveSample, materialInfo.emissiveChannels.x),
         DynamicSwizzle(emissiveSample, materialInfo.emissiveChannels.y),
@@ -4415,9 +4461,16 @@ void GetFragmentInfoCanonicalSurface(in uint2 pixelCoordinates, in float3 viewWS
     const float4 normalRoughness = normalRoughnessTexture[pixelCoordinates];
     const float4 specularAo = specularAoTexture[pixelCoordinates];
     const float4 emissive = emissiveTexture[pixelCoordinates];
-    const float4 coat = payload0Texture[pixelCoordinates];
-    const float4 fuzz = payload1Texture[pixelCoordinates];
     const uint2 identity = identityTexture[pixelCoordinates];
+    // Material evaluation writes the payloads only for a profile that carries them (WriteCanonicalSurfaceSample).
+    const bool hasPayload = ((identity.y >> 8u) & 0xffu) != 0u;
+    float4 coat = 0.0f.xxxx;
+    float4 fuzz = 0.0f.xxxx;
+    if (hasPayload)
+    {
+        coat = payload0Texture[pixelCoordinates];
+        fuzz = payload1Texture[pixelCoordinates];
+    }
     uint surfaceRecordCount;
     uint surfaceRecordStride;
     records.GetDimensions(surfaceRecordCount, surfaceRecordStride);

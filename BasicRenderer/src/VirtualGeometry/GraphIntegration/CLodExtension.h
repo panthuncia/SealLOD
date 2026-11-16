@@ -40,6 +40,9 @@ struct CLodExtensionOptions {
     // On the RT view: schedule the sun shadow passes. Shadow maps keep rendering everything, because leaving out what the
     // BVH covers stops their pages from settling (20 ms of culling every frame, against 0.7 ms cached).
     bool rayTracedShadows = false;
+    // On the primary raster variant, with rayTracingSystem: its culling is also the ray tracing view's (CLOD_UNIFIED_RT).
+    // Phase 1 writes the ray tracing view's cluster list, and the scene build follows it. No RT view variant is registered.
+    bool unifiedRayTracingCulling = false;
 };
 
 class CLodExtension final : public org::IRenderGraphExtension, public org::IResourceProvider {
@@ -115,6 +118,9 @@ private:
     std::shared_ptr<org::Buffer> m_visibleClustersBuffer;
     std::shared_ptr<org::Buffer> m_visibleClusterTransformIndicesBuffer;
     std::shared_ptr<org::Buffer> m_visibleClustersCounterBuffer;
+    // Unified culling: the ray tracing view's cluster list, side band and counter, which phase 1 writes.
+    std::shared_ptr<org::Buffer> m_rtVisibleClustersBuffer, m_rtVisibleClusterTransformIndicesBuffer, m_rtVisibleClustersCounterBuffer;
+    uint32_t m_rtVisibleClusterCapacity = 0u;
     std::shared_ptr<org::Buffer> m_workGraphTelemetryBuffer;
     std::shared_ptr<org::Buffer> m_occlusionReplayBuffer;
     std::shared_ptr<org::Buffer> m_occlusionReplayStateBuffer;

@@ -138,4 +138,80 @@ struct RtasInstanceDesc
 #define RTAS_INSTANCE_FLAG_FORCE_OMM_2_STATE 0x10u
 #define RTAS_INSTANCE_FLAG_DISABLE_OMMS 0x20u
 
+// ---- Partitioned TLAS (DXR 2 / VK_NV_partitioned_acceleration_structure)
+
+// One operation of a partitioned TLAS build, the same on both backends (D3D12_RTAS_PARTITIONED_TLAS_OPERATION). The build
+// reads how many of these there are from GPU memory, at most one per type, and each names its argument array and count.
+struct RtasPartitionedTlasOperation
+{
+    uint type;
+    uint argCount;
+    uint64_t argAddress;
+    uint64_t argStride; // 0: the argument struct's size.
+};
+
+#define RTAS_PTLAS_OP_WRITE_INSTANCE 0u
+#define RTAS_PTLAS_OP_UPDATE_INSTANCE 1u
+#define RTAS_PTLAS_OP_TRANSLATE_PARTITION 2u
+#define RTAS_PTLAS_GLOBAL_PARTITION 0xFFFFFFFFu
+
+// Partitioned TLAS instance flags. The low four bits are the classic instance flags on both backends; D3D12 keeps the
+// classic micromap bits too, and moves the explicit-AABB flag above them. Vulkan has no micromap bits here.
+#define RTAS_PTLAS_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE 0x1u
+#define RTAS_PTLAS_INSTANCE_FLAG_TRIANGLE_FRONT_COUNTERCLOCKWISE 0x2u
+#define RTAS_PTLAS_INSTANCE_FLAG_FORCE_OPAQUE 0x4u
+#define RTAS_PTLAS_INSTANCE_FLAG_FORCE_NON_OPAQUE 0x8u
+#if defined(BASICRENDERER_SHADER_API_VULKAN)
+#define RTAS_PTLAS_INSTANCE_FLAG_FORCE_OMM_2_STATE 0x0u
+#define RTAS_PTLAS_INSTANCE_FLAG_DISABLE_OMMS 0x0u
+#define RTAS_PTLAS_INSTANCE_FLAG_ENABLE_EXPLICIT_AABB 0x10u
+#else
+#define RTAS_PTLAS_INSTANCE_FLAG_FORCE_OMM_2_STATE 0x10u
+#define RTAS_PTLAS_INSTANCE_FLAG_DISABLE_OMMS 0x20u
+#define RTAS_PTLAS_INSTANCE_FLAG_ENABLE_EXPLICIT_AABB 0x40u
+#endif
+
+// WRITE_INSTANCE arguments: rhi::PackedDxr2PartitionedTlasWriteInstanceData on D3D12 and
+// rhi::PackedRayTracingPartitionedTlasWriteInstanceData on Vulkan, which order the fields differently. A null
+// acceleration structure leaves the instance disabled. The transform is row-major object to world, as classic rows.
+#if defined(BASICRENDERER_SHADER_API_VULKAN)
+struct RtasPartitionedTlasWriteInstance
+{
+    float4 transformRows[3];
+    float3 explicitAabbMin;
+    float3 explicitAabbMax;
+    uint instanceID;
+    uint instanceMask;
+    uint instanceContributionToHitGroupIndex;
+    uint instanceFlags;
+    uint instanceIndex;
+    uint partitionIndex;
+    uint64_t accelerationStructure;
+};
+#else
+struct RtasPartitionedTlasWriteInstance
+{
+    float4 transformRows[3];
+    uint instanceID;
+    uint instanceMask;
+    uint instanceContributionToHitGroupIndex;
+    uint instanceFlags;
+    uint64_t accelerationStructure;
+    uint instanceIndex;
+    uint partitionIndex;
+    float3 explicitAabbMin;
+    float3 explicitAabbMax;
+};
+#endif
+
+// UPDATE_INSTANCE arguments, the same on both backends: a new BLAS (never null) and hit group offset for an instance whose
+// last write had a nonzero BLAS or an explicit AABB. The instance keeps its partition, and with an explicit AABB its
+// partition isn't rebuilt.
+struct RtasPartitionedTlasUpdateInstance
+{
+    uint instanceIndex;
+    uint instanceContributionToHitGroupIndex;
+    uint64_t accelerationStructure;
+};
+
 #endif // RHI_RTAS_ARGS_HLSLI

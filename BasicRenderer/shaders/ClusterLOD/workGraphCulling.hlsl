@@ -51,7 +51,15 @@
 #endif
 // Forked DAGs (CLOD_GROUP_FLAG_BRANCH_*): a raster view with voxel output takes the voxel branch, every other view the
 // triangle branch. CLOD_FORCE_VIEW_BRANCH (1 triangle, 2 voxel) overrides it for raster views.
-#if CLOD_RT_VIEW
+#ifndef CLOD_UNIFIED_RT
+#define CLOD_UNIFIED_RT 0
+#endif
+// The unified main view: one traversal for raster and the ray tracing view (docs/clod_raytracing.md, "Unified culling").
+// Draws the BVH covers are traversed as the ray tracing view would (no frustum or occlusion culling of their nodes, its
+// LOD metric, buildable groups only, the triangle branch), and each cluster they select goes to the ray tracing view's
+// list; raster then takes the clusters that pass its frustum and occlusion tests. Other draws cull as raster always does.
+// It runs only where raster takes the triangle branch.
+#if CLOD_RT_VIEW || CLOD_UNIFIED_RT
 #define CLOD_VIEW_BRANCH_VOXEL 0
 #elif CLOD_FORCE_VIEW_BRANCH == 1
 #define CLOD_VIEW_BRANCH_VOXEL 0
@@ -2648,7 +2656,7 @@ float ProjectedGeometricError(
     // underestimates projected error near frustum edges and allows coarse LODs
     // to switch in too early toward screen corners.
     const float centerViewZ = dot(float4(worldCenter, 1.0f), worldToViewZ);
-#if CLOD_RT_VIEW
+#if CLOD_RT_VIEW || CLOD_UNIFIED_RT
     // The ray tracing view has no frustum culling, so this also sees geometry beside and behind the camera. Inside
     // the frustum it is identical to the raster views, so the two select the same clusters. Outside, secondary rays
     // are all that sees the geometry and view depth says nothing about its size, so it uses distance and far less
@@ -2784,6 +2792,21 @@ bool CLodInstanceRootWantsTraversal(
 
 #include "include/clodRayTracingCoverage.hlsli"
 
+// Unified main view, per thread: whether the record being culled is of a draw the BVH covers, and whether its work may
+// touch and request groups. Off screen, as in the ray tracing view, it uses what raster keeps resident.
+static bool g_clodUnifiedRt = false;
+static bool g_clodMayStream = true;
+
+bool CLodUnifiedRtCovered(uint perMeshBufferIndex, CLodMeshMetadata metadata)
+{
+#if CLOD_UNIFIED_RT
+    StructuredBuffer<PerMeshBuffer> unifiedPerMesh = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMeshBuffer)];
+    return CLodDrawIsRayTracingCovered(unifiedPerMesh[perMeshBufferIndex], metadata);
+#else
+    return false;
+#endif
+}
+
 
 bool CLodGroupIsResident(uint groupGlobalIndex)
 {
@@ -2874,7 +2897,7 @@ void CLodRequestGroupLoad(
     }
 }
 
-#if CLOD_RT_VIEW
+#if CLOD_RT_VIEW || CLOD_UNIFIED_RT
 #include "include/clodRayTracingGroups.hlsli"
 
 // Whether a CLAS can be built from a resident group at all: a property of the group, not of the CLAS cache, which this
@@ -2898,7 +2921,9 @@ bool CLodTouchAndRequestGroupResident(
 #if !CLOD_RT_VIEW || CLOD_RT_VIEW_STREAMS
     // Normally the ray tracing view uses what raster keeps resident and has no say in it, and a missing group means
     // its coarser parent is used. When rays replace raster for these draws, nothing else would ask for them.
-    CLodMarkGroupTouched(groupGlobalIndex);
+    if (g_clodMayStream) {
+        CLodMarkGroupTouched(groupGlobalIndex);
+    }
 #endif
     StructuredBuffer<ClusterLODGroup> groups =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::Groups)];
@@ -2916,11 +2941,17 @@ bool CLodTouchAndRequestGroupResident(
         {
             return false;
         }
+#elif CLOD_UNIFIED_RT
+        if (g_clodUnifiedRt && !CLodRtGroupUsable(group))
+        {
+            return false;
+        }
 #endif
         return true;
     }
 
 #if !CLOD_RT_VIEW || CLOD_RT_VIEW_STREAMS
+    if (g_clodMayStream)
     CLodRequestGroupLoad(
         groupGlobalIndex,
         instanceIndex,
@@ -2961,6 +2992,8 @@ bool CLodRefinedChildSuppressesParent(
 #if CLOD_RT_VIEW
     // Voxels have no triangles to build a CLAS from, so this view keeps the triangle parent instead.
     allowVoxelChildSuppression = false;
+#elif CLOD_UNIFIED_RT
+    allowVoxelChildSuppression = allowVoxelChildSuppression && !g_clodUnifiedRt;
 #endif
     if (!allowVoxelChildSuppression && ((childGroup.flags & CLOD_GROUP_FLAG_IS_VOXEL) != 0u))
     {
@@ -4432,6 +4465,34 @@ struct ReyesRasterBatchRecord
 // Shared cluster-cull implementation called by each bucket-size variant.
 // FIXED_LOOP_COUNT is the bucket size (1, 2, 4, 8, 16, 32, or 64) - all active lanes
 // in a variant wave process the same number of iterations, minimizing WaveActiveMax divergence.
+#if CLOD_UNIFIED_RT
+// The ray tracing view's list, as its own culling would have written it: a packed visible cluster and its side band.
+void CLodUnifiedAppendRayTracingCluster(bool emit, CLodClusterRunRecord b, uint localMeshletIndex, uint groupId, uint paletteIndex)
+{
+    const uint4 mask = WaveActiveBallot(emit);
+    const uint count = countbits(mask.x) + countbits(mask.y) + countbits(mask.z) + countbits(mask.w);
+    if (count == 0u) {
+        return;
+    }
+    RWStructuredBuffer<uint> counter = ResourceDescriptorHeap[CLOD_WG_RT_VISIBLE_CLUSTERS_COUNTER_DESCRIPTOR_INDEX];
+    const uint leader = WaveFirstLaneFromMask(mask);
+    uint base = 0u;
+    if (WaveGetLaneIndex() == leader) {
+        InterlockedAdd(counter[0], count, base);
+    }
+    base = WaveReadLaneAt(base, leader);
+    const uint index = base + WavePrefixCountBits(emit);
+    if (!emit || index >= CLOD_WG_RT_VISIBLE_CLUSTERS_CAPACITY) {
+        return;
+    }
+    globallycoherent RWByteAddressBuffer clusters = ResourceDescriptorHeap[CLOD_WG_RT_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX];
+    RWStructuredBuffer<uint2> sideBand = ResourceDescriptorHeap[CLOD_WG_RT_VISIBLE_CLUSTER_TRANSFORM_INDICES_DESCRIPTOR_INDEX];
+    CLodStoreVisibleClusterForShadowLayer(clusters, index, b.viewId, b.instanceIndex, localMeshletIndex, groupId,
+        b.pageSlabDescriptorIndex, b.pageSlabByteOffset, CLOD_PACKED_VISIBLE_CLUSTER_INVALID_SHADOW_CLIPMAP_INDEX, false);
+    sideBand[index] = uint2(b.assemblyTransformIndex, paletteIndex);
+}
+#endif
+
 void ClusterCullBody(
     CLodClusterRunRecord b,
     bool hasBucket,
@@ -4639,6 +4700,7 @@ void ClusterCullBody(
         clodMeshMetadata = clodMeshMetadataBuffer[clodOff.clodMeshMetadataIndex];
         groupsBase = clodMeshMetadata.groupsBase;
         forceLodDecision = CLodForcedTraversalDepthRootEnabled(clodMeshMetadata);
+        g_clodUnifiedRt = CLodUnifiedRtCovered(meshBufferIndex, clodMeshMetadata);
 
         // Own group EOD for streaming request priority
         {
@@ -4722,6 +4784,7 @@ void ClusterCullBody(
         float3 meshletCenterWorld = 0.0f.xxx;
         float meshletRadiusWorld = 0.0f;
         bool meshletNeedsReyesDisplacement = reyesDisplacementCandidate;
+        bool unifiedRtEmit = false; // CLOD_UNIFIED_RT: this cluster goes to the ray tracing view's list.
         // A local light face's finest mip with active pages under the meshlet; 0 (mip 0's size, the conservative
         // choice for routing) when the query is skipped or this is a sun clip.
         uint meshletFinestLocalMip = 0u;
@@ -4911,6 +4974,15 @@ void ClusterCullBody(
                 }
 #endif
 
+#if CLOD_UNIFIED_RT
+                // A covered draw's cluster is decided for the ray tracing view first, wherever it is; raster's frustum
+                // result applies after. Off screen it neither touches nor requests groups.
+                const bool unifiedFrustumSurvives = survives;
+                g_clodMayStream = !g_clodUnifiedRt || survives;
+                if (g_clodUnifiedRt && !replaySource) {
+                    survives = true;
+                }
+#endif
                 // Per-meshlet LOD condition 2: terminal meshlets pass
                 // automatically; non-terminal meshlets are suppressed when
                 // the refined child boundary is still above the threshold and
@@ -4938,6 +5010,13 @@ void ClusterCullBody(
                         WGTelemetryAdd(WG_COUNTER_CLUSTER_CULL_REJECTED_CONDITION2, 1);
                     }
                 }
+#if CLOD_UNIFIED_RT
+                g_clodMayStream = true;
+                if (g_clodUnifiedRt && !replaySource) {
+                    unifiedRtEmit = survives;
+                    survives = survives && unifiedFrustumSurvives;
+                }
+#endif
 
  #if !CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
                 if (survives && CLodWorkGraphOcclusionEnabled() && depthMapDescriptorIndex != 0) {
@@ -5015,6 +5094,9 @@ void ClusterCullBody(
 
         const bool contributes = active && survives;
         const uint visibleGroupId = UnpackGroupId(b.groupIdPacked);
+#if CLOD_UNIFIED_RT
+        CLodUnifiedAppendRayTracingCluster(active && unifiedRtEmit, b, localMeshletIndex, visibleGroupId, clusterPaletteIndex);
+#endif
         uint shadowClipmapIndex = CLOD_PACKED_VISIBLE_CLUSTER_INVALID_SHADOW_CLIPMAP_INDEX;
         CLodVirtualShadowClipmapInfo shadowClipmapInfo = (CLodVirtualShadowClipmapInfo)0;
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW

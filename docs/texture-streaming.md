@@ -108,6 +108,24 @@ the allowance recover, so the on-screen pull-back reached 14.5 mips (everything 
 relaxed to 0.5 over the next 40 s. Relaxing a quarter mip at a time upgrades each texture one mip at a time: about
 1,700 small residency jobs for 250 textures. `materialTextureStreamingVisibleOffset` trades that for a budget overrun.
 
+## How shaders find the image
+
+A material texture with a streaming ID samples the image its row in the texture image table
+(`Builtin::Material::TextureStreamingMetadataBuffer`) publishes, else the material's own descriptor
+(`ResolveMaterialTextureDescriptor`, `materialTextureBinding.hlsli`). Per pixel that is a dependent chain: the material
+record, then the row, then the sample.
+
+Material evaluation doesn't chain. `ResolveMaterialTextureDescriptorsPass` runs every frame just before it (~6 us on
+Zorah) and writes `Builtin::Material::ResolvedTextureDescriptors`: per material evaluation table row, the descriptor each of
+eight texture slots resolves to. Evaluation reads it by material index (`ResolveMaterialEvalTextureDescriptor`). The table
+covers the material tables' capacity, at least 65536 rows. When the material tables grow past it, the renderer grows the
+`materialResolvedTextureCapacity` setting and rebuilds the graph. Material evaluation went 2.62 -> 2.49 ms
+(`docs/material-evaluation-optimization-experiments.md`).
+
+**TODO:** this pass works around the streaming design. Streaming should keep the resolved descriptor current itself, by
+publishing it with the material or patching the evaluation table when an image's descriptor changes, and then the pass
+and its table go away.
+
 ## Settings and switches
 
 | Name | Default | Purpose |

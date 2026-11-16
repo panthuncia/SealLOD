@@ -48,10 +48,12 @@ struct ProceduralWindFrameSettings {
 };
 
 // How analytic lights are shadowed. Shaders read it from GetRootShadowingMode() as SHADOWING_MODE_* (shaders/Common/defines.h).
-// It follows the pipeline recipe: VirtualShadowMaps exactly when ClusterLodShadowTechnique is in it.
+// It follows the pipeline recipe: VirtualShadowMaps when ClusterLodShadowTechnique is in it, StochasticRayTraced when
+// StochasticDirectLightingTechnique is too and the device can trace clusters (docs/stochastic_lighting.md).
 enum class ShadowingMode : uint32_t {
 	None = 0,
-	VirtualShadowMaps = 1, // The sun through the virtual shadow map; local lights unshadowed.
+	VirtualShadowMaps = 1, // The sun and the budgeted local lights through the virtual shadow map.
+	StochasticRayTraced = 2, // The sun through the virtual shadow map; point and spot lights sampled stochastically and traced.
 };
 
 struct LightingFrameSettings {
@@ -82,7 +84,7 @@ struct RenderContext {
 	bool terrainRegionMaterialEvaluationEnabled = false;
 	unsigned int outputType = 0;
 	unsigned int tonemapType = 0;
-	DirectX::XMUINT3 lightClusterSize{};
+	DirectX::XMUINT3 lightClusterSize{}; // The light grid: tiles across, tiles down, depth slices (MakeLightGridShape).
 	LightingFrameSettings lighting;
 	ProceduralWindFrameSettings proceduralWind;
 
@@ -115,9 +117,6 @@ struct RenderContext {
 		return viewFamily ? std::span<const PreparedViewFrameData>(viewFamily->views)
 			: std::span<const PreparedViewFrameData>{};
 	}
-	uint32_t LightPagePoolSize() const noexcept {
-		return lightTables ? lightTables->lightPagePoolSize : 0u;
-	}
 	uint32_t ViewCameraBufferSize() const noexcept {
 		return viewFamily ? viewFamily->cameraBufferSize : 0u;
 	}
@@ -147,7 +146,7 @@ struct UpdateContext {
 	bool terrainRegionMaterialEvaluationEnabled = false;
 	unsigned int outputType = 0;
 	unsigned int tonemapType = 0;
-	DirectX::XMUINT3 lightClusterSize{};
+	DirectX::XMUINT3 lightClusterSize{}; // The light grid: tiles across, tiles down, depth slices (MakeLightGridShape).
 	LightingFrameSettings lighting;
 	ProceduralWindFrameSettings proceduralWind;
 	std::shared_ptr<br::render::IWindPaletteService> windPaletteService;
@@ -170,9 +169,6 @@ struct UpdateContext {
 	std::span<const PreparedViewFrameData> Views() const noexcept {
 		return viewFamily ? std::span<const PreparedViewFrameData>(viewFamily->views)
 			: std::span<const PreparedViewFrameData>{};
-	}
-	uint32_t LightPagePoolSize() const noexcept {
-		return lightTables ? lightTables->lightPagePoolSize : 0u;
 	}
 	uint32_t ViewCameraBufferSize() const noexcept {
 		return viewFamily ? viewFamily->cameraBufferSize : 0u;

@@ -97,6 +97,41 @@ inline bool SupportsObjectReyesGeometricDisplacement(const MaterialDescription& 
         (d.heightMap.channels.empty() || d.heightMap.channels[0] == 0u);
 }
 
+// Object triplanar stochastic sampling: the runtime flag (MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) and the compile flag
+// (MaterialCompileObjectTriplanar) both come from here, since material evaluation compiles only the one sampling path.
+inline bool UsesObjectTriplanarStochastic(const MaterialDescription& d) {
+    return d.objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::TriplanarStochastic ||
+        (d.objectSurfaceUseTriplanarProjection && d.objectSurfaceUseTripleTapStochastic);
+}
+
+// Model-space normal maps: the runtime flag (MATERIAL_OBJECT_SPACE_NORMAL_MAP) and the compile flag
+// (MaterialCompileObjectSpaceNormalMap) both come from here.
+inline bool UsesObjectSpaceNormalMap(const MaterialDescription& d) {
+    return d.normal.texture != nullptr && d.brniflyModelSpaceNormals;
+}
+
+// True when the material's bound textures sample more than one UV set. Material evaluation compiles a one-UV-set path for
+// the rest (MaterialCompileMultipleUvSets clear -> MATERIAL_EVAL_SINGLE_UV_SET), which reads its UV cache with constant
+// indices. The slots match the eval shader's: the core textures, the height map (base colour's set when it is base alpha)
+// and the OpenPBR coat and fuzz textures.
+inline bool SamplesMultipleUvSets(const MaterialDescription& d) {
+    bool any = false;
+    uint32_t first = 0;
+    bool multiple = false;
+    const auto visit = [&](bool bound, uint32_t uvSetIndex) {
+        if (!bound) return;
+        if (!any) { any = true; first = uvSetIndex; }
+        else if (uvSetIndex != first) multiple = true;
+    };
+    for (const TextureAndConstant* binding : { &d.baseColor, &d.normal, &d.metallic, &d.roughness, &d.aoMap, &d.emissive, &d.opacity,
+             &d.openPBRTextures.coatColor, &d.openPBRTextures.coatWeight, &d.openPBRTextures.coatRoughness,
+             &d.openPBRTextures.fuzzColor, &d.openPBRTextures.fuzzWeight, &d.openPBRTextures.fuzzRoughness }) {
+        visit(HasMaterialTextureBinding(*binding), binding->uvSetIndex);
+    }
+    visit(HasMaterialHeightBinding(d), d.heightMap.uvSetIndex);
+    return multiple;
+}
+
 inline TechniqueDescriptor PickTechnique(const MaterialDescription& d) { // TODO: The alpha-test/double-sided logic is wrong here
     TechniqueDescriptor tech{};
     tech.rasterFlags = WithForwardUvSetCount(tech.rasterFlags, PickForwardUvSetCount(d));
@@ -173,6 +208,15 @@ inline TechniqueDescriptor PickTechnique(const MaterialDescription& d) { // TODO
             tech.compileFlags |= MaterialCompileFlags::MaterialCompileParallax;
         }
 	}
+    if (UsesObjectTriplanarStochastic(d)) {
+        tech.compileFlags |= MaterialCompileFlags::MaterialCompileObjectTriplanar;
+    }
+    if (SamplesMultipleUvSets(d)) {
+        tech.compileFlags |= MaterialCompileFlags::MaterialCompileMultipleUvSets;
+    }
+    if (UsesObjectSpaceNormalMap(d)) {
+        tech.compileFlags |= MaterialCompileFlags::MaterialCompileObjectSpaceNormalMap;
+    }
     if (HasMaterialTextureBinding(d.openPBRTextures.coatColor)) {
         tech.compileFlags |= MaterialCompileFlags::MaterialCompileOpenPBRCoatColorTexture;
     }
@@ -244,7 +288,7 @@ public:
         }
         if (desc.normal.texture) {
             materialFlags |= MaterialFlags::MATERIAL_NORMAL_MAP | MaterialFlags::MATERIAL_TEXTURED;
-            if (desc.brniflyModelSpaceNormals) {
+            if (UsesObjectSpaceNormalMap(desc)) {
                 materialFlags |= MaterialFlags::MATERIAL_OBJECT_SPACE_NORMAL_MAP;
             }
         }
@@ -257,8 +301,7 @@ public:
         if (SupportsObjectReyesGeometricDisplacement(desc)) {
             materialFlags |= MaterialFlags::MATERIAL_GEOMETRIC_DISPLACEMENT;
         }
-        if (desc.objectSurfaceSamplingMode == ObjectSurfaceSamplingMode::TriplanarStochastic ||
-            (desc.objectSurfaceUseTriplanarProjection && desc.objectSurfaceUseTripleTapStochastic)) {
+        if (UsesObjectTriplanarStochastic(desc)) {
             materialFlags |= MaterialFlags::MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC;
         }
         auto diffuseColor = desc.diffuseColor;

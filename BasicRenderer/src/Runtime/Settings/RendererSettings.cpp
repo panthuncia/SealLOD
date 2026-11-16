@@ -23,6 +23,8 @@
 #include "PostProcessing/ToneMapping/TonemapTypes.h"
 #include "Utilities/Utilities.h"
 #include "Runtime/Settings/RendererSettingsHelpers.h"
+#include "../shaders/PerPassRootConstants/materialTextureResolveConstants.h"
+#include "../shaders/PerPassRootConstants/lightCullingRootConstants.h"
 #include <nlohmann/json.hpp>
 
 namespace {
@@ -211,6 +213,10 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>(
         "enableShadows",
         m_pipelineRecipe.Contains<br::pipeline::ClusterLodShadowTechnique>());
+    // Written by the renderer at graph build (Renderer::VirtualShadowMapsActive): shadows on and not stochastic lighting.
+    settingsManager.registerSetting<bool>(
+        "virtualShadowMapsActive",
+        m_pipelineRecipe.Contains<br::pipeline::ClusterLodShadowTechnique>());
 	settingsManager.registerSetting<uint16_t>("skyboxResolution", 2048);
     settingsManager.registerSetting<uint16_t>("reflectionCubemapResolution", 512);
 	settingsManager.registerSetting<bool>("enableImageBasedLighting", true);
@@ -272,7 +278,17 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<uint32_t>("terrainParallaxMaxSteps", 25u);
     settingsManager.registerSetting<float>("terrainParallaxFadeStartDistance", 2000.0f);
     settingsManager.registerSetting<float>("terrainParallaxFadeEndDistance", 3000.0f);
-    settingsManager.registerSetting<DirectX::XMUINT3>("lightClusterSize", m_lightClusterSize);
+    // The light grid's tile size in pixels and depth slices (docs/lighting.md "The light grid"); either rebuilds the graph.
+    {
+        const char* tile = std::getenv("SARP_LIGHT_GRID_TILE");
+        const char* slices = std::getenv("SARP_LIGHT_GRID_SLICES");
+        settingsManager.registerSetting<uint32_t>(LightGridTileSizeSettingName,
+            tile ? static_cast<uint32_t>(std::atoi(tile)) : LightGridDefaultTileSize);
+        settingsManager.registerSetting<uint32_t>(LightGridSlicesSettingName,
+            slices ? static_cast<uint32_t>(std::atoi(slices)) : LightGridDefaultSlices);
+    }
+    settingsManager.registerSetting<uint32_t>(LightGridIndexCapacitySettingName, LightGridMinIndexCapacity * 4u);
+    settingsManager.registerSetting<uint32_t>(LightGridRecordCapacitySettingName, LightGridMinRecordCapacity * 4u);
     settingsManager.registerSetting<bool>("collectPassStatistics", true);
     settingsManager.registerSetting<bool>("collectPipelineStatistics", false);
 	// This feels like abuse of the settings manager, but it's the easiest way to get the renderable objects to the menu
@@ -319,6 +335,7 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<uint32_t>(CLodVisibleClusterCapacitySettingName, CLodDefaultVisibleClusterCapacity);
     settingsManager.registerSetting<bool>(CLodFrustumCullingSettingName, true);
     settingsManager.registerSetting<float>(CLodLodErrorPixelsSettingName, 1.0f);
+    settingsManager.registerSetting<uint32_t>(MaterialResolvedTextureCapacitySettingName, MATERIAL_RESOLVED_TEXTURE_MIN_CAPACITY);
     settingsManager.registerSetting<uint32_t>(
         CLodPureComputePhase2ExpansionFactorSettingName,
         CLodPureComputePhase2ExpansionFactorDefault);
@@ -339,6 +356,42 @@ void Renderer::SetSettings() {
     if (ReadTruthyEnvironmentFlag("SARP_RT_SHADOWS")) m_rayTracedShadows = true;
     if (ReadTruthyEnvironmentFlag("SARP_RT_PRIMARY")) m_rayTracedPrimaryVisibilityMode = 1u;
     if (ReadTruthyEnvironmentFlag("SARP_RT_PRIMARY_COMPARE")) m_rayTracedPrimaryVisibilityMode = 2u;
+    // Stochastic direct lighting (docs/stochastic_lighting.md): spot and point lights sampled and shadowed by ray instead of the
+    // virtual shadow map's local faces. Needs the shadow map (for the sun), clustered lighting and cluster ray tracing; the
+    // recipe keeps it while path tracing replaces raster, and it takes effect again when raster comes back.
+    if (ReadTruthyEnvironmentFlag("SARP_STOCHASTIC_LIGHTING")) {
+        m_pipelineRecipe.Add<br::pipeline::StochasticDirectLightingTechnique>();
+    }
+    settingsManager.registerSetting<bool>("enableStochasticLighting",
+        m_pipelineRecipe.Contains<br::pipeline::StochasticDirectLightingTechnique>());
+    // The brute-force reference in place of the estimator: every light in the pixel's cluster, one ray each, averaged over frames
+    // while nothing changes. Rebuilds the graph.
+    settingsManager.registerSetting<bool>("stochasticLightingReference", ReadTruthyEnvironmentFlag("SARP_STOCHASTIC_REFERENCE"));
+    // The estimator's running average while nothing changes, for comparing it with the reference. Rebuilds the graph.
+    settingsManager.registerSetting<bool>("stochasticLightingAccumulate", ReadTruthyEnvironmentFlag("SARP_STOCHASTIC_ACCUMULATE"));
+    // The temporal and spatial denoiser (on unless SARP_STOCHASTIC_DENOISE=0). Rebuilds the graph.
+    {
+        const char* denoise = std::getenv("SARP_STOCHASTIC_DENOISE");
+        settingsManager.registerSetting<bool>("stochasticLightingDenoise", !denoise || ReadTruthyEnvironmentFlag("SARP_STOCHASTIC_DENOISE"));
+    }
+    // Guiding by last frame's per-tile visible lights (on unless SARP_STOCHASTIC_GUIDING=0). Per frame.
+    {
+        const char* guiding = std::getenv("SARP_STOCHASTIC_GUIDING");
+        settingsManager.registerSetting<bool>("stochasticLightingGuiding", !guiding || ReadTruthyEnvironmentFlag("SARP_STOCHASTIC_GUIDING"));
+    }
+    // Lights drawn per pixel (1 to 4), each with one shadow ray. Per frame.
+    {
+        const char* samples = std::getenv("SARP_STOCHASTIC_SAMPLES");
+        settingsManager.registerSetting<uint32_t>("stochasticLightingSamplesPerPixel",
+            std::clamp(samples ? static_cast<uint32_t>(std::atoi(samples)) : 2u, 1u, 4u));
+    }
+    // Reduced-resolution sampling: 2 samples one pixel of each 2x2 a frame (twice the samples there, so one per pixel at the
+    // default 2) and the denoiser reconstructs full resolution; 1 samples every pixel. Rebuilds the graph.
+    {
+        const char* downsample = std::getenv("SARP_STOCHASTIC_DOWNSAMPLE");
+        settingsManager.registerSetting<uint32_t>("stochasticLightingDownsample",
+            std::clamp(downsample ? static_cast<uint32_t>(std::atoi(downsample)) : 2u, 1u, 2u));
+    }
     // Path tracing is the default wherever the device can run it. SARP_RT_PATH_TRACING=0 starts on raster, and =1 asks for path
     // tracing (it still falls back to raster, with a warning, where it can't run).
     const auto& deviceManager = DeviceManager::GetInstance();
@@ -551,6 +604,43 @@ void Renderer::SetSettings() {
         }
         RequestPipelineReplacement(std::move(recipe));
         }));
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableStochasticLighting", [this](const bool& newValue) {
+        if (m_syncingPipelineTopologySettings) {
+            return;
+        }
+        if (m_pathTracing) {
+            // The raster recipe waiting for raster to come back is the one that has it.
+            if (m_rasterRecipeBeforePathTracing) {
+                if (newValue) m_rasterRecipeBeforePathTracing->Add<br::pipeline::StochasticDirectLightingTechnique>();
+                else m_rasterRecipeBeforePathTracing->Remove<br::pipeline::StochasticDirectLightingTechnique>();
+            }
+            return;
+        }
+        auto recipe = GetPipelineRecipeForMutation();
+        if (newValue) recipe.Add<br::pipeline::StochasticDirectLightingTechnique>();
+        else recipe.Remove<br::pipeline::StochasticDirectLightingTechnique>();
+        RequestPipelineReplacement(std::move(recipe));
+        }));
+    // These choose stochastic lighting's passes, which its graph extension makes; extensions are registered again only when
+    // marked dirty, so a graph rebuild alone would keep the old passes.
+    for (const char* name : { "stochasticLightingReference", "stochasticLightingAccumulate", "stochasticLightingDenoise" }) {
+        m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>(name, [this](const bool&) {
+            m_pipelineExtensionsDirty = true;
+            rebuildRenderGraph = true;
+        }));
+    }
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("stochasticLightingDownsample", [this](const uint32_t&) {
+        m_pipelineExtensionsDirty = true;
+        rebuildRenderGraph = true;
+    }));
+    // At full resolution the estimator's buffers hold the setting's samples per pixel (docs/stochastic_lighting.md "Kernel
+    // split"), so a change rebuilds them.
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("stochasticLightingSamplesPerPixel", [this](const uint32_t&) {
+        if (SettingsManager::GetInstance().getSettingGetter<uint32_t>("stochasticLightingDownsample")() == 1u) {
+            m_pipelineExtensionsDirty = true;
+            rebuildRenderGraph = true;
+        }
+    }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<std::string>("environmentName", [this](const std::string& newValue) {
 		SetEnvironmentInternal(s2ws(newValue));
 		rebuildRenderGraph = true;
@@ -581,6 +671,11 @@ void Renderer::SetSettings() {
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("drawBoundingSpheres", [this](const bool& newValue) {
 		rebuildRenderGraph = true;
 		}));
+    for (const char* name : { LightGridTileSizeSettingName, LightGridSlicesSettingName }) {
+        m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(name, [this](const uint32_t&) {
+            rebuildRenderGraph = true;
+            }));
+    }
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableClusteredLighting", [this](const bool& newValue) {
 		m_clusteredLighting = newValue;
 		if (m_syncingPipelineTopologySettings) return;

@@ -153,6 +153,10 @@ Be aware of what does and does not exist before you go looking:
   rerender, deferred-shading and small-pass optimization rounds). These are lab notebooks tied to
   specific experiments, not architecture references.
 
+[docs/pass-optimization-workflow.md](docs/pass-optimization-workflow.md) is the workflow for making a GPU pass faster:
+moving-camera A/B timing with hot-swapped shaders, NVPerf limiters and register arithmetic, Nsight per-line register
+exports (`scripts/nsight_shader_lines.py`), validation, and the patterns that have and haven't paid.
+
 [docs/texture-streaming.md](docs/texture-streaming.md) is the reference for material texture streaming: per-material
 feedback, the residency policy and its VRAM budget.
 

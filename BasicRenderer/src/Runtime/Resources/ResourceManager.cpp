@@ -95,19 +95,20 @@ void ::ResourceManager::SetUploadService(std::shared_ptr<org::runtime::IUploadSe
 	m_uploadService = std::move(uploadService);
 }
 
-void ::ResourceManager::UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, UINT sunLightIndex, UINT sunLightSlot, UINT vsmDebugLightIndex, DirectX::XMUINT2 screenRes, DirectX::XMUINT3 clusterSizes, unsigned int frameIndex) {
+void ::ResourceManager::UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, UINT sunLightIndex, UINT sunLightSlot, UINT numDirectionalLights, UINT vsmDebugLightIndex, DirectX::XMUINT2 screenRes, const LightGridShape& lightGrid, unsigned int frameIndex) {
 	UpdateDirectionalShadowConstants(perFrameCBData);
 	perFrameCBData.mainCameraIndex = cameraIndex;
 	perFrameCBData.numLights = numLights;
 	perFrameCBData.sunLightIndex = sunLightIndex;
 	perFrameCBData.sunLightSlot = sunLightSlot;
+	perFrameCBData.numDirectionalLights = numDirectionalLights;
 	perFrameCBData.vsmDebugLightIndex = vsmDebugLightIndex;
 	perFrameCBData.screenResX = screenRes.x;
 	perFrameCBData.screenResY = screenRes.y;
-	perFrameCBData.lightClusterGridSizeX = clusterSizes.x;
-	perFrameCBData.lightClusterGridSizeY = clusterSizes.y;
-	perFrameCBData.lightClusterGridSizeZ = clusterSizes.z;
-	perFrameCBData.nearClusterCount = 4;
+	perFrameCBData.lightClusterGridSizeX = lightGrid.tilesX;
+	perFrameCBData.lightClusterGridSizeY = lightGrid.tilesY;
+	perFrameCBData.lightClusterGridSizeZ = lightGrid.slices;
+	perFrameCBData.lightGridTileSize = lightGrid.tileSize;
 	perFrameCBData.clusterZSplitDepth = 6.0f;
 	perFrameCBData.frameIndex = frameIndex;
     perFrameCBData.shadowVirtualSmrtDirectionalCountsPacked = PackDirectionalVirtualShadowSmrtCounts(

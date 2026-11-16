@@ -2,6 +2,8 @@
 // Created by matth on 6/25/2024.
 //
 
+#include "../shaders/PerPassRootConstants/materialTextureResolveConstants.h"
+#include "../shaders/PerPassRootConstants/lightCullingRootConstants.h"
 #include "Runtime/GraphIntegration/TextureJobGraph.h"
 #include "Runtime/GraphIntegration/EnvironmentJobGraph.h"
 #include "OpenRenderGraph/Runtime.h"
@@ -183,6 +185,8 @@ void Renderer::Update(float elapsedSeconds) {
     if (m_lensManager) m_lensManager->OnFrame(currentRenderGraph);
     // O(1) too: a new lens revision wakes the ghost flares' worker; a flare self-test reads back.
     if (m_ghostFlareManager) m_ghostFlareManager->OnFrame(currentRenderGraph);
+    // O(1): every few frames, a readback of the light culling's overflow counters.
+    if (m_pLightManager) m_pLightManager->PollCullingStats(currentRenderGraph);
 
     if (m_shaderReloadRequested) {
         runCapturedStage("ShaderReload", [&]() {
@@ -254,6 +258,41 @@ void Renderer::Update(float elapsedSeconds) {
     SyncOpenRenderGraphSettings(m_numFramesInFlight);
     m_preparationFrameIndex = m_frameIndex;
     ApplyPendingPipelineReplacement();
+
+    // Material evaluation reads its resolved texture table by material row without a range check
+    // (ResolveMaterialTextureDescriptorsPass): grow the table past the material tables' capacity, which doubles from 4096.
+    if (m_pMaterialManager) {
+        const uint32_t materialRows = m_pMaterialManager->GetMaterialBufferCapacity();
+        auto& settings = SettingsManager::GetInstance();
+        const uint32_t tableRows = settings.getSettingGetter<uint32_t>(MaterialResolvedTextureCapacitySettingName)();
+        if (materialRows > tableRows) {
+            uint32_t grown = std::max(tableRows, MATERIAL_RESOLVED_TEXTURE_MIN_CAPACITY);
+            while (grown < materialRows) grown *= 2u;
+            spdlog::info("Renderer: material resolved texture table {} -> {} rows (material tables {}); rebuilding the graph",
+                tableRows, grown, materialRows);
+            settings.getSettingSetter<uint32_t>(MaterialResolvedTextureCapacitySettingName)(grown);
+            rebuildRenderGraph = true;
+        }
+    }
+
+    // The light grid's index buffer and culling records (BuildLightClusteringPipeline): grow them past what the last
+    // readback of the culling counters needed, and past the active light count, and rebuild the graph. Until then the
+    // froxels that find no room keep their opaque lights first and the rest are counted as dropped.
+    if (m_pLightManager) {
+        auto& settings = SettingsManager::GetInstance();
+        const auto grow = [&](const char* name, uint32_t minimum, uint64_t needed, const char* what) {
+            const uint32_t capacity = std::max(minimum, settings.getSettingGetter<uint32_t>(name)());
+            if (needed <= capacity) return;
+            uint64_t grown = capacity;
+            while (grown < needed + needed / 4u) grown *= 2u;
+            grown = std::min<uint64_t>(grown, 1ull << 30);
+            spdlog::info("Renderer: light grid {} {} -> {} (needed {}); rebuilding the graph", what, capacity, grown, needed);
+            settings.getSettingSetter<uint32_t>(name)(static_cast<uint32_t>(grown));
+            rebuildRenderGraph = true;
+        };
+        grow(LightGridIndexCapacitySettingName, LightGridMinIndexCapacity, m_pLightManager->GetCullingStats().maxNeededLights, "index entries");
+        grow(LightGridRecordCapacitySettingName, LightGridMinRecordCapacity, m_pLightManager->GetNumLights(), "culling records");
+    }
 
     if (rebuildRenderGraph) {
         runCapturedStage("RenderGraphBuild", [&]() {
@@ -524,7 +563,10 @@ void Renderer::Update(float elapsedSeconds) {
         const uint32_t vsmDebugLightIndex =
             std::ranges::find(debugLightIndices, requestedDebugLight) != debugLightIndices.end() ? requestedDebugLight : sun.lightIndex;
         resourceManager.UpdatePerFrameBuffer(cameraIndex, m_pLightManager->GetNumLights(), sun.lightIndex, sun.activeSlot,
-            vsmDebugLightIndex, { res.x, res.y }, m_lightClusterSize, static_cast<uint32_t>(m_totalFramesRendered));
+            m_pLightManager->GetNumDirectionalLights(), vsmDebugLightIndex, { res.x, res.y },
+            MakeLightGridShape(res.x, res.y, settings.getSettingGetter<uint32_t>(LightGridTileSizeSettingName)(),
+                settings.getSettingGetter<uint32_t>(LightGridSlicesSettingName)()),
+            static_cast<uint32_t>(m_totalFramesRendered));
     });
 
     static const basic_telemetry::Callsite captureFrameInputsCallsite("Renderer::Update::CaptureFrameInputs");
@@ -556,15 +598,19 @@ void Renderer::Update(float elapsedSeconds) {
         .getSettingGetter<unsigned int>("outputType")();
     updateData.tonemapType = SettingsManager::GetInstance()
         .getSettingGetter<unsigned int>("tonemapType")();
-    updateData.lightClusterSize = SettingsManager::GetInstance()
-        .getSettingGetter<DirectX::XMUINT3>("lightClusterSize")();
+    {
+        const LightGridShape lightGrid = MakeLightGridShape(renderRes.x, renderRes.y,
+            SettingsManager::GetInstance().getSettingGetter<uint32_t>(LightGridTileSizeSettingName)(),
+            SettingsManager::GetInstance().getSettingGetter<uint32_t>(LightGridSlicesSettingName)());
+        updateData.lightClusterSize = { lightGrid.tilesX, lightGrid.tilesY, lightGrid.slices };
+    }
     updateData.lighting = {
         .imageBasedLightingEnabled = SettingsManager::GetInstance()
             .getSettingGetter<bool>("enableImageBasedLighting")(),
         .punctualLightingEnabled = SettingsManager::GetInstance()
             .getSettingGetter<bool>("enablePunctualLighting")(),
-        .shadowingMode = m_pipelineRecipe.Contains<br::pipeline::ClusterLodShadowTechnique>()
-            ? ShadowingMode::VirtualShadowMaps : ShadowingMode::None,
+        .shadowingMode = !m_pipelineRecipe.Contains<br::pipeline::ClusterLodShadowTechnique>() ? ShadowingMode::None
+            : StochasticLightingActive() ? ShadowingMode::StochasticRayTraced : ShadowingMode::VirtualShadowMaps,
         .gtaoEnabled = SettingsManager::GetInstance()
             .getSettingGetter<bool>("enableGTAO")(),
         .clusteredLightingEnabled = SettingsManager::GetInstance()
@@ -783,7 +829,8 @@ void Renderer::Update(float elapsedSeconds) {
     std::shared_ptr<br::render::LightTableBuildInput> desiredLights;
     if (m_pLightManager) {
         BT_ZONE_SCOPE("Renderer::Update::LocalShadowSelection");
-        m_pLightManager->UpdateLocalShadows();
+        // Stochastic lighting shadows spot and point lights by ray, so none of them get shadow map faces.
+        m_pLightManager->UpdateLocalShadows(!StochasticLightingActive());
     }
     if (m_pLightManager && m_rendererStateRequests) {
         BT_ZONE_SCOPE("Renderer::Update::CaptureFrameInputs::LightTables");
@@ -798,7 +845,6 @@ void Renderer::Update(float elapsedSeconds) {
             desiredLights = std::make_shared<br::render::LightTableBuildInput>();
         desiredLights->revision = m_lightArtifactRevision;
         desiredLights->lightCount = m_pLightManager->GetNumLights();
-        desiredLights->lightPagePoolSize = m_pLightManager->GetLightPagePoolSize();
         desiredLights->tableImages = m_pLightManager->CaptureTableImages();
         auto& lightWorld = RendererECSManager::GetInstance().GetWorld();
         auto directionalLights = lightWorld.query_builder<const Components::Light,

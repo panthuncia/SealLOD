@@ -29,6 +29,7 @@
 #include "BasicRenderer/Streaming/LightStateArtifacts.h"
 
 namespace br::render { class IShadowViewService; }
+namespace org { class RenderGraph; }
 class SortedUnsignedIntBuffer;
 
 // The sun as shaders see it (PerFrameCB::sunLightIndex/sunLightSlot): the first shadow-casting directional light, else
@@ -42,6 +43,16 @@ struct SunLightSelection {
 struct VirtualShadowDebugLight {
 	uint32_t lightIndex = 0xFFFFFFFFu;
 	std::string label;
+};
+
+// What the light grid last reported through Builtin::Light::CullingStats (LightManager::PollCullingStats).
+struct LightCullingStats {
+	uint32_t droppedLights = 0;      // (froxel, light) pairs the index buffer had no room for
+	uint32_t overflowedClusters = 0; // froxels that dropped at least one light
+	uint32_t storedLights = 0;       // (froxel, light) pairs stored
+	uint32_t neededLights = 0;       // index entries the frame needed (may exceed the buffer's capacity)
+	uint32_t maxNeededLights = 0;    // the most needed in any readback so far
+	uint64_t readbacks = 0;          // readbacks so far; 0 until the first lands
 };
 
 struct AddLightReturn {
@@ -60,6 +71,7 @@ public:
     void RemoveLight(LightInfo* light);
 	void RemoveLight(flecs::entity light);
 	unsigned int GetNumLights();
+	uint32_t GetNumDirectionalLights();
 	SunLightSelection GetSunLight();
 	uint64_t GetPublicationRevision() const noexcept { return m_publicationRevision.load(std::memory_order_acquire); }
     void SetCurrentCamera(flecs::entity camera);
@@ -69,11 +81,15 @@ public:
     void UpdateLightViewInfo(flecs::entity light);
 	// Chooses which shadow-casting spot and point lights have virtual shadow map faces (LocalShadowSelection.h),
 	// creating and destroying their face views. Call once a frame, before the light tables are captured.
-	void UpdateLocalShadows();
+	// Without local shadow maps (stochastic lighting), every light's faces are released.
+	void UpdateLocalShadows(bool localShadowMaps = true);
 	std::vector<br::render::PublishedLocalShadowLight> CaptureLocalShadows();
 	// The sun, if it has a virtual shadow map, then each spot and point light with faces, by light buffer index.
 	std::vector<VirtualShadowDebugLight> GetVirtualShadowDebugLights();
-	unsigned int GetLightPagePoolSize() { return m_lightPagePoolSize; }
+	// Reads back Builtin::Light::CullingStats every few frames while LightCullingPass runs, logs it every 300 frames and
+	// warns the first time a light is dropped. Call once a frame on the render thread; nothing waits for the readback.
+	void PollCullingStats(org::RenderGraph* graph);
+	LightCullingStats GetCullingStats() const;
 	std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override;
 	std::vector<org::ResourceIdentifier> GetSupportedKeys() override;
 	std::vector<org::ResourceIdentifier> GetSupportedResolverKeys() override;
@@ -97,8 +113,11 @@ private:
 	std::set<uint32_t> m_activeIndices;
 	std::map<uint32_t, bool> m_directionalLights;
 
-	std::shared_ptr<org::Buffer> m_pClusterBuffer;
-	std::shared_ptr<org::Buffer> m_pLightPagesBuffer;
+	// The light grid's counters (LIGHT_CULLING_STATS_*), not aliased so they can be read after the graph.
+	std::shared_ptr<org::Buffer> m_pCullingStatsBuffer;
+	struct CullingStatsShared;
+	std::shared_ptr<CullingStatsShared> m_cullingStats;
+	uint64_t m_cullingStatsFrame = 0;
 
     // Settings funcs
 	std::function<uint8_t()> getNumDirectionalLightCascades;
@@ -118,7 +137,6 @@ private:
 	};
 	std::map<uint32_t, LocalShadowAssignment> m_localShadows;
 	std::array<bool, CLodVirtualShadowMaxLocalFaceCount> m_localFaceUsed{};
-	unsigned int m_lightPagePoolSize = 0;
 
 	std::mutex m_lightUpdateMutex;
 	std::atomic_uint64_t m_publicationRevision{1};

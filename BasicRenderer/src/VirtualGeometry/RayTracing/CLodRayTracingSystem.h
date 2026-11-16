@@ -146,6 +146,14 @@ public:
         uint32_t distinctBlases = 0;
         uint32_t clustersInBvh = 0;
         uint32_t droppedInstances = 0;
+        uint32_t tlasBuildRows = 0; // Rows the last TLAS was built over.
+        // Partitioned TLAS, last frame: instance writes, BLAS updates, slots retired, and work dropped for lack of room (slots
+        // or argument capacity; retried next frame). Partitions handed out so far, slots in the global partition, free slots.
+        uint32_t ptlasWrites = 0, ptlasUpdates = 0, ptlasRetired = 0, ptlasDropped = 0, ptlasPartitions = 0, ptlasGlobal = 0, ptlasFreeSlots = 0;
+        // BLAS cache, last frame: BLASes reused, built into blocks, built into the batch because they can't be kept or found
+        // no room, entries evicted, and entries kept.
+        uint32_t bcHits = 0, bcBuilt = 0, bcBatch = 0, bcUncacheable = 0, bcNoRoom = 0, bcEvicted = 0, bcLive = 0;
+        uint64_t clippedInstancesTotal = 0; // Live rows that fell past that bound, summed over frames.
         uint32_t droppedClusters = 0;
         uint32_t droppedBlases = 0;
         uint32_t listClusters = 0;
@@ -188,6 +196,8 @@ public:
     struct ScenePipelines {
         org::PipelineState clear, resetDraws, count, allocate, addCoarseConsumers, allocateFinish, place, writeInstances;
         org::PipelineState cacheInit, cacheCollect, cacheOmmRetire, cacheEvict, cacheAdmit, cacheAssign, cacheArgs, cachePack, cacheEnd;
+        org::PipelineState ptlasInit, ptlasClaimCells, ptlasAssignCells, ptlasRetire, ptlasFinish; // Partitioned TLAS only.
+        org::PipelineState bcInit, bcBegin, bcIndex, bcLookup, bcFinish, bcScatter; // The BLAS cache.
     };
 
     struct VisibilityDescriptors {
@@ -273,7 +283,9 @@ public:
     uint32_t GetTlasSrv() const noexcept { return m_tlasSrv; }
     uint32_t GetClasInfoSrv() const noexcept { return m_clasInfo.srv; }
     // Per TLAS row (InstanceIndex()): uint4(draw, assembly transform, a cluster's group, 0). See CLOD_RT_INSTANCE_ID_PORTAL.
-    uint32_t GetInstanceRowsSrv() const noexcept { return m_instanceRows.srv; }
+    // What hits read at InstanceIndex(): the rows by slot with a partitioned TLAS, by row with a classic one.
+    uint32_t GetInstanceRowsSrv() const noexcept { return m_partitionedTlas ? m_ptlasSlotRows.srv : m_instanceRows.srv; }
+    bool UsesPartitionedTlas() const noexcept { return m_partitionedTlas; }
 
     // Where raytraced primary visibility writes its visible cluster records.
     void SetPrimaryVisibleClusters(std::shared_ptr<org::Buffer> clusters, std::shared_ptr<org::Buffer> transformIndices, uint32_t capacity);
@@ -303,6 +315,7 @@ private:
     void RecordCache(org::RecordingContext& recording, const ScenePipelines& pipelines);
     MiscConstants CacheConstants() const;
     MiscConstants SceneConstants(const SceneInputs& inputs) const;
+    void RecordBlasCache(org::RecordingContext& recording, const ScenePipelines& pipelines);
     void RecordSceneClear(org::RecordingContext& recording, const ScenePipelines& pipelines, const GraphBuffer& buffer, uint64_t bytes);
     void SceneStamp(rhi::CommandList& commands, uint32_t index);
     uint32_t ArenaSlot() const noexcept { return m_frame % m_transientSlices; }
@@ -421,7 +434,40 @@ private:
     uint32_t m_tlasSrv = 0;
     // Every row, every frame: sized from a count read back frames ago, a load that added instances faster than that left
     // them out of the TLAS until it caught up. Rows past this frame's instances are inactive.
-    uint32_t m_tlasInstanceCount = 0;
+    uint32_t m_tlasInstanceCount = 0; // Rows the TLAS buffer holds (the instance capacity).
+    // Rows the TLAS is built over: the live count read back, plus headroom. Building over all of the capacity, nearly all of it
+    // inactive rows, cost 1.1 ms for 42k live instances on Zorah. Rows past this bound are left out of that frame's TLAS.
+    uint32_t m_tlasBuildCount = 0;
+    // Where the device has them, the TLAS is a partitioned one (DXR 2): its build reads one WRITE_INSTANCE operation, with the
+    // live row count, from GPU memory (m_tlasOps), so its cost follows the frame's rows with no read back bound. The classic
+    // TLAS and m_tlasBuildCount are the default; SARP_RT_PARTITIONED_TLAS=1 opts in to the partitioned one.
+    bool m_partitionedTlas = false;
+    GraphBuffer m_tlasOps; // The build's operations and count, then the control words (CLOD_RT_PTLAS_*).
+    rhi::RayTracingPartitionedTlasInputsDesc m_ptlasInputs{};
+    // Persistent partitioned TLAS state (clodRayTracingSetupRootConstants.h, "TLAS stage").
+    GraphBuffer m_ptlasKeySlots, m_ptlasSlots, m_ptlasSlotRows, m_ptlasRing, m_ptlasCells, m_ptlasFill;
+    uint32_t m_ptlasPartitions = 4096u; // A power of two, at least 16. SARP_RT_PTLAS_PARTITIONS.
+    uint32_t m_ptlasPartitionCapacity = 4096u; // Instances per partition; a full cell chains to a new one. Fewer, larger partitions
+    // rebuild less under motion (Zorah, moving camera: 0.28 ms at 4096, 0.67 ms with 4 m cells). SARP_RT_PTLAS_PARTITION_INSTANCES.
+    float m_ptlasCellSize = 16.0f; // World units. SARP_RT_PTLAS_CELL.
+    bool m_ptlasBuilt = false;
+    // The BLAS cache (rayTracingSceneBuild.hlsl, "The BLAS cache"). SARP_RT_BLAS_CACHE_MB sizes its pool (0 turns it off),
+    // SARP_RT_BLAS_CACHE_KEEP how many frames an unused BLAS is kept.
+    bool m_bcEnabled = false;
+    bool m_bcInitialized = false;
+    uint64_t m_bcPoolBytes = 256ull << 20u; // Zorah keeps ~45 MiB in use; the even split leaves the mid classes room.
+    uint32_t m_bcEntries = 1u << 15;
+    uint32_t m_bcKeepFrames = 8u;
+    uint32_t m_bcRingItems = 0u; // Blocks across the classes; the entries' ring follows them.
+    GraphBuffer m_bcKeys, m_bcEntryTable, m_bcIndex, m_bcRings, m_bcCtrl, m_bcClasses, m_bcExplicitArgs, m_bcExplicitDst, m_bcBatchArgs, m_bcBatchMap,
+        m_bcBatchAddresses, m_bcPool;
+    std::array<uint64_t, 17> m_bcClassBytes{};
+    std::array<uint32_t, 17> m_bcClassBlocks{};
+    std::array<uint32_t, 17> m_bcClassUsed{};
+    uint64_t m_readbackBcOffset = 0u;
+    uint64_t m_readbackPtlasOffset = 0u; // The first build starts from empty; later ones update in place.
+    uint32_t m_tlasShrinkFrames = 0;
+    std::vector<uint32_t> m_sliceTlasBuildCount;
     rhi::QueryPoolPtr m_timers;
     uint64_t m_timerTicksPerSecond = 0;
 

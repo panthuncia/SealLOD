@@ -1417,6 +1417,9 @@ org::PipelineState PSOManager::CreateMaterialEvalPSO(MaterialCompileFlags materi
     if (materialCompileFlags & MaterialCompileFlags::MaterialCompileDoubleSided) {
         shaderDefines.push_back({ L"VISUTIL_DOUBLE_SIDED_GBUFFER_RESOLVE", L"1" });
     }
+    if ((materialCompileFlags & MaterialCompileFlags::MaterialCompileMultipleUvSets) == 0) {
+        shaderDefines.push_back({ L"MATERIAL_EVAL_SINGLE_UV_SET", L"1" }); // utilities.hlsli, MaterialUvCacheAt.
+    }
 
     spdlog::info(
         "PSOManager: creating material eval PSO shaderKey=0x{:X} defines={}",
@@ -1441,6 +1444,9 @@ void PSOManager::PrecompileMaterialEvalShaderArtifact(MaterialCompileFlags mater
     shaderDefines.push_back({ L"CLOD_VSM_ADAPTIVE_RECEIVER_SCREEN_TRACE", L"1" });
     if (materialCompileFlags & MaterialCompileFlags::MaterialCompileDoubleSided) {
         shaderDefines.push_back({ L"VISUTIL_DOUBLE_SIDED_GBUFFER_RESOLVE", L"1" });
+    }
+    if ((materialCompileFlags & MaterialCompileFlags::MaterialCompileMultipleUvSets) == 0) {
+        shaderDefines.push_back({ L"MATERIAL_EVAL_SINGLE_UV_SET", L"1" }); // utilities.hlsli, MaterialUvCacheAt.
     }
 
     ShaderInfoBundle shaderInfo;
@@ -2039,6 +2045,18 @@ std::vector<DxcDefine> PSOManager::GetShaderDefines(UINT psoFlags, MaterialCompi
         DxcDefine macro;
         macro.Value = L"1";
         macro.Name = L"PSO_OPENPBR_FUZZ_ROUGHNESS_TEXTURE";
+        defines.insert(defines.begin(), macro);
+    }
+    if (materialFlags & MaterialCompileFlags::MaterialCompileObjectSpaceNormalMap) {
+        DxcDefine macro;
+        macro.Value = L"1";
+        macro.Name = L"PSO_OBJECT_SPACE_NORMAL_MAP";
+        defines.insert(defines.begin(), macro);
+    }
+    if (materialFlags & MaterialCompileFlags::MaterialCompileObjectTriplanar) {
+        DxcDefine macro;
+        macro.Value = L"1";
+        macro.Name = L"PSO_OBJECT_TRIPLANAR";
         defines.insert(defines.begin(), macro);
     }
     if (materialFlags & MaterialCompileFlags::MaterialCompileMaterialEvalColorOnly) {

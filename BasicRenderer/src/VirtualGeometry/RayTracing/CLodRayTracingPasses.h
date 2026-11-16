@@ -75,10 +75,24 @@ public:
             pipelines.addCoarseConsumers = make(L"CLodRtAddCoarseConsumersCS", "CLod.RayTracing.AddCoarseConsumers.PSO");
             pipelines.allocateFinish = make(L"CLodRtAllocateFinishCS", "CLod.RayTracing.AllocateFinish.PSO");
             pipelines.place = make(L"CLodRtPlaceCS", "CLod.RayTracing.Place.PSO");
+            pipelines.bcInit = make(L"CLodRtBcInitCS", "CLod.RayTracing.BlasCacheInit.PSO");
+            pipelines.bcBegin = make(L"CLodRtBcBeginCS", "CLod.RayTracing.BlasCacheBegin.PSO");
+            pipelines.bcIndex = make(L"CLodRtBcIndexCS", "CLod.RayTracing.BlasCacheIndex.PSO");
+            pipelines.bcLookup = make(L"CLodRtBcLookupCS", "CLod.RayTracing.BlasCacheLookup.PSO");
+            pipelines.bcFinish = make(L"CLodRtBcFinishCS", "CLod.RayTracing.BlasCacheFinish.PSO");
+            pipelines.bcScatter = make(L"CLodRtBcScatterCS", "CLod.RayTracing.BlasCacheScatter.PSO");
+            if (m_stage == Stage::Blas) pipelines.clear = make(L"CLodRtClearCS", "CLod.RayTracing.Clear.PSO");
         }
         else {
             pipelines.writeInstances = make(L"CLodRtWriteInstancesCS", "CLod.RayTracing.WriteInstances.PSO");
             pipelines.cacheEnd = make(L"CLodRtCacheEndCS", "CLod.RayTracing.CacheEnd.PSO");
+            if (m_system->UsesPartitionedTlas()) {
+                pipelines.ptlasInit = make(L"CLodRtPtlasInitCS", "CLod.RayTracing.PtlasInit.PSO");
+                pipelines.ptlasClaimCells = make(L"CLodRtPtlasClaimCellsCS", "CLod.RayTracing.PtlasClaimCells.PSO");
+                pipelines.ptlasAssignCells = make(L"CLodRtPtlasAssignCellsCS", "CLod.RayTracing.PtlasAssignCells.PSO");
+                pipelines.ptlasRetire = make(L"CLodRtPtlasRetireCS", "CLod.RayTracing.PtlasRetire.PSO");
+                pipelines.ptlasFinish = make(L"CLodRtPtlasFinishCS", "CLod.RayTracing.PtlasFinish.PSO");
+            }
         }
         bindings.clusterCapacity = m_clusterCapacity;
         if (m_stage != Stage::Tlas) { // Count and place read the cluster list; the TLAS stage doesn't.

@@ -92,7 +92,7 @@ void DeferredCSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     GetFragmentInfoCanonicalSurface(pixel, viewDirWS, positionVS, positionWS, GetRootEnableGTAO(), fragmentInfo);
     
     DirectLightingOptions lightingOptions = DirectLightingOptionsFromRoot();
-    if (GetRootEnableRayTracedSunShadow() && GetRootShadowingMode() != SHADOWING_MODE_NONE)
+    if (GetRootEnableRayTracedSunShadow() && GetRootShadowingMode() == SHADOWING_MODE_VIRTUAL_SHADOW_MAPS)
     {
         // The ray traced sun mask covers what the shadow map's pages leave out; the loop combines the two by max.
         Texture2D<float> rayTracedSun = ResourceDescriptorHeap[OptionalResourceDescriptorIndex(Builtin::RayTracing::SunShadow)];
@@ -101,6 +101,16 @@ void DeferredCSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     LightingOutput lightingOutput = lightFragment(fragmentInfo, mainCamera, perFrameBuffer.activeEnvironmentIndex, ResourceDescriptorIndex(Builtin::Environment::InfoBuffer), lightingOptions);
     
     float3 lighting = lightingOutput.lighting;
+    float3 stochasticLighting = 0.0f;
+    if (GetRootShadowingMode() == SHADOWING_MODE_STOCHASTIC)
+    {
+        // Every analytic light, the sun included, sampled, traced and shaded by stochastic lighting (the loop above
+        // skipped them).
+        Texture2D<float4> stochasticDiffuse = ResourceDescriptorHeap[OptionalResourceDescriptorIndex(Builtin::StochasticLighting::Diffuse)];
+        Texture2D<float4> stochasticSpecular = ResourceDescriptorHeap[OptionalResourceDescriptorIndex(Builtin::StochasticLighting::Specular)];
+        stochasticLighting = stochasticDiffuse[pixel].rgb + stochasticSpecular[pixel].rgb;
+        lighting += stochasticLighting;
+    }
 
     RWTexture2D<float4> hdrTarget = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Color::HDRColorTarget)];
     
@@ -114,6 +124,12 @@ void DeferredCSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
         switch (perFrameBuffer.outputType) {
             case OUTPUT_AO:
                 payload = PackDebugFloat3(fragmentInfo.diffuseAmbientOcclusion.xxx);
+                break;
+            case OUTPUT_STOCHASTIC_LIGHTING:
+                payload = PackDebugFloat3(stochasticLighting / (1.0f + stochasticLighting));
+                break;
+            case OUTPUT_STOCHASTIC_LIGHTING_LOG:
+                payload = PackDebugFloat3(saturate(log2(1.0f + 16.0f * max(stochasticLighting, 0.0f)) / 12.0f));
                 break;
             case OUTPUT_DEPTH: {
                 float scaledDepth = abs(linearZ) * 0.1;

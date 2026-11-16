@@ -264,7 +264,7 @@ struct PerFrameBuffer {
     
     uint lightClusterGridSizeY;
     uint lightClusterGridSizeZ;
-    uint nearClusterCount; // how many uniform slices up close
+    uint lightGridTileSize; // light grid tile, pixels square (lightGrid.hlsli)
     float clusterZSplitDepth; // view-space depth to switch to log
     
     uint frameIndex; // 0 to 64
@@ -305,7 +305,7 @@ struct PerFrameBuffer {
     uint sunLightIndex; // Light buffer index of the sun, LIGHT_INDEX_NONE without one (PerFrameCB).
     uint sunLightSlot; // Its position in the active-index list.
     uint vsmDebugLightIndex; // Light buffer index whose virtual shadow map the VSM debug views show (vsmDebugLight).
-    uint sunLightPad1;
+    uint numDirectionalLights; // Directional lights in the light buffer (PerFrameCB).
 };
 
 static const uint TERRAIN_RVT_CONTENT_HEIGHT = 1u << 0;
@@ -953,20 +953,11 @@ struct SkinnedAssemblyPlacementBuffer {
     uint3 pad;
 };
 
-#define LIGHTS_PER_PAGE 12
-#define LIGHT_PAGE_ADDRESS_NULL 0xFFFFFFFF
-struct LightPage {
-    uint ptrNextPage;
-    uint numLightsInPage;
-    uint lightIndices[LIGHTS_PER_PAGE];
-};
-
-struct Cluster {
-    float4 minPoint;
-    float4 maxPoint;
-    uint numLights;
-    uint ptrFirstPage;
-    uint pad[2];
+// One active light as the light grid culls it (lightCulling.hlsl, Builtin::Light::CullingRecords).
+struct LightCullingRecord {
+    float4 sphere; // View-space centre and radius; a negative radius is a directional light, which reaches everything.
+    uint lightIndex; // Light buffer index.
+    uint3 pad;
 };
 
 struct GTAOConstants {

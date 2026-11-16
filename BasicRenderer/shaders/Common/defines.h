@@ -14,4 +14,5 @@
 
 // How analytic lights are shadowed: ShadowingMode in RenderContext.h, GetRootShadowingMode() in shaders.
 #define SHADOWING_MODE_NONE 0
-#define SHADOWING_MODE_VIRTUAL_SHADOW_MAPS 1 // The sun through the virtual shadow map; local lights unshadowed.
+#define SHADOWING_MODE_VIRTUAL_SHADOW_MAPS 1 // The sun and the budgeted local lights through the virtual shadow map.
+#define SHADOWING_MODE_STOCHASTIC 2 // Every analytic light, the sun included, from stochastic lighting; no shadow map.

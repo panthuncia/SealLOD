@@ -44,6 +44,90 @@
 #define CLOD_RT_SCENE_BLAS_OMM_KEYS_UAV UintRootConstant28 // Per BLAS: the same, or CLOD_RT_OMM_KEY_CONFLICT.
 #define CLOD_RT_OMM_KEY_CONFLICT 0x80000000u
 #define CLOD_RT_SCENE_OMM_ACTIVE UintRootConstant29 // Zero disables every instance's micromaps.
+// The TLAS stage with a partitioned TLAS (DXR 2), kept from frame to frame and changed only where the scene changed.
+// Every instance key holds a slot, the PTLAS instance index, for as long as it stays in the BVH. A slot whose transform,
+// flags or ID changed is written (WRITE_INSTANCE), one whose BLAS alone changed is updated (UPDATE_INSTANCE), and one no
+// longer listed is written disabled and freed for the next frame. Static slots sit in partitions by grid cell; one that
+// moves goes to the global partition. The build reads the operations and their count from TLAS_OPS_UAV.
+#define CLOD_RT_SCENE_TLAS_ROWS_LOW UintRootConstant36 // The TLAS rows buffer: write arguments, then update arguments.
+#define CLOD_RT_SCENE_TLAS_ROWS_HIGH UintRootConstant37
+#define CLOD_RT_SCENE_TLAS_OPS_UAV UintRootConstant38 // Raw: the operations, their count, and the PTLAS control words (CLOD_RT_PTLAS_*).
+#define CLOD_RT_SCENE_TLAS_PARTITIONED UintRootConstant39
+#define CLOD_RT_SCENE_PTLAS_KEY_SLOTS_UAV UintRootConstant40 // Per instance key: its slot + 1, or 0.
+#define CLOD_RT_SCENE_PTLAS_SLOTS_UAV UintRootConstant41 // Raw, CLOD_RT_PTLAS_SLOT_BYTES per slot (below).
+#define CLOD_RT_SCENE_PTLAS_SLOT_ROWS_UAV UintRootConstant42 // uint4 per slot: the instance row, which hits read at InstanceIndex().
+#define CLOD_RT_SCENE_PTLAS_RING_UAV UintRootConstant43 // Free slots, a ring over the slot capacity.
+#define CLOD_RT_SCENE_PTLAS_CELLS_UAV UintRootConstant44 // Raw: grid cell -> partition hash table, CLOD_RT_PTLAS_CELL_BYTES per entry.
+#define CLOD_RT_SCENE_PTLAS_FILL_UAV UintRootConstant45 // Per partition: the slots in it.
+#define CLOD_RT_SCENE_PTLAS_CELL_SIZE UintRootConstant46 // asfloat: the grid cell's edge, in world units.
+#define CLOD_RT_SCENE_PTLAS_LIMITS UintRootConstant47 // Partitions (low 16 bits, in units of 16) and instances per partition (high 16).
+
+// Slot state: uint4(key + 1, partition, hash of what a write sets, last frame listed), uint4(BLAS address low, high, 0, 0).
+#define CLOD_RT_PTLAS_SLOT_BYTES 32u
+#define CLOD_RT_PTLAS_CELL_BYTES 32u // uint4(cell key low, high, current partition + 1, rows claimed this frame), then the
+                                    // partitions reserved for them (rayTracingSceneBuild.hlsl, CLodRtPtlasChainFirst), 0, 0, 0.
+// The control words, after the operations: two RtasPartitionedTlasOperation (write, update) and their count.
+#define CLOD_RT_TLAS_OPS_COUNT_OFFSET 48u
+#define CLOD_RT_PTLAS_HEAD 13u // In words: the ring's head and tail (free slots are tail - head).
+#define CLOD_RT_PTLAS_TAIL 14u
+#define CLOD_RT_PTLAS_WRITES 15u // This frame's write and update argument counts.
+#define CLOD_RT_PTLAS_UPDATES 16u
+#define CLOD_RT_PTLAS_PARTITIONS 17u // Partitions handed to cells so far.
+#define CLOD_RT_PTLAS_DROPPED 18u // This frame: instances without a slot, and writes past the argument capacity.
+#define CLOD_RT_PTLAS_GLOBAL 19u // Slots in the global partition.
+#define CLOD_RT_PTLAS_RETIRED 20u // This frame: slots retired.
+#define CLOD_RT_PTLAS_LAST_WRITES 21u // Last frame's counts, for the stats.
+#define CLOD_RT_PTLAS_LAST_UPDATES 22u
+#define CLOD_RT_PTLAS_LAST_RETIRED 23u
+#define CLOD_RT_PTLAS_LAST_DROPPED 24u
+#define CLOD_RT_PTLAS_CTRL_BYTES 128u
+#define CLOD_RT_PTLAS_GLOBAL_PARTITION 0xFFFFFFFFu
+
+// ---- BLAS cache (rayTracingSceneBuild.hlsl, "The BLAS cache"): BLASes kept from frame to frame in a pool of power-of-two
+// size classes by cluster count, each block a class's largest BLAS.
+// In the BLAS stage, Allocate and Place write each BLAS's keys here (CLOD_RT_BC_KEY_BYTES each): the share key, the
+// validity hash Place sums over its CLAS, and a flag word, nonzero when the BLAS can't be kept.
+#define CLOD_RT_SCENE_BC_KEYS_UAV UintRootConstant36 // BLAS stage only; the TLAS stage uses this constant for its rows.
+#define CLOD_RT_BC_KEY_BYTES 32u
+#define CLOD_RT_BC_ENTRY_BYTES 32u // uint4(key low, high, address low, high), uint4(class, block or ~0, last frame used, in use).
+#define CLOD_RT_BC_CLASSES 17u // 1, 2, 4 ... 65536 clusters.
+// The cache passes' own constants.
+#define CLOD_RT_BC_COUNTERS_UAV UintRootConstant0
+#define CLOD_RT_BC_BLAS_ARGS_UAV UintRootConstant1
+#define CLOD_RT_BC_BLAS_ADDRESSES_UAV UintRootConstant2
+#define CLOD_RT_BC_KEYS_UAV UintRootConstant3
+#define CLOD_RT_BC_ENTRIES_UAV UintRootConstant4
+#define CLOD_RT_BC_INDEX_UAV UintRootConstant5 // Entry + 1 by key, twice the entries; rebuilt every frame.
+#define CLOD_RT_BC_RINGS_UAV UintRootConstant6 // Free blocks of each class, then free entries.
+#define CLOD_RT_BC_CTRL_UAV UintRootConstant7 // Raw: the rings' heads and tails, then counts (below).
+#define CLOD_RT_BC_EXPLICIT_ARGS_UAV UintRootConstant8 // Misses built into blocks: arguments, and their destinations.
+#define CLOD_RT_BC_EXPLICIT_DST_UAV UintRootConstant9
+#define CLOD_RT_BC_IMPLICIT_ARGS_UAV UintRootConstant10 // The rest, built into the frame's batch, and which BLAS each is.
+#define CLOD_RT_BC_IMPLICIT_MAP_UAV UintRootConstant11
+#define CLOD_RT_BC_IMPLICIT_ADDRESSES_UAV UintRootConstant12
+#define CLOD_RT_BC_ENTRY_CAPACITY UintRootConstant13 // A power of two.
+#define CLOD_RT_BC_FRAME UintRootConstant14
+#define CLOD_RT_BC_KEEP_FRAMES UintRootConstant15 // An entry unused for longer than this is freed.
+#define CLOD_RT_BC_BLAS_CAPACITY UintRootConstant16
+#define CLOD_RT_BC_POOL_LOW UintRootConstant17
+#define CLOD_RT_BC_POOL_HIGH UintRootConstant18
+#define CLOD_RT_BC_CLASSES_SRV UintRootConstant19 // uint4 per class: block bytes, blocks, ring offset, pool offset / 256.
+#define CLOD_RT_BC_ENTRY_RING_OFFSET UintRootConstant20
+// Control words: class c's ring head and tail at 2c and 2c + 1, the entries' ring after them; then this frame's counts,
+// and a copy of last frame's for the stats. The build counts are what the two builds read.
+#define CLOD_RT_BC_ENTRY_HEAD 34u
+#define CLOD_RT_BC_ENTRY_TAIL 35u
+#define CLOD_RT_BC_FRAME_FIRST 36u
+#define CLOD_RT_BC_EXPLICIT_COUNT 36u
+#define CLOD_RT_BC_IMPLICIT_COUNT 37u
+#define CLOD_RT_BC_HITS 38u
+#define CLOD_RT_BC_UNCACHEABLE 39u
+#define CLOD_RT_BC_NO_ROOM 40u
+#define CLOD_RT_BC_EVICTED 41u
+#define CLOD_RT_BC_LIVE 42u
+#define CLOD_RT_BC_FRAME_END 43u
+#define CLOD_RT_BC_LAST_OFFSET 8u
+#define CLOD_RT_BC_CTRL_BYTES 256u
 
 // The CLAS cache passes (CLodRtCache*CS). See clodRayTracingCache.hlsli.
 #define CLOD_RT_CACHE_STATE_UAV UintRootConstant0
@@ -125,10 +209,11 @@
 #define CLOD_RT_CACHE_GROUP_THREADS 1024u // The collect, admit, assign and pack passes are one group of this many.
 #define CLOD_RT_TRANSIENT_DIRECT 0x80000000u // In a transient word: the rest is the group's first CLAS ID.
 
-// Entries, 96 bytes: [group, page count, first page, micromap table slot + 1, chunk count, chunks (16), packed units, 0, 0].
+// Entries, 96 bytes: [group, page count, first page, micromap table slot + 1, chunk count, chunks (16), packed units, built frame, 0].
 #define CLOD_RT_CACHE_ENTRY_BYTES 96u
 #define CLOD_RT_CACHE_ENTRY_CHUNKS_OFFSET 20u
 #define CLOD_RT_CACHE_ENTRY_UNITS_OFFSET 84u
+#define CLOD_RT_CACHE_ENTRY_BUILT_OFFSET 88u // The frame the entry's CLAS were placed (the BLAS cache's validity check).
 
 // The demand bitset, raw words: a summary bit per bitset word, then a bit per group, then a word per group for the material
 // identity micromaps would be baked for (the largest any drawing material asked for, so the result doesn't depend on order).

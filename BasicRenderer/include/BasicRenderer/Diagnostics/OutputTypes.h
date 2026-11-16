@@ -83,6 +83,8 @@ enum OutputType {
 	VSM_CLIP_COMPARISON = 74,
 	VSM_CLIP_GRID_OFFSET = 75,
 	VSM_TRACE_FOOTPRINT = 76,
+	STOCHASTIC_LIGHTING = 77, // Stochastic lighting's lights alone (every analytic light), x / (1 + x) (docs/stochastic_lighting.md).
+	STOCHASTIC_LIGHTING_LOG = 78, // The same, log2(1 + 16 x) / 12 per channel: for measuring from 8-bit captures.
 };
 
 inline std::vector<std::string> OutputTypeNames = {
@@ -163,4 +165,6 @@ inline std::vector<std::string> OutputTypeNames = {
 	"VSM Adjacent Clip Comparison",
 	"VSM Adjacent Clip Grid Offset",
 	"VSM Trace Footprint",
+	"Stochastic Lighting",
+	"Stochastic Lighting (log, for measuring)",
 };

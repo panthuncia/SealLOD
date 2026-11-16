@@ -92,7 +92,8 @@ ClusterRasterizationPass::ClusterRasterizationPass(
 
     auto& settingsManager = SettingsManager::GetInstance();
     m_getPunctualLightingEnabled = settingsManager.getSettingGetter<bool>("enablePunctualLighting");
-    m_getShadowsEnabled = settingsManager.getSettingGetter<bool>("enableShadows");
+    // Whether the virtual shadow map is built, not just shadows on: stochastic lighting replaces it (Renderer::VirtualShadowMapsActive).
+    m_getShadowsEnabled = settingsManager.getSettingGetter<bool>("virtualShadowMapsActive");
     m_gtaoEnabled = settingsManager.getSettingGetter<bool>("enableGTAO")();
 }
 
@@ -192,8 +193,8 @@ ClusterRasterBindings ClusterRasterizationPass::Declare(org::PassBuilder& builde
                 Builtin::Light::ActiveLightIndices,
                 Builtin::Light::InfoBuffer,
                 Builtin::Light::DirectionalLightCascadeBuffer,
-                Builtin::Light::ClusterBuffer,
-                Builtin::Light::PagesBuffer,
+                Builtin::Light::GridCells,
+                Builtin::Light::GridIndices,
                 Builtin::OpenPBR::FuzzLTC,
                 Builtin::OpenPBR::IdealMetalEnergyComplement,
                 Builtin::OpenPBR::IdealMetalAverageEnergyComplement,
@@ -407,7 +408,8 @@ ClusterRasterFrame ClusterRasterizationPass::Prepare(
         if (bindings.hasDepth) frame.depthClear = preparation.ClearValue(bindings.depth.Resource());
     }
     if (bindings.avboitShading) {
-        frame.shadows = context->lighting.shadowingMode == ShadowingMode::VirtualShadowMaps;
+        // Only with the shadow map's resources declared: in stochastic mode it doesn't exist, and lights are unshadowed here.
+        frame.shadows = m_declaredShadowsEnabled && context->lighting.shadowingMode == ShadowingMode::VirtualShadowMaps;
         frame.punctualLights = context->lighting.punctualLightingEnabled;
         frame.gtao = context->lighting.gtaoEnabled;
     }

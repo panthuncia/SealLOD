@@ -28,6 +28,7 @@
 #include "Resources/Buffers/DynamicBufferBase.h"
 #include "Runtime/GraphIntegration/Resolvers/ResourceGroupResolver.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include "Materials/Evaluation/RenderPasses/ResolveMaterialTextureDescriptorsPass.h"
 
 struct EvaluateMaterialGroupsBindings {
     org::DeclaredViewToken visibleClusters, visibleClusterTransformIndices;
@@ -139,6 +140,7 @@ public:
             Builtin::Terrain::Regions,
             Builtin::Terrain::WeightBlocks,
             Builtin::Material::TextureStreamingMetadataBuffer,
+            kMaterialResolvedTextureDescriptorsResource, // ResolveMaterialTextureDescriptorsPass
             Builtin::CLod::Offsets,
 			Builtin::CLod::GroupChunks,
 			Builtin::CLod::Groups,

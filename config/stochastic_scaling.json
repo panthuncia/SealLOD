@@ -1,0 +1,120 @@
+{
+  "name": "Stochastic lighting scaling",
+  "readiness": {
+    "stable_frames": 60,
+    "settling_frames": 30,
+    "timeout_ms": 120000
+  },
+  "statistics": {
+    "minimum_samples": 120,
+    "maximum_samples": 300,
+    "confidence_level": 0.95,
+    "relative_half_width": 0.02
+  },
+  "output": {
+    "database": "out/stochastic_scaling.sqlite",
+    "last_run_summary": "out/stochastic_scaling.md"
+  },
+  "metrics": [
+    {
+      "id": "gpu_time",
+      "name": "render_graph_gpu_time",
+      "output_name": "GPU time",
+      "unit": "ms",
+      "source": "render_graph_gpu_time",
+      "relative_half_width": 0.02
+    }
+  ],
+  "passes": [
+    {
+      "id": "select",
+      "name": "StochasticSelectPass",
+      "queue": "Compute",
+      "occurrence": 0,
+      "metrics": [
+        "gpu_time"
+      ],
+      "required": true
+    },
+    {
+      "id": "trace",
+      "name": "StochasticTracePass",
+      "queue": "Compute",
+      "occurrence": 0,
+      "metrics": [
+        "gpu_time"
+      ],
+      "required": true
+    },
+    {
+      "id": "shade",
+      "name": "StochasticShadePass",
+      "queue": "Compute",
+      "occurrence": 0,
+      "metrics": [
+        "gpu_time"
+      ],
+      "required": true
+    },
+    {
+      "id": "temporal",
+      "name": "StochasticDenoiseTemporalPass",
+      "queue": "Compute",
+      "occurrence": 0,
+      "metrics": [
+        "gpu_time"
+      ],
+      "required": false
+    },
+    {
+      "id": "spatial",
+      "name": "StochasticDenoiseSpatialPass",
+      "queue": "Compute",
+      "occurrence": 0,
+      "metrics": [
+        "gpu_time"
+      ],
+      "required": false
+    },
+    {
+      "id": "deferred",
+      "name": "DeferredShadingPass",
+      "queue": "Compute",
+      "occurrence": 0,
+      "metrics": [
+        "gpu_time"
+      ],
+      "required": false
+    },
+    {
+      "id": "cull",
+      "name": "LightCullingPass",
+      "queue": "Compute",
+      "occurrence": 0,
+      "metrics": [
+        "gpu_time"
+      ],
+      "required": false
+    },
+    {
+      "id": "gridprepare",
+      "name": "LightGridPreparePass",
+      "queue": "Compute",
+      "occurrence": 0,
+      "metrics": [
+        "gpu_time"
+      ],
+      "required": false
+    },
+    {
+      "id": "griddepth",
+      "name": "LightGridDepthBoundsPass",
+      "queue": "Compute",
+      "occurrence": 0,
+      "metrics": [
+        "gpu_time"
+      ],
+      "required": false
+    }
+  ]
+}

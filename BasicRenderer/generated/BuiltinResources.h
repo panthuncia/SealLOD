@@ -72,11 +72,13 @@ struct Builtin {
   struct Light {
     inline static constexpr std::string_view ActiveLightIndices = "Builtin::Light::ActiveLightIndices";
     inline static constexpr std::string_view BufferGroup = "Builtin::Light::BufferGroup";
-    inline static constexpr std::string_view ClusterBuffer = "Builtin::Light::ClusterBuffer";
+    inline static constexpr std::string_view CullingRecords = "Builtin::Light::CullingRecords";
+    inline static constexpr std::string_view CullingStats = "Builtin::Light::CullingStats";
     inline static constexpr std::string_view DirectionalLightCascadeBuffer = "Builtin::Light::DirectionalLightCascadeBuffer";
+    inline static constexpr std::string_view GridCells = "Builtin::Light::GridCells";
+    inline static constexpr std::string_view GridDepthBounds = "Builtin::Light::GridDepthBounds";
+    inline static constexpr std::string_view GridIndices = "Builtin::Light::GridIndices";
     inline static constexpr std::string_view InfoBuffer = "Builtin::Light::InfoBuffer";
-    inline static constexpr std::string_view PagesBuffer = "Builtin::Light::PagesBuffer";
-    inline static constexpr std::string_view PagesCounter = "Builtin::Light::PagesCounter";
   };
   inline static constexpr std::string_view LinearDepthMaps = "Builtin::LinearDepthMaps";
   struct Material {
@@ -128,6 +130,7 @@ struct Builtin {
     inline static constexpr std::string_view VisibilityTexture = "Builtin::PrimaryCamera::VisibilityTexture";
   };
   struct RayTracing {
+    inline static constexpr std::string_view BlasCache = "Builtin::RayTracing::BlasCache";
     inline static constexpr std::string_view BlasData = "Builtin::RayTracing::BlasData";
     inline static constexpr std::string_view ClasInfo = "Builtin::RayTracing::ClasInfo";
     inline static constexpr std::string_view ClasPool = "Builtin::RayTracing::ClasPool";
@@ -158,6 +161,10 @@ struct Builtin {
     inline static constexpr std::string_view SkinningInstanceInfo = "Builtin::SkeletonResources::SkinningInstanceInfo";
   };
   inline static constexpr std::string_view SkinnedAssemblyPlacements = "Builtin::SkinnedAssemblyPlacements";
+  struct StochasticLighting {
+    inline static constexpr std::string_view Diffuse = "Builtin::StochasticLighting::Diffuse";
+    inline static constexpr std::string_view Specular = "Builtin::StochasticLighting::Specular";
+  };
   struct Surface {
     inline static constexpr std::string_view BaseColorOpacity = "sarp.surface.base-color-opacity";
     inline static constexpr std::string_view DeviceDepth = "sarp.surface.device-depth";

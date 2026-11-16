@@ -125,6 +125,7 @@ ComputeCullingPrograms ComputeCullingPass::DeclarePrograms(org::PassBuilder& bui
         { L"CLOD_RT_VIEW_STREAMS", m_config.rayTracingViewStreams ? L"1" : L"0" },
         { L"CLOD_RT_VIEW_PATH_TRACED", m_config.rayTracingViewPathTraced ? L"1" : L"0" },
         { L"CLOD_SKIP_RT_COVERED", m_config.skipRayTracingCoveredDraws ? L"1" : L"0" },
+        { L"CLOD_UNIFIED_RT", m_config.unifiedRayTracing ? L"1" : L"0" },
         { L"CLOD_FORCE_VIEW_BRANCH", GetClusterLODForcedViewBranch() == 1u ? L"1" : GetClusterLODForcedViewBranch() == 2u ? L"2" : L"0" },
     };
     auto leafDefines = defines;
@@ -233,6 +234,12 @@ ComputeCullingBindings ComputeCullingPass::Declare(org::PassBuilder& builder)
     bindings.visibleClusters = uav(outputs.visibleClusters);
     bindings.visibleClusterTransformIndices = uav(outputs.visibleClusterTransformIndices);
     bindings.visibleClustersCounter = uav(outputs.visibleClustersCounter);
+    if (m_config.rtVisibleClusters) {
+        bindings.rtVisibleClusters = uav(m_config.rtVisibleClusters);
+        bindings.rtVisibleClusterTransformIndices = uav(m_config.rtVisibleClusterTransformIndices);
+        bindings.rtVisibleClustersCounter = uav(m_config.rtVisibleClustersCounter);
+        bindings.rtVisibleClusterCapacity = m_config.rtVisibleClusterCapacity;
+    }
     bindings.rasterBucketHistogramCommand = uav(outputs.rasterBucketHistogramCommand);
     bindings.telemetry = uav(m_resources.telemetry);
     bindings.replay = uav(replay.replay);
@@ -451,6 +458,9 @@ void ComputeCullingPass::Update(const org::UpdateExecutionContext& executionCont
     UpdateTraversalDepth(context);
 
     br::render::ResetCullingCounter(m_resources.outputs.visibleClustersCounter, upload);
+    if (m_config.rtVisibleClustersCounter) {
+        br::render::ResetCullingCounter(m_config.rtVisibleClustersCounter, upload);
+    }
     if (m_resources.outputs.swVisibleClustersCounter) {
         br::render::ResetCullingCounter(m_resources.outputs.swVisibleClustersCounter, upload);
     }

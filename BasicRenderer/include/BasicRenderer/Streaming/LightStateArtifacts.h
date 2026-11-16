@@ -38,7 +38,6 @@ struct PublishedLocalShadowLight {
 struct LightTableBuildInput {
     std::uint64_t revision = 0;
     std::uint32_t lightCount = 0;
-    std::uint32_t lightPagePoolSize = 0;
     std::vector<PublishedDirectionalShadowLight> directionalShadows;
     std::vector<PublishedLocalShadowLight> localShadows;
     std::vector<std::shared_ptr<org::Resource>> retainedResources;
@@ -48,7 +47,6 @@ struct LightTableBuildInput {
 struct PublishedLightTableState {
     std::uint64_t revision = 0;
     std::uint32_t lightCount = 0;
-    std::uint32_t lightPagePoolSize = 0;
     std::vector<PublishedDirectionalShadowLight> directionalShadows;
     std::vector<PublishedLocalShadowLight> localShadows;
     std::vector<std::shared_ptr<org::Resource>> retainedResources;

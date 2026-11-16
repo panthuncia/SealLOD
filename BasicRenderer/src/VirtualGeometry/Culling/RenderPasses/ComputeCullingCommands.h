@@ -78,6 +78,9 @@ struct ComputeCullingBindings {
     ComputeCullingPrograms programs;
     org::DeclaredViewToken visibleClusters, visibleClusterTransformIndices, visibleClustersCounter;
     org::DeclaredViewToken swVisibleClustersCounter;  // Software classification only.
+    // The unified main view's phase 1: the ray tracing view's cluster list.
+    org::DeclaredViewToken rtVisibleClusters, rtVisibleClusterTransformIndices, rtVisibleClustersCounter;
+    uint32_t rtVisibleClusterCapacity = 0u;
     org::DeclaredViewToken rasterBucketHistogramCommand, telemetry, replay, replayState;
     ComputeCullingFrontierViews frontiers;
     org::DeclaredViewToken windBounds, windMembership;  // DynamicWind bounds cache only.

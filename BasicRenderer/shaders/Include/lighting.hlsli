@@ -5,6 +5,7 @@
 #include "include/structs.hlsli"
 #include "Common/defines.h"
 #include "include/lightModel.hlsli"
+#include "include/lightGrid.hlsli"
 #include "include/materialFlags.hlsli"
 #include "include/parallax.hlsli"
 #include "include/cbuffers.hlsli"
@@ -346,45 +347,6 @@ DirectLightContribution EvaluateDirectLightContribution(
     return result;
 }
 
-uint3 ComputeClusterID(float2 pixelCoords, float viewDepth,
-                          ConstantBuffer<PerFrameBuffer> perFrame, Camera mainCamera) {
-
-    uint gridX = max(perFrame.lightClusterGridSizeX, 1u);
-    uint gridY = max(perFrame.lightClusterGridSizeY, 1u);
-    uint totalZ = max(perFrame.lightClusterGridSizeZ, 1u);
-
-    float2 tileSize = float2(perFrame.screenResX, perFrame.screenResY) / float2(gridX, gridY);
-    uint2 tile = min(uint2(pixelCoords / max(tileSize, float2(1.0f, 1.0f))), uint2(gridX - 1u, gridY - 1u));
-    
-    // Z slice piecewise
-    float zNear = max(mainCamera.zNear, 1.0e-5f);
-    float z = max(abs(viewDepth), zNear);
-    uint nearSlices = min(perFrame.nearClusterCount, totalZ);
-    float zSplit = max(perFrame.clusterZSplitDepth, zNear + 1.0e-4f);
-    float zFar = max(mainCamera.zFar, zSplit + 1.0e-4f);
-    uint sliceZ;
-
-    if (nearSlices > 0u && z < zSplit) {
-        // uniform up close
-        float t = saturate((z - zNear) / max(zSplit - zNear, 1.0e-5f));
-        sliceZ = min(uint(t * nearSlices), nearSlices - 1u);
-    }
-    else if (totalZ > nearSlices) {
-        // logarithmic beyond zSplit
-        float logStart = log(zSplit / zNear);
-        float logEnd = log(zFar / zNear);
-        float logZ = log(z / zNear);
-        float u = saturate((logZ - logStart) / max(logEnd - logStart, 1.0e-5f));
-        uint logSlices = totalZ - nearSlices;
-        sliceZ = nearSlices + min(uint(u * logSlices), logSlices - 1u);
-    }
-    else {
-        sliceZ = totalZ - 1u;
-    }
-    
-    return uint3(tile.x, tile.y, sliceZ);
-}
-
 // ---------------------------------------------------------------------------------------------------------------------
 // The direct-light loop. Every raster and ray-hit shading path runs this one loop over the analytic lights; what differs
 // between them is only how visibility is known, which the caller states in DirectLightingOptions. Nothing below reads
@@ -394,7 +356,10 @@ uint3 ComputeClusterID(float2 pixelCoords, float viewDepth,
 // Shadowing (ShadowingMode, SHADOWING_MODE_* in Common/defines.h):
 //   NONE                 no occlusion.
 //   VIRTUAL_SHADOW_MAPS  the sun's occlusion from the virtual shadow map, combined by max with options.sunOcclusion
-//                        (the ray traced sun mask, where it runs). Local lights are unshadowed.
+//                        (the ray traced sun mask, where it runs). Spot and point lights with faces from theirs.
+//   STOCHASTIC           every analytic light is skipped, the sun included: stochastic lighting samples, traces and
+//                        shades them in its own passes, and the caller adds their result (deferred.hlsl). No shadow map
+//                        exists in this mode.
 // Defining LIGHTING_NO_VIRTUAL_SHADOW_MAPS compiles the shadow map lookup out, for passes that never bind its resources
 // (ray hits: the shadow map only has pages for what the camera sees).
 
@@ -404,6 +369,7 @@ struct DirectLightingOptions
     bool virtualShadowMaps; // The sun's occlusion from the virtual shadow map; its resources must be bound.
     float sunOcclusion; // The sun's occlusion known before the loop (a traced ray or mask), combined by max.
     uint sunLightIndex; // Which light sunOcclusion belongs to: PerFrameCB::sunLightIndex.
+    bool stochasticLights; // Every analytic light is left to stochastic lighting.
 };
 
 DirectLightingOptions MakeDirectLightingOptions(bool punctualLights, uint shadowingMode)
@@ -414,6 +380,7 @@ DirectLightingOptions MakeDirectLightingOptions(bool punctualLights, uint shadow
     options.virtualShadowMaps = shadowingMode == SHADOWING_MODE_VIRTUAL_SHADOW_MAPS;
     options.sunOcclusion = 0.0f;
     options.sunLightIndex = perFrame.sunLightIndex;
+    options.stochasticLights = shadowingMode == SHADOWING_MODE_STOCHASTIC;
     return options;
 }
 
@@ -550,6 +517,22 @@ float EvaluateLightOcclusion(
     return occlusion;
 }
 
+// The base layer's per-fragment state for EvaluateDirectLightContribution, built once per fragment.
+OpenPBRBaseLayerState MakeOpenPBRBaseLayerStateForLighting(LightingParameters lightingParameters)
+{
+    return MakeOpenPBRBaseLayerState(
+        lightingParameters.weightedBaseColor,
+        lightingParameters.diffuseColor,
+        lightingParameters.baseDiffuseRoughness,
+        lightingParameters.specularAlpha,
+        lightingParameters.weightedSpecularIor,
+        lightingParameters.dielectricSpecularF0,
+        lightingParameters.dielectricSpecularWeight,
+        lightingParameters.metalAverageFresnel,
+        lightingParameters.metalSpecularF0,
+        lightingParameters.metalSpecularWeight);
+}
+
 void AccumulateDirectLight(
     uint lightIndex,
     FragmentInfo fragmentInfo,
@@ -561,15 +544,26 @@ void AccumulateDirectLight(
 {
     StructuredBuffer<LightInfo> lights = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::InfoBuffer)];
     const LightInfo light = lights[lightIndex];
-    const float occlusion = EvaluateLightOcclusion(light, lightIndex, fragmentInfo, mainCamera, options, result);
-    // Full occlusion makes every direct-light term exactly zero.
-    if (occlusion >= 1.0f)
+    if (options.stochasticLights)
     {
         return;
     }
-
     const LightFragmentData lightData = EvaluateLightAtPoint(light, fragmentInfo.fragPosWorldSpace.xyz);
     if (!LightInRange(light, lightData))
+    {
+        return;
+    }
+    // Facing away from the light or the viewer, the contribution is exactly zero (EvaluateDirectLightContribution), so
+    // the shadow lookup is skipped: for the sun that is several virtual shadow map samples. VSM debug views still take it.
+    ConstantBuffer<PerFrameBuffer> facingPerFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+    if ((dot(lightingParameters.normal, lightData.lightToFrag) <= 0.0f || dot(lightingParameters.normal, lightingParameters.viewDir) <= 0.0f)
+        && !VirtualShadowDebugOutput(facingPerFrame.outputType))
+    {
+        return;
+    }
+    const float occlusion = EvaluateLightOcclusion(light, lightIndex, fragmentInfo, mainCamera, options, result);
+    // Full occlusion makes every direct-light term exactly zero.
+    if (occlusion >= 1.0f)
     {
         return;
     }
@@ -585,7 +579,8 @@ DirectLightingResult EvaluateDirectLighting(FragmentInfo fragmentInfo, Camera ma
     DirectLightingResult result = (DirectLightingResult)0;
     result.hasShadowDebug = false;
     result.shadowDebug = CLodVirtualShadowInitDebugInfo(0xFFFFFFFFu);
-    if (!options.punctualLights)
+    // Stochastic lighting shades every analytic light (docs/stochastic_lighting.md); the caller adds its result.
+    if (!options.punctualLights || options.stochasticLights)
     {
         return result;
     }
@@ -593,52 +588,19 @@ DirectLightingResult EvaluateDirectLighting(FragmentInfo fragmentInfo, Camera ma
     ConstantBuffer<PerFrameBuffer> perFrameBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     const LightingParameters lightingParameters = MakeLightingParameters(fragmentInfo);
     // This state depends only on the material/view inputs, so it is built once, outside the light loop.
-    const OpenPBRBaseLayerState baseState = MakeOpenPBRBaseLayerState(
-        lightingParameters.weightedBaseColor,
-        lightingParameters.diffuseColor,
-        lightingParameters.baseDiffuseRoughness,
-        lightingParameters.specularAlpha,
-        lightingParameters.weightedSpecularIor,
-        lightingParameters.dielectricSpecularF0,
-        lightingParameters.dielectricSpecularWeight,
-        lightingParameters.metalAverageFresnel,
-        lightingParameters.metalSpecularF0,
-        lightingParameters.metalSpecularWeight);
+    const OpenPBRBaseLayerState baseState = MakeOpenPBRBaseLayerStateForLighting(lightingParameters);
 
     // TODO: Parallax shadows will require a forward pass.
 
 #if defined(PSO_CLUSTERED_LIGHTING)
-    StructuredBuffer<Cluster> clusterBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::ClusterBuffer)];
-    StructuredBuffer<LightPage> lightPagesBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::PagesBuffer)];
-
-    const uint3 clusterID = ComputeClusterID(fragmentInfo.pixelCoords, fragmentInfo.fragPosViewSpace.z, perFrameBuffer, mainCamera);
-    const uint clusterIndex = clusterID.x +
-                              clusterID.y * perFrameBuffer.lightClusterGridSizeX +
-                              clusterID.z * perFrameBuffer.lightClusterGridSizeX * perFrameBuffer.lightClusterGridSizeY;
-    const Cluster activeCluster = clusterBuffer[clusterIndex];
-    result.clusterIndex = clusterID.z;
-    result.clusterLightCount = activeCluster.numLights;
-
-    // Pages hold light buffer indices: lightCulling.hlsl copies them out of the active list.
-    uint remainingLights = activeCluster.numLights;
-    uint pageIndex = activeCluster.ptrFirstPage;
-    const uint maxPagesToVisit = max(1u, (remainingLights + LIGHTS_PER_PAGE - 1u) / LIGHTS_PER_PAGE);
-    uint pagesVisited = 0;
-    while (pageIndex != LIGHT_PAGE_ADDRESS_NULL && remainingLights > 0 && pagesVisited < maxPagesToVisit)
+    // The fragment's froxel in the light grid (lightGrid.hlsli): a contiguous run of light buffer indices. Forward passes
+    // define LIGHT_GRID_FORWARD to read the run that covers the froxel in front of the opaque surface.
+    const LightGridRange lightRange = LightGridLoadRange(fragmentInfo.pixelCoords, fragmentInfo.fragPosViewSpace.z, perFrameBuffer, mainCamera);
+    result.clusterIndex = lightRange.slice;
+    result.clusterLightCount = lightRange.count;
+    for (uint i = 0; i < lightRange.count; i++)
     {
-        const LightPage page = lightPagesBuffer[pageIndex];
-        const uint lightsInPage = min(min(page.numLightsInPage, LIGHTS_PER_PAGE), remainingLights);
-        if (lightsInPage == 0)
-        {
-            break;
-        }
-        for (uint i = 0; i < lightsInPage; i++)
-        {
-            AccumulateDirectLight(page.lightIndices[i], fragmentInfo, mainCamera, lightingParameters, baseState, options, result);
-        }
-        remainingLights -= lightsInPage;
-        pageIndex = page.ptrNextPage;
-        pagesVisited++;
+        AccumulateDirectLight(LightGridLight(lightRange, i), fragmentInfo, mainCamera, lightingParameters, baseState, options, result);
     }
 #else
     StructuredBuffer<unsigned int> activeLightIndices = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::ActiveLightIndices)];

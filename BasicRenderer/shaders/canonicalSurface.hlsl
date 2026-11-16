@@ -27,8 +27,6 @@ void WriteCanonicalSurfaceSample(uint2 pixel, float2 motionVector, MaterialInput
     normalRoughness[pixel] = float4(normalize(material.normalWS), saturate(material.roughness));
     specularAo[pixel] = float4(lerp(dielectricF0, metalF0, metalness), saturate(material.ambientOcclusion));
     emissiveTexture[pixel] = float4(material.emissive, 0.0f);
-    payload0Texture[pixel] = float4(material.coatColor, material.coatWeight);
-    payload1Texture[pixel] = float4(material.fuzzColor, material.fuzzRoughness);
     motionVectorTexture[pixel] = motionVector;
 
     uint width;
@@ -41,9 +39,14 @@ void WriteCanonicalSurfaceSample(uint2 pixel, float2 motionVector, MaterialInput
     const uint metallicWorkflow = material.metallic > 0.0f ? (1u << 8u) : 0u;
     const uint flags = material.surfaceFlags | hasCoat | hasFuzz | hasGlint | metallicWorkflow;
     const uint payloadProfile = hasGlint != 0u ? 3u : ((hasCoat | hasFuzz) != 0u ? 1u : 0u);
-    surfaceIdentity[pixel] = uint2(
-        recordIndex,
-        (material.semanticFamily & 0xffu) | ((payloadProfile & 0xffu) << 8u) | ((flags & 0xffffu) << 16u));
+    // Payloads only for the profiles that carry them: readers take them as zero under SARP_SURFACE_PAYLOAD_NONE
+    // (GetFragmentInfoCanonicalSurface). Most surfaces have neither coat nor fuzz, and the two targets were 16 of the
+    // 84 bytes a pixel.
+    if (payloadProfile != 0u)
+    {
+        payload0Texture[pixel] = float4(material.coatColor, material.coatWeight);
+        payload1Texture[pixel] = float4(material.fuzzColor, material.fuzzRoughness);
+    }
 
     SARPSurfaceRecordV1 record = (SARPSurfaceRecordV1)0;
     record.sourceObjectId = material.sourceObjectId;
@@ -52,7 +55,30 @@ void WriteCanonicalSurfaceSample(uint2 pixel, float2 motionVector, MaterialInput
     record.semanticFamilyAndPayload = (material.semanticFamily & 0xffffu) | ((payloadProfile & 0xffffu) << 16u);
     record.flags = flags;
     record.diagnosticReason = material.diagnosticReason;
-    surfaceRecords[recordIndex] = record;
+
+    // One record for the lanes of a wave whose records are equal, kept at the lowest of their pixel indices. The contract
+    // indexes records through identity.x (SARPSurfaceRecordV1), not by pixel, and a record a pixel was 32 of the 84 bytes
+    // material evaluation wrote a pixel. Each pass of the loop takes the first remaining lane's record and retires the lanes
+    // that match it; waves hold a few distinct records.
+    const uint4 recordLo = uint4(record.sourceObjectId, record.sourceMaterialId);
+    const uint4 recordHi = uint4(record.materialTableIndex, record.semanticFamilyAndPayload, record.flags, record.diagnosticReason);
+    uint sharedRecordIndex = recordIndex;
+    [loop]
+    for (;;)
+    {
+        if (all(WaveReadLaneFirst(recordLo) == recordLo) && all(WaveReadLaneFirst(recordHi) == recordHi))
+        {
+            sharedRecordIndex = WaveActiveMin(recordIndex);
+            break;
+        }
+    }
+    surfaceIdentity[pixel] = uint2(
+        sharedRecordIndex,
+        (material.semanticFamily & 0xffu) | ((payloadProfile & 0xffu) << 8u) | ((flags & 0xffffu) << 16u));
+    if (sharedRecordIndex == recordIndex)
+    {
+        surfaceRecords[recordIndex] = record;
+    }
 }
 
 void EvaluateCanonicalSurfaceOptimized(uint2 pixel, uint64_t vis)

@@ -54,6 +54,28 @@ uint ReadPackedBits32_BA(ByteAddressBuffer buf, uint startBit, uint bitCount)
     return packed & mask;
 }
 
+// countA bits at startBit, then countB bits right after them (each at most 32), from one load. The two fields span at most
+// 31 + 64 bits from the aligned word, so three words always hold them. Material evaluation read a vertex's U and V with
+// ReadPackedBits32_BA, two loads each behind branches: the most sampled lines of the pass (Nsight, 2026-11-14).
+uint ExtractBits32FromPair(uint lowWord, uint highWord, uint bitOffset, uint bitCount)
+{
+    // HLSL masks shift amounts to 5 bits, so a shift by 32 would not clear: bitOffset 0 takes lowWord alone.
+    const uint packed = bitOffset != 0u ? ((lowWord >> bitOffset) | (highWord << (32u - bitOffset))) : lowWord;
+    const uint mask = bitCount >= 32u ? 0xffffffffu : ((1u << bitCount) - 1u);
+    return packed & mask;
+}
+
+uint2 ReadPackedBitPair32_BA(ByteAddressBuffer buf, uint startBit, uint countA, uint countB)
+{
+    const uint bitOffset = startBit & 31u;
+    const uint3 words = buf.Load3((startBit >> 5) * 4u);
+    const uint secondStart = bitOffset + countA; // < 64
+    const bool secondInFirstWord = secondStart < 32u;
+    return uint2(
+        ExtractBits32FromPair(words.x, words.y, bitOffset, countA),
+        ExtractBits32FromPair(secondInFirstWord ? words.x : words.y, secondInFirstWord ? words.y : words.z, secondStart & 31u, countB));
+}
+
 float3 DecodeCompressedPosition(uint meshletLocalVertex, MeshletResolveData d)
 {
     ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(d.pagePoolSlabDescriptorIndex)];
@@ -297,28 +319,6 @@ MeshletResolveData LoadMeshletResolveData(uint clusterIndex)
     return d;
 }
 
-// The same, loaded once per distinct cluster in the wave: each iteration takes the first active lane's cluster (a
-// wave-uniform index, so the loads are scalar) and retires the lanes that share it. WaveReadLaneAt with a per-group leader
-// is not this: its lane index must be wave-uniform, and drivers that scalarize it hand every lane the first group's data.
-MeshletResolveData LoadMeshletResolveData_Wave(uint clusterIndex)
-{
-#if defined(CLOD_RESOLVE_RAY_HIT)
-    return LoadMeshletResolveData(clusterIndex); // Threads see unrelated clusters, so there's nothing to share.
-#endif
-    MeshletResolveData d = (MeshletResolveData)0;
-    [loop]
-    for (;;)
-    {
-        const uint uniformCluster = WaveReadLaneFirst(clusterIndex);
-        if (clusterIndex == uniformCluster)
-        {
-            d = LoadMeshletResolveData(uniformCluster);
-            break;
-        }
-    }
-    return d;
-}
-
 void ApplyPreviousClodSkinningToPosition(
     uint meshletLocalVertex,
     MeshletResolveData d,
@@ -349,32 +349,11 @@ uint3 DecodeTriangleCompact(uint triLocalIndex, MeshletResolveData d)
     uint triOffset = d.triangleStreamBase + d.triangleByteOffset + triLocalIndex * 3u;
 
     ByteAddressBuffer slab = ResourceDescriptorHeap[NonUniformResourceIndex(d.pagePoolSlabDescriptorIndex)];
-    uint alignedOffset = (triOffset / 4u) * 4u;
-    uint firstWord = slab.Load(alignedOffset);
-    uint byteOffset = triOffset % 4u;
-
-    uint b0 = (firstWord >> (byteOffset * 8u)) & 0xFFu;
-    uint b1, b2;
-
-    if (byteOffset <= 1u)
-    {
-        b1 = (firstWord >> ((byteOffset + 1u) * 8u)) & 0xFFu;
-        b2 = (firstWord >> ((byteOffset + 2u) * 8u)) & 0xFFu;
-    }
-    else if (byteOffset == 2u)
-    {
-        b1 = (firstWord >> ((byteOffset + 1u) * 8u)) & 0xFFu;
-        uint secondWord = slab.Load(alignedOffset + 4u);
-        b2 = secondWord & 0xFFu;
-    }
-    else
-    {
-        uint secondWord = slab.Load(alignedOffset + 4u);
-        b1 = secondWord & 0xFFu;
-        b2 = (secondWord >> 8u) & 0xFFu;
-    }
-
-    return uint3(b0, b1, b2);
+    // The three index bytes lie within two words from the aligned one: one load, no branches.
+    const uint2 words = slab.Load2((triOffset / 4u) * 4u);
+    const uint shift = (triOffset % 4u) * 8u;
+    const uint packed = shift != 0u ? ((words.x >> shift) | (words.y << (32u - shift))) : words.x;
+    return uint3(packed & 0xFFu, (packed >> 8u) & 0xFFu, (packed >> 16u) & 0xFFu);
 }
 
 float2 ComputeClodMotionVector(float3 previousPosOS, float3 worldPosition, float4x4 prevModel, float4x4 unjitteredViewProj, float4x4 prevUnjitteredViewProj)
@@ -387,5 +366,15 @@ float2 ComputeClodMotionVector(float3 previousPosOS, float3 worldPosition, float
     float2 ndcPrev = clipPrev.xy / clipPrev.w;
     return ndcCur - ndcPrev;
 }
+
+// From last frame's world position, with each view-projection given as its two factors.
+float2 ComputeClodMotionVectorFromPrevWorld(float3 prevWorldPosition, float3 worldPosition,
+    float4x4 view, float4x4 unjitteredProjection, float4x4 prevView, float4x4 prevUnjitteredProjection)
+{
+    const float4 clipCur = mul(mul(float4(worldPosition, 1.0f), view), unjitteredProjection);
+    const float4 clipPrev = mul(mul(float4(prevWorldPosition, 1.0f), prevView), prevUnjitteredProjection);
+    return clipCur.xy / clipCur.w - clipPrev.xy / clipPrev.w;
+}
+
 
 #endif // CLOD_RESOLVE_MESHLET_HLSLI

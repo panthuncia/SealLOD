@@ -273,6 +273,18 @@ struct ClodResolvedSurface
     float4 tangentWS;
 };
 
+// transpose(inverse(m)) for a row-vector model: row i of the cofactor matrix is the cross product of the other two rows.
+// Equal to transpose((float3x3)modelInverse), mirrored models included; a degenerate model keeps the unscaled cofactors.
+float3x3 CLodNormalMatrixFromModel(float3x3 m)
+{
+    const float3 c0 = cross(m[1], m[2]);
+    const float3 c1 = cross(m[2], m[0]);
+    const float3 c2 = cross(m[0], m[1]);
+    const float det = dot(m[0], c0);
+    const float invDet = abs(det) > 1.0e-30f ? rcp(det) : 1.0f;
+    return float3x3(c0 * invDet, c1 * invDet, c2 * invDet);
+}
+
 ClodResolvedSurface CLodResolveInterpolateSurface(
     ClodResolvedTriangle tri,
     float3 evalPos0,
@@ -350,7 +362,10 @@ ClodResolvedSurface CLodResolveInterpolateSurface(
             InterpolateWithDeriv(bary, tri.c0.y, tri.c1.y, tri.c2.y).x,
             InterpolateWithDeriv(bary, tri.c0.z, tri.c1.z, tri.c2.z).x);
     }
-    float3x3 normalMatrix = CLodAssemblyAwareNormalMatrix(obj);
+    // The inverse transpose of the model's 3x3, as its cofactors over the determinant: from obj.model, already live, rather
+    // than obj.modelInverse, which cost a load of the instance's inverse, a second load of the assembly transform, its
+    // inversion and a matrix multiply, and was one of material evaluation's register peaks (Nsight, 2026-11-14).
+    float3x3 normalMatrix = CLodNormalMatrixFromModel((float3x3)obj.model);
     const float3 interpolatedNormalOS = normalOS;
     const float3 interpolatedWorldNormal = normalize(mul(interpolatedNormalOS, normalMatrix));
     if (useReyesGeometricNormal)
@@ -485,10 +500,20 @@ MaterialInputs CLodResolveEvaluateMaterial(
     {
 #endif
 #if !defined(PSO_TERRAIN) || defined(CLOD_RESOLVE_PATH_HIT)
+#if defined(VISUTIL_SPECIALIZED_MATERIAL_EVAL)
+    // Object triplanar materials have their own evaluation variant (MaterialCompileObjectTriplanar -> PSO_OBJECT_TRIPLANAR),
+    // so each variant compiles one sampling path. Both in one shader made every material pay the triplanar path's registers:
+    // 18 samples a texture, 82 sample ops for four textures.
+#if defined(PSO_OBJECT_TRIPLANAR)
+    const bool isObjectTriplanarMaterial = true;
+#else
+    const bool isObjectTriplanarMaterial = false;
+#endif
+#else
     const bool isObjectTriplanarMaterial = (materialFlags & MATERIAL_OBJECT_TRIPLANAR_STOCHASTIC) != 0u;
+#endif
     const bool needsObjectSpaceNormalUv =
-        (materialFlags & (MATERIAL_NORMAL_MAP | MATERIAL_OBJECT_SPACE_NORMAL_MAP)) ==
-        (MATERIAL_NORMAL_MAP | MATERIAL_OBJECT_SPACE_NORMAL_MAP);
+        (materialFlags & MATERIAL_NORMAL_MAP) != 0u && MaterialUsesObjectSpaceNormalMap(materialFlags);
 #if defined(VISUTIL_COLOR_ONLY_GBUFFER_EVAL)
     const bool needsMaterialDebugUv = false;
 #else
@@ -591,7 +616,7 @@ MaterialInputs CLodResolveEvaluateMaterial(
     {
 #if defined(PSO_NORMAL_MAP)
         const MaterialUvSample objectNormalUv = GetBoundUvSample(uvCache, uvBindings, MATERIAL_TEXTURE_SLOT_NORMAL);
-        Texture2D<float4> objectNormalTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialTextureDescriptor(materialInfo.normalTextureIndex, materialInfo.normalStreamingTextureID))];
+        Texture2D<float4> objectNormalTexture = ResourceDescriptorHeap[NonUniformResourceIndex(ResolveMaterialEvalTextureDescriptor(MATERIAL_RESOLVED_TEXTURE_NORMAL, materialInfo.normalTextureIndex, materialInfo.normalStreamingTextureID))];
         SamplerState objectNormalSamplerState = SamplerDescriptorHeap[NonUniformResourceIndex(materialInfo.normalSamplerIndex)];
         const float4 objectNormalSample = SampleMaterialTexture2DGrad(
             objectNormalTexture,
@@ -713,7 +738,10 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
     assemblyTransformIndex = g_clodRtHitTransformIndex;
 #endif
 
-    MeshletResolveData md = LoadMeshletResolveData_Wave(clusterIndex);
+    // Per lane. Lanes that share a cluster read the same lines, so the loads overlap. A loop over the wave's distinct clusters
+    // (scalar loads, one cluster an iteration) waited out the whole chain of dependent loads once per cluster: material
+    // evaluation on Zorah took 5.9 ms with it, 4.2 ms without.
+    MeshletResolveData md = LoadMeshletResolveData(clusterIndex);
     if (meshletTriangleIndex >= md.triangleCount)
     {
         return false;
@@ -738,13 +766,25 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
 
     const ClodResolvedTriangle tri = CLodResolveLoadTriangle(triIdx, md, assemblyTransformIndex);
 
-    PerObjectBuffer obj = LoadInstanceTransformForDrawWithAssemblyTransform(md.objAndMesh.x, assemblyTransformIndex);
+    // Only the model up front: the normal matrix's inverse is composed just before the surface, the previous model at the
+    // motion vector, and the scene IDs are read at the end (ComposeAssemblyModel).
+    const uint instanceTransformIndex = LoadInstanceDrawRecord(md.objAndMesh.x).instanceTransformIndex;
+    PerObjectBuffer obj = (PerObjectBuffer)0;
+    obj.model = ComposeAssemblyModel(instanceTransformIndex, assemblyTransformIndex);
 #if defined(VISUTIL_USE_COMPACT_MATERIAL_EVAL)
     StructuredBuffer<ClodResolveMaterialInfo> materialDataBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialEvalDataBuffer)];
 #else
     StructuredBuffer<ClodResolveMaterialInfo> materialDataBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
 #endif
+#if defined(VISUTIL_SPECIALIZED_MATERIAL_EVAL) && !defined(PSO_CLOD_REYES_PATCH)
+    // Material evaluation loads the material just before sampling it: copied here, every field it reads was loaded here and
+    // held through the triangle fetch, the barycentrics and the motion vector. Only the flags are needed before then.
+#define CLOD_RESOLVE_LATE_MATERIAL_LOAD 1
+    ClodResolveMaterialInfo materialInfo = (ClodResolveMaterialInfo)0;
+    materialInfo.materialFlags = materialDataBuffer[md.materialDataIndex].materialFlags;
+#else
     ClodResolveMaterialInfo materialInfo = materialDataBuffer[md.materialDataIndex];
+#endif
     MaterialEvalInfo reyesMaterialInfo = (MaterialEvalInfo)0;
 #if defined(VISUTIL_USE_COMPACT_MATERIAL_EVAL)
     reyesMaterialInfo = materialInfo;
@@ -872,9 +912,40 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
         isReyesPatch,
         useReyesGeometricNormal);
 
+    // Before the material, so that what they read (the camera's matrices, the object's previous transform, the previous
+    // position) isn't held across the texture sampling. After it, they cost material evaluation ~65 registers on Zorah.
+    // The matrices are read here, not through the Camera copied at the top: loaded there, all four stayed live through the
+    // triangle fetch and the barycentrics.
+    float2 motionVector;
+    float3 positionVS;
+    {
+        StructuredBuffer<Camera> motionCameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
+        const uint motionCameraIndex = perFrame.mainCameraIndex;
+        const float4x4 cameraView = motionCameras[motionCameraIndex].view;
+        // Loaded here rather than with the model: from there its 12 floats stayed live through the triangle fetch, the
+        // barycentrics and the surface, and took the common textured variant from 96 to 128 registers (five warps a
+        // scheduler to four).
+        const ClusterLODAssemblyTransform motionAssembly = LoadAssemblyTransformOrIdentity(assemblyTransformIndex);
+        motionVector = ComputeClodMotionVectorFromPrevWorld(
+            AssemblyPrevWorldPosition(instanceTransformIndex, motionAssembly, surface.previousPosOS),
+            surface.worldPosition,
+            cameraView,
+            motionCameras[motionCameraIndex].unjitteredProjection,
+            motionCameras[motionCameraIndex].prevView,
+            motionCameras[motionCameraIndex].prevUnjitteredProjection);
+        positionVS = mul(float4(surface.worldPosition, 1.0f), cameraView).xyz;
+    }
+
+#if defined(CLOD_RESOLVE_LATE_MATERIAL_LOAD)
+    materialInfo = materialDataBuffer[md.materialDataIndex];
+    materialInfo.materialFlags = materialFlags;
+#endif
     float2 materialDebugUv;
     float materialDebugUvValid;
     float2 materialDebugUvDerivative;
+#if defined(MATERIAL_EVAL_RESOLVED_TEXTURE_TABLE)
+    g_materialEvalResolvedTextureRow = md.materialDataIndex; // ResolveMaterialEvalTextureDescriptor
+#endif
     MaterialInputs materialInputs = CLodResolveEvaluateMaterial(
         materialInfo,
         materialFlags,
@@ -894,8 +965,6 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
 #if !defined(VISUTIL_COLOR_ONLY_GBUFFER_EVAL)
     const float3 reyesDebugSourceBarycentrics = bary.m_lambda;
 #endif
-
-    float3 positionVS = mul(float4(surface.worldPosition, 1.0f), cam.view).xyz;
 
     sample.linearDepth = depth;
     sample.clusterIndex = clusterIndex;
@@ -917,18 +986,18 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
 #endif
     sample.dpdxWS = surface.dpdx;
     sample.dpdyWS = surface.dpdy;
-    sample.motionVector = ComputeClodMotionVector(
-        surface.previousPosOS,
-        surface.worldPosition,
-        obj.prevModel,
-        mul(cam.view, cam.unjitteredProjection),
-        mul(cam.prevView, cam.prevUnjitteredProjection));
-    materialInputs.sourceObjectId = uint2(obj.stableSceneIdLo, obj.stableSceneIdHi);
-    materialInputs.sourceMaterialId = materialInfo.sourceMaterialId;
+    sample.motionVector = motionVector;
+    {
+        StructuredBuffer<PerObjectBuffer> sceneIdTransforms = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerInstanceTransformBuffer)];
+        materialInputs.sourceObjectId = uint2(sceneIdTransforms[instanceTransformIndex].stableSceneIdLo,
+            sceneIdTransforms[instanceTransformIndex].stableSceneIdHi);
+    }
+    // Read after the sampling rather than through materialInfo, which would load them before it.
+    materialInputs.sourceMaterialId = materialDataBuffer[md.materialDataIndex].sourceMaterialId;
     materialInputs.materialTableIndex = md.materialDataIndex;
-    materialInputs.semanticFamily = materialInfo.semanticFamily;
-    materialInputs.surfaceFlags = materialInfo.surfaceFlags;
-    materialInputs.diagnosticReason = materialInfo.diagnosticReason;
+    materialInputs.semanticFamily = materialDataBuffer[md.materialDataIndex].semanticFamily;
+    materialInputs.surfaceFlags = materialDataBuffer[md.materialDataIndex].surfaceFlags;
+    materialInputs.diagnosticReason = materialDataBuffer[md.materialDataIndex].diagnosticReason;
 #if defined(VISUTIL_USE_COMPACT_MATERIAL_EVAL)
     sample.materialInfo = (MaterialInfo)0;
 #else
@@ -946,6 +1015,7 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
         sample.materialInputs.normalWS = -sample.materialInputs.normalWS;
     }
 #endif
+#undef CLOD_RESOLVE_LATE_MATERIAL_LOAD
     return true;
 }
 

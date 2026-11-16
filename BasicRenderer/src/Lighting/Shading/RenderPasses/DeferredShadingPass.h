@@ -28,16 +28,17 @@ struct DeferredShadingFrame {
 
 class DeferredShadingPass : public org::TypedRenderGraphPass<DeferredShadingPass, DeferredShadingFrame> {
 public:
-	explicit DeferredShadingPass(bool skyboxEnabled = false)
-		: m_skyboxEnabled(skyboxEnabled) {
+	explicit DeferredShadingPass(bool skyboxEnabled = false, bool stochasticLighting = false)
+		: m_skyboxEnabled(skyboxEnabled), m_stochasticLighting(stochasticLighting) {
 		auto& settingsManager = SettingsManager::GetInstance();
 		m_imageBasedLightingEnabled = settingsManager.getSettingGetter<bool>("enableImageBasedLighting")();
 		m_punctualLightingEnabled = settingsManager.getSettingGetter<bool>("enablePunctualLighting")();
-		// enableShadows follows ClusterLodShadowTechnique, and the graph is rebuilt when it changes.
-		m_virtualShadowMaps = settingsManager.getSettingGetter<bool>("enableShadows")();
+		// enableShadows follows ClusterLodShadowTechnique, and the graph is rebuilt when it changes. Stochastic lighting
+		// shadows every light itself, the sun included, and no shadow map exists then.
+		m_virtualShadowMaps = settingsManager.getSettingGetter<bool>("enableShadows")() && !stochasticLighting;
 		m_gtaoEnabled = settingsManager.getSettingGetter<bool>("enableGTAO")();
 		m_rayTracedSunShadow = settingsManager.getSettingGetter<bool>("enableRayTracedShadows")()
-			&& DeviceManager::GetInstance().GetCLodRayTracingSupported();
+			&& DeviceManager::GetInstance().GetCLodRayTracingSupported() && !stochasticLighting;
 		m_clusteredLightingEnabled = settingsManager.getSettingGetter<bool>("enableClusteredLighting")();
 		// Receiver counters go to CLodStats, which is bound only with the virtual shadow map.
 		m_virtualShadowReceiverTelemetry = m_virtualShadowMaps &&
@@ -90,11 +91,14 @@ public:
 			}
 
 		if (m_clusteredLightingEnabled) {
-			builder.ShaderResource(Builtin::Light::ClusterBuffer, Builtin::Light::PagesBuffer);
+			builder.ShaderResource(Builtin::Light::GridCells, Builtin::Light::GridIndices);
 		}
 
 		if (m_rayTracedSunShadow) {
 			builder.ShaderResource(Builtin::RayTracing::SunShadow);
+		}
+		if (m_stochasticLighting) {
+			builder.ShaderResource(Builtin::StochasticLighting::Diffuse, Builtin::StochasticLighting::Specular);
 		}
 		if (m_gtaoEnabled) {
 			builder.ShaderResource(Builtin::GTAO::OutputAOTerm);
@@ -115,8 +119,15 @@ public:
 		const auto& lighting = update ? update->lighting : render->lighting;
 		DeferredShadingFrame frame{};
 		frame.pipeline = DeferredPipeline(globalFlags);
-		// The shadow map's resources are declared only when it was on at graph build.
-		frame.shadowingMode = m_virtualShadowMaps ? lighting.shadowingMode : ShadowingMode::None;
+		// The shadow map's resources are declared only when it was on at graph build, and stochastic lighting's only when its
+		// passes were built.
+		if (lighting.shadowingMode == ShadowingMode::StochasticRayTraced && m_stochasticLighting) {
+			frame.shadowingMode = ShadowingMode::StochasticRayTraced;
+		} else if (lighting.shadowingMode != ShadowingMode::None && m_virtualShadowMaps) {
+			frame.shadowingMode = ShadowingMode::VirtualShadowMaps;
+		} else {
+			frame.shadowingMode = ShadowingMode::None;
+		}
 		frame.punctualLights = lighting.punctualLightingEnabled;
 		frame.gtao = lighting.gtaoEnabled;
 		frame.skybox = m_skyboxEnabled;
@@ -162,4 +173,5 @@ private:
 	bool m_virtualShadowReceiverTelemetry = false;
 	bool m_clusteredLightingEnabled = true;
 	bool m_skyboxEnabled = false;
+	bool m_stochasticLighting = false;
 };

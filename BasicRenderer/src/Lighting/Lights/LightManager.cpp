@@ -19,6 +19,27 @@
 #include "BasicRenderer/Streaming/LightStateArtifacts.h"
 #include "Lighting/Lights/LocalShadowSelection.h"
 #include "../../../generated/BuiltinResources.h"
+#include "../shaders/PerPassRootConstants/lightCullingRootConstants.h"
+#include "Render/RenderGraph/RenderGraph.h"
+#include "Render/Runtime/IReadbackService.h"
+#include "Resources/ReadbackRequest.h"
+#include <cstring>
+
+namespace {
+// Frames between readbacks of the light grid's counters (LightCullingPass), and between their log lines.
+constexpr uint64_t kCullingStatsReadbackInterval = 30u;
+constexpr uint64_t kCullingStatsLogInterval = 300u;
+}
+
+struct LightManager::CullingStatsShared {
+	std::mutex mutex;
+	LightCullingStats last;
+	uint32_t windowMaxDropped = 0; // the most dropped in one readback since the last log line
+	uint32_t windowMaxNeeded = 0;
+	bool reading = false;
+	uint64_t requestedFrame = 0;
+	bool warned = false;
+};
 
 LightManager::LightManager() {
     auto& resourceManager = ::ResourceManager::GetInstance();
@@ -43,29 +64,12 @@ LightManager::LightManager() {
 	m_pLightBufferResourceGroup->AddResource(m_lightBuffer);
 	m_pLightBufferResourceGroup->AddResource(m_activeLightIndices);
 
-	auto getClusterSize = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT3>("lightClusterSize");
-	auto lightClusterSize = getClusterSize();
+	m_pCullingStatsBuffer = CreateIndexedStructuredBuffer(LIGHT_CULLING_STATS_WORDS, sizeof(uint32_t), true, false);
+	m_pCullingStatsBuffer->SetName("lightCullingStats");
+	org::memory::SetResourceUsageHint(*m_pCullingStatsBuffer, "Lighting buffers");
+	m_cullingStats = std::make_shared<CullingStatsShared>();
 
-	auto numClusters = lightClusterSize.x * lightClusterSize.y * lightClusterSize.z;
-	m_pClusterBuffer = CreateIndexedStructuredBuffer(numClusters, sizeof(Cluster), true, false);
-	m_pClusterBuffer->SetName("lightingClusterBuffer");
-	org::memory::SetResourceUsageHint(*m_pClusterBuffer, "Lighting buffers");
-
-	static const size_t avgPagesPerCluster = 10;
-	m_lightPagePoolSize = numClusters * avgPagesPerCluster;
-	m_pLightPagesBuffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
-		static_cast<uint32_t>(m_lightPagePoolSize),
-		sizeof(LightPage),
-		true,
-		false,
-		false,
-		rhi::HeapType::DeviceLocal);
-	m_pLightPagesBuffer->SetAllowAlias(true);
-	m_pLightPagesBuffer->SetName("lightPagesBuffer");
-	org::memory::SetResourceUsageHint(*m_pLightPagesBuffer, "Lighting buffers");
-
-	m_resources[Builtin::Light::ClusterBuffer] = m_pClusterBuffer;
-	m_resources[Builtin::Light::PagesBuffer] = m_pLightPagesBuffer;
+	m_resources[Builtin::Light::CullingStats] = m_pCullingStatsBuffer;
 	m_resources[Builtin::Light::InfoBuffer] = m_lightBuffer;
 	m_resources[Builtin::Light::DirectionalLightCascadeBuffer] = m_directionalViewInfo;
 	m_resources[Builtin::Light::ActiveLightIndices] = m_activeLightIndices;
@@ -167,6 +171,19 @@ void LightManager::RemoveLight(flecs::entity light) {
 	auto& viewInfo = light.get<Components::LightViewInfo>();
 	if (viewInfo.lightBufferView) {
 		m_activeLightIndices->Remove(viewInfo.lightBufferIndex);
+		{
+			// The slot goes dark under a new generation before it is freed. Stochastic lighting's visible lists are read
+			// without the light clusters (stochasticSelect.hlsl), so a listed slot must stop matching its light, and give
+			// nothing if it is still read.
+			std::lock_guard<std::mutex> lock(m_lightUpdateMutex);
+			const uint32_t lightIndex = viewInfo.lightBufferIndex;
+			if (m_slotGenerations.size() <= lightIndex) {
+				m_slotGenerations.resize(lightIndex + 1u, 0u);
+			}
+			LightInfo retired{};
+			retired.generation = ++m_slotGenerations[lightIndex];
+			m_lightBuffer->UpdateView(viewInfo.lightBufferView.get(), &retired);
+		}
 		m_lightBuffer->Remove(viewInfo.lightBufferView.get());
 		std::lock_guard<std::mutex> lock(m_lightUpdateMutex);
 		m_activeIndices.erase(viewInfo.lightBufferIndex);
@@ -206,6 +223,11 @@ std::vector<VirtualShadowDebugLight> LightManager::GetVirtualShadowDebugLights()
 				std::to_string(firstSlice + assignment.faceCount * CLodVirtualShadowLocalSlicesPerFace - 1u) + ")"});
 	}
 	return lights;
+}
+
+uint32_t LightManager::GetNumDirectionalLights() {
+	std::lock_guard<std::mutex> lock(m_lightUpdateMutex);
+	return static_cast<uint32_t>(m_directionalLights.size());
 }
 
 SunLightSelection LightManager::GetSunLight() {
@@ -539,12 +561,12 @@ void LightManager::ReleaseLocalShadow(uint32_t lightIndex) {
 	m_publicationRevision.fetch_add(1, std::memory_order_release);
 }
 
-void LightManager::UpdateLocalShadows() {
+void LightManager::UpdateLocalShadows(bool localShadowMaps) {
 	if (!m_shadowViews || !m_currentCamera.is_valid() || !m_currentCamera.has<Components::Matrix>()) {
 		return;
 	}
 	const auto cameraPosition = GetGlobalPositionFromMatrix(m_currentCamera.get<Components::Matrix>().matrix);
-	const uint32_t faceBudget = (std::min)(getLocalShadowMaxFaces(), CLodVirtualShadowMaxLocalFaceCount);
+	const uint32_t faceBudget = localShadowMaps ? (std::min)(getLocalShadowMaxFaces(), CLodVirtualShadowMaxLocalFaceCount) : 0u;
 
 	struct Light {
 		flecs::entity entity;
@@ -650,6 +672,61 @@ std::vector<br::render::PublishedLocalShadowLight> LightManager::CaptureLocalSha
 		shadows.push_back({ lightIndex, assignment.firstFace, assignment.viewIDs });
 	}
 	return shadows;
+}
+
+void LightManager::PollCullingStats(org::RenderGraph* graph) {
+	const uint64_t frame = ++m_cullingStatsFrame;
+	if (!graph || frame % kCullingStatsReadbackInterval != 0u) return;
+	auto* readbacks = graph->GetReadbackService();
+	if (!readbacks) return;
+	// Nothing writes the counters without the pass (no clustered lighting, path tracing).
+	if (const auto* statistics = graph->GetStatisticsService()) {
+		const auto& names = statistics->GetPassNames();
+		if (!names.empty() && std::ranges::find(names, std::string("LightCullingPass")) == names.end()) return;
+	}
+	{
+		std::scoped_lock lock(m_cullingStats->mutex);
+		// A readback lost with its graph would otherwise stop the polling for good.
+		if (m_cullingStats->reading && frame - m_cullingStats->requestedFrame < kCullingStatsLogInterval) return;
+		m_cullingStats->reading = true;
+		m_cullingStats->requestedFrame = frame;
+	}
+	const std::weak_ptr<CullingStatsShared> weak = m_cullingStats;
+	readbacks->RequestReadbackCaptureAfterGraph(m_pCullingStatsBuffer.get(), org::RangeSpec{}, [weak](org::ReadbackCaptureResult&& result) {
+		const auto shared = weak.lock();
+		if (!shared) return;
+		std::scoped_lock lock(shared->mutex);
+		shared->reading = false;
+		uint32_t words[LIGHT_CULLING_STATS_WORDS] = {};
+		if (result.data.size() < sizeof(words)) return;
+		std::memcpy(words, result.data.data(), sizeof(words));
+		auto& stats = shared->last;
+		stats.droppedLights = words[LIGHT_CULLING_STATS_DROPPED_LIGHTS];
+		stats.overflowedClusters = words[LIGHT_CULLING_STATS_OVERFLOWED_CLUSTERS];
+		stats.storedLights = words[LIGHT_CULLING_STATS_STORED_LIGHTS];
+		stats.neededLights = words[LIGHT_CULLING_STATS_NEEDED_LIGHTS];
+		++stats.readbacks;
+		stats.maxNeededLights = (std::max)(stats.maxNeededLights, stats.neededLights);
+		shared->windowMaxDropped = (std::max)(shared->windowMaxDropped, stats.droppedLights);
+		shared->windowMaxNeeded = (std::max)(shared->windowMaxNeeded, stats.neededLights);
+		if (stats.droppedLights > 0u && !shared->warned) {
+			shared->warned = true;
+			spdlog::warn("Light culling: {} (froxel, light) pairs dropped in {} froxels ({} index entries needed); the light grid's "
+				"index buffer grows to fit", stats.droppedLights, stats.overflowedClusters, stats.neededLights);
+		}
+		if (stats.readbacks % (kCullingStatsLogInterval / kCullingStatsReadbackInterval) == 0u) {
+			spdlog::info("Light culling: {} (froxel, light) pairs dropped in {} froxels, at most {} in a sampled frame of the last {}; {} stored; "
+				"at most {} index entries needed", stats.droppedLights, stats.overflowedClusters, shared->windowMaxDropped,
+				kCullingStatsLogInterval, stats.storedLights, shared->windowMaxNeeded);
+			shared->windowMaxDropped = 0u;
+			shared->windowMaxNeeded = 0u;
+		}
+	});
+}
+
+LightCullingStats LightManager::GetCullingStats() const {
+	std::scoped_lock lock(m_cullingStats->mutex);
+	return m_cullingStats->last;
 }
 
 std::shared_ptr<org::Resource> LightManager::ProvideResource(org::ResourceIdentifier const& key) {

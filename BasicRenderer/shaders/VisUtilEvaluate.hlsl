@@ -1,3 +1,8 @@
+// Read the per-material resolved texture descriptors (materialTextureBinding.hlsli). 0 keeps the binding but resolves
+// through the streaming rows, for A/B with pso.recompile.
+#ifndef MATERIAL_EVAL_RESOLVED_TEXTURE_TABLE
+#define MATERIAL_EVAL_RESOLVED_TEXTURE_TABLE 1
+#endif
 #include "include/cbuffers.hlsli"
 #include "include/structs.hlsli"
 #include "include/visUtilCommon.hlsli"

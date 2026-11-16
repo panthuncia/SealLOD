@@ -941,6 +941,7 @@ void CLodRtCachePackCS(uint tid : SV_GroupIndex)
             }
             entries.Store2(entryBase + 4u, uint2(own + 1u, firstPage));
             entries.Store(entryBase + CLOD_RT_CACHE_ENTRY_UNITS_OFFSET, packedUnits);
+            entries.Store(entryBase + CLOD_RT_CACHE_ENTRY_BUILT_OFFSET, frame); // What kept BLASes check their CLAS against.
             // The entry a rebuild replaces goes only now, once all the new CLAS have a place.
             const uint replacedPlusOne = ranges.Load(r * CLOD_RT_CACHE_RANGE_BYTES + 32u);
             const uint4 groupState = state.Load4(range.x * CLOD_RT_CACHE_STATE_BYTES);
@@ -1325,6 +1326,10 @@ void CLodRtAllocateCS(uint3 id : SV_DispatchThreadID)
     args.clusterReferences = addressArray + uint64_t(base) * 8ull;
     blasArgs[blasIndex] = args;
     instanceBlas[id.x] = count != 0u ? blasIndex : 0xFFFFFFFFu;
+    // The BLAS cache's keys: the share key, the validity hash Place sums, and whether it can be kept (not when truncated).
+    RWByteAddressBuffer cacheKeys = ResourceDescriptorHeap[CLOD_RT_SCENE_BC_KEYS_UAV];
+    cacheKeys.Store4(blasIndex * CLOD_RT_BC_KEY_BYTES, uint4(uint(key), uint(key >> 32u), 0u, 0u));
+    cacheKeys.Store4(blasIndex * CLOD_RT_BC_KEY_BYTES + 16u, uint4(count != wanted ? 1u : 0u, 0u, 0u, 0u));
     // Only a whole selection can be shared: a truncated one differs from what its key says.
     if (claimed && count == wanted) {
         shareTable.Store((slot * 16u) + 12u, blasIndex + 1u);
@@ -1410,6 +1415,8 @@ void CLodRtPlaceCS(uint3 id : SV_DispatchThreadID)
     // A group the cache built no CLAS for this frame (over the budget, or no room to keep it) leaves a null reference,
     // which the build ignores: that part of the scene is missing this frame, and it is asked for again next frame.
     uint64_t address = 0ull;
+    RWStructuredBuffer<uint> placeInstanceBlas = ResourceDescriptorHeap[CLOD_RT_SCENE_INSTANCE_BLAS_UAV];
+    const uint ownBlas = placeInstanceBlas[drawTable.Load(draws) - 1u];
     if (slot == CLOD_RT_CACHE_INVALID) {
         RWByteAddressBuffer cacheCtrl = ResourceDescriptorHeap[CLOD_RT_SCENE_CACHE_CTRL_UAV];
         cacheCtrl.InterlockedAdd(CLOD_RT_CTRL_MISSING_TOTAL * 4u, 1u);
@@ -1433,8 +1440,671 @@ void CLodRtPlaceCS(uint3 id : SV_DispatchThreadID)
             }
         }
     }
+    // After the CLAS address: this block once sat between that if and its else, which took the else and left every
+    // reference null (every BLAS empty, every ray missed).
+    if (ownBlas < CLOD_RT_SCENE_BLAS_CAPACITY) {
+        // The BLAS cache's validity hash: each CLAS's address and the frame its cache entry was built, summed, so the order
+        // clusters are placed in doesn't matter. A cluster without a CLAS, or whose group is transient this frame (rebuilt
+        // every frame), keeps the BLAS from being kept.
+        RWByteAddressBuffer cacheKeys = ResourceDescriptorHeap[CLOD_RT_SCENE_BC_KEYS_UAV];
+        uint stamp = 0u;
+        bool keepable = slot != CLOD_RT_CACHE_INVALID && transient[groupGlobal].x != CLodRtSceneFrame();
+        if (keepable) {
+            uint entryBytes = 0u;
+            cacheEntries.GetDimensions(entryBytes);
+            uint entry = 0u;
+            keepable = CLodRtCacheStateEntry(groupState.Load(groupGlobal * CLOD_RT_CACHE_STATE_BYTES), entryBytes / CLOD_RT_CACHE_ENTRY_BYTES, entry);
+            stamp = keepable ? cacheEntries.Load(entry * CLOD_RT_CACHE_ENTRY_BYTES + CLOD_RT_CACHE_ENTRY_BUILT_OFFSET) : 0u;
+        }
+        if (!keepable) {
+            cacheKeys.InterlockedOr(ownBlas * CLOD_RT_BC_KEY_BYTES + 16u, 1u);
+        }
+        else {
+            RWStructuredBuffer<uint64_t> slotAddresses = ResourceDescriptorHeap[CLOD_RT_SCENE_CLAS_ADDRESSES_UAV];
+            const uint64_t clas = slotAddresses[slot];
+            const uint low = CLodRtMix(uint(clas) ^ CLodRtMix(stamp + slot));
+            const uint high = CLodRtMix(uint(clas >> 32u) ^ low ^ 0x85EBCA6Bu);
+            uint64_t ignored = 0ull;
+            cacheKeys.InterlockedAdd64(ownBlas * CLOD_RT_BC_KEY_BYTES + 8u, (uint64_t(high) << 32u) | uint64_t(low), ignored);
+        }
+    }
     RWStructuredBuffer<uint64_t> addressArray = ResourceDescriptorHeap[CLOD_RT_SCENE_ADDRESS_ARRAY_UAV];
     addressArray[element] = address;
+}
+
+// ---- The BLAS cache (clodRayTracingSetupRootConstants.h, "BLAS cache")
+//
+// A BLAS is the same as last frame's when its draw selected the same clusters (the share key: an order-independent
+// signature and a count) and every one of those clusters has the same CLAS (the validity hash: each CLAS's address and the
+// frame its cache entry was built). Such a BLAS is kept in a block of the cache's pool and not built again. A miss builds
+// into a new block of the size class its cluster count needs (explicit destinations), and what can't be kept (a cluster
+// with no CLAS, or a transient one, a truncated selection, or no room) builds into the frame's batch as before.
+
+uint64_t CLodRtBcKey(uint4 keys)
+{
+    const uint64_t share = uint64_t(keys.x) | (uint64_t(keys.y) << 32u);
+    const uint64_t validity = uint64_t(keys.z) | (uint64_t(keys.w) << 32u);
+    const uint64_t key = share ^ (validity * 0x9E3779B97F4A7C15ull);
+    return key != 0ull ? key : 1ull;
+}
+
+uint4 CLodRtBcClass(uint index)
+{
+    StructuredBuffer<uint4> classes = ResourceDescriptorHeap[CLOD_RT_BC_CLASSES_SRV];
+    return classes[index]; // (block bytes, blocks, ring offset, pool offset in 256 B units)
+}
+
+// The first frame, after the tables are cleared: every block and entry free.
+[numthreads(64, 1, 1)]
+void CLodRtBcInitCS(uint3 id : SV_DispatchThreadID)
+{
+    RWStructuredBuffer<uint> rings = ResourceDescriptorHeap[CLOD_RT_BC_RINGS_UAV];
+    RWByteAddressBuffer ctrl = ResourceDescriptorHeap[CLOD_RT_BC_CTRL_UAV];
+    uint offset = 0u;
+    [loop]
+    for (uint c = 0u; c < CLOD_RT_BC_CLASSES; ++c) {
+        const uint4 cls = CLodRtBcClass(c);
+        if (id.x >= offset && id.x < offset + cls.y) {
+            rings[cls.z + (id.x - offset)] = id.x - offset;
+        }
+        if (id.x == 0u) {
+            ctrl.Store((c * 2u + 1u) * 4u, cls.y);
+        }
+        offset += cls.y;
+    }
+    if (id.x >= offset && id.x < offset + CLOD_RT_BC_ENTRY_CAPACITY) {
+        rings[CLOD_RT_BC_ENTRY_RING_OFFSET + (id.x - offset)] = id.x - offset;
+    }
+    if (id.x == 0u) {
+        ctrl.Store(CLOD_RT_BC_ENTRY_TAIL * 4u, CLOD_RT_BC_ENTRY_CAPACITY);
+    }
+}
+
+// This frame's counts start at zero.
+[numthreads(1, 1, 1)]
+void CLodRtBcBeginCS()
+{
+    RWByteAddressBuffer ctrl = ResourceDescriptorHeap[CLOD_RT_BC_CTRL_UAV];
+    [unroll]
+    for (uint word = CLOD_RT_BC_FRAME_FIRST; word < CLOD_RT_BC_FRAME_END; ++word) ctrl.Store(word * 4u, 0u);
+}
+
+// Per entry: one unused for longer than the keep age gives its block and itself back; the others are indexed by key.
+// The index is rebuilt every frame (cleared before this), so removing an entry leaves no hole in a probe chain.
+[numthreads(64, 1, 1)]
+void CLodRtBcIndexCS(uint3 id : SV_DispatchThreadID)
+{
+    RWByteAddressBuffer ctrl = ResourceDescriptorHeap[CLOD_RT_BC_CTRL_UAV];
+    if (id.x >= CLOD_RT_BC_ENTRY_CAPACITY) {
+        return;
+    }
+    RWByteAddressBuffer entries = ResourceDescriptorHeap[CLOD_RT_BC_ENTRIES_UAV];
+    const uint base = id.x * CLOD_RT_BC_ENTRY_BYTES;
+    const uint4 head = entries.Load4(base);      // key low, key high, address low, address high
+    const uint4 tail = entries.Load4(base + 16u); // class, block, last frame used, in use
+    if (tail.w == 0u) {
+        return;
+    }
+    RWStructuredBuffer<uint> rings = ResourceDescriptorHeap[CLOD_RT_BC_RINGS_UAV];
+    if (CLOD_RT_BC_FRAME - tail.z > CLOD_RT_BC_KEEP_FRAMES) {
+        if (tail.y != 0xFFFFFFFFu) {
+            const uint4 cls = CLodRtBcClass(tail.x);
+            uint at = 0u;
+            ctrl.InterlockedAdd((tail.x * 2u + 1u) * 4u, 1u, at);
+            rings[cls.z + at % cls.y] = tail.y;
+        }
+        uint at = 0u;
+        ctrl.InterlockedAdd(CLOD_RT_BC_ENTRY_TAIL * 4u, 1u, at);
+        rings[CLOD_RT_BC_ENTRY_RING_OFFSET + at % CLOD_RT_BC_ENTRY_CAPACITY] = id.x;
+        entries.Store4(base, uint4(0u, 0u, 0u, 0u));
+        entries.Store4(base + 16u, uint4(0u, 0u, 0u, 0u));
+        ctrl.InterlockedAdd(CLOD_RT_BC_EVICTED * 4u, 1u);
+        return;
+    }
+    if (tail.y == 0xFFFFFFFFu) {
+        return; // Took an entry but no block: only waits to be freed.
+    }
+    const uint64_t key = uint64_t(head.x) | (uint64_t(head.y) << 32u);
+    RWStructuredBuffer<uint> index = ResourceDescriptorHeap[CLOD_RT_BC_INDEX_UAV];
+    const uint mask = CLOD_RT_BC_ENTRY_CAPACITY * 2u - 1u;
+    uint probe = CLodRtMix(head.x ^ CLodRtMix(head.y)) & mask;
+    for (uint step = 0u; step < 64u; ++step) {
+        uint original = 0u;
+        InterlockedCompareExchange(index[probe], 0u, id.x + 1u, original);
+        if (original == 0u) {
+            ctrl.InterlockedAdd(CLOD_RT_BC_LIVE * 4u, 1u);
+            return;
+        }
+        probe = (probe + 1u) & mask;
+    }
+}
+
+uint CLodRtBcFind(uint64_t key)
+{
+    RWStructuredBuffer<uint> index = ResourceDescriptorHeap[CLOD_RT_BC_INDEX_UAV];
+    RWByteAddressBuffer entries = ResourceDescriptorHeap[CLOD_RT_BC_ENTRIES_UAV];
+    const uint mask = CLOD_RT_BC_ENTRY_CAPACITY * 2u - 1u;
+    uint probe = CLodRtMix(uint(key) ^ CLodRtMix(uint(key >> 32u))) & mask;
+    for (uint step = 0u; step < 64u; ++step) {
+        const uint stored = index[probe];
+        if (stored == 0u) {
+            return CLOD_RT_CACHE_INVALID;
+        }
+        if (entries.Load<uint64_t>((stored - 1u) * CLOD_RT_BC_ENTRY_BYTES) == key) {
+            return stored - 1u;
+        }
+        probe = (probe + 1u) & mask;
+    }
+    return CLOD_RT_CACHE_INVALID;
+}
+
+// Takes an item from a ring; false when it is empty. The ring's tail doesn't move in this pass, and the finish pass takes
+// the head back to the tail after takers that found it empty.
+bool CLodRtBcTake(uint headWord, uint tailWord, uint ringOffset, uint capacity, out uint item)
+{
+    RWByteAddressBuffer ctrl = ResourceDescriptorHeap[CLOD_RT_BC_CTRL_UAV];
+    item = 0u;
+    uint taken = 0u;
+    ctrl.InterlockedAdd(headWord * 4u, 1u, taken);
+    if (taken >= ctrl.Load(tailWord * 4u)) {
+        return false;
+    }
+    RWStructuredBuffer<uint> rings = ResourceDescriptorHeap[CLOD_RT_BC_RINGS_UAV];
+    item = rings[ringOffset + taken % capacity];
+    return true;
+}
+
+void CLodRtBcAppendBatch(uint blas, RtasClusterBuildBottomLevelInfo args)
+{
+    RWByteAddressBuffer ctrl = ResourceDescriptorHeap[CLOD_RT_BC_CTRL_UAV];
+    uint at = 0u;
+    ctrl.InterlockedAdd(CLOD_RT_BC_IMPLICIT_COUNT * 4u, 1u, at);
+    RWStructuredBuffer<RtasClusterBuildBottomLevelInfo> batchArgs = ResourceDescriptorHeap[CLOD_RT_BC_IMPLICIT_ARGS_UAV];
+    RWStructuredBuffer<uint> batchMap = ResourceDescriptorHeap[CLOD_RT_BC_IMPLICIT_MAP_UAV];
+    batchArgs[at] = args;
+    batchMap[at] = blas;
+}
+
+// Per BLAS of this frame: reuse a kept one, or decide where it builds.
+[numthreads(64, 1, 1)]
+void CLodRtBcLookupCS(uint3 id : SV_DispatchThreadID)
+{
+    RWByteAddressBuffer counters = ResourceDescriptorHeap[CLOD_RT_BC_COUNTERS_UAV];
+    if (id.x >= min(counters.Load(CLOD_RT_COUNTER_BLAS_ARGS * 4u), CLOD_RT_BC_BLAS_CAPACITY)) {
+        return;
+    }
+    RWStructuredBuffer<RtasClusterBuildBottomLevelInfo> blasArgs = ResourceDescriptorHeap[CLOD_RT_BC_BLAS_ARGS_UAV];
+    RWStructuredBuffer<uint64_t> blasAddresses = ResourceDescriptorHeap[CLOD_RT_BC_BLAS_ADDRESSES_UAV];
+    RWByteAddressBuffer keys = ResourceDescriptorHeap[CLOD_RT_BC_KEYS_UAV];
+    RWByteAddressBuffer ctrl = ResourceDescriptorHeap[CLOD_RT_BC_CTRL_UAV];
+    const RtasClusterBuildBottomLevelInfo args = blasArgs[id.x];
+    blasAddresses[id.x] = 0ull;
+    if (args.clusterReferencesCount == 0u) {
+        return; // Nothing references an empty BLAS.
+    }
+    const uint4 blasKey = keys.Load4(id.x * CLOD_RT_BC_KEY_BYTES);
+    if (keys.Load(id.x * CLOD_RT_BC_KEY_BYTES + 16u) != 0u) {
+        ctrl.InterlockedAdd(CLOD_RT_BC_UNCACHEABLE * 4u, 1u);
+        CLodRtBcAppendBatch(id.x, args);
+        return;
+    }
+    const uint64_t key = CLodRtBcKey(blasKey);
+    RWByteAddressBuffer entries = ResourceDescriptorHeap[CLOD_RT_BC_ENTRIES_UAV];
+    const uint found = CLodRtBcFind(key);
+    if (found != CLOD_RT_CACHE_INVALID) {
+        blasAddresses[id.x] = entries.Load<uint64_t>(found * CLOD_RT_BC_ENTRY_BYTES + 8u);
+        entries.Store(found * CLOD_RT_BC_ENTRY_BYTES + 24u, CLOD_RT_BC_FRAME);
+        ctrl.InterlockedAdd(CLOD_RT_BC_HITS * 4u, 1u);
+        return;
+    }
+    // A miss: an entry, then a block of its size class.
+    uint entry = 0u;
+    if (!CLodRtBcTake(CLOD_RT_BC_ENTRY_HEAD, CLOD_RT_BC_ENTRY_TAIL, CLOD_RT_BC_ENTRY_RING_OFFSET, CLOD_RT_BC_ENTRY_CAPACITY, entry)) {
+        ctrl.InterlockedAdd(CLOD_RT_BC_NO_ROOM * 4u, 1u);
+        CLodRtBcAppendBatch(id.x, args);
+        return;
+    }
+    const uint cls = args.clusterReferencesCount <= 1u ? 0u : firstbithigh(args.clusterReferencesCount - 1u) + 1u;
+    const uint4 classInfo = CLodRtBcClass(min(cls, CLOD_RT_BC_CLASSES - 1u));
+    uint block = 0u;
+    if (cls >= CLOD_RT_BC_CLASSES || classInfo.y == 0u || !CLodRtBcTake(cls * 2u, cls * 2u + 1u, classInfo.z, classInfo.y, block)) {
+        // The entry stays taken without a block, and the next frame's index pass gives it back.
+        entries.Store4(entry * CLOD_RT_BC_ENTRY_BYTES, uint4(0u, 0u, 0u, 0u));
+        entries.Store4(entry * CLOD_RT_BC_ENTRY_BYTES + 16u, uint4(0u, 0xFFFFFFFFu, CLOD_RT_BC_FRAME - CLOD_RT_BC_KEEP_FRAMES - 1u, 1u));
+        ctrl.InterlockedAdd(CLOD_RT_BC_NO_ROOM * 4u, 1u);
+        CLodRtBcAppendBatch(id.x, args);
+        return;
+    }
+    const uint64_t address = (uint64_t(CLOD_RT_BC_POOL_LOW) | (uint64_t(CLOD_RT_BC_POOL_HIGH) << 32u))
+        + uint64_t(classInfo.w) * 256ull + uint64_t(block) * uint64_t(classInfo.x);
+    entries.Store4(entry * CLOD_RT_BC_ENTRY_BYTES, uint4(uint(key), uint(key >> 32u), uint(address), uint(address >> 32u)));
+    entries.Store4(entry * CLOD_RT_BC_ENTRY_BYTES + 16u, uint4(cls, block, CLOD_RT_BC_FRAME, 1u));
+    blasAddresses[id.x] = address;
+    uint at = 0u;
+    ctrl.InterlockedAdd(CLOD_RT_BC_EXPLICIT_COUNT * 4u, 1u, at);
+    RWStructuredBuffer<RtasClusterBuildBottomLevelInfo> explicitArgs = ResourceDescriptorHeap[CLOD_RT_BC_EXPLICIT_ARGS_UAV];
+    RWStructuredBuffer<uint64_t> explicitDestinations = ResourceDescriptorHeap[CLOD_RT_BC_EXPLICIT_DST_UAV];
+    explicitArgs[at] = args;
+    explicitDestinations[at] = address;
+}
+
+// Rings' heads back to their tails after takers that found them empty; last frame's counts for the stats.
+[numthreads(1, 1, 1)]
+void CLodRtBcFinishCS()
+{
+    RWByteAddressBuffer ctrl = ResourceDescriptorHeap[CLOD_RT_BC_CTRL_UAV];
+    [loop]
+    for (uint c = 0u; c <= CLOD_RT_BC_CLASSES; ++c) { // The classes' rings, then the entries'.
+        const uint headWord = c * 2u;
+        ctrl.Store(headWord * 4u, min(ctrl.Load(headWord * 4u), ctrl.Load((headWord + 1u) * 4u)));
+    }
+    [unroll]
+    for (uint word = CLOD_RT_BC_FRAME_FIRST; word < CLOD_RT_BC_FRAME_END; ++word) {
+        ctrl.Store((word + CLOD_RT_BC_LAST_OFFSET) * 4u, ctrl.Load(word * 4u));
+    }
+}
+
+// The batch's BLASes, once built: their addresses where the instances look.
+[numthreads(64, 1, 1)]
+void CLodRtBcScatterCS(uint3 id : SV_DispatchThreadID)
+{
+    RWByteAddressBuffer ctrl = ResourceDescriptorHeap[CLOD_RT_BC_CTRL_UAV];
+    if (id.x >= ctrl.Load(CLOD_RT_BC_IMPLICIT_COUNT * 4u)) {
+        return;
+    }
+    RWStructuredBuffer<uint> batchMap = ResourceDescriptorHeap[CLOD_RT_BC_IMPLICIT_MAP_UAV];
+    RWStructuredBuffer<uint64_t> batchAddresses = ResourceDescriptorHeap[CLOD_RT_BC_IMPLICIT_ADDRESSES_UAV];
+    RWStructuredBuffer<uint64_t> blasAddresses = ResourceDescriptorHeap[CLOD_RT_BC_BLAS_ADDRESSES_UAV];
+    blasAddresses[batchMap[id.x]] = batchAddresses[id.x];
+}
+
+
+// ---- Partitioned TLAS: slots, partitions and the operation list (clodRayTracingSetupRootConstants.h)
+
+uint CLodRtPtlasPartitionCount()
+{
+    return (CLOD_RT_SCENE_PTLAS_LIMITS & 0xFFFFu) * 16u;
+}
+
+uint CLodRtPtlasPartitionCapacity()
+{
+    return CLOD_RT_SCENE_PTLAS_LIMITS >> 16u;
+}
+
+uint CLodRtPtlasCellEntries()
+{
+    return CLodRtPtlasPartitionCount() * 2u; // A power of two: the partition count is.
+}
+
+uint CLodRtPtlasHashTransform(RtasInstanceDesc desc)
+{
+    uint h = 0x811C9DC5u;
+    [unroll]
+    for (uint row = 0u; row < 3u; ++row) {
+        h = CLodRtMix(h ^ asuint(desc.transformRows[row].x));
+        h = CLodRtMix(h ^ asuint(desc.transformRows[row].y));
+        h = CLodRtMix(h ^ asuint(desc.transformRows[row].z));
+        h = CLodRtMix(h ^ asuint(desc.transformRows[row].w));
+    }
+    return h;
+}
+
+uint CLodRtPtlasHashAttributes(RtasInstanceDesc desc)
+{
+    return CLodRtMix(desc.instanceIDAndMask ^ CLodRtMix(desc.contributionAndFlags + 0x9E3779B9u));
+}
+
+// The grid cell of an instance's origin, as a nonzero 64-bit key.
+uint64_t CLodRtPtlasCellKey(RtasInstanceDesc desc)
+{
+    const float3 origin = float3(desc.transformRows[0].w, desc.transformRows[1].w, desc.transformRows[2].w);
+    const int3 cell = clamp(int3(floor(origin / asfloat(CLOD_RT_SCENE_PTLAS_CELL_SIZE))), -(1 << 20), (1 << 20) - 1) + (1 << 20);
+    return (uint64_t(uint(cell.x)) | (uint64_t(uint(cell.y)) << 21u) | (uint64_t(uint(cell.z)) << 42u)) | (1ull << 63u);
+}
+
+// The cell's table entry. With claim, an absent cell is claimed; otherwise, and when the table is full,
+// CLOD_RT_CACHE_INVALID.
+uint CLodRtPtlasFindCell(uint64_t key, bool claim)
+{
+    RWByteAddressBuffer cells = ResourceDescriptorHeap[CLOD_RT_SCENE_PTLAS_CELLS_UAV];
+    const uint mask = CLodRtPtlasCellEntries() - 1u;
+    uint entry = CLodRtMix(uint(key) ^ CLodRtMix(uint(key >> 32u))) & mask;
+    for (uint probe = 0u; probe < 64u; ++probe) {
+        const uint64_t stored = cells.Load<uint64_t>(entry * CLOD_RT_PTLAS_CELL_BYTES);
+        if (stored == key) {
+            return entry;
+        }
+        if (stored == 0ull) {
+            if (!claim) {
+                return CLOD_RT_CACHE_INVALID;
+            }
+            uint64_t original = 0ull;
+            cells.InterlockedCompareExchange64(entry * CLOD_RT_PTLAS_CELL_BYTES, 0ull, key, original);
+            if (original == 0ull || original == key) {
+                return entry;
+            }
+        }
+        entry = (entry + 1u) & mask;
+    }
+    return CLOD_RT_CACHE_INVALID;
+}
+
+// Appends write arguments; false past the capacity, and the caller tries again next frame.
+bool CLodRtPtlasAppendWrite(RtasInstanceDesc desc, uint slot, uint partition)
+{
+    RWByteAddressBuffer ctrl = ResourceDescriptorHeap[CLOD_RT_SCENE_TLAS_OPS_UAV];
+    uint index = 0u;
+    ctrl.InterlockedAdd(CLOD_RT_PTLAS_WRITES * 4u, 1u, index);
+    if (index >= CLOD_RT_SCENE_INSTANCE_CAPACITY) {
+        ctrl.InterlockedAdd(CLOD_RT_PTLAS_DROPPED * 4u, 1u);
+        return false;
+    }
+    RtasPartitionedTlasWriteInstance write = (RtasPartitionedTlasWriteInstance)0;
+    write.transformRows = desc.transformRows;
+    write.instanceID = desc.instanceIDAndMask & 0x00FFFFFFu;
+    write.instanceMask = desc.instanceIDAndMask >> 24u;
+    write.instanceContributionToHitGroupIndex = desc.contributionAndFlags & 0x00FFFFFFu;
+    write.instanceFlags = desc.contributionAndFlags >> 24u; // The classic bits the rows use are the partitioned ones.
+#if defined(BASICRENDERER_SHADER_API_VULKAN)
+    write.instanceFlags &= 0xFu; // Vulkan has no partitioned micromap flags, and its bit 4 is the explicit AABB.
+#endif
+    write.accelerationStructure = desc.accelerationStructure; // Null leaves the instance disabled.
+    write.instanceIndex = slot;
+    write.partitionIndex = partition == CLOD_RT_PTLAS_GLOBAL_PARTITION ? RTAS_PTLAS_GLOBAL_PARTITION : partition;
+    RWByteAddressBuffer rows = ResourceDescriptorHeap[CLOD_RT_SCENE_TLAS_INSTANCES_UAV];
+    rows.Store<RtasPartitionedTlasWriteInstance>(index * 104u, write);
+    return true;
+}
+
+bool CLodRtPtlasAppendUpdate(RtasInstanceDesc desc, uint slot)
+{
+    RWByteAddressBuffer ctrl = ResourceDescriptorHeap[CLOD_RT_SCENE_TLAS_OPS_UAV];
+    uint index = 0u;
+    ctrl.InterlockedAdd(CLOD_RT_PTLAS_UPDATES * 4u, 1u, index);
+    if (index >= CLOD_RT_SCENE_INSTANCE_CAPACITY) {
+        ctrl.InterlockedAdd(CLOD_RT_PTLAS_DROPPED * 4u, 1u);
+        return false;
+    }
+    RtasPartitionedTlasUpdateInstance update;
+    update.instanceIndex = slot;
+    update.instanceContributionToHitGroupIndex = desc.contributionAndFlags & 0x00FFFFFFu;
+    update.accelerationStructure = desc.accelerationStructure;
+    RWByteAddressBuffer rows = ResourceDescriptorHeap[CLOD_RT_SCENE_TLAS_INSTANCES_UAV];
+    rows.Store<RtasPartitionedTlasUpdateInstance>(CLOD_RT_SCENE_INSTANCE_CAPACITY * 104u + index * 16u, update);
+    return true;
+}
+
+// A cell's chain word: first partition + 1 in the low 21 bits, the partition count above. 0 for none.
+uint CLodRtPtlasChainFirst(uint chain)
+{
+    return chain & 0x1FFFFFu;
+}
+
+uint CLodRtPtlasChainCount(uint chain)
+{
+    return chain >> 21u;
+}
+
+// Takes a place in partition, false when it is full.
+bool CLodRtPtlasTakePartitionPlace(uint partition)
+{
+    RWStructuredBuffer<uint> fill = ResourceDescriptorHeap[CLOD_RT_SCENE_PTLAS_FILL_UAV];
+    uint before = 0u;
+    InterlockedAdd(fill[partition], 1u, before);
+    if (before < CLodRtPtlasPartitionCapacity()) {
+        return true;
+    }
+    InterlockedAdd(fill[partition], 0xFFFFFFFFu);
+    return false;
+}
+
+// The first frame, after the tables are cleared: every slot free.
+[numthreads(64, 1, 1)]
+void CLodRtPtlasInitCS(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= CLOD_RT_SCENE_INSTANCE_CAPACITY) {
+        return;
+    }
+    RWStructuredBuffer<uint> ring = ResourceDescriptorHeap[CLOD_RT_SCENE_PTLAS_RING_UAV];
+    ring[id.x] = id.x;
+    if (id.x == 0u) {
+        RWByteAddressBuffer ctrl = ResourceDescriptorHeap[CLOD_RT_SCENE_TLAS_OPS_UAV];
+        ctrl.Store(CLOD_RT_PTLAS_TAIL * 4u, CLOD_RT_SCENE_INSTANCE_CAPACITY);
+    }
+}
+
+RtasInstanceDesc CLodRtPtlasRowTransform(uint4 rowInfo)
+{
+    const PerObjectBuffer transform = LoadInstanceTransformForDrawRecordWithAssemblyTransform(LoadInstanceDrawRecord(rowInfo.x), rowInfo.y);
+    RtasInstanceDesc desc = (RtasInstanceDesc)0;
+    for (uint row = 0u; row < 3u; ++row) {
+        desc.transformRows[row] = float4(transform.model[0][row], transform.model[1][row], transform.model[2][row], transform.model[3][row]);
+    }
+    return desc;
+}
+
+// Per listed row whose key has no slot yet: claims the grid cell it will go in, so that the next pass gives each new cell
+// its partition without a race.
+[numthreads(64, 1, 1)]
+void CLodRtPtlasClaimCellsCS(uint3 id : SV_DispatchThreadID)
+{
+    RWByteAddressBuffer counters = ResourceDescriptorHeap[CLOD_RT_SCENE_COUNTERS_UAV];
+    if (id.x >= counters.Load(CLOD_RT_COUNTER_TLAS_INSTANCES * 4u)) {
+        return;
+    }
+    RWStructuredBuffer<uint> instanceList = ResourceDescriptorHeap[CLOD_RT_SCENE_INSTANCE_LIST_UAV];
+    RWStructuredBuffer<uint> keySlots = ResourceDescriptorHeap[CLOD_RT_SCENE_PTLAS_KEY_SLOTS_UAV];
+    if (keySlots[instanceList[id.x]] != 0u) {
+        return;
+    }
+    RWStructuredBuffer<uint4> instanceRows = ResourceDescriptorHeap[CLOD_RT_SCENE_INSTANCE_ROWS_UAV];
+    const uint entry = CLodRtPtlasFindCell(CLodRtPtlasCellKey(CLodRtPtlasRowTransform(instanceRows[id.x])), true);
+    if (entry != CLOD_RT_CACHE_INVALID) {
+        RWByteAddressBuffer cells = ResourceDescriptorHeap[CLOD_RT_SCENE_PTLAS_CELLS_UAV];
+        cells.InterlockedAdd(entry * CLOD_RT_PTLAS_CELL_BYTES + 12u, 1u);
+    }
+}
+
+// Per cell table entry with rows new this frame: reserves, after what is left in the cell's current partition, just enough
+// fresh partitions for them (a chain, contiguous), so that a dense cell fills partitions of its own rather than spill into
+// the global partition, whose rebuild is the TLAS's cost under camera motion. Rows past the partition count go global.
+// The last partition of the previous chain becomes the cell's current one first.
+[numthreads(64, 1, 1)]
+void CLodRtPtlasAssignCellsCS(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= CLodRtPtlasCellEntries()) {
+        return;
+    }
+    RWByteAddressBuffer cells = ResourceDescriptorHeap[CLOD_RT_SCENE_PTLAS_CELLS_UAV];
+    const uint base = id.x * CLOD_RT_PTLAS_CELL_BYTES;
+    const uint4 entry = cells.Load4(base);
+    const uint pending = entry.w;
+    if ((entry.x | entry.y) == 0u || pending == 0u) {
+        return;
+    }
+    uint current = entry.z;
+    const uint previousChain = cells.Load(base + 16u);
+    if (previousChain != 0u) {
+        current = CLodRtPtlasChainFirst(previousChain) + CLodRtPtlasChainCount(previousChain); // The last one, plus 1.
+    }
+    uint room = 0u;
+    if (current != 0u && current != 0xFFFFFFFFu) {
+        RWStructuredBuffer<uint> fill = ResourceDescriptorHeap[CLOD_RT_SCENE_PTLAS_FILL_UAV];
+        room = CLodRtPtlasPartitionCapacity() - min(fill[current - 1u], CLodRtPtlasPartitionCapacity());
+    }
+    uint chain = 0u;
+    if (pending > room) {
+        const uint wanted = min((pending - room + CLodRtPtlasPartitionCapacity() - 1u) / CLodRtPtlasPartitionCapacity(), 2047u);
+        RWByteAddressBuffer ctrl = ResourceDescriptorHeap[CLOD_RT_SCENE_TLAS_OPS_UAV];
+        uint first = 0u;
+        ctrl.InterlockedAdd(CLOD_RT_PTLAS_PARTITIONS * 4u, wanted, first);
+        const uint count = CLodRtPtlasPartitionCount();
+        const uint granted = first < count ? min(wanted, count - first) : 0u;
+        chain = granted != 0u ? (first + 1u) | (granted << 21u) : 0u;
+    }
+    cells.Store2(base + 8u, uint2(current, 0u)); // The pending count starts again for next frame's claims.
+    cells.Store(base + 16u, chain);
+}
+
+// A listed row: takes its key's slot (or a free one), and writes or updates the instance only where it changed.
+void CLodRtPtlasListRow(uint row, RtasInstanceDesc desc)
+{
+    RWStructuredBuffer<uint> instanceList = ResourceDescriptorHeap[CLOD_RT_SCENE_INSTANCE_LIST_UAV];
+    RWStructuredBuffer<uint4> instanceRows = ResourceDescriptorHeap[CLOD_RT_SCENE_INSTANCE_ROWS_UAV];
+    RWStructuredBuffer<uint> keySlots = ResourceDescriptorHeap[CLOD_RT_SCENE_PTLAS_KEY_SLOTS_UAV];
+    RWByteAddressBuffer slots = ResourceDescriptorHeap[CLOD_RT_SCENE_PTLAS_SLOTS_UAV];
+    RWByteAddressBuffer ctrl = ResourceDescriptorHeap[CLOD_RT_SCENE_TLAS_OPS_UAV];
+    const uint key = instanceList[row];
+    uint slot = keySlots[key];
+    const bool fresh = slot == 0u;
+    if (fresh) {
+        // The ring's tail only grows in the retire pass, after this one, so reading it here is safe. Takers past it get no
+        // slot this frame, and the finish pass takes the head back to the tail.
+        uint taken = 0u;
+        ctrl.InterlockedAdd(CLOD_RT_PTLAS_HEAD * 4u, 1u, taken);
+        if (taken >= ctrl.Load(CLOD_RT_PTLAS_TAIL * 4u)) {
+            ctrl.InterlockedAdd(CLOD_RT_PTLAS_DROPPED * 4u, 1u);
+            return;
+        }
+        RWStructuredBuffer<uint> ring = ResourceDescriptorHeap[CLOD_RT_SCENE_PTLAS_RING_UAV];
+        slot = ring[taken % CLOD_RT_SCENE_INSTANCE_CAPACITY];
+        keySlots[key] = slot + 1u;
+    }
+    else {
+        slot -= 1u;
+    }
+    RWStructuredBuffer<uint4> slotRows = ResourceDescriptorHeap[CLOD_RT_SCENE_PTLAS_SLOT_ROWS_UAV];
+    slotRows[slot] = instanceRows[row];
+
+    const uint base = slot * CLOD_RT_PTLAS_SLOT_BYTES;
+    const uint4 state = fresh ? uint4(0u, CLOD_RT_PTLAS_GLOBAL_PARTITION, 0u, 0u) : slots.Load4(base);
+    const uint4 extra = fresh ? uint4(0u, 0u, 0u, 0u) : slots.Load4(base + 16u);
+    const uint transformHash = CLodRtPtlasHashTransform(desc);
+    const uint attributeHash = CLodRtPtlasHashAttributes(desc);
+    const uint64_t blas = desc.accelerationStructure;
+    const uint64_t previousBlas = uint64_t(extra.x) | (uint64_t(extra.y) << 32u);
+    uint partition = state.y;
+    if (fresh) {
+        // Its cell's current partition while that has room, then the chain reserved for this frame's new rows. The global
+        // partition only when partitions have run out, or (rarely) when a place freed by a racing row went unused.
+        const uint entry = CLodRtPtlasFindCell(CLodRtPtlasCellKey(desc), false);
+        partition = CLOD_RT_PTLAS_GLOBAL_PARTITION;
+        if (entry != CLOD_RT_CACHE_INVALID) {
+            RWByteAddressBuffer cells = ResourceDescriptorHeap[CLOD_RT_SCENE_PTLAS_CELLS_UAV];
+            const uint current = cells.Load(entry * CLOD_RT_PTLAS_CELL_BYTES + 8u);
+            const uint chain = cells.Load(entry * CLOD_RT_PTLAS_CELL_BYTES + 16u);
+            if (current != 0u && current != 0xFFFFFFFFu && CLodRtPtlasTakePartitionPlace(current - 1u)) {
+                partition = current - 1u;
+            }
+            else {
+                for (uint link = 0u; link < CLodRtPtlasChainCount(chain); ++link) {
+                    const uint candidate = CLodRtPtlasChainFirst(chain) - 1u + link;
+                    if (CLodRtPtlasTakePartitionPlace(candidate)) {
+                        partition = candidate;
+                        break;
+                    }
+                }
+            }
+        }
+        if (partition == CLOD_RT_PTLAS_GLOBAL_PARTITION) {
+            ctrl.InterlockedAdd(CLOD_RT_PTLAS_GLOBAL * 4u, 1u);
+        }
+    }
+    else if (state.z != transformHash && partition != CLOD_RT_PTLAS_GLOBAL_PARTITION) {
+        // It moved. Moving instances live in the global partition, where their writes rebuild no partition.
+        RWStructuredBuffer<uint> fill = ResourceDescriptorHeap[CLOD_RT_SCENE_PTLAS_FILL_UAV];
+        InterlockedAdd(fill[partition], 0xFFFFFFFFu);
+        partition = CLOD_RT_PTLAS_GLOBAL_PARTITION;
+        ctrl.InterlockedAdd(CLOD_RT_PTLAS_GLOBAL * 4u, 1u);
+    }
+
+    // An update can't null the BLAS, nor follow a write that nulled it.
+    const bool write = fresh || state.z != transformHash || extra.z != attributeHash || ((blas == 0ull) != (previousBlas == 0ull));
+    bool done = true;
+    if (write) {
+        done = CLodRtPtlasAppendWrite(desc, slot, partition);
+    }
+    else if (blas != previousBlas) {
+        done = CLodRtPtlasAppendUpdate(desc, slot);
+    }
+    // A write or update that didn't fit is tried again next frame, since the stored state then differs from what is listed.
+    slots.Store4(base, uint4(key + 1u, partition, done ? transformHash : ~transformHash, CLodRtSceneFrame()));
+    slots.Store4(base + 16u, done ? uint4(uint(blas), uint(blas >> 32u), attributeHash, 0u) : uint4(extra.x, extra.y, ~attributeHash, 0u));
+}
+
+// Per slot: one whose key this frame didn't list is written disabled and freed. The ring hands it out from next frame on.
+[numthreads(64, 1, 1)]
+void CLodRtPtlasRetireCS(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= CLOD_RT_SCENE_INSTANCE_CAPACITY) {
+        return;
+    }
+    RWByteAddressBuffer slots = ResourceDescriptorHeap[CLOD_RT_SCENE_PTLAS_SLOTS_UAV];
+    const uint base = id.x * CLOD_RT_PTLAS_SLOT_BYTES;
+    const uint4 state = slots.Load4(base);
+    if (state.x == 0u || state.w == CLodRtSceneFrame()) {
+        return;
+    }
+    RtasInstanceDesc disabled = (RtasInstanceDesc)0; // A zero transform and a null BLAS: not in the BVH.
+    if (!CLodRtPtlasAppendWrite(disabled, id.x, state.y)) {
+        return;
+    }
+    RWByteAddressBuffer ctrl = ResourceDescriptorHeap[CLOD_RT_SCENE_TLAS_OPS_UAV];
+    if (state.y != CLOD_RT_PTLAS_GLOBAL_PARTITION) {
+        RWStructuredBuffer<uint> fill = ResourceDescriptorHeap[CLOD_RT_SCENE_PTLAS_FILL_UAV];
+        InterlockedAdd(fill[state.y], 0xFFFFFFFFu);
+    }
+    else {
+        ctrl.InterlockedAdd(CLOD_RT_PTLAS_GLOBAL * 4u, 0xFFFFFFFFu);
+    }
+    RWStructuredBuffer<uint> keySlots = ResourceDescriptorHeap[CLOD_RT_SCENE_PTLAS_KEY_SLOTS_UAV];
+    keySlots[state.x - 1u] = 0u;
+    slots.Store4(base, uint4(0u, 0u, 0u, 0u));
+    slots.Store4(base + 16u, uint4(0u, 0u, 0u, 0u));
+    uint tail = 0u;
+    ctrl.InterlockedAdd(CLOD_RT_PTLAS_TAIL * 4u, 1u, tail);
+    RWStructuredBuffer<uint> ring = ResourceDescriptorHeap[CLOD_RT_SCENE_PTLAS_RING_UAV];
+    ring[tail % CLOD_RT_SCENE_INSTANCE_CAPACITY] = id.x;
+    ctrl.InterlockedAdd(CLOD_RT_PTLAS_RETIRED * 4u, 1u);
+}
+
+// The build's operations and their count, from this frame's write and update counts.
+[numthreads(1, 1, 1)]
+void CLodRtPtlasFinishCS()
+{
+    RWByteAddressBuffer ctrl = ResourceDescriptorHeap[CLOD_RT_SCENE_TLAS_OPS_UAV];
+    ctrl.Store(CLOD_RT_PTLAS_HEAD * 4u, min(ctrl.Load(CLOD_RT_PTLAS_HEAD * 4u), ctrl.Load(CLOD_RT_PTLAS_TAIL * 4u)));
+    const uint writes = min(ctrl.Load(CLOD_RT_PTLAS_WRITES * 4u), CLOD_RT_SCENE_INSTANCE_CAPACITY);
+    const uint updates = min(ctrl.Load(CLOD_RT_PTLAS_UPDATES * 4u), CLOD_RT_SCENE_INSTANCE_CAPACITY);
+    const uint64_t rows = uint64_t(CLOD_RT_SCENE_TLAS_ROWS_LOW) | (uint64_t(CLOD_RT_SCENE_TLAS_ROWS_HIGH) << 32u);
+    uint count = 0u;
+    if (writes != 0u) {
+        RtasPartitionedTlasOperation op;
+        op.type = RTAS_PTLAS_OP_WRITE_INSTANCE;
+        op.argCount = writes;
+        op.argAddress = rows;
+        op.argStride = 104ull;
+        ctrl.Store<RtasPartitionedTlasOperation>(count * 24u, op);
+        ++count;
+    }
+    if (updates != 0u) {
+        RtasPartitionedTlasOperation op;
+        op.type = RTAS_PTLAS_OP_UPDATE_INSTANCE;
+        op.argCount = updates;
+        op.argAddress = rows + uint64_t(CLOD_RT_SCENE_INSTANCE_CAPACITY) * 104ull;
+        op.argStride = 16ull;
+        ctrl.Store<RtasPartitionedTlasOperation>(count * 24u, op);
+        ++count;
+    }
+    ctrl.Store(CLOD_RT_TLAS_OPS_COUNT_OFFSET, count);
+    ctrl.Store(CLOD_RT_PTLAS_LAST_WRITES * 4u, writes);
+    ctrl.Store(CLOD_RT_PTLAS_LAST_UPDATES * 4u, updates);
+    ctrl.Store(CLOD_RT_PTLAS_LAST_RETIRED * 4u, ctrl.Load(CLOD_RT_PTLAS_RETIRED * 4u));
+    ctrl.Store(CLOD_RT_PTLAS_LAST_DROPPED * 4u, ctrl.Load(CLOD_RT_PTLAS_DROPPED * 4u));
+    ctrl.Store(CLOD_RT_PTLAS_WRITES * 4u, 0u);
+    ctrl.Store(CLOD_RT_PTLAS_UPDATES * 4u, 0u);
+    ctrl.Store(CLOD_RT_PTLAS_RETIRED * 4u, 0u);
+    ctrl.Store(CLOD_RT_PTLAS_DROPPED * 4u, 0u);
 }
 
 // ---- TLAS instances
@@ -1445,11 +2115,15 @@ void CLodRtWriteInstancesCS(uint3 id : SV_DispatchThreadID)
     if (id.x >= CLOD_RT_SCENE_TLAS_INSTANCE_COUNT) {
         return;
     }
-    RWStructuredBuffer<RtasInstanceDesc> instances = ResourceDescriptorHeap[CLOD_RT_SCENE_TLAS_INSTANCES_UAV];
     RWByteAddressBuffer counters = ResourceDescriptorHeap[CLOD_RT_SCENE_COUNTERS_UAV];
+    const uint liveRows = counters.Load(CLOD_RT_COUNTER_TLAS_INSTANCES * 4u);
+    const bool partitioned = CLOD_RT_SCENE_TLAS_PARTITIONED != 0u;
+    if (partitioned && id.x >= liveRows) {
+        return; // A partitioned TLAS keeps what it has: rows past the count aren't written.
+    }
 
     RtasInstanceDesc desc = (RtasInstanceDesc)0; // A null acceleration structure makes the row inactive.
-    if (id.x < counters.Load(CLOD_RT_COUNTER_TLAS_INSTANCES * 4u)) {
+    if (id.x < liveRows) {
         StructuredBuffer<uint64_t> blasAddresses = ResourceDescriptorHeap[CLOD_RT_SCENE_BLAS_ADDRESSES_SRV];
         RWStructuredBuffer<uint> instanceBlas = ResourceDescriptorHeap[CLOD_RT_SCENE_INSTANCE_BLAS_UAV];
         RWStructuredBuffer<uint4> instanceRows = ResourceDescriptorHeap[CLOD_RT_SCENE_INSTANCE_ROWS_UAV];
@@ -1564,5 +2238,10 @@ void CLodRtWriteInstancesCS(uint3 id : SV_DispatchThreadID)
             }
         }
     }
+    if (partitioned) {
+        CLodRtPtlasListRow(id.x, desc);
+        return;
+    }
+    RWStructuredBuffer<RtasInstanceDesc> instances = ResourceDescriptorHeap[CLOD_RT_SCENE_TLAS_INSTANCES_UAV];
     instances[id.x] = desc;
 }
