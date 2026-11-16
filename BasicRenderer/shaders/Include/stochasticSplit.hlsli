@@ -20,10 +20,12 @@
 
 // Pixel word.
 #define STOCHASTIC_PIXEL_VISIBLE_MASK 0xFu // Bit k: slot k's ray reached its light.
+// Bits 4-6 (STOCHASTIC_PIXEL_GRADIENT_SHIFT, stochasticLightingRootConstants.h): with visibility gradients, the slot selection
+// recorded for its cell at this pixel + 1, so shading can fill in the record's visibility.
 #define STOCHASTIC_PIXEL_LIST_SHIFT 8u // STOCHASTIC_DEBUG_PROBE 5: the reprojected list's length + 1 (0: reprojection failed).
 #define STOCHASTIC_PIXEL_VALID 0x40000000u // The sampled pixel has a surface.
 #define STOCHASTIC_PIXEL_DEBUG 0x80000000u // Selection wrote a debug probe's output itself; shading leaves the pixel alone.
-// Bits 16-29: the unshadowed bound (docs/stochastic_lighting.md "Moving-light trails"), log2(1 + B) in 1/512 steps,
+// Bits 16-29: the unshadowed bound (docs/performance/stochastic-lighting-experiments.md "Moving-light trails"), log2(1 + B) in 1/512 steps,
 // rounded up. B is selection's estimate of the pixel's unshadowed light (luminance, albedo included): the linear sum of its
 // candidates' importances, the hidden ones scaled by M / drawCount. Shading writes it to the noisy diffuse input's alpha,
 // and the denoiser keeps the history under it, so light that has left a pixel can't linger there.

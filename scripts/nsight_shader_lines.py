@@ -7,7 +7,9 @@ Export from the Shader Profiler's source view (one row per source line, a header
 Prints, per file, the highest live-register count and the share of samples; the regions whose live registers exceed the
 threshold (the lines to look at for an occupancy step); the share of samples by live-register band (a plateau across a
 whole phase means many loads in flight, not one long live range); and the lines with the most samples with their top
-stall reason.
+stall reason. Samples are a line's own; code inlined from included files (which the export does not list) counts only in
+the call site's Total Samples, so the last section ranks lines by that (a call site's inclusive share; nested call sites
+overlap, so these shares do not sum to 100%).
 """
 
 import argparse
@@ -36,6 +38,8 @@ def parse(path):
             if not row:
                 continue
             if row[0] == "" and len(row) > 1 and row[1]:
+                if current_file is not None:
+                    break  # Later sections are the DXIL and per-instruction views, not source files.
                 current_file = row[1]
                 continue
             try:
@@ -49,6 +53,7 @@ def parse(path):
                     "line": line,
                     "source": row[1].strip() if len(row) > 1 else "",
                     "samples": number(row, "Samples"),
+                    "total": number(row, "Total Samples"),
                     "stall": row[stall_index] if stall_index is not None and stall_index < len(row) else "",
                     "registers": number(row, "Live Registers"),
                 }
@@ -116,6 +121,18 @@ def main():
     for r in sorted(rows, key=lambda r: -r["samples"])[: args.top]:
         print(f"{r['samples']:7.0f} {100 * r['samples'] / total:4.1f}%  regs {r['registers']:3.0f}  {r['stall']:16s} "
               f"{r['file']}:{r['line']}  {r['source'][:80]}")
+
+    # The entry point's lines (from the last line holding "[numthreads" on) never nest in each other, so their totals sum to
+    # the shader's samples with every inlined callee counted once.
+    if any(r["total"] > r["samples"] for r in rows):
+        entry = max((r["line"] for r in rows if "[numthreads" in r["source"]), default=0)
+        whole = sum(r["total"] for r in rows if r["line"] >= entry) or 1.0
+        print(f"\n== top {args.top} lines by total samples (with inlined callees), share of {whole:.0f} "
+              f"(the entry point's lines; nested call sites overlap)")
+        for r in sorted(rows, key=lambda r: -r["total"])[: args.top]:
+            mark = " [calls]" if r["total"] > r["samples"] else ""
+            print(f"{r['total']:7.0f} {100 * r['total'] / whole:5.1f}%  regs {r['registers']:3.0f}  "
+                  f"{r['file']}:{r['line']}{mark}  {r['source'][:80]}")
 
 
 if __name__ == "__main__":

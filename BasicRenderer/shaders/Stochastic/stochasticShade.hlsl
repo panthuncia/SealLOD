@@ -31,6 +31,24 @@
 #endif
 #define STOCHASTIC_GUIDING_ENABLED (STOCHASTIC_GUIDING != 0)
 
+// 1 (set by StochasticSamplePass with the denoiser): the paired ratio's unshadowed estimate can be written (STOCHASTIC_FLAG_PAIRED;
+// docs/stochastic_lighting.md "The paired ratio"), which reads the surface's albedos. 0 names no surface texture, as the
+// accumulation's and the undenoised graphs declare none for shading. A pso.recompile of Stochastic.Shade.PSO keeps it (its
+// overrides merge onto the pipeline's defines).
+#ifndef STOCHASTIC_SHADE_PAIRED
+#define STOCHASTIC_SHADE_PAIRED 0
+#endif
+
+// Visibility gradients: the held gradient's decay per frame (docs/stochastic_lighting.md "Visibility gradients"): 0.5 keeps a detection 2-3 frames above the temporal pass's tolerance.
+#ifndef STOCHASTIC_GRADIENT_DECAY
+#define STOCHASTIC_GRADIENT_DECAY 0.5f
+#endif
+// How the 3x3 cells' raw gradients combine (above, in the kernel): 1 their signed mean's magnitude (false positives on still
+// lights 0.05% of pixels below c_v = 0.9, 7% of pixels in the sweep at 4x speed), 0 their largest (0.30%, 14%).
+#ifndef STOCHASTIC_GRADIENT_SIGNED
+#define STOCHASTIC_GRADIENT_SIGNED 1
+#endif
+
 // The visible list build: each wave's sorted run, then the merged list, as packed build entries (below). One uint an entry
 // keeps the group's shared memory at 2 KB: more costs the pass L1 cache.
 #define STOCHASTIC_GROUP_KEYS (STOCHASTIC_TILE_SIZE * STOCHASTIC_TILE_SIZE * STOCHASTIC_MAX_SAMPLE_COUNT)
@@ -82,6 +100,11 @@ void StochasticShadeCS(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupI
     float keyWeights[STOCHASTIC_MAX_SAMPLE_COUNT];
     float3 diffuse = 0.0f;
     float3 specular = 0.0f;
+    // The paired unshadowed estimate (docs/stochastic_lighting.md "The paired ratio"): every used slot, visible or not, so
+    // the same samples with visibility 1. Each visible slot adds the same decoded value to both, so the shadowed sum never
+    // exceeds it, per slot and channel.
+    float3 unshadowedDiffuse = 0.0f;
+    float3 unshadowedSpecular = 0.0f;
     RWStructuredBuffer<uint3> slots = ResourceDescriptorHeap[STOCHASTIC_SLOTS_UAV];
     [unroll]
     for (uint k = 0; k < STOCHASTIC_MAX_SAMPLE_COUNT; ++k)
@@ -94,15 +117,20 @@ void StochasticShadeCS(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupI
             continue;
         }
         const uint3 slot = slots[sampledIndex * sampleCount + k];
-        // Visible: its ray reached the light, or it took none.
-        const bool visible = (slot.x & STOCHASTIC_SLOT_USED) != 0u
-            && ((slot.x & STOCHASTIC_SLOT_RAY) == 0u || (pixelWord & (1u << k)) != 0u);
-        if (!visible)
+        if ((slot.x & STOCHASTIC_SLOT_USED) == 0u)
         {
             continue;
         }
         const float3 sampleDiffuse = StochasticUnpackRgb9e5(slot.y);
         const float3 sampleSpecular = StochasticUnpackRgb9e5(slot.z);
+        unshadowedDiffuse += sampleDiffuse;
+        unshadowedSpecular += sampleSpecular;
+        // Visible: its ray reached the light, or it took none.
+        const bool visible = (slot.x & STOCHASTIC_SLOT_RAY) == 0u || (pixelWord & (1u << k)) != 0u;
+        if (!visible)
+        {
+            continue;
+        }
         diffuse += sampleDiffuse;
         specular += sampleSpecular;
         keys[k] = slot.x & STOCHASTIC_ENTRY_INDEX_MASK;
@@ -243,6 +271,59 @@ void StochasticShadeCS(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupI
     {
         return;
     }
+    // ---- Visibility gradients (STOCHASTIC_FLAG_GRADIENT; stochasticLightingRootConstants.h, docs/stochastic_lighting.md
+    // "Visibility gradients and paired (2026-11-17)"). The pixel selection recorded for its cell fills in whether the recorded
+    // slot's ray reached its light; the cell's first pixel takes the largest gradient the trace scattered into the 3x3 cells around
+    // it, holds it against last frame's held value decayed by STOCHASTIC_GRADIENT_DECAY, and writes it for the temporal pass.
+    if ((STOCHASTIC_FLAGS & STOCHASTIC_FLAG_GRADIENT) != 0u)
+    {
+        RWStructuredBuffer<uint> gradientBuffer = ResourceDescriptorHeap[STOCHASTIC_GRADIENT_UAV];
+        const uint capacity = StochasticGradientCapacity(blocks);
+        const uint2 cells = StochasticGradientCells(blocks);
+        const uint2 cell = id.xy / STOCHASTIC_GRADIENT_CELL;
+        const uint cellIndex = cell.y * cells.x + cell.x;
+        const uint parity = CLOD_RT_SEC_FRAME & 1u;
+        const uint recordedSlot = (pixelWord >> STOCHASTIC_PIXEL_GRADIENT_SHIFT) & 7u;
+        if (recordedSlot != 0u)
+        {
+            const uint base = StochasticGradientRecordBase(capacity, parity, cellIndex);
+            const bool reached = (pixelWord & (1u << (recordedSlot - 1u))) != 0u;
+            gradientBuffer[base] = gradientBuffer[base] | STOCHASTIC_GRADIENT_COMPLETE | (reached ? STOCHASTIC_GRADIENT_VISIBLE : 0u);
+        }
+        if (all((id.xy % STOCHASTIC_GRADIENT_CELL) == 0u))
+        {
+            // STOCHASTIC_GRADIENT_SIGNED 0: the largest change in the 3x3 cells; 1: the magnitude of their signed mean over the
+            // records re-traced there (changes that agree in direction, a shadow edge sweeping over, add up; churn cancels).
+            float held = 0.0f;
+            int signedSum = 0;
+            uint count = 0u;
+            [unroll]
+            for (int y = -1; y <= 1; ++y)
+            {
+                [unroll]
+                for (int x = -1; x <= 1; ++x)
+                {
+                    const int2 other = int2(cell) + int2(x, y);
+                    if (all(other >= 0) && all(other < int2(cells)))
+                    {
+                        const uint raw = StochasticGradientRawIndex(capacity, uint(other.y) * cells.x + uint(other.x));
+                        held = max(held, asfloat(gradientBuffer[raw]));
+                        signedSum += int(gradientBuffer[raw + 1u]);
+                        count += gradientBuffer[raw + 2u];
+                    }
+                }
+            }
+            if (STOCHASTIC_GRADIENT_SIGNED)
+            {
+                held = count > 0u ? abs(float(signedSum)) / (STOCHASTIC_GRADIENT_FIXED * float(count)) : 0.0f;
+            }
+            if ((STOCHASTIC_FLAGS & STOCHASTIC_FLAG_GRADIENT_VALID) != 0u)
+            {
+                held = max(held, asfloat(gradientBuffer[StochasticGradientHeldIndex(capacity, parity ^ 1u, cellIndex)]) * STOCHASTIC_GRADIENT_DECAY);
+            }
+            gradientBuffer[StochasticGradientHeldIndex(capacity, parity, cellIndex)] = asuint(held);
+        }
+    }
     RWTexture2D<float4> outputDiffuse = ResourceDescriptorHeap[STOCHASTIC_DIFFUSE_UAV];
     RWTexture2D<float4> outputSpecular = ResourceDescriptorHeap[STOCHASTIC_SPECULAR_UAV];
     if ((pixelWord & STOCHASTIC_PIXEL_DEBUG) != 0u)
@@ -305,10 +386,42 @@ void StochasticShadeCS(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupI
     {
         // At the sampled pixel, or (denoised and downsampled) at the noisy inputs' texel for this block.
         const uint2 target = downsample > 1u ? id.xy : pixel;
-        // Denoised, the diffuse input's alpha carries selection's unshadowed bound for the denoiser (stochasticSplit.hlsli).
-        const float alpha = (STOCHASTIC_FLAGS & STOCHASTIC_FLAG_DENOISED) != 0u ? min(StochasticDecodeBound(pixelWord), 65504.0f) : 1.0f;
+        // Denoised, the diffuse input's alpha carries selection's unshadowed bound for the denoiser (stochasticSplit.hlsli),
+        // in radiance as before, whether or not the rgb is normalized.
+        const bool denoised = (STOCHASTIC_FLAGS & STOCHASTIC_FLAG_DENOISED) != 0u;
+        float alpha = denoised ? min(StochasticDecodeBound(pixelWord), 65504.0f) : 1.0f;
+        float specularAlpha = 1.0f;
+#if STOCHASTIC_SHADE_PAIRED
+        if (denoised && (STOCHASTIC_FLAGS & STOCHASTIC_FLAG_NORMALIZE) != 0u && (STOCHASTIC_FLAGS & STOCHASTIC_FLAG_PAIRED) != 0u)
+        {
+            // The paired ratio (docs/stochastic_lighting.md "The paired ratio"): in place of the bound, each lobe's alpha holds the
+            // unshadowed estimate from this frame's samples in the guide's domain, lum_d(X / max(albedo, floor)) / G, which has
+            // expectation 1 (the guide is that estimate's exact mean). The denoiser demodulates the rgb by the same albedo, so
+            // lum_d of the demodulated rgb never exceeds it.
+            Texture2D<float2> guide = ResourceDescriptorHeap[STOCHASTIC_SHADE_GUIDE_SRV];
+            Texture2D<float4> baseColor = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::BaseColorOpacity)];
+            Texture2D<float4> specularAo = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::SpecularAo)];
+            const float2 g = valid ? guide[pixel] : 0.0f;
+            const float x = StochasticDemodulatedLuminance(unshadowedDiffuse / max(baseColor[pixel].rgb, STOCHASTIC_DEMODULATION_FLOOR));
+            const float y = StochasticDemodulatedLuminance(unshadowedSpecular / max(specularAo[pixel].rgb, STOCHASTIC_DEMODULATION_FLOOR));
+            alpha = g.x > STOCHASTIC_GUIDE_EPSILON ? min(x / g.x, 65504.0f) : 0.0f;
+            specularAlpha = g.y > STOCHASTIC_GUIDE_EPSILON ? min(y / g.y, 65504.0f) : 0.0f;
+        }
+#endif
+        if (denoised && (STOCHASTIC_FLAGS & STOCHASTIC_FLAG_NORMALIZE) != 0u)
+        {
+            // Guide-normalized (docs/stochastic_lighting.md "Guide-normalized accumulation"): each lobe divided by the guide at the pixel it
+            // was taken at, before the denoiser reconstructs across the 2x2, so a sample is never carried to a pixel at another
+            // distance from the light. The rgb stays modulated by the albedo (the denoiser demodulates it at this same pixel, so
+            // it reads (radiance / albedo) / guide, the guide's domain). The quotient is no longer near fp16's limit beside a
+            // light. A lobe the guide says no light reaches is 0 (its output is 0 too: the denoiser multiplies by the guide).
+            Texture2D<float2> guide = ResourceDescriptorHeap[STOCHASTIC_SHADE_GUIDE_SRV];
+            const float2 g = valid ? guide[pixel] : 0.0f;
+            diffuse = g.x > STOCHASTIC_GUIDE_EPSILON ? min(diffuse / g.x, 65504.0f) : 0.0f;
+            specular = g.y > STOCHASTIC_GUIDE_EPSILON ? min(specular / g.y, 65504.0f) : 0.0f;
+        }
         outputDiffuse[target] = float4(diffuse, alpha);
-        outputSpecular[target] = float4(specular, 1.0f);
+        outputSpecular[target] = float4(specular, specularAlpha);
         return;
     }
     [unroll]

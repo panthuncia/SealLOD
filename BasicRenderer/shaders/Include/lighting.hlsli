@@ -241,13 +241,27 @@ struct LightingOutput { // Lighting + debug info
 #endif
 };
 
-// Direct-lighting BRDF for any light direction, shared by raster and the path tracer. Callers
-// must have rejected NdotL <= 0 and NdotV <= 0. Excludes glint, which is not a physical lobe.
-// The return value is the sum of diffuse and specular, computed separately so raster's
-// floating-point results do not change; diffuse and specular are for callers that need the split.
-float3 EvaluateOpenPBRSurfaceBrdf(
+// What EvaluateOpenPBRSurfaceBrdf builds from the surface and view alone that is costly to build per light: the base
+// layer's view terms (five of its nine table samples and its analytic directional albedo). A loop over many lights at one
+// surface builds it once (MakeOpenPBRSurfaceBrdfFrame) and calls EvaluateOpenPBRSurfaceBrdfFrame per light;
+// EvaluateOpenPBRSurfaceBrdf builds it per call, the same arithmetic. The coat and fuzz layers' states stay per light: they
+// return at once for a surface without the layer, and holding them across a loop costs ~25 registers.
+struct OpenPBRSurfaceBrdfFrame
+{
+    OpenPBRBaseLayerViewTerms baseView;
+};
+
+OpenPBRSurfaceBrdfFrame MakeOpenPBRSurfaceBrdfFrame(LightingParameters lightingParameters, OpenPBRBaseLayerState baseState)
+{
+    OpenPBRSurfaceBrdfFrame frame;
+    frame.baseView = MakeOpenPBRBaseLayerViewTerms(baseState, lightingParameters.normal, lightingParameters.viewDir);
+    return frame;
+}
+
+float3 EvaluateOpenPBRSurfaceBrdfFrame(
     LightingParameters lightingParameters,
     OpenPBRBaseLayerState baseState,
+    OpenPBRSurfaceBrdfFrame frame,
     float3 lightDir,
     float normDotView,
     float normDotLight,
@@ -272,7 +286,7 @@ float3 EvaluateOpenPBRSurfaceBrdf(
         lightingParameters.fuzzRoughness);
 #endif
     const OpenPBRBaseLayerEvaluation baseEvaluation =
-        EvaluateOpenPBRBaseLayerDirect(baseState, lightingParameters.normal, lightingParameters.viewDir, lightDir);
+        EvaluateOpenPBRBaseLayerDirectView(baseState, frame.baseView, lightingParameters.normal, lightingParameters.viewDir, lightDir);
 #if !defined(CLOD_FORWARD_FUZZ) || CLOD_FORWARD_FUZZ
     const float fuzzLayerScale = OpenPBRFuzzBaseLayerScaleComplete(fuzzState, lightDir);
 #else
@@ -307,6 +321,23 @@ float3 EvaluateOpenPBRSurfaceBrdf(
     return (baseEvaluation.diffuse + baseEvaluation.specular) * baseAttenuation + coatFr * fuzzLayerScale.xxx + fuzzFr;
 }
 
+// Direct-lighting BRDF for any light direction, shared by raster and the path tracer. Callers
+// must have rejected NdotL <= 0 and NdotV <= 0. Excludes glint, which is not a physical lobe.
+// The return value is the sum of diffuse and specular, computed separately so raster's
+// floating-point results do not change; diffuse and specular are for callers that need the split.
+float3 EvaluateOpenPBRSurfaceBrdf(
+    LightingParameters lightingParameters,
+    OpenPBRBaseLayerState baseState,
+    float3 lightDir,
+    float normDotView,
+    float normDotLight,
+    out float3 diffuse,
+    out float3 specular)
+{
+    return EvaluateOpenPBRSurfaceBrdfFrame(lightingParameters, baseState, MakeOpenPBRSurfaceBrdfFrame(lightingParameters, baseState),
+        lightDir, normDotView, normDotLight, diffuse, specular);
+}
+
 // One light's unshadowed contribution. total is what raster accumulates, computed exactly as it always has been;
 // diffuse and specular split it by lobe (glint counts as specular) for passes that need them apart.
 struct DirectLightContribution
@@ -315,6 +346,40 @@ struct DirectLightContribution
     float3 diffuse;
     float3 specular;
 };
+
+// EvaluateDirectLightContribution with the surface's per-view BRDF state built once (MakeOpenPBRSurfaceBrdfFrame), for loops
+// over many lights at one surface (stochastic lighting's guide).
+DirectLightContribution EvaluateDirectLightContributionFrame(
+    LightFragmentData light,
+    LightingParameters lightingParameters,
+    OpenPBRBaseLayerState baseState,
+    OpenPBRSurfaceBrdfFrame frame)
+{
+    DirectLightContribution result = (DirectLightContribution)0;
+    float normDotView = saturate(dot(lightingParameters.normal, lightingParameters.viewDir));
+    float normDotLight = saturate(dot(lightingParameters.normal, light.lightToFrag));
+    // A light at or below the geometric shading horizon has no direct surface
+    // contribution. Besides avoiding needless BRDF work, returning here keeps
+    // the GGX horizon singularity from becoming Inf * 0 when NoL is zero.
+    if (normDotLight <= 0.0f || normDotView <= 0.0f)
+    {
+        return result;
+    }
+    float3 diffuse;
+    float3 specular;
+    float3 BRDF = EvaluateOpenPBRSurfaceBrdfFrame(lightingParameters, baseState, frame, light.lightToFrag, normDotView, normDotLight, diffuse, specular);
+
+    result.total = BRDF * light.lightColor.rgb * light.intensity * light.attenuation * light.spotAttenuation * normDotLight;
+    const float3 irradiance = LightIncidentRadiance(light) * normDotLight;
+    result.diffuse = diffuse * irradiance;
+    result.specular = specular * irradiance;
+#if !defined(CLOD_FORWARD_GLINT) || CLOD_FORWARD_GLINT
+    const float3 glint = EvaluateGlintContribution(light, lightingParameters);
+    result.total += glint;
+    result.specular += glint;
+#endif
+    return result;
+}
 
 DirectLightContribution EvaluateDirectLightContribution(
     LightFragmentData light,

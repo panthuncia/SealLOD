@@ -317,6 +317,7 @@ set(SOURCES
     "src/Lighting/Stochastic/StochasticLightingResources.h"
     "src/Lighting/Stochastic/RenderPasses/StochasticSamplePass.h"
     "src/Lighting/Stochastic/RenderPasses/StochasticDenoisePass.h"
+    "src/Lighting/Stochastic/RenderPasses/StochasticGuidePass.h"
     "src/Lighting/Environment/RenderPasses/brdfIntegrationPass.h"
     "src/Lighting/Environment/RenderPasses/EnvironmentConversionPass.h"
     "src/Lighting/Environment/RenderPasses/EnvironmentFilterPass.h"

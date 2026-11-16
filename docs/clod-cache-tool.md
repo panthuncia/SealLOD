@@ -42,7 +42,7 @@ not just one shard's meshes. Every shard therefore writes the same description, 
 `Scene cache complete` once all shards have run.
 
 Write the cache to a fast drive. On a QLC drive, sustained writes stall every worker in `NtWriteFile` once the drive's
-write cache fills. A 16-shard slice of Zorah took 45 s writing to such a drive and 35 s to a TLC one.
+write cache fills.
 
 | Option | |
 |---|---|
@@ -54,7 +54,7 @@ write cache fills. A 16-shard slice of Zorah took 45 s writing to such a drive a
 | `--cache-only` | Misses are reported, nothing is built, and the manifest is left alone. |
 | `--no-textures` | Skip the texture stage. |
 | `--outcomes-csv=path` | One row per primitive: kind, triangles, start and end time. Use it to see admission and the tail. |
-| `--clod-report=path`, `--clod-*=...`, `--debug` | As before. |
+| `--clod-report=path`, `--clod-*=...`, `--debug` | CLod build report, CLod build settings, debug logging. |
 
 A directory argument queues only the scene files in it. A scene's own folder also holds its buffers and images, so
 pass the scene file itself.
@@ -150,7 +150,7 @@ The manifest embeds it, so the tool and the renderer read the scene the same way
 `materialChannels` rules are tried in order. Each can require a channel count (`channels`) and a name suffix
 (`nameSuffix`). The channel count is known up front only for KTX2 images.
 
-## glTF support added for this
+## glTF support
 
 | Feature | Notes |
 |---|---|
@@ -160,7 +160,7 @@ The manifest embeds it, so the tool and the renderer read the scene the same way
 | `KHR_texture_basisu` | Its source is preferred over `source`. |
 | `KHR_texture_transform` | One transform per material (`MaterialDescription::uvTransform`), applied to every slot. A material whose slots differ uses the first slot's and is reported. |
 | `EXT_mesh_gpu_instancing` | A part carries `instanceMatrices`. The demo places it as one static group of all its instances. |
-| Normals | glTF (OpenGL) normals load as stored, and the shader flips green (`MATERIAL_INVERT_NORMAL_GREEN`). A two-channel normal map reconstructs Z. Before this, every glTF normal map was decompressed, flipped and re-encoded. |
+| Normals | glTF (OpenGL) normals load as stored, and the shader flips green (`MATERIAL_INVERT_NORMAL_GREEN`). A two-channel normal map reconstructs Z. |
 | `extensionsRequired` | A file requiring an extension the importer does not read is refused. |
 
 The KTX2 dependency is KTX-Software (`ktx[tools]` in `vcpkg.json`), with zstd. Its command-line tools land in

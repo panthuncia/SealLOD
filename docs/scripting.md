@@ -11,10 +11,6 @@ commands, capture frames and check outcomes, all without editing and rebuilding 
 > coverage its draw records need, and the static import coordinator cuts a geometry-only scene to publish it
 > (`StaticImportCoordinator::DrainGeometryCoverage`, woken by `StaticImportStreamingPump`). A host must attach a
 > `StaticImportRuntime`, even an empty one, or dynamic models never draw. The demo always does.
->
-> **Open:** a scripted model created while a static import (Scene Explorer's Load Model) is still publishing its first
-> scene stayed invisible until the next static membership change, although the geometry roots covering it published.
-> The demo no longer loads static models at startup (`--model` was removed), so scenarios do not hit this.
 
 ## Running a scenario
 
@@ -218,7 +214,7 @@ Renderer / Scene (flecs)           and ControlCommandRegistry (the demo's comman
 | [`ControlCommandRegistry.h`](../BasicRenderer/include/BasicRenderer/Diagnostics/ControlCommandRegistry.h) | Named JSON commands: `Register`, `Invoke`, `Serve(pipe)`. The demo's commands are registered once, and the pipe and scripts share them. |
 | [`Managed/.../Interop/Native.cs`](../Scripting/Managed/BasicRenderer.Scripting/Interop/Native.cs) | `IHostApi` and the native table behind it. Tests substitute `FakeHost`. |
 
-**Renderer additions this needed:**
+**Renderer entry points it relies on:**
 - `Renderer::AddSceneMutationHook` and `SetCameraInputEnabled`. The latter gates the fly camera on both the synchronous
   and the overlapped path.
 - `Scene::InstantiateModel` and `ReleaseModel`: a root entity with one renderable child per part.
@@ -243,7 +239,7 @@ the runtime and Roslyn, so a reload of unchanged sources skips Roslyn (about 0.8
 - **Append-only.** A new entry goes at the end of its table and bumps `BR_SCRIPT_ABI_VERSION`. Existing entries never
   move or change signature.
 - Strings are NUL-terminated UTF-8, valid during the call. `command_invoke`'s reply is valid until the next call.
-- Host-specific API (later, SARP's) goes in an extension table, found through `get_extension(name, version)`.
+- Host-specific API goes in an extension table, found through `get_extension(name, version)`.
 
 ### Adding an API entry
 
@@ -277,15 +273,10 @@ the runtime and Roslyn, so a reload of unchanged sources skips Roslyn (about 0.8
 ctest -C RelWithDebInfo --test-dir build\ninja-renderer-host -R Script --output-on-failure
 ```
 
-## Status
+## Limitations
 
-- **Done (M0 to M2):** everything above. Verified live in the demo:
-  - The three examples pass with exit 0, and CameraPath writes a 2560x1600 RGBA32F capture through the command
-    registry.
-  - The pipe commands `script.run`, `script.reload` (a compile-cache hit), `script.stop` and `script.status` work.
-  - The migrated commands answer through the registry.
-- **Open:**
-  - A model instantiated while a first static import is publishing stays invisible until the next static membership
-    change (see the note at the top).
-  - Later: port the demo's hard-coded test flags to scenarios, adopt the host in SARP (through an extension table),
-    play rigid glTF clips through `Track`, and add static placement for large non-moving content.
+- A scripted model created while a static import (Scene Explorer's Load Model) is still publishing its first scene
+  stays invisible until the next static membership change, although the geometry roots covering it publish. The demo
+  loads no static models at startup, so scenarios do not hit this unless they race a manual Load Model.
+- There is no host-specific extension table yet (SARP does not host scripts), rigid glTF clips cannot be played
+  through `Track`, and there is no static placement for large non-moving content.

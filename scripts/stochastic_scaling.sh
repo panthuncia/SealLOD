@@ -10,13 +10,32 @@
 #                                                     view), for looking at artefacts; add --vars ZORAH_FREEZE_LIGHTS=0 to move lights
 #   scripts/stochastic_scaling.sh pair [options]      moving camera: each frame's denoised luminance against its own noisy
 #                                                     input (DENOISE_DEBUG_PAIR), per variant: the denoiser's bias and lag
-#   scripts/stochastic_scaling.sh trail [options]     the sweep scene (lights skimming the ground under a held overhead camera):
-#                                                     --frames (48) consecutive denoised/noisy frames per variant; stuck history
+#   scripts/stochastic_scaling.sh trail [options]     moving lights under a held camera (--layout, default sweep: lights skimming
+#                                                     the ground): --frames (48) consecutive frames per variant, the denoised
+#                                                     output against the noisy input after the temporal pass, the spatial pass
+#                                                     and DLSS; stuck history
+#   scripts/stochastic_scaling.sh still [options]     frozen lights (--layout, default sweep): denoised mean against the converged
+#                                                     reference's and the noisy input's (stationary brightness); with --variant,
+#                                                     each variant's frames before the reference and again after it, in reverse
+#                                                     order (--pso defaults to the denoiser's two pipelines)
+#   scripts/stochastic_scaling.sh guide [options]     frozen lights (--layout): the guide (stochasticLightingNormalize on) for
+#                                                     --frames frames with jitter and without, then the unshadowed reference
+#                                                     written as the guide: its stability and its truth ratio (overhaul phase 2)
+#   scripts/stochastic_scaling.sh paired [options]    frozen lights (--layout; default the bias scene), the paired ratio on: --frames
+#                                                     frames of DENOISE_DEBUG_VIEW 7 and the guide: E[X] / G from the noisy x and
+#                                                     from the long unshadowed history H_X, overall and where it deviates (phase 3)
 #   scripts/stochastic_scaling.sh dlss [options]      held camera (ZORAH_CAMERA_T, default 0: the moving-camera test's start), DLSS
 #                                                     on: the reference through the whole pipeline, then --frames consecutive frames
 #                                                     of the undenoised input and of each denoiser variant, each captured before
 #                                                     DLSS (stochastic lighting) and after it (the upscaled HDR image), against
 #                                                     the reference: error per pixel, 8x8 and 32x32 blocks, persistent and flicker
+#                                                     (does not fit a 60 s session: three graph rebuilds and reference convergence)
+#   scripts/stochastic_scaling.sh dlssnoise [options] held camera, frozen lights, DLSS on, no reference (fits 60 s with two variants):
+#                                                     --sets sets of --frames consecutive frames per variant, before and after
+#                                                     DLSS; each variant's slow (between its sets) and fast (within a set) noise
+#                                                     after DLSS at pixel / 8x8 / 32x32, display-weighted. Self-referenced: no
+#                                                     bias (take it from still), no moving lights. --noisy adds the undenoised
+#                                                     input, --floor the per-frame reference's floor (each a graph rebuild)
 #
 # Options:
 #   --scales "1 4 16"       ZORAH_LIGHT_SCALE values, 16 lights each (profile; default "1 4 16 64"). 0 is the sun alone.
@@ -44,6 +63,11 @@
 #   --ref-grid g            dlss: the per-frame reference traces a g x g grid of rays per light (default 4), so the sun's
 #                           penumbrae are not noise DLSS mistreats
 #   --no-noisy              dlss: skip the undenoised segment
+#   --noisy                 dlssnoise: add the undenoised input first (a graph rebuild each way, ~20 s)
+#   --floor                 dlssnoise: add the per-frame reference (STOCHASTIC_REFERENCE_PER_FRAME, --ref-grid) last, the
+#                           floor of the same metric (a graph rebuild, ~15 s)
+#   --history s             dlssnoise: seconds after a variant is applied before its first set (default 3: the denoiser's
+#                           and DLSS's histories)
 #   --denoise               noise: keep the denoiser on for the live frames (denoised error against the accumulation)
 #   --converge n            frames the reference / accumulation must hold before a capture (bias, noise; default 1500: keep bias runs short)
 #   --max-wait s            the longest wait for that, in seconds (default 60)
@@ -51,6 +75,21 @@
 #   --tag name              run name prefix (default ss_<mode>); runs are <tag>_r<range>_s<scale>
 #   --vars "A=1 B=2"        more environment variables for the demo (applied after the defaults, so they override)
 #   --keep                  keep the captures (bias, noise); by default they are deleted after the analysis
+#   --exit-after s          the demo quits on its own after s seconds (default 3600), a cap on a session's length
+#   --layout name           trail, still: ZORAH_LIGHT_LAYOUT (sweep, off, single, foliage, swap, flight; ZorahLights.cs)
+#   --stages 3|1            trail: 3 (default) the temporal, spatial and post-DLSS stages from DENOISE_DEBUG_VIEW 5 with the
+#                           HDR image (~200 MB a frame); 1 the original DENOISE_DEBUG_PAIR capture (the spatial stage alone)
+#   --debug-view 6          trail: capture DENOISE_DEBUG_VIEW 6 instead (set on both denoiser pipelines; stochastic_diffuse only):
+#                           the trail numbers after the temporal and spatial passes, and how many stuck blocks were reached
+#                           by history from another surface (cross-surface reprojection). Its composite is not valid
+#   --debug-view 8          trail: DENOISE_DEBUG_VIEW 8 likewise: the trail numbers and the light-mixture confidence (overhaul
+#                           phase 4): its mean, the pixels below 0.9 and 0.5, per frame. With --vars ZORAH_FREEZE_LIGHTS=1, its
+#                           false-positive rate on still lights. With visibility gradients on, the combined confidence
+#   --debug-view 9          trail: as 8, with the visibility gradients' confidence alone ("Visibility gradients and paired
+#                           (2026-11-17)")
+#   --trigger-after s       trail --layout off or swap: seconds after a capture starts that its event is triggered (default 1)
+#   --fixed-dt s            the scenario (and renderer.Update) advance s seconds a frame (--script-fixed-dt), so lights move
+#                           as far per captured frame as live at 1/s fps even while captures slow the frames down
 #
 # Environment: DEMO_DIR (default D:/BasicRendererDemo, the deployed demo: the exe, shaders/), CTL (StatisticalSamplingControl.exe,
 # default SARP's ninja-renderer-host RelWithDebInfo build), CAP_DIR (captures, default D:/stoch_cap), OUT_DIR (run files, logs
@@ -79,10 +118,12 @@ win() { cygpath -w "$1"; }
 
 MODE=${1:-}
 [ -n "$MODE" ] && shift
-case "$MODE" in profile|bias|noise|look|pair|dlss|trail) ;; *) sed -n '2,60p' "$0"; exit 1 ;; esac
+case "$MODE" in profile|bias|noise|look|pair|dlss|dlssnoise|trail|still|guide|paired) ;; *) sed -n '2,90p' "$0"; exit 1 ;; esac
 
 SCALES="1 4 16 64"; SCALE=1; RANGES=18; RANGE=18; VARIANTS=(); PSO=Stochastic.Select.PSO,Stochastic.Shade.PSO; REPEAT=1; SAMPLES=""
-FRAMES=""; REF_FRAMES=8; PER_FRAME_FRAMES=32; REF_GRID=4; SETS=4; SET_GAP=1; NOISY=1; CONVERGE=1500; MAX_WAIT=60; SETTLE=20; TAG="ss_$MODE"; XVARS=""; KEEP=0; DENOISE_LIVE=0; PAIR=0
+EXIT_AFTER=3600; FRAMES=""; REF_FRAMES=8; PER_FRAME_FRAMES=32; REF_GRID=4; SETS=4; SET_GAP=1; NOISY=1; CONVERGE=1500; MAX_WAIT=60; SETTLE=20; TAG="ss_$MODE"; XVARS=""; KEEP=0; DENOISE_LIVE=0; PAIR=0
+VIEW=0; LAYOUT=sweep; STAGES=3; TRIGGER_AFTER=1; FIXED_DT=""; DEBUG_VIEW=""; FLOOR=0; HISTORY=3
+[ "$MODE" = dlssnoise ] && NOISY=0
 PSO_SET=0; declare -A SHADERS=(); SHADER_TARGET=shaders/Stochastic/stochasticSelect.hlsl
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -103,22 +144,34 @@ while [ $# -gt 0 ]; do
 		--sets) SETS=$2; shift 2 ;;
 		--set-gap) SET_GAP=$2; shift 2 ;;
 		--no-noisy) NOISY=0; shift ;;
+		--noisy) NOISY=1; shift ;;
+		--floor) FLOOR=1; shift ;;
+		--history) HISTORY=$2; shift 2 ;;
 		--converge) CONVERGE=$2; shift 2 ;;
 		--max-wait) MAX_WAIT=$2; shift 2 ;;
 		--settle) SETTLE=$2; shift 2 ;;
 		--tag) TAG=$2; shift 2 ;;
 		--vars) XVARS=$2; shift 2 ;;
 		--keep) KEEP=1; shift ;;
+		--exit-after) EXIT_AFTER=$2; shift 2 ;;
 		--denoise) DENOISE_LIVE=1; shift ;;
+		--layout) LAYOUT=$2; shift 2 ;;
+		--stages) STAGES=$2; shift 2 ;;
+		--trigger-after) TRIGGER_AFTER=$2; shift 2 ;;
+		--fixed-dt) FIXED_DT=$2; shift 2 ;;
+		--debug-view) DEBUG_VIEW=$2; shift 2 ;;
 		*) die "unknown option '$1'" ;;
 	esac
 done
 [ ${#VARIANTS[@]} -eq 0 ] && VARIANTS=('base={}')
 [ "$MODE" = trail ] && FRAMES=${FRAMES:-48}
-if [ "$MODE" = dlss ]; then
-	FRAMES=${FRAMES:-8}
+if [ "$MODE" = dlss ] || [ "$MODE" = dlssnoise ] || [ "$MODE" = still ]; then
+	{ [ "$MODE" = dlss ] || [ "$MODE" = dlssnoise ]; } && FRAMES=${FRAMES:-8}
 	[ "$PSO_SET" = 1 ] || PSO=Stochastic.DenoiseTemporal.PSO,Stochastic.DenoiseSpatial.PSO
 fi
+[ "$MODE" = still ] && FRAMES=${FRAMES:-16}
+[ "$MODE" = guide ] && FRAMES=${FRAMES:-8}
+[ "$MODE" = paired ] && FRAMES=${FRAMES:-16}
 FRAMES=${FRAMES:-6}
 for v in "${VARIANTS[@]}"; do case "$v" in *=\{*\}) ;; *) die "a variant is name={json}, not '$v'" ;; esac; done
 
@@ -178,7 +231,7 @@ launch() {
 		for v in SARP_RT_PATH_TRACING=0 SARP_STOCHASTIC_LIGHTING=1 SARP_TEXTURE_FEEDBACK_FORCE_MIP=4 ZORAH_LOD_ERROR_PIXELS=3 \
 			ZORAH_FREEZE_LIGHTS=1 $vars $XVARS; do echo "set $v"; done
 		echo "set BASICRENDERER_LOG_PATH=$(win "$(log_file)")"
-		echo "BasicRenderer.exe --sampling-control-pipe p_$RUN --script $(win "$SCENARIO") --exit-after-seconds 3600 $args"
+		echo "BasicRenderer.exe --sampling-control-pipe p_$RUN --script $(win "$SCENARIO") --exit-after-seconds $EXIT_AFTER${FIXED_DT:+ --script-fixed-dt $FIXED_DT} $args"
 	} > "$cmdfile"
 	cmd //c start "" explorer.exe "$(win "$cmdfile")"
 	echo "== $RUN: launched ($vars)"
@@ -228,7 +281,16 @@ recompile() {
 	[ "$force" = 0 ] && [ "$defines" = "$CURRENT_DEFINES" ] && return 0
 	local reply
 	for pso in ${PSO//,/ }; do
-		reply=$(ctl pso.recompile "{\"pipeline_id\":\"$pso\",\"defines\":$defines}" 2>&1)
+		local d=$defines
+		# A variant's defines replace the pipeline's whole set: keep pair's or trail's diagnostic output on the spatial pass
+		# (and view 6's on the temporal pass, which hands it over).
+		if [ "$pso" = Stochastic.DenoiseSpatial.PSO ]; then
+			[ "$PAIR" = 1 ] && d=$("$PY" -c 'import json, sys; d = json.loads(sys.argv[1]); d["DENOISE_DEBUG_PAIR"] = "1"; print(json.dumps(d, separators=(",", ":")))' "$d" | tr -d '\r')
+		fi
+		if [ "$VIEW" != 0 ] && { [ "$pso" = Stochastic.DenoiseSpatial.PSO ] || { [ "$pso" = Stochastic.DenoiseTemporal.PSO ] && { [ "$VIEW" = 6 ] || [ "$VIEW" = 8 ]; }; }; }; then
+			d=$("$PY" -c 'import json, sys; d = json.loads(sys.argv[1]); d["DENOISE_DEBUG_VIEW"] = sys.argv[2]; print(json.dumps(d, separators=(",", ":")))' "$d" "$VIEW" | tr -d '\r')
+		fi
+		reply=$(ctl pso.recompile "{\"pipeline_id\":\"$pso\",\"defines\":$d}" 2>&1)
 		if ! echo "$reply" | grep -q '"state":"published"'; then
 			echo "$reply" | head -c 600 >&2; echo >&2
 			grep -iE "failed to rebuild|structural" "$(log_file)" | tail -3 >&2
@@ -255,13 +317,20 @@ print(json.dumps({k: v for k, v in d.items() if not k.startswith("setting:")}, s
 	for kv in $settings; do
 		key=${kv%%=*}; value=${kv#*=}
 		if [ "${CURRENT_SETTINGS[$key]:-}" != "$value" ]; then
-			set_setting "$key" "$value"; CURRENT_SETTINGS[$key]=$value; changed=1
+			set_setting "$key" "$value"; CURRENT_SETTINGS[$key]=$value
+			# Per-frame settings rebuild nothing, so the pipelines keep their overrides; the denoiser restarts its history.
+			case $key in
+				stochasticLightingNormalize|stochasticLightingPaired|stochasticLightingMixtureConfidence|stochasticLightingVisibilityGradient|enableJitter) [ "$changed" = 0 ] && changed=2 ;;
+				*) changed=1 ;;
+			esac
 		fi
 	done
+	[ "$changed" = 2 ] && sleep 2
 	if [ "$changed" = 1 ]; then
 		sleep 8 # the graph rebuild and its pipelines
 		CURRENT_DEFINES='{}'
 		[ "$PAIR" = 1 ] && pair_recompile
+		[ "$VIEW" != 0 ] && view_recompile
 	fi
 	use_shader "$name" && force=1
 	recompile "$defines" "$force"
@@ -475,28 +544,217 @@ mode_dlss() {
 	delete_captures
 }
 
-# trail: the sweep scene (ZORAH_LIGHT_LAYOUT=sweep, moving lights, held overhead camera), --frames consecutive frames of
-# DENOISE_DEBUG_PAIR (denoised and noisy luminance) per variant: history the denoiser keeps after a light has passed.
-mode_trail() {
-	launch "${TAG}_r${RANGE}_s${SCALE}" "ZORAH_LIGHT_LAYOUT=sweep ZORAH_FREEZE_LIGHTS=0 ZORAH_LIGHT_SCALE=$SCALE ZORAH_LIGHT_RANGE=$RANGE"
+# dlssnoise: noise after DLSS without a reference (docs/stochastic_lighting.md "Running the benchmarks"). Held camera
+# (ZORAH_CAMERA_T=0 unless --vars says otherwise), frozen lights. Per variant, --sets sets of --frames consecutive frames,
+# --set-gap s apart, each frame before DLSS (stochastic lighting) and after it (the upscaled HDR image). The analysis splits each
+# variant's frames into fast noise (within a set) and slow noise (between its sets), which need no truth: the old dlss mode's
+# headline, sqrt(slow^2 + fast^2) after DLSS, was always computed this way. What every set of a variant shares (its bias, and
+# noise slower than its sets' span) is not measured: take the bias from still. The display weights come from the mean of all
+# variants' frames. --noisy adds the undenoised input first, --floor the per-frame reference last (each a graph rebuild).
+mode_dlssnoise() {
+	launch "${TAG}_r${RANGE}_s${SCALE}" "ZORAH_CAMERA_T=0 ZORAH_FREEZE_LIGHTS=1 ZORAH_LIGHT_SCALE=$SCALE ZORAH_LIGHT_RANGE=$RANGE"
 	sleep "$SETTLE"
-	PAIR=1
-	pair_recompile
+	local tags=() v name
+	if [ "$NOISY" = 1 ]; then
+		set_setting stochasticLightingDenoise false; sleep 8
+		capture_sets noisy; tags+=(noisy)
+		set_setting stochasticLightingDenoise true; sleep 8
+	fi
 	CURRENT_DEFINES='{}'
-	local tags=() v name reply
 	for v in "${VARIANTS[@]}"; do
 		name=${v%%=*}
 		apply_variant "$name" "${v#*=}"
-		sleep 3 # the denoiser's history after the switch
-		reply=$(ctl capture.hdr "{\"path\":\"$CAP_DIR/${RUN}_${name}_{target}_{frame}.dds\",\"targets\":[\"stochastic_diffuse\"],\"frames\":$FRAMES,\"timeout_seconds\":180}" 2>&1)
-		echo "$reply" | grep -q '"state":"published"' || die "$RUN: capture.hdr $name failed: $(echo "$reply" | head -c 400)"
+		sleep "$HISTORY"
+		running || { echo "   the session ended before $name"; break; }
+		capture_sets "$name"
 		tags+=("$name")
 	done
+	if [ "$FLOOR" = 1 ] && running; then
+		set_setting stochasticLightingReference true; sleep 8; reference_per_frame; sleep 1
+		capture_sets floor; tags+=(floor)
+	fi
+	grep -q "DLSS history reset submitted" "$(log_file)" || echo "   warning: no DLSS evaluation in the log (Streamline off?)"
 	local run=$RUN
 	finish
 	RUN=$run
+	mkdir -p "$OUT_DIR/dlss"
+	"$PY" "$ANALYSIS" dlssnoise "$(win "$CAP_DIR")" "$RUN" "${tags[@]}" | tee "$OUT_DIR/dlss/$RUN.txt"
+	delete_captures
+}
+
+# view_recompile: the spatial pass writes DENOISE_DEBUG_VIEW $VIEW: 5 for trail (the composite unchanged; the noisy luminance
+# and the temporal pass's result in the targets' alphas), so one capture of both targets and the HDR image has the three
+# stages; 1 for still; 6 (--debug-view 6, on the temporal pass too) the cross-surface share; 8 the mixture confidence.
+view_recompile() {
+	local reply pso
+	for pso in Stochastic.DenoiseSpatial.PSO $({ [ "$VIEW" = 6 ] || [ "$VIEW" = 8 ] || [ "$VIEW" = 9 ]; } && echo Stochastic.DenoiseTemporal.PSO); do
+		reply=$(ctl pso.recompile "{\"pipeline_id\":\"$pso\",\"defines\":{\"DENOISE_DEBUG_VIEW\":\"$VIEW\"}}" 2>&1)
+		echo "$reply" | grep -q '"state":"published"' || die "$RUN: DENOISE_DEBUG_VIEW $VIEW did not publish on $pso: $(echo "$reply" | head -c 300)"
+	done
+	sleep 2
+}
+
+# trail: moving lights under a held camera (--layout, default sweep), --frames consecutive frames per variant: history the
+# denoiser keeps after the light has gone. --stages 3 (default) captures DENOISE_DEBUG_VIEW 5 with the HDR image (RGBA32F,
+# ~200 MB a frame): the trail after the temporal pass, after the spatial pass, and after DLSS, all from the same frames.
+# --stages 1 is the original detector (DENOISE_DEBUG_PAIR, the spatial pass only, ~65 MB a frame).
+# Layouts off and swap have an event (the lights cut; A swapped for B) that the scenario starts when the file
+# ZORAH_EVENT_FILE appears: each variant's capture starts, and --trigger-after (1) seconds later the file is written, so the
+# event falls a few frames into the capture. Off cuts at once (ZORAH_OFF_SECONDS=0); swap fades in ZORAH_SWAP_FADE=0.1 s.
+# Captures are slow (5-12 frames a second, the readbacks), and the scenario's lights move by its clock: without --fixed-dt a
+# light moves 5-12 times as far per captured frame as it does live at 60 fps.
+mode_trail() {
+	local layout_vars="ZORAH_LIGHT_LAYOUT=$LAYOUT ZORAH_FREEZE_LIGHTS=0" event=""
+	if [ "$LAYOUT" = off ] || [ "$LAYOUT" = swap ]; then
+		event="$OUT_DIR/${TAG}_r${RANGE}_s${SCALE}.event"
+		rm -f "$event"
+		layout_vars="$layout_vars ZORAH_EVENT_FILE=$(win "$event") ZORAH_OFF_SECONDS=0 ZORAH_SWAP_FADE=0.1"
+	fi
+	launch "${TAG}_r${RANGE}_s${SCALE}" "$layout_vars ZORAH_LIGHT_SCALE=$SCALE ZORAH_LIGHT_RANGE=$RANGE"
+	local tags=() v name reply targets='["stochastic_diffuse"]' pid analysis=trail
+	if [ -n "$DEBUG_VIEW" ]; then
+		case "$DEBUG_VIEW" in 6) analysis=cross ;; 8|9) analysis=confidence ;; *) die "--debug-view takes 6, 8 or 9" ;; esac
+		VIEW=$DEBUG_VIEW; view_recompile
+	elif [ "$STAGES" = 1 ]; then PAIR=1; pair_recompile
+	else VIEW=5; view_recompile; targets='["stochastic_diffuse","stochastic_specular","hdr"]'
+	fi
+	CURRENT_DEFINES='{}'
+	sleep "$SETTLE"
+	for v in "${VARIANTS[@]}"; do
+		name=${v%%=*}
+		# The event restarts with each variant: removing the file undoes it (lights on, A back) before the next one.
+		[ -n "$event" ] && rm -f "$event"
+		apply_variant "$name" "${v#*=}"
+		sleep 3 # the denoiser's history after the switch
+		if [ -n "$event" ]; then
+			ctl capture.hdr "{\"path\":\"$CAP_DIR/${RUN}_${name}_{target}_{frame}.dds\",\"targets\":$targets,\"frames\":$FRAMES,\"timeout_seconds\":180}" \
+				> "$OUT_DIR/capture_reply.json" 2>&1 &
+			pid=$!
+			sleep "$TRIGGER_AFTER"
+			echo "$name" > "$event"
+			wait "$pid"
+			reply=$(cat "$OUT_DIR/capture_reply.json")
+		else
+			reply=$(ctl capture.hdr "{\"path\":\"$CAP_DIR/${RUN}_${name}_{target}_{frame}.dds\",\"targets\":$targets,\"frames\":$FRAMES,\"timeout_seconds\":180}" 2>&1)
+		fi
+		echo "$reply" | grep -q '"state":"published"' || die "$RUN: capture.hdr $name failed: $(echo "$reply" | head -c 400)"
+		tags+=("$name")
+	done
+	[ -n "$event" ] && grep -o "event file seen.*\|lights off\|lights back on\|swapped.*" "$(log_file)" | head -4 | sed 's/^/   scenario: /'
+	local run=$RUN
+	finish
+	RUN=$run
+	[ -n "$event" ] && rm -f "$event"
 	mkdir -p "$OUT_DIR/trail"
-	"$PY" "$ANALYSIS" trail "$(win "$CAP_DIR")" "$RUN" "$(win "$OUT_DIR/trail")" "${tags[@]}" | tee "$OUT_DIR/trail/$RUN.txt"
+	"$PY" "$ANALYSIS" "$analysis" "$(win "$CAP_DIR")" "$RUN" "$(win "$OUT_DIR/trail")" "${tags[@]}" | tee "$OUT_DIR/trail/$RUN.txt"
+	delete_captures
+}
+
+# still: frozen lights (--layout, default sweep, held camera): the denoiser's stationary brightness. --frames (16) frames of
+# DENOISE_DEBUG_VIEW 1 (the denoised, noisy and temporal-only luminance of each frame), then the reference until it holds
+# --converge frames (at most --max-wait s), and --frames frames of it as luminance. Reports the denoised, temporal-only and
+# noisy means over the reference's, and the displayed ratios (x / (1 + x) of 8x8 block means).
+mode_still() {
+	launch "${TAG}_r${RANGE}_s${SCALE}" "ZORAH_LIGHT_LAYOUT=$LAYOUT ZORAH_FREEZE_LIGHTS=1 ZORAH_LIGHT_SCALE=$SCALE ZORAH_LIGHT_RANGE=$RANGE"
+	sleep "$SETTLE"
+	local reply
+	if [ "${#VARIANTS[@]}" -gt 1 ]; then
+		# Variants: D.<name> for each before the reference, E.<name> after it in reverse order, so the scene's drift falls
+		# on every variant alike.
+		local v name names=() i
+		VIEW=1; view_recompile; CURRENT_DEFINES='{}'
+		for v in "${VARIANTS[@]}"; do
+			name=${v%%=*}; names+=("$name")
+			apply_variant "$name" "${v#*=}" # its recompile waits 4 s, enough for the history
+			reply=$(ctl capture.hdr "{\"path\":\"$CAP_DIR/${RUN}_D.${name}_{target}_{frame}.dds\",\"targets\":[\"stochastic_diffuse\"],\"frames\":$FRAMES,\"timeout_seconds\":120}" 2>&1)
+			echo "$reply" | grep -q '"state":"published"' || die "$RUN: capture.hdr D.$name failed: $(echo "$reply" | head -c 400)"
+		done
+		set_setting stochasticLightingReference true; converge reference
+		reply=$(ctl capture.hdr "{\"path\":\"$CAP_DIR/${RUN}_R_{target}_{frame}.dds\",\"targets\":[\"stochastic_diffuse\",\"stochastic_specular\"],\"frames\":$FRAMES,\"luminance\":true,\"timeout_seconds\":120}" 2>&1)
+		echo "$reply" | grep -q '"state":"published"' || die "$RUN: capture.hdr R failed: $(echo "$reply" | head -c 400)"
+		# The reference's graph rebuild dropped every override.
+		set_setting stochasticLightingReference false; sleep 3
+		view_recompile; CURRENT_DEFINES='{}'
+		for ((i = ${#VARIANTS[@]} - 1; i >= 0; i--)); do
+			v=${VARIANTS[$i]}; name=${v%%=*}
+			running || { echo "   the session ended before E.$name"; break; }
+			apply_variant "$name" "${v#*=}"
+			reply=$(ctl capture.hdr "{\"path\":\"$CAP_DIR/${RUN}_E.${name}_{target}_{frame}.dds\",\"targets\":[\"stochastic_diffuse\"],\"frames\":$FRAMES,\"timeout_seconds\":120}" 2>&1)
+			# A session capped by --exit-after may end here: the analysis takes the sets that exist.
+			echo "$reply" | grep -q '"state":"published"' || { echo "   capture.hdr E.$name failed (session over?)"; break; }
+		done
+		local run=$RUN
+		finish
+		RUN=$run
+		"$PY" "$ANALYSIS" still "$(win "$CAP_DIR")" "$RUN" "${names[@]}" | tee "$OUT_DIR/$RUN.still.txt"
+		delete_captures
+		return
+	fi
+	reply=$(ctl pso.recompile '{"pipeline_id":"Stochastic.DenoiseSpatial.PSO","defines":{"DENOISE_DEBUG_VIEW":"1"}}' 2>&1)
+	echo "$reply" | grep -q '"state":"published"' || die "$RUN: DENOISE_DEBUG_VIEW 1 did not publish: $(echo "$reply" | head -c 300)"
+	sleep 3
+	reply=$(ctl capture.hdr "{\"path\":\"$CAP_DIR/${RUN}_D_{target}_{frame}.dds\",\"targets\":[\"stochastic_diffuse\"],\"frames\":$FRAMES,\"timeout_seconds\":120}" 2>&1)
+	echo "$reply" | grep -q '"state":"published"' || die "$RUN: capture.hdr D failed: $(echo "$reply" | head -c 400)"
+	# The reference rebuilds the graph, which drops the override.
+	set_setting stochasticLightingReference true; converge reference
+	reply=$(ctl capture.hdr "{\"path\":\"$CAP_DIR/${RUN}_R_{target}_{frame}.dds\",\"targets\":[\"stochastic_diffuse\",\"stochastic_specular\"],\"frames\":$FRAMES,\"luminance\":true,\"timeout_seconds\":120}" 2>&1)
+	echo "$reply" | grep -q '"state":"published"' || die "$RUN: capture.hdr R failed: $(echo "$reply" | head -c 400)"
+	# The denoised frames again (D2), so the scene's drift between the two captures shows (and averages out).
+	set_setting stochasticLightingReference false; sleep 3
+	reply=$(ctl pso.recompile '{"pipeline_id":"Stochastic.DenoiseSpatial.PSO","defines":{"DENOISE_DEBUG_VIEW":"1"}}' 2>&1)
+	echo "$reply" | grep -q '"state":"published"' || die "$RUN: DENOISE_DEBUG_VIEW 1 did not publish: $(echo "$reply" | head -c 300)"
+	sleep 3
+	reply=$(ctl capture.hdr "{\"path\":\"$CAP_DIR/${RUN}_E_{target}_{frame}.dds\",\"targets\":[\"stochastic_diffuse\"],\"frames\":$FRAMES,\"timeout_seconds\":120}" 2>&1)
+	echo "$reply" | grep -q '"state":"published"' || die "$RUN: capture.hdr D2 failed: $(echo "$reply" | head -c 400)"
+	local run=$RUN
+	finish
+	RUN=$run
+	"$PY" "$ANALYSIS" still "$(win "$CAP_DIR")" "$RUN" | tee "$OUT_DIR/$RUN.still.txt"
+	delete_captures
+}
+
+# guide: the guide-normalized mode's guide (docs/stochastic_lighting.md "Guide-normalized accumulation"), frozen lights and camera:
+# --frames (8) consecutive frames with the upscaler's jitter (G), the same without it (J), then the reference with
+# STOCHASTIC_REFERENCE_UNSHADOWED 2 (no rays, written in the guide's domain; U).
+mode_guide() {
+	launch "${TAG}_r${RANGE}_s${SCALE}" "ZORAH_LIGHT_LAYOUT=$LAYOUT ZORAH_FREEZE_LIGHTS=1 ZORAH_LIGHT_SCALE=$SCALE ZORAH_LIGHT_RANGE=$RANGE"
+	sleep "$SETTLE"
+	local reply tag
+	set_setting stochasticLightingNormalize true; sleep 2
+	for tag in G J; do
+		[ "$tag" = J ] && { set_setting enableJitter false; sleep 2; }
+		reply=$(ctl capture.hdr "{\"path\":\"$CAP_DIR/${RUN}_${tag}_{target}_{frame}.dds\",\"targets\":[\"stochastic_guide\"],\"frames\":$FRAMES,\"timeout_seconds\":60}" 2>&1)
+		echo "$reply" | grep -q '"state":"published"' || die "$RUN: capture.hdr $tag failed: $(echo "$reply" | head -c 400)"
+	done
+	set_setting stochasticLightingReference true; sleep 8
+	PSO=Stochastic.Reference.PSO; CURRENT_DEFINES='{}'; recompile '{"STOCHASTIC_REFERENCE_UNSHADOWED":"2"}'
+	reply=$(ctl capture.hdr "{\"path\":\"$CAP_DIR/${RUN}_U_{target}_{frame}.dds\",\"targets\":[\"stochastic_diffuse\"],\"frames\":2,\"timeout_seconds\":60}" 2>&1)
+	echo "$reply" | grep -q '"state":"published"' || die "$RUN: capture.hdr U failed: $(echo "$reply" | head -c 400)"
+	local run=$RUN
+	finish
+	RUN=$run
+	"$PY" "$ANALYSIS" guide "$(win "$CAP_DIR")" "$RUN" | tee "$OUT_DIR/$RUN.guide.txt"
+	delete_captures
+}
+
+# paired: the paired ratio's denominator (docs/stochastic_lighting.md "The paired ratio"), frozen lights and camera, normalize
+# and paired on: --frames (16) consecutive frames of DENOISE_DEBUG_VIEW 7 (the unshadowed history H_X, before and after the
+# spatial filter, and this frame's noisy x with the guide where it was taken) and the guide itself. --layout sweep etc. picks
+# a layout; by default the bias scene (16 lights x --scale).
+mode_paired() {
+	local layout_vars="ZORAH_FREEZE_LIGHTS=1"
+	[ "$LAYOUT" != sweep ] && layout_vars="$layout_vars ZORAH_LIGHT_LAYOUT=$LAYOUT"
+	launch "${TAG}_r${RANGE}_s${SCALE}" "$layout_vars ZORAH_LIGHT_SCALE=$SCALE ZORAH_LIGHT_RANGE=$RANGE"
+	sleep "$SETTLE"
+	local reply
+	set_setting stochasticLightingNormalize true; set_setting stochasticLightingPaired true; sleep 2
+	VIEW=7; view_recompile; sleep 3 # the history's 32 frames
+	reply=$(ctl capture.hdr "{\"path\":\"$CAP_DIR/${RUN}_P_{target}_{frame}.dds\",\"targets\":[\"stochastic_diffuse\",\"stochastic_specular\",\"stochastic_guide\"],\"frames\":$FRAMES,\"timeout_seconds\":120}" 2>&1)
+	echo "$reply" | grep -q '"state":"published"' || die "$RUN: capture.hdr P failed: $(echo "$reply" | head -c 400)"
+	local run=$RUN
+	finish
+	RUN=$run
+	"$PY" "$ANALYSIS" paired "$(win "$CAP_DIR")" "$RUN" "$(win "$OUT_DIR")" | tee "$OUT_DIR/$RUN.paired.txt"
 	delete_captures
 }
 

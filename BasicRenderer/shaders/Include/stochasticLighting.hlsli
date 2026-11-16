@@ -159,24 +159,8 @@ float StochasticLightSphereRadius(LightInfo light)
 
 // ---- Guiding helpers (docs/stochastic_lighting.md "Guiding").
 
-uint StochasticPackNormal(float3 n)
-{
-    n /= abs(n.x) + abs(n.y) + abs(n.z);
-    float2 e = n.z >= 0.0f ? n.xy : (1.0f - abs(n.yx)) * float2(n.x >= 0.0f ? 1.0f : -1.0f, n.y >= 0.0f ? 1.0f : -1.0f);
-    const uint2 q = (uint2)round(saturate(e * 0.5f + 0.5f) * 65535.0f);
-    return q.x | (q.y << 16u);
-}
-
-float3 StochasticUnpackNormal(uint packed)
-{
-    const float2 e = float2(packed & 0xFFFFu, packed >> 16u) / 65535.0f * 2.0f - 1.0f;
-    float3 n = float3(e, 1.0f - abs(e.x) - abs(e.y));
-    if (n.z < 0.0f)
-    {
-        n.xy = (1.0f - abs(n.yx)) * float2(n.x >= 0.0f ? 1.0f : -1.0f, n.y >= 0.0f ? 1.0f : -1.0f);
-    }
-    return normalize(n);
-}
+// StochasticPackNormal and StochasticUnpackNormal are in stochasticLightingRootConstants.h (the denoiser's spatial pass reads
+// the surface history too).
 
 // A visible-list entry: light buffer index (20 bits), the light's generation's low 8 bits (a reused slot is not the same
 // light), and which quadrants of the emitter's sampling domain a ray reached.
@@ -224,15 +208,11 @@ uint StochasticQuadrantOf(float2 u)
     return (u.x >= 0.5f ? 1u : 0u) | (u.y >= 0.5f ? 2u : 0u);
 }
 
-// The shadow ray toward the point on the light's sphere that u picks (uniform over the solid angle the sphere subtends), or
-// out of the scene in the direction u picks in a directional light's disc. False when no ray is needed because the point is
-// visible by construction (the surface is inside the emitter, or right against it).
-bool StochasticLightShadowRay(LightInfo light, StochasticSurface surface, float2 u, out RayDesc ray)
+// The same ray from an origin already offset off its surface (StochasticLightShadowRay's), toward the light where it is now:
+// visibility gradients re-trace last frame's sample this way (docs/stochastic_lighting.md "Visibility gradients").
+bool StochasticLightShadowRayFrom(LightInfo light, float3 origin, float2 u, out RayDesc ray)
 {
-    // Off the surface by about a pixel at its distance, as the ray traced sun shadow does: the BVH can be at a coarser LOD
-    // than the surface the ray starts from.
-    const float offset = max(0.05f, surface.distanceToCamera * 2e-3f);
-    ray.Origin = surface.position + surface.fragment.normalWS * offset;
+    ray.Origin = origin;
     ray.TMin = 0.0f;
     if (light.type == LIGHT_TYPE_DIRECTIONAL)
     {
@@ -262,6 +242,17 @@ bool StochasticLightShadowRay(LightInfo light, StochasticSurface surface, float2
     const float endBias = max(0.01f, hitDistance * 1e-3f);
     ray.TMax = max(hitDistance - endBias, 0.0f);
     return ray.TMax > 0.0f;
+}
+
+// The shadow ray toward the point on the light's sphere that u picks (uniform over the solid angle the sphere subtends), or
+// out of the scene in the direction u picks in a directional light's disc. False when no ray is needed because the point is
+// visible by construction (the surface is inside the emitter, or right against it).
+bool StochasticLightShadowRay(LightInfo light, StochasticSurface surface, float2 u, out RayDesc ray)
+{
+    // Off the surface by about a pixel at its distance, as the ray traced sun shadow does: the BVH can be at a coarser LOD
+    // than the surface the ray starts from.
+    const float offset = max(0.05f, surface.distanceToCamera * 2e-3f);
+    return StochasticLightShadowRayFrom(light, surface.position + surface.fragment.normalWS * offset, u, ray);
 }
 
 // Whether one shadow ray (StochasticLightShadowRay) reaches the light. 1 visible, 0 occluded.

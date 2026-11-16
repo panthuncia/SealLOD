@@ -57,9 +57,9 @@ the lens flare sources all evaluate lights through it. A change to falloff or co
 indices; otherwise it walks the whole active list. Per light it evaluates occlusion, the light model and
 the OpenPBR BRDF (`EvaluateDirectLightContribution`), and accumulates:
 
-- `lighting`: the sum raster writes, computed exactly as before the loop was unified.
-- `diffuse`, `specular`: the same contribution split by lobe (glint counts as specular). Nothing consumes these yet;
-  the compiler drops them where unused.
+- `lighting`: the sum raster writes.
+- `diffuse`, `specular`: the same contribution split by lobe (glint counts as specular). The compiler drops them
+  where unused.
 
 `lightFragment` (deferred, with debug outputs) and `lightFragmentColor` (forward and ray-hit paths) wrap it with
 image-based lighting and emission.
@@ -93,8 +93,7 @@ Current callers:
 
 Every consumer of per-pixel light lists reads one structure, built each frame by three compute passes in
 `shaders/lightCulling.hlsl` (`src/Lighting/Clustered/RenderPasses/LightCullingPass.h`, registered by
-`BuildLightClusteringPipeline`). It replaced the linked light pages (12 lights a page from a fixed pool) on 2026-11-15:
-the pool silently dropped up to 310,000 (cluster, light) pairs at 4,096 lights.
+`BuildLightClusteringPipeline`).
 
 **Shape.** Froxels are tiles of `lightGridTileSize` pixels square (default 32, a multiple of 16;
 `SARP_LIGHT_GRID_TILE`) by `lightGridSlices` depth slices (default 24; `SARP_LIGHT_GRID_SLICES`): 4 uniform slices
@@ -137,15 +136,6 @@ entries needed (the allocator), the pairs dropped, the froxels that dropped any,
 needed`) and warns the first time anything is dropped. `Renderer::Update` grows `lightGridIndexCapacity` (from 4M entries, 16 MB)
 past the most needed so far, and `lightGridRecordCapacity` past the active light count, by doubling and a graph rebuild,
 as the material resolved-texture table grows. A froxel that finds no room keeps its opaque lights first.
-
-**Measured (2026-11-15, ZorahLights, range 18).** Overhead still camera, 1024 lights: a pixel's froxel holds 200 lights
-of which 185 reach it (92.5%; the pages held 279, 66%). Tile 64 gives 86.5%, tile 128 77.6%; the slice count barely
-matters (86.0–86.9% for 16–48 slices at tile 64), since the depth bounds already shrink each froxel to its surface. Moving
-camera, all three passes together: 0.02 + 0.12 + 0.08 = 0.22 ms at 1024 lights and 0.02 + 0.12 + 0.31 = 0.45 ms at
-4096, against 0.68 and 2.16 ms for the pages with cluster generation, which also dropped 261,000 pairs at 4096. At 16
-lights the grid costs 0.15 ms against 0.05: the depth bounds pass is most of it, and its floor, reading the depth alone,
-is 0.09 ms. In VSM mode at 1024 lights the deferred loop over the opaque runs took 35.0 ms with 32-pixel tiles against
-36.2 with 64-pixel ones (moving camera; [stochastic_lighting.md](stochastic_lighting.md) "After the light grid").
 
 ## Spot and point light shadows
 
@@ -214,15 +204,14 @@ Upgrades are paced for the sun and local faces alike. A page rendered within the
 `clodVirtualShadowUpgradeCooldownFrames` frames (default 8, `SARP_CLOD_VSM_UPGRADE_COOLDOWN_FRAMES`) keeps its pending
 upgrade but waits, so refinements that stream in meanwhile share one re-render; none are dropped. At most
 `clodDirectionalVirtualShadowUpgradePageRenderBudget` upgraded pages render per frame (default 500,
-`SARP_CLOD_VSM_UPGRADE_PAGE_BUDGET`). Both are in the menu with the page render budget. In the demo the cooldown cut
-upgrade re-renders during loading from about 41,600 to 12,000-13,000 and the time spent in hitch frames by 3-8x. A
-30-frame cooldown let pages wait long enough for their refined groups to be streamed out, and they were re-requested
-and re-rendered indefinitely; the menu caps it at 16.
+`SARP_CLOD_VSM_UPGRADE_PAGE_BUDGET`). Both are in the menu with the page render budget. The menu caps the cooldown at
+16: much longer, and pages wait long enough for their refined groups to be streamed out again, so they are re-requested
+and re-rendered indefinitely.
 
 **Level of detail.** A face's LOD threshold follows the sun's policy: it is set from the `shadowResolution` setting
-(2048), not the 16K the face renders at, so caster detail is about 8 texels of tolerance, as for the sun's clips. At 16K
-the faces asked for 8 times finer geometry than the camera had streamed, and the resulting upgrades re-rendered
-hundreds of pages a frame during loading.
+(2048), not the 16K the face renders at, so caster detail is about 8 texels of tolerance, as for the sun's clips. A
+threshold from the 16K resolution would ask for 8 times finer geometry than the camera streams, and the resulting
+upgrades would re-render hundreds of pages a frame during loading.
 
 Culling then divides a local face's projected error by 2^m, where m is the finest mip with active pages under the
 bounds being tested (`CLodVirtualShadowLocalLodErrorScale`, set up by `CLodResolveLodViewId`). Geometry that only
@@ -244,8 +233,7 @@ no depth with cleared depth, but only in a frame whose shadow work all ran
   `blockExpandedDroppedRecordCount`;
 - Reyes's split and dice overflow counters, where the variant resets them each frame.
 
-If any is nonzero the page stays admitted and is tried again next frame. This applies to the sun as well, which had a
-handful of such pages retrying every frame.
+If any is nonzero the page stays admitted and is tried again next frame. This applies to the sun's pages as well.
 
 **Invalidation.** A face's pages are reset when its view-projection changes, meaning the light moved, or when its
 dynamic-layer state flips. A moved caster invalidates the pages it covers in every mip of every face within range.
@@ -263,7 +251,7 @@ with `shadowViewInfoIndex >= 0`. The lookup:
 4. walks to coarser mips until a page has content.
 
 It offsets the receiver 1.5 texels along its normal, then compares a 2×2 bilinear-weighted footprint with a
-one-texel depth bias. This is a hard shadow softened over one texel; a ray march using `sourceRadius` is planned.
+one-texel depth bias. This is a hard shadow softened over one texel; `sourceRadius` does not widen it.
 
 ### Raster paths
 
@@ -272,8 +260,8 @@ one-texel depth bias. This is a hard shadow softened over one texel; a ray march
 | Hardware mesh | Every mip. |
 | Voxels | Every mip (one rasterization pass per mip, with the mip's own scissor). |
 | Software raster | Every mip. One record per cluster; the rasterizer divides by w, interpolates 1/depth, and walks the face's mips, clamping each to its rectangle. Meshlets crossing the near plane go to the hardware path. |
-| Reyes | Not yet. Displaced clusters render undisplaced through the hardware path. |
-| SARP grass (caster provider) | Not yet. |
+| Reyes | None. Displaced clusters render undisplaced through the hardware path. |
+| SARP grass (caster provider) | None. |
 
 ### Testing
 
@@ -292,15 +280,6 @@ logs them when they change. `SARP_DEBUG_OUTPUT_TYPE` selects an output at startu
 `SARP_CLOD_VSM_TELEMETRY=1` logs the shadow map's per-frame work. If cluster records keep being emitted but the
 raster's triangle and pixel counts stay near zero, pages are being retried without being written. The ownership
 line's `emptyAdmittedCompleted` and `rasterWorkDropped` show empty completions and the drops that block them.
-
-In the demo with one point light beside the camera, the statistical profiler settles after 22 s (14 s without the
-light). While the first geometry streams in, about 110 frames re-render pages at 20-40 ms of shadow raster. Steady-state
-cost is:
-
-- shadow culling and raster: the same as without the light (0.18 ms and 0.005 ms);
-- shadow lookup: about 0.8 ms of deferred shading at 2560×1600;
-- page clears: 0.42 ms (0.13 ms without the light). The light is within the wind's reach of the camera, so its faces
-  use the dynamic layer, and every active dynamic page is cleared and recomposed each frame.
 
 ## Shadowing modes
 
@@ -323,18 +302,16 @@ shadow map's resources only in `VirtualShadowMaps`.
 
 ### Adding a mode
 
-A new mode, such as stochastic direct lighting, comes as a technique in the recipe, plus a value in both
-`ShadowingMode` and `SHADOWING_MODE_*`. Things to settle when adding one:
+A mode comes as a technique in the recipe, plus a value in both `ShadowingMode` and `SHADOWING_MODE_*`. A new mode has
+to settle:
 
-- Whether the deferred pass still runs the loop for some lights (the sun, say) with that mode's visibility, or a
-  separate pass shades the sampled lights and the deferred pass adds its result. Today `DirectLightingOptions` carries
+- Whether the deferred pass still runs the loop for some lights with that mode's visibility, or a separate pass shades
+  the lights and the deferred pass adds its result (as `StochasticRayTraced` does). `DirectLightingOptions` carries
   visibility for the sun only (`sunOcclusion`, which can come from a resolved texture, as the ray traced mask does);
   per-light visibility would extend `EvaluateLightOcclusion`.
 - What forward and ray-hit paths get. They cannot read a screen-space result for their own fragments. In
-  `VirtualShadowMaps` they share the primary pass's shadow map; in a mode without one they would be unshadowed unless
-  they trace.
+  `VirtualShadowMaps` they share the primary pass's shadow map; in a mode without one they are unshadowed unless they
+  trace.
 - Light selection. The light grid covers only the primary camera's frustum, and only its visible surfaces (the forward
   runs extend to transparent fragments in front of them). Ray hits have no world-space light structure.
-- Temporal reuse needs `LightInfo::generation` to validate stored slots. It also needs history this renderer does not
-  keep yet: only linear depth has a previous-frame copy.
-- Denoising. DLSS Ray Reconstruction's guides are produced only by the path tracer today.
+- Temporal reuse, which needs `LightInfo::generation` to validate stored light slots.

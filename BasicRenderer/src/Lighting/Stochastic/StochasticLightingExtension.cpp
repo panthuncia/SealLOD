@@ -4,7 +4,9 @@
 #include <utility>
 
 #include "Lighting/Stochastic/RenderPasses/StochasticDenoisePass.h"
+#include "Lighting/Stochastic/RenderPasses/StochasticGuidePass.h"
 #include "Lighting/Stochastic/RenderPasses/StochasticSamplePass.h"
+#include "Render/RenderGraph/RenderGraph.h"
 #include "Runtime/Settings/SettingsManager.h"
 
 namespace br::render {
@@ -14,7 +16,7 @@ StochasticLightingExtension::StochasticLightingExtension(std::shared_ptr<CLodRay
 	: m_rayTracingSystem(std::move(rayTracingSystem)), m_slabs(std::move(slabs)), m_options(options) {
 }
 
-void StochasticLightingExtension::GatherStructuralPasses(org::RenderGraph&, std::vector<org::ExternalPassDesc>& passes) {
+void StochasticLightingExtension::GatherStructuralPasses(org::RenderGraph& graph, std::vector<org::ExternalPassDesc>& passes) {
 	if (!m_rayTracingSystem) {
 		return;
 	}
@@ -40,6 +42,12 @@ void StochasticLightingExtension::GatherStructuralPasses(org::RenderGraph&, std:
 		passes.push_back(std::move(desc));
 	};
 	const auto mode = m_options.reference ? StochasticLightingPassMode::Reference : StochasticLightingPassMode::Estimator;
+	if (denoise) {
+		// The guide for guide-normalized accumulation (docs/stochastic_lighting.md "Guide-normalized accumulation"), before shading reads it.
+		// Named in the graph for capture.hdr's stochastic_guide target.
+		graph.RegisterResource(org::ResourceIdentifier{ StochasticLightingResources::kGuideResourceName }, resources->guide);
+		add("StochasticGuidePass", std::make_shared<StochasticGuidePass>(resources));
+	}
 	if (split) {
 		// Selection, the trace and shading. One state for the three, so they agree on each frame's flags.
 		auto state = std::make_shared<StochasticSampleState>();

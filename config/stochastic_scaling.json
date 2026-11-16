@@ -27,6 +27,16 @@
   ],
   "passes": [
     {
+      "id": "guide",
+      "name": "StochasticGuidePass",
+      "queue": "Compute",
+      "occurrence": 0,
+      "metrics": [
+        "gpu_time"
+      ],
+      "required": false
+    },
+    {
       "id": "select",
       "name": "StochasticSelectPass",
       "queue": "Compute",

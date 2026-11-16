@@ -41,10 +41,38 @@
 #define STOCHASTIC_DENOISE_PREVIOUS_HISTORY_SPECULAR_UAV UintRootConstant10
 #define STOCHASTIC_DENOISE_PREVIOUS_HISTORY_MOMENTS_UAV UintRootConstant13
 #define STOCHASTIC_DENOISE_VARIANCE_UAV UintRootConstant14
-// Change-aware rectification (docs/stochastic_lighting.md "Change-aware rectification"): per pixel, the slow and fast
-// averages of the neighbourhood's compressed mean, diffuse and specular.
+// The change history (RGBA16F, ping-ponged), per pixel: with guide-normalized accumulation the history's average guide as log2
+// (b, a: diffuse, specular) and, paired, the unshadowed history H_X (r, g) (docs/stochastic_lighting.md "Denoiser"); with a
+// legacy switch instead (docs/stochastic_lighting.md "Denoiser switches"), DENOISE_CHANGE_DETECT's slow and fast averages of the
+// neighbourhood's compressed mean, DENOISE_BOUND_CHANGE's bound or DENOISE_RECONSTRUCT_MOMENTS's moments.
 #define STOCHASTIC_DENOISE_HISTORY_CHANGE_UAV UintRootConstant11
 #define STOCHASTIC_DENOISE_PREVIOUS_HISTORY_CHANGE_UAV UintRootConstant16
+// The guide (docs/stochastic_lighting.md "Guide-normalized accumulation"), read by both denoiser passes.
+#define STOCHASTIC_DENOISE_GUIDE_SRV UintRootConstant17
+// The spatial pass: this frame's surface history (selection's STOCHASTIC_SURFACE_HISTORY_UAV), its taps' depth and normal
+// (DENOISE_SPATIAL_SURFACE_HISTORY; the temporal pass's STOCHASTIC_PREVIOUS_SURFACE_HISTORY_UAV slot).
+#define STOCHASTIC_DENOISE_SURFACE_HISTORY_UAV UintRootConstant12
+// Light-mixture confidence (docs/stochastic_lighting.md "Guide-normalized accumulation", "Overhaul phase 5"), temporal pass only: this
+// frame's light-mixture signature (the guide pass writes it), and the history's mixture, this frame's (written) and last frame's
+// (read); per 4x4 block in their top-left corner with STOCHASTIC_SIGNATURE_LOWRES (below), else per pixel.
+#define STOCHASTIC_DENOISE_SIGNATURE_SRV UintRootConstant18
+#define STOCHASTIC_DENOISE_MIXTURE_UAV UintRootConstant19
+#define STOCHASTIC_DENOISE_PREVIOUS_MIXTURE_UAV UintRootConstant20
+
+// Visibility gradients (STOCHASTIC_FLAG_GRADIENT; docs/stochastic_lighting.md "Visibility gradients"):
+// one buffer of uints (layout below), in the slot after the estimator's last (21-23 are free in the estimator's kernels and the
+// denoiser: the lighting passes' switches begin at 24). Selection writes this frame's records, the trace's gradient kernel
+// re-traces last frame's and scatters the gradient, shading fills in the records' visibility and keeps the held gradient, and
+// the temporal pass reads that.
+#define STOCHASTIC_GRADIENT_UAV UintRootConstant21
+#define STOCHASTIC_DENOISE_GRADIENT_UAV UintRootConstant21
+
+// The guide pass (shaders/Stochastic/stochasticGuide.hlsl) writes it; shading reads it in the accumulation's slot, which
+// shading uses only without the denoiser (STOCHASTIC_FLAG_ACCUMULATE and STOCHASTIC_FLAG_DENOISED never meet).
+#define STOCHASTIC_GUIDE_UAV UintRootConstant2
+#define STOCHASTIC_SHADE_GUIDE_SRV UintRootConstant6
+// The guide pass's light-mixture signature (STOCHASTIC_FLAG_MIXTURE).
+#define STOCHASTIC_GUIDE_SIGNATURE_UAV UintRootConstant3
 
 #ifndef STOCHASTIC_MAX_SAMPLE_COUNT
 #define STOCHASTIC_MAX_SAMPLE_COUNT 4u
@@ -71,6 +99,76 @@
 #define STOCHASTIC_FLAG_HISTORY_VALID 8u
 // The estimator writes the denoiser's noisy inputs, which are at the sampling resolution (one texel per sampled pixel).
 #define STOCHASTIC_FLAG_DENOISED 16u
+// Guide-normalized accumulation (stochasticLightingNormalize; docs/stochastic_lighting.md "Guide-normalized accumulation"): the guide pass
+// runs, shading divides the noisy inputs by the guide at the sampled pixel, and the denoiser multiplies by it at the output
+// pixel. Only with STOCHASTIC_FLAG_DENOISED.
+#define STOCHASTIC_FLAG_NORMALIZE 32u
+// The paired ratio (stochasticLightingPaired; docs/stochastic_lighting.md "The paired ratio"), only with
+// STOCHASTIC_FLAG_NORMALIZE: shading also writes each lobe's unshadowed estimate from the same samples (every used slot,
+// visible or not) over the guide into the noisy inputs' alphas, and the denoiser divides the filtered ratio by that
+// estimate's filtered history before multiplying by the guide.
+#define STOCHASTIC_FLAG_PAIRED 64u
+// Light-mixture confidence (stochasticLightingMixtureConfidence; docs/stochastic_lighting.md "Guide-normalized accumulation"), only with
+// STOCHASTIC_FLAG_NORMALIZE: the guide pass also writes which lights its unshadowed light comes from (a signature of shares in
+// STOCHASTIC_SIGNATURE_BUCKETS buckets by light), and the temporal pass shortens the history by how far that mixture has
+// moved from the one the history was made under.
+#define STOCHASTIC_FLAG_MIXTURE 128u
+// Visibility gradients (stochasticLightingVisibilityGradient; docs/stochastic_lighting.md "Visibility gradients"), only with STOCHASTIC_FLAG_NORMALIZE: per cell of STOCHASTIC_GRADIENT_CELL x STOCHASTIC_GRADIENT_CELL sampled
+// pixels, selection records one traced sample (light and generation, its point in the emitter's [0,1)^2 domain, the ray's origin,
+// the light's share of the pixel's unshadowed light), shading adds whether its ray reached the light, and next frame the trace
+// re-traces that sample from the same origin toward the light where it is now. g = |V_now - V_then| x share goes to the cell the
+// origin projects to; shading takes the 3x3 cells' maximum and holds it with decay; the temporal pass shortens the history by it.
+// The extra rays only read the estimator's state: no slot, pixel word bit or ray list entry changes.
+#define STOCHASTIC_FLAG_GRADIENT 256u
+// Last frame's records were written (the estimator ran with gradients the frame before), so the trace may re-trace them and
+// shading may hold last frame's gradient.
+#define STOCHASTIC_FLAG_GRADIENT_VALID 512u
+
+// The gradient buffer's cells (sampled pixels per side): 8, a selection tile (16x16 pixels at reduced resolution), or 4. Set
+// it on Stochastic.Select.PSO, Stochastic.TraceGradient.PSO, Stochastic.Shade.PSO and Stochastic.DenoiseTemporal.PSO together.
+// The buffer is sized for STOCHASTIC_GRADIENT_MIN_CELL.
+#ifndef STOCHASTIC_GRADIENT_CELL
+#define STOCHASTIC_GRADIENT_CELL 8u
+#endif
+#define STOCHASTIC_GRADIENT_MIN_CELL 4u
+#define STOCHASTIC_GRADIENT_RECORD_WORDS 8u
+// The raw gradient per cell, as the trace scatters it: the largest |V_now - V_then| x share (float bits), the signed sum of
+// (V_now - V_then) x share in units of 1 / STOCHASTIC_GRADIENT_FIXED, and the records re-traced into the cell.
+#define STOCHASTIC_GRADIENT_RAW_WORDS 3u
+#define STOCHASTIC_GRADIENT_FIXED 4096.0f
+// Words per cell of capacity: two records' sections (by frame parity), the raw gradient, two held gradients (by parity).
+#define STOCHASTIC_GRADIENT_WORDS_PER_CELL (2u * STOCHASTIC_GRADIENT_RECORD_WORDS + STOCHASTIC_GRADIENT_RAW_WORDS + 2u)
+// Record word 0: the light's index (20 bits), its generation's low 8 bits, the slot (2 bits), then shading's two bits.
+#define STOCHASTIC_GRADIENT_COMPLETE 0x40000000u // Shading has filled in the visibility.
+#define STOCHASTIC_GRADIENT_VISIBLE 0x80000000u // The ray reached the light.
+// Pixel word bits 4-6 (stochasticSplit.hlsli): the slot selection recorded at this pixel + 1 (0: none).
+#define STOCHASTIC_PIXEL_GRADIENT_SHIFT 4u
+
+#ifndef __cplusplus
+// The gradient buffer's capacity in cells (at STOCHASTIC_GRADIENT_MIN_CELL) and its sections' word offsets. sampled: the
+// sampled pixels' grid. The C++ sizes it the same way (StochasticLightingResources).
+uint StochasticGradientCapacity(uint2 sampled)
+{
+    const uint2 cells = (sampled + STOCHASTIC_GRADIENT_MIN_CELL - 1u) / STOCHASTIC_GRADIENT_MIN_CELL;
+    return cells.x * cells.y;
+}
+uint2 StochasticGradientCells(uint2 sampled)
+{
+    return (sampled + STOCHASTIC_GRADIENT_CELL - 1u) / STOCHASTIC_GRADIENT_CELL;
+}
+uint StochasticGradientRecordBase(uint capacity, uint parity, uint cell)
+{
+    return (parity * capacity + cell) * STOCHASTIC_GRADIENT_RECORD_WORDS;
+}
+uint StochasticGradientRawIndex(uint capacity, uint cell)
+{
+    return 2u * STOCHASTIC_GRADIENT_RECORD_WORDS * capacity + cell * STOCHASTIC_GRADIENT_RAW_WORDS;
+}
+uint StochasticGradientHeldIndex(uint capacity, uint parity, uint cell)
+{
+    return (2u * STOCHASTIC_GRADIENT_RECORD_WORDS + STOCHASTIC_GRADIENT_RAW_WORDS + parity) * capacity + cell;
+}
+#endif
 
 #ifndef __cplusplus
 // Reduced-resolution sampling (docs/stochastic_lighting.md "Reduced resolution"). With factor 2, each 2x2 block of pixels is
@@ -106,5 +204,84 @@ uint2 StochasticDownsampledPixel(uint2 block, uint frame, uint downsample, uint2
 uint StochasticDownsampledVisit(uint frame, uint downsample)
 {
     return downsample <= 1u ? frame : frame >> 2u;
+}
+
+// The denoiser's domain, which the guide (stochasticGuide.hlsl) is computed in: diffuse radiance divided by
+// max(Surface::BaseColorOpacity.rgb, floor), specular by max(Surface::SpecularAo.rgb, floor), and luminance with weights
+// (0.25, 0.5, 0.25).
+#define STOCHASTIC_DEMODULATION_FLOOR 0.02f
+float StochasticDemodulatedLuminance(float3 value)
+{
+    return dot(value, float3(0.25f, 0.5f, 0.25f));
+}
+// A guide at or below this (no light reaches the pixel, or the lobe is black) normalizes to 0 and remodulates to 0.
+#define STOCHASTIC_GUIDE_EPSILON 1e-7f
+
+// The light-mixture signature (STOCHASTIC_FLAG_MIXTURE; docs/stochastic_lighting.md "Guide-normalized accumulation"): the shares of a pixel's
+// unshadowed light that come from each of 8 buckets of lights, a byte each (share * 255), packed four to a word in a uint2.
+// A light always falls in the same bucket (its light buffer index and generation decide it; a reused slot moves to another
+// bucket), so a light's share moving between frames moves its bucket's share continuously: no ranking, no dominant-light
+// choice that could flip. Lights that share a bucket are one light to the signature (less sensitive, never a false change).
+// Consecutive light indices of one generation fall in different buckets, up to 8 of them.
+#define STOCHASTIC_SIGNATURE_BUCKETS 8u
+// 1: the signature and the history's mixture are kept per block of STOCHASTIC_SIGNATURE_BLOCK x STOCHASTIC_SIGNATURE_BLOCK pixels
+// (docs/performance/stochastic-lighting-experiments.md "Overhaul phase 5"), in the top-left (width / 4) x (height / 4) texels of their full-resolution
+// textures: the guide pass averages its pixels' shares into the block's, and the temporal pass compares one reprojected block
+// mixture per block and gives its confidence to the block's 16 pixels. The block average does what phase 4's 5x5 tent did
+// (removes the shares' pixel-scale normal-map detail) for a sixteenth of the loads. 0: per pixel with the tent (phase 4). The
+// guide pass and the temporal pass must agree: pso.recompile sets it on Stochastic.Guide.PSO and Stochastic.DenoiseTemporal.PSO.
+#ifndef STOCHASTIC_SIGNATURE_LOWRES
+#define STOCHASTIC_SIGNATURE_LOWRES 1
+#endif
+#define STOCHASTIC_SIGNATURE_BLOCK 4
+uint StochasticSignatureBucket(uint lightIndex, uint generation)
+{
+    return (lightIndex + 5u * generation) & (STOCHASTIC_SIGNATURE_BUCKETS - 1u);
+}
+// Packs shares (buckets 0-3 in low, 4-7 in high; each in [0, 1]) rounded down after adding dither in [0, 1) (0.5 rounds to
+// nearest; a uniform random number rounds stochastically, so an average kept in this form keeps its expectation).
+uint StochasticPackShares(float4 shares, float4 dither)
+{
+    const uint4 q = uint4(min(floor(saturate(shares) * 255.0f + dither), 255.0f));
+    return q.x | (q.y << 8u) | (q.z << 16u) | (q.w << 24u);
+}
+uint2 StochasticPackSignature(float4 low, float4 high, float4 ditherLow, float4 ditherHigh)
+{
+    return uint2(StochasticPackShares(low, ditherLow), StochasticPackShares(high, ditherHigh));
+}
+uint StochasticPackNormal(float3 n)
+{
+    n /= abs(n.x) + abs(n.y) + abs(n.z);
+    float2 e = n.z >= 0.0f ? n.xy : (1.0f - abs(n.yx)) * float2(n.x >= 0.0f ? 1.0f : -1.0f, n.y >= 0.0f ? 1.0f : -1.0f);
+    const uint2 q = (uint2)round(saturate(e * 0.5f + 0.5f) * 65535.0f);
+    return q.x | (q.y << 16u);
+}
+
+float3 StochasticUnpackNormal(uint packed)
+{
+    const float2 e = float2(packed & 0xFFFFu, packed >> 16u) / 65535.0f * 2.0f - 1.0f;
+    float3 n = float3(e, 1.0f - abs(e.x) - abs(e.y));
+    if (n.z < 0.0f)
+    {
+        n.xy = (1.0f - abs(n.yx)) * float2(n.x >= 0.0f ? 1.0f : -1.0f, n.y >= 0.0f ? 1.0f : -1.0f);
+    }
+    return normalize(n);
+}
+float4 StochasticUnpackShares(uint word)
+{
+    return float4((uint4(word, word, word, word) >> uint4(0u, 8u, 16u, 24u)) & 0xFFu) * (1.0f / 255.0f);
+}
+// How much two mixtures (unpacked shares, buckets 0-3 and 4-7) have in common: the sum over buckets of the smaller share, over
+// the larger total (1 - the total variation distance between them). 1 for the same mixture; 1 where either holds no light
+// (nothing to compare).
+float StochasticMixtureOverlap(float4 lowA, float4 highA, float4 lowB, float4 highB)
+{
+    const float totalA = dot(lowA + highA, 1.0f);
+    const float totalB = dot(lowB + highB, 1.0f);
+    if (totalA <= 0.0f || totalB <= 0.0f)
+    {
+        return 1.0f;
+    }
+    return saturate(dot(min(lowA, lowB) + min(highA, highB), 1.0f) / max(totalA, totalB));
 }
 #endif

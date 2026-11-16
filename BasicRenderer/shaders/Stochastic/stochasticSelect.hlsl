@@ -42,8 +42,7 @@
 #ifndef STOCHASTIC_CHEAP_IMPORTANCE
 #define STOCHASTIC_CHEAP_IMPORTANCE 1
 #endif
-// How many of the cluster's entries a pixel draws as hidden-set candidates (docs/stochastic_lighting.md "Bounded
-// candidates"). Clusters with no more take every light. 0: every light, unbounded.
+// How many of the cluster's entries a pixel draws as hidden-set candidates (docs/stochastic_lighting.md "Bounded candidates"). Clusters with no more take every light. 0: every light, unbounded.
 #ifndef STOCHASTIC_CANDIDATE_COUNT
 #define STOCHASTIC_CANDIDATE_COUNT 24
 #endif
@@ -281,6 +280,41 @@ void StochasticSelectCS(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_Group
     float3 debugShares = float3(-1.0f, -1.0f, -1.0f); // STOCHASTIC_DEBUG_PROBE 2: directional share, unlisted share, reprojected.
     float3 debugCluster = float3(-1.0f, 0.0f, 0.0f); // STOCHASTIC_DEBUG_PROBE 4: cluster's count, local candidates evaluated, lights in range.
     float debugListCount = -1.0f; // STOCHASTIC_DEBUG_PROBE 5: the reprojected list's length.
+
+    // ---- Visibility gradients (STOCHASTIC_FLAG_GRADIENT; stochasticLightingRootConstants.h, docs/stochastic_lighting.md
+    // "Visibility gradients and paired (2026-11-17)"): one pixel per cell, chosen by a hash of the cell and the frame so every
+    // pixel takes its turn, records its traced sample whose light has the largest share of its unshadowed light. The record is
+    // written straight to the buffer (only the recorder's share is held in a register); it changes nothing the estimate uses.
+    const bool gradient = (STOCHASTIC_FLAGS & STOCHASTIC_FLAG_GRADIENT) != 0u;
+    const uint2 gradientCell = id.xy / STOCHASTIC_GRADIENT_CELL;
+    bool gradientRecorder = false;
+    uint gradientBase = 0u;
+    float gradientShare = 0.0f;
+    uint gradientSlot = 0u; // The recorded slot + 1.
+    RWStructuredBuffer<uint> gradientBuffer = ResourceDescriptorHeap[STOCHASTIC_GRADIENT_UAV];
+    if (gradient && inBounds)
+    {
+        const uint2 cellOrigin = gradientCell * STOCHASTIC_GRADIENT_CELL;
+        const uint2 cellSize = min(uint2(STOCHASTIC_GRADIENT_CELL, STOCHASTIC_GRADIENT_CELL), blocks - cellOrigin);
+        const uint turn = StochasticHash(gradientCell.x ^ StochasticHash(gradientCell.y ^ StochasticHash(CLOD_RT_SEC_FRAME * 0x2545F491u + 11u)))
+            % (cellSize.x * cellSize.y);
+        gradientRecorder = all(id.xy == cellOrigin + uint2(turn % cellSize.x, turn / cellSize.x));
+        const uint capacity = StochasticGradientCapacity(blocks);
+        const uint2 cells = StochasticGradientCells(blocks);
+        if (gradientRecorder)
+        {
+            gradientBase = StochasticGradientRecordBase(capacity, CLOD_RT_SEC_FRAME & 1u, gradientCell.y * cells.x + gradientCell.x);
+            gradientBuffer[gradientBase + 6u] = 0u; // No record (share 0) unless a traced sample below takes it.
+        }
+        if (all(id.xy == cellOrigin))
+        {
+            // The raw gradient the trace scatters into this frame (shading of last frame has read it).
+            const uint raw = StochasticGradientRawIndex(capacity, gradientCell.y * cells.x + gradientCell.x);
+            gradientBuffer[raw] = 0u;
+            gradientBuffer[raw + 1u] = 0u;
+            gradientBuffer[raw + 2u] = 0u;
+        }
+    }
 
     if (valid)
     {
@@ -583,6 +617,25 @@ void StochasticSelectCS(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_Group
                 if (any(sampleDiffuse + sampleSpecular > 0.0f))
                 {
                     traced = light.shadowCaster != 0u && StochasticLightShadowRay(light, surface, u, ray);
+                    if (gradientRecorder && traced)
+                    {
+                        // The light's share of the pixel's unshadowed light: its contribution over the unshadowed bound (both
+                        // luminance with the albedo; the bound sums the candidates' cheap importances, so it is approximate).
+                        const float share = saturate(StochasticLuminance(contribution.diffuse + contribution.specular)
+                            / max(boundListed + boundHidden, 1e-30f));
+                        if (share > gradientShare)
+                        {
+                            gradientShare = share;
+                            gradientSlot = k + 1u;
+                            gradientBuffer[gradientBase + 0u] = lightIndex | ((light.generation & 0xFFu) << 20u) | (k << 28u);
+                            gradientBuffer[gradientBase + 1u] = asuint(u.x);
+                            gradientBuffer[gradientBase + 2u] = asuint(u.y);
+                            gradientBuffer[gradientBase + 3u] = asuint(ray.Origin.x);
+                            gradientBuffer[gradientBase + 4u] = asuint(ray.Origin.y);
+                            gradientBuffer[gradientBase + 5u] = asuint(ray.Origin.z);
+                            gradientBuffer[gradientBase + 6u] = asuint(share);
+                        }
+                    }
                     // The packing rounds stochastically, so the stored estimate's expectation is unchanged.
                     const float rounding = StochasticRngNext(rng);
                     slot = uint3(lightIndex | (quadrant << STOCHASTIC_SLOT_QUADRANT_SHIFT) | STOCHASTIC_SLOT_USED
@@ -616,6 +669,7 @@ void StochasticSelectCS(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_Group
 
     // ---- The pixel word: surface valid, and the visibility bits cleared for the trace to set.
     uint pixelWord = valid ? STOCHASTIC_PIXEL_VALID | StochasticEncodeBound(boundListed + boundHidden) : 0u;
+    pixelWord |= gradientSlot << STOCHASTIC_PIXEL_GRADIENT_SHIFT; // Visibility gradients: shading fills in this record's visibility.
 #if defined(STOCHASTIC_DEBUG_PROBE) && STOCHASTIC_DEBUG_PROBE == 5
     pixelWord |= uint(debugListCount + 1.0f) << STOCHASTIC_PIXEL_LIST_SHIFT;
 #elif defined(STOCHASTIC_DEBUG_PROBE) && (STOCHASTIC_DEBUG_PROBE == 1 || STOCHASTIC_DEBUG_PROBE == 3)

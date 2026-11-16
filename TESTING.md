@@ -73,7 +73,7 @@ StatisticalSamplingControl.exe --pipe <name> --json capture.hdr '{"path":"D:/cap
 
 With more than one target `path` needs the placeholder `{target}`, and with more than one frame `{frame}` (1-based), for
 example `D:/cap/run_{target}_{frame}.dds`. The job is published when every file is written. Stochastic lighting's
-post-DLSS noise metric uses it (`scripts/stochastic_scaling.sh dlss`, docs/stochastic_lighting.md "Noise after DLSS").
+post-DLSS noise metric uses it (`scripts/stochastic_scaling.sh dlss`, docs/stochastic_lighting.md "Running the benchmarks").
 
 For `accumulation`, rgb is already the average radiance (the shader keeps a
 running mean), so nothing needs dividing; alpha is the per-pixel sample count.

@@ -931,10 +931,11 @@ public:
         const auto accumulation = renderer.GetPathTracingAccumulation();
         const std::string target = document.value("target", accumulation.buffer ? std::string("accumulation") : std::string("hdr"));
         // stochastic_diffuse / stochastic_specular: stochastic lighting's output (docs/stochastic_lighting.md), as the deferred
-        // pass reads it, at render resolution.
+        // pass reads it, at render resolution. stochastic_guide: the denoiser's guide (docs/stochastic_lighting.md "Guide-normalized accumulation"; r the demodulated unshadowed diffuse luminance, g the specular; written only while stochasticLightingNormalize
+        // is on).
         const auto checkTarget = [](const std::string& name) {
-            if (name != "accumulation" && name != "hdr" && name != "stochastic_diffuse" && name != "stochastic_specular") {
-                throw std::runtime_error("capture.hdr 'target' must be 'accumulation', 'hdr', 'stochastic_diffuse' or 'stochastic_specular'");
+            if (name != "accumulation" && name != "hdr" && name != "stochastic_diffuse" && name != "stochastic_specular" && name != "stochastic_guide") {
+                throw std::runtime_error("capture.hdr 'target' must be 'accumulation', 'hdr', 'stochastic_diffuse', 'stochastic_specular' or 'stochastic_guide'");
             }
         };
         // "targets": several targets read in the same frame, and "frames": that many consecutive frames. The path then names
@@ -1106,6 +1107,13 @@ private:
                 reads.push_back({ std::move(texture), "DeferredShadingPass", target });
                 continue;
             }
+            if (target == "stochastic_guide") {
+                // StochasticLightingResources::kGuideResourceName, registered by the stochastic lighting extension with the denoiser.
+                auto texture = graph->RequestResourcePtr(org::ResourceIdentifier{ "Builtin::StochasticLighting::Guide" }, true);
+                if (!texture) throw std::runtime_error("stochastic lighting's denoiser is not running (no guide texture)");
+                reads.push_back({ std::move(texture), "DeferredShadingPass", target });
+                continue;
+            }
             // The upscaled HDR colour aliases, so it is read where tonemapping reads it, after the upscaler's write: output
             // resolution, without bloom (tonemapping adds that).
             constexpr const char* kAnchor = "TonemappingPass";
@@ -1216,6 +1224,7 @@ private:
         switch (result.format) {
         case rhi::Format::R32G32B32A32_Float: bytesPerPixel = 16; break;
         case rhi::Format::R16G16B16A16_Float: bytesPerPixel = 8; break;
+        case rhi::Format::R32G32_Float: bytesPerPixel = 8; break; // The stochastic guide; written as (r, g, 0, 1).
         default: throw std::runtime_error("capture.hdr target has an unsupported format " + std::to_string(static_cast<int>(result.format)));
         }
         const auto& layout = result.layouts.front();
@@ -1232,6 +1241,12 @@ private:
             float* destination = pixels.data() + static_cast<std::size_t>(row) * result.width * 4u;
             if (bytesPerPixel == 16) {
                 std::memcpy(destination, source, tightPitch);
+            } else if (result.format == rhi::Format::R32G32_Float) {
+                for (std::size_t pixel = 0; pixel < static_cast<std::size_t>(result.width); ++pixel) {
+                    std::memcpy(destination + pixel * 4u, source + pixel * 2u * sizeof(float), 2u * sizeof(float));
+                    destination[pixel * 4u + 2u] = 0.0f;
+                    destination[pixel * 4u + 3u] = 1.0f;
+                }
             } else {
                 for (std::size_t channel = 0; channel < static_cast<std::size_t>(result.width) * 4u; ++channel) {
                     DirectX::PackedVector::HALF half;

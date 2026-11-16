@@ -549,17 +549,45 @@ OpenPBRBaseLayerState MakeOpenPBRBaseLayerState(
     return state;
 }
 
-OpenPBRBaseLayerEvaluation EvaluateOpenPBRBaseLayerDirect(OpenPBRBaseLayerState state, float3 normal, float3 viewDir, float3 lightDir)
+// The base layer's direct terms that depend on the view alone (the normal and view direction, not the light): what
+// EvaluateOpenPBRBaseLayerDirect would otherwise look up again for every light. A loop over many lights at one surface
+// builds them once (MakeOpenPBRBaseLayerViewTerms) and calls EvaluateOpenPBRBaseLayerDirectView per light; the result is
+// the same arithmetic in the same order as building them per light, so EvaluateOpenPBRBaseLayerDirect is exactly that.
+struct OpenPBRBaseLayerViewTerms
+{
+    float NdotV;
+    float diffuseViewCompensation; // OpenPBRCachedOpaqueDielectricDiffuseCompensation: two table samples and one more.
+    float metalViewComplement;
+    float metalAverageComplement; // Clamped above zero.
+    float3 dielectricEnergyCompensation; // mx_ggx_energy_compensation (the analytic directional albedo).
+};
+
+OpenPBRBaseLayerViewTerms MakeOpenPBRBaseLayerViewTerms(OpenPBRBaseLayerState state, float3 normal, float3 viewDir)
+{
+    OpenPBRBaseLayerViewTerms terms = (OpenPBRBaseLayerViewTerms)0;
+    terms.NdotV = saturate(dot(normal, viewDir));
+    terms.diffuseViewCompensation = OpenPBRCachedOpaqueDielectricDiffuseCompensation(terms.NdotV, state.specularAlpha, state.weightedSpecularIor);
+#if !defined(CLOD_FORWARD_METAL) || CLOD_FORWARD_METAL
+    terms.metalViewComplement = OpenPBRLookUpIdealMetalEnergyComplement(state.specularAlpha, terms.NdotV);
+    terms.metalAverageComplement = OpenPBRClampAverageEnergyComplementAboveZero(OpenPBRLookUpIdealMetalAverageEnergyComplement(state.specularAlpha));
+#endif
+    terms.dielectricEnergyCompensation = mx_ggx_energy_compensation(terms.NdotV, state.specularAlpha, state.dielectricSpecularF0);
+    return terms;
+}
+
+OpenPBRBaseLayerEvaluation EvaluateOpenPBRBaseLayerDirectView(OpenPBRBaseLayerState state, OpenPBRBaseLayerViewTerms terms, float3 normal, float3 viewDir, float3 lightDir)
 {
     OpenPBRBaseLayerEvaluation evaluation = (OpenPBRBaseLayerEvaluation)0;
-    const float NdotV = saturate(dot(normal, viewDir));
+    const float NdotV = terms.NdotV;
     const float NdotL = saturate(dot(normal, lightDir));
     const float3 halfwayDir = normalize(lightDir + viewDir);
     const float NdotH = saturate(dot(normal, halfwayDir));
     const float LdotH = saturate(dot(lightDir, halfwayDir));
     const float VdotL = dot(viewDir, lightDir);
 
-    const float diffuseEnergyComp = OpenPBRDiffuseSpecularEnergyCompensation(NdotV, NdotL, state.specularAlpha, state.weightedSpecularIor);
+    // OpenPBRDiffuseSpecularEnergyCompensation with its view half from the terms.
+    const float lightComplement = OpenPBRLookUpOpaqueDielectricEnergyComplement(state.weightedSpecularIor, state.specularAlpha, saturate(NdotL));
+    const float diffuseEnergyComp = max(0.0f, terms.diffuseViewCompensation * lightComplement);
 #if !defined(CLOD_FORWARD_DIFFUSE_ROUGHNESS) || CLOD_FORWARD_DIFFUSE_ROUGHNESS
     evaluation.diffuse = OpenPBRDiffuseEON(state.diffuseColor, state.baseDiffuseRoughness, NdotV, NdotL, VdotL) * diffuseEnergyComp;
 #else
@@ -569,18 +597,15 @@ OpenPBRBaseLayerEvaluation EvaluateOpenPBRBaseLayerDirect(OpenPBRBaseLayerState 
     evaluation.diffuse = state.diffuseColor * (Fd_Lambert() * diffuseEnergyComp);
 #endif
 #if !defined(CLOD_FORWARD_METAL) || CLOD_FORWARD_METAL
-    const float metalViewComplement = OpenPBRLookUpIdealMetalEnergyComplement(state.specularAlpha, NdotV);
     const float metalLightComplement = OpenPBRLookUpIdealMetalEnergyComplement(state.specularAlpha, NdotL);
-    const float metalAverageComplement = OpenPBRLookUpIdealMetalAverageEnergyComplement(state.specularAlpha);
-    const float metalTabulatedFactors =
-        metalViewComplement * metalLightComplement / OpenPBRClampAverageEnergyComplementAboveZero(metalAverageComplement);
+    const float metalTabulatedFactors = terms.metalViewComplement * metalLightComplement / terms.metalAverageComplement;
     const float metalMmsBrdfScale = min(metalTabulatedFactors, rcp(max(NdotL, 1.0e-4f))) * Fd_Lambert();
 #endif
 
     const float3 dielectricSpecular =
         state.dielectricSpecularWeight *
         specularLobe(state.specularAlpha, state.dielectricSpecularF0, halfwayDir, NdotV, NdotL, NdotH, LdotH) *
-        mx_ggx_energy_compensation(NdotV, state.specularAlpha, state.dielectricSpecularF0);
+        terms.dielectricEnergyCompensation;
 #if !defined(CLOD_FORWARD_METAL) || CLOD_FORWARD_METAL
     const float3 metalSpecular =
         state.metalSpecularWeight *
@@ -592,6 +617,11 @@ OpenPBRBaseLayerEvaluation EvaluateOpenPBRBaseLayerDirect(OpenPBRBaseLayerState 
 
     evaluation.specular = dielectricSpecular + metalSpecular;
     return evaluation;
+}
+
+OpenPBRBaseLayerEvaluation EvaluateOpenPBRBaseLayerDirect(OpenPBRBaseLayerState state, float3 normal, float3 viewDir, float3 lightDir)
+{
+    return EvaluateOpenPBRBaseLayerDirectView(state, MakeOpenPBRBaseLayerViewTerms(state, normal, viewDir), normal, viewDir, lightDir);
 }
 
 OpenPBRBaseLayerEvaluation EvaluateOpenPBRBaseLayerIBL(OpenPBRBaseLayerState state, float NdotV, float3 diffuseIrradiance, float3 specularRadiance)

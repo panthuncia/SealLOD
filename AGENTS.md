@@ -32,7 +32,7 @@ shader identifier you search for.
 Supported headers live in `BasicRenderer/include/BasicRenderer/`; private headers live
 beside implementations in `BasicRenderer/src/`. `Runtime/Detail` declarations are
 compile-visible for existing by-value members and are not supported consumer entry points.
-See [renderer architecture](docs/renderer-architecture.md) for current migration status.
+See [renderer boundaries](docs/renderer-architecture.md) for the ownership contracts and placement rules.
 
 | Path under `BasicRenderer/src/` | Contents |
 |---|---|
@@ -149,11 +149,14 @@ Be aware of what does and does not exist before you go looking:
 - [README.md](README.md) — feature list, dependency model, standalone build. Accurate.
 - [TESTING.md](TESTING.md) — sampling harness, named-pipe experiment control, the CLOD
   virtual-shadow CPU benchmark and its request tracing. Detailed and accurate.
-- `docs/` — mostly **performance-experiment writeups** (CLOD compute vs work-graph, VSM
-  rerender, deferred-shading and small-pass optimization rounds). These are lab notebooks tied to
-  specific experiments, not architecture references.
+- `docs/` — references for systems as they exist now (listed below).
+- `docs/performance/` — **performance-experiment writeups and measurements** (CLOD compute vs work-graph,
+  VSM rerender, deferred-shading, small-pass and material-evaluation rounds, stochastic lighting, lighting and
+  texture streaming measurements). These are lab notebooks tied to specific experiments, not architecture
+  references.
+- `docs/architecture/` — the SysML model and a subsystem overview.
 
-[docs/pass-optimization-workflow.md](docs/pass-optimization-workflow.md) is the workflow for making a GPU pass faster:
+[docs/performance/pass-optimization-workflow.md](docs/performance/pass-optimization-workflow.md) is the workflow for making a GPU pass faster:
 moving-camera A/B timing with hot-swapped shaders, NVPerf limiters and register arithmetic, Nsight per-line register
 exports (`scripts/nsight_shader_lines.py`), validation, and the patterns that have and haven't paid.
 
@@ -166,8 +169,9 @@ result document, and the ABI rules for adding API.
 [docs/lighting.md](docs/lighting.md) is the reference for analytic lights: the light model, the single direct-light
 loop and its visibility options, and the shadowing modes a new technique slots in beside.
 
-Architecture and migration status are now documented in
-[docs/renderer-architecture.md](docs/renderer-architecture.md). Historical baseline and
-validation records are in [docs/history/renderer-migration-history.md](docs/history/renderer-migration-history.md).
-The boundary audit distinguishes violations from ordinary private implementation
-connections; internal include counts are not a migration completion metric.
+[docs/stochastic_lighting.md](docs/stochastic_lighting.md) is the reference for stochastic (MegaLights-style) direct
+lighting.
+
+[docs/renderer-architecture.md](docs/renderer-architecture.md) covers renderer boundaries: ownership contracts,
+cross-subsystem dependencies and placement rules. [docs/unified-binding-ownership.md](docs/unified-binding-ownership.md)
+covers descriptor binding ownership across ORG publications.

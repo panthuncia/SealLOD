@@ -35,6 +35,12 @@
 #ifndef STOCHASTIC_REFERENCE_RAY_GRID
 #define STOCHASTIC_REFERENCE_RAY_GRID 1
 #endif
+// Diagnostic, the guide's truth (docs/stochastic_lighting.md "Guide-normalized accumulation"). 1: no rays, every light visible (the
+// unshadowed light). 2: that, written as the guide writes it (stochasticGuide.hlsl): ::Diffuse's r the demodulated diffuse
+// luminance, g the specular, b and a 0 and 1; ::Specular 0. 0: off.
+#ifndef STOCHASTIC_REFERENCE_UNSHADOWED
+#define STOCHASTIC_REFERENCE_UNSHADOWED 0
+#endif
 
 void StochasticReferenceAccumulateLight(
     uint lightIndex,
@@ -53,7 +59,7 @@ void StochasticReferenceAccumulateLight(
         return;
     }
     float visibility = 1.0f;
-    if (light.shadowCaster != 0u)
+    if (light.shadowCaster != 0u && !STOCHASTIC_REFERENCE_UNSHADOWED)
     {
         visibility = 0.0f;
         for (uint ray = 0; ray < STOCHASTIC_REFERENCE_RAY_GRID * STOCHASTIC_REFERENCE_RAY_GRID; ++ray)
@@ -119,5 +125,14 @@ void StochasticReferenceCS(uint3 id : SV_DispatchThreadID)
 #else
     outputDiffuse[pixel] = float4(meanDiffuse, 1.0f);
     outputSpecular[pixel] = float4(meanSpecular, 1.0f);
+#endif
+#if STOCHASTIC_REFERENCE_UNSHADOWED == 2
+    {
+        Texture2D<float4> baseColor = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::BaseColorOpacity)];
+        Texture2D<float4> specularAo = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::SpecularAo)];
+        outputDiffuse[pixel] = float4(StochasticDemodulatedLuminance(max(diffuse, 0.0f) / max(baseColor[pixel].rgb, STOCHASTIC_DEMODULATION_FLOOR)),
+            StochasticDemodulatedLuminance(max(specular, 0.0f) / max(specularAo[pixel].rgb, STOCHASTIC_DEMODULATION_FLOOR)), 0.0f, 1.0f);
+        outputSpecular[pixel] = 0.0f;
+    }
 #endif
 }

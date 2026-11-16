@@ -42,6 +42,7 @@ struct StochasticSampleState {
     // this pass's only if it ran (with guiding) the frame before.
     uint64_t lastFrame = UINT64_MAX;
     uint64_t lastGuidedFrame = UINT64_MAX;
+    uint64_t lastGradientFrame = UINT64_MAX; // ... and with visibility gradients (their records).
     // The frame the passes sharing this state last prepared, and what they prepared for it.
     uint64_t preparedFrame = UINT64_MAX;
     StochasticSampleFrame prepared{};
@@ -64,9 +65,15 @@ struct StochasticSampleBindings {
     org::PipelineState pipeline, argumentsPipeline;
     org::CommandSignatureState signature;
     org::DeclaredViewToken diffuse, specular, accumulationDiffuse, accumulationSpecular;
+    // Shading's, with the denoiser: the guide it divides the noisy inputs by (docs/stochastic_lighting.md "Guide-normalized accumulation").
+    org::DeclaredViewToken guide;
     // The estimator's guiding: visible lists and surface history, two of each (this frame's and last frame's by parity).
     std::array<org::DeclaredViewToken, 2> visibleLists{}, surfaceHistory{};
     org::DeclaredViewToken slots, pixelWords, rays, rayCounter, rayArguments;
+    // Visibility gradients (docs/stochastic_lighting.md "Visibility gradients"): the buffer, in the
+    // denoised graph only, and the trace's re-tracing kernel.
+    org::DeclaredViewToken gradient;
+    org::PipelineState gradientPipeline;
     uint32_t rayCapacity = 0u;
     StochasticSampleKernel kernel = StochasticSampleKernel::Single;
     bool estimator = false;
@@ -112,11 +119,21 @@ public:
         case StochasticSampleKernel::Trace:
             bindings.argumentsPipeline = builder.Pipeline(CLodRtComputePipeline(L"Shaders/Stochastic/stochasticTrace.hlsl", L"StochasticTraceArgsCS", "Stochastic.TraceArgs.PSO"));
             bindings.pipeline = builder.Pipeline(CLodRtComputePipeline(L"Shaders/Stochastic/stochasticTrace.hlsl", L"StochasticTraceCS", "Stochastic.Trace.PSO"));
+            bindings.gradientPipeline = builder.Pipeline(CLodRtComputePipeline(L"Shaders/Stochastic/stochasticTrace.hlsl", L"StochasticTraceGradientCS", "Stochastic.TraceGradient.PSO"));
             bindings.signature = builder.CommandSignature(br::render::RawDispatchCommandSignature());
             break;
-        case StochasticSampleKernel::Shade:
-            bindings.pipeline = builder.Pipeline(CLodRtComputePipeline(L"Shaders/Stochastic/stochasticShade.hlsl", L"StochasticShadeCS", "Stochastic.Shade.PSO"));
+        case StochasticSampleKernel::Shade: {
+            // With the denoiser, shading can write the paired ratio's unshadowed estimate (docs/stochastic_lighting.md "The paired ratio"), which reads the albedos: STOCHASTIC_SHADE_PAIRED 1 and the surface textures declared below. Without it
+            // (the accumulation, the undenoised output) the shader names neither, and the pass declares neither: a pipeline
+            // whose shader names a Builtin resource needs its pass to declare it in every graph the pipeline runs in, so the
+            // define and the declaration go together ("Correctness pass (2026-11-17)", how to declare a resource conditionally).
+            auto desc = CLodRtComputePipeline(L"Shaders/Stochastic/stochasticShade.hlsl", L"StochasticShadeCS", "Stochastic.Shade.PSO");
+            if (m_mode == StochasticLightingPassMode::Estimator && !m_accumulate && m_resources->Denoised()) {
+                desc.defines.push_back({ L"STOCHASTIC_SHADE_PAIRED", L"1" });
+            }
+            bindings.pipeline = builder.Pipeline(desc);
             break;
+        }
         }
         builder.ConstantBuffer(Builtin::PerFrameBuffer);
         builder.ShaderResource(Builtin::CameraBuffer, Builtin::Light::InfoBuffer);
@@ -153,10 +170,29 @@ public:
         if (denoised) {
             bindings.diffuse = builder.UnorderedAccess(m_resources->noisyDiffuse).View();
             bindings.specular = builder.UnorderedAccess(m_resources->noisySpecular).View();
+            // Bound whether or not stochasticLightingNormalize is on, so switching it needs no graph rebuild.
+            if (shades) bindings.guide = builder.ShaderResource(m_resources->guide).View();
+            // Shading demodulates the paired unshadowed estimate it writes in the noisy alphas (docs/stochastic_lighting.md
+            // "Overhaul phase 3"), so it reads the albedos the denoiser divides by: with the denoiser only, as the shader names
+            // them only then (STOCHASTIC_SHADE_PAIRED above).
+            if (kernel == StochasticSampleKernel::Shade) {
+                builder.ShaderResource(Builtin::Surface::BaseColorOpacity, Builtin::Surface::SpecularAo);
+            }
+            // Visibility gradients: the buffer exists only with the denoiser, and is declared (and indexed in Record) only
+            // where it exists, by every estimator kernel; the shaders reach it through its root slot only under
+            // STOCHASTIC_FLAG_GRADIENT, which only the denoised graph sets.
+            if (m_resources->gradient && kernel != StochasticSampleKernel::Single) {
+                bindings.gradient = builder.UnorderedAccess(m_resources->gradient).View();
+            }
         }
         else {
             bindings.diffuse = builder.UnorderedAccess(Builtin::StochasticLighting::Diffuse).View();
             bindings.specular = builder.UnorderedAccess(Builtin::StochasticLighting::Specular).View();
+        }
+        // Record indexes both outputs unconditionally. A token left default-constructed (no layout) fails there, on the first
+        // frame and on a worker, as "Foreign or stale declared view token" (docs/stochastic_lighting.md "Declaring resources conditionally"): fail here instead, naming the cause.
+        if (!bindings.diffuse.layout || !bindings.specular.layout) {
+            throw std::logic_error("StochasticSamplePass declared no output for one of its kernels");
         }
         if (m_accumulate && shades) {
             bindings.accumulationDiffuse = builder.UnorderedAccess(m_accumulationDiffuse).View();
@@ -225,6 +261,12 @@ public:
             constants[STOCHASTIC_ACCUMULATION_DIFFUSE_UAV] = recording.Index(bindings.accumulationDiffuse);
             constants[STOCHASTIC_ACCUMULATION_SPECULAR_UAV] = recording.Index(bindings.accumulationSpecular);
         }
+        if (kernel == StochasticSampleKernel::Shade && bindings.guide.layout) {
+            constants[STOCHASTIC_SHADE_GUIDE_SRV] = recording.Index(bindings.guide);
+        }
+        if (bindings.gradient.layout) {
+            constants[STOCHASTIC_GRADIENT_UAV] = recording.Index(bindings.gradient);
+        }
         constants[STOCHASTIC_FLAGS] = frame.flags;
         constants[STOCHASTIC_SAMPLE_COUNT] = frame.sampleCount;
         constants[STOCHASTIC_DOWNSAMPLE_FACTOR] = frame.downsample;
@@ -252,6 +294,16 @@ public:
                 rhi::ResourceAccessType::UnorderedAccess, rhi::ResourceAccessType::IndirectArgument,
                 rhi::ResourceSyncState::ComputeShading, rhi::ResourceSyncState::ExecuteIndirect);
             br::render::DispatchComputeIndirect(recording, bindings.pipeline, constants, bindings.signature, bindings.rayArguments.Resource());
+            // Visibility gradients: last frame's records re-traced, one thread per cell (the buffer's capacity, at the
+            // smallest cell; the shader skips the rest). It touches only the gradient buffer.
+            if ((frame.flags & STOCHASTIC_FLAG_GRADIENT_VALID) && bindings.gradient.layout) {
+                const uint32_t sampledWidth = (frame.width + frame.downsample - 1u) / frame.downsample;
+                const uint32_t sampledHeight = (frame.height + frame.downsample - 1u) / frame.downsample;
+                const uint32_t cells = ((sampledWidth + STOCHASTIC_GRADIENT_MIN_CELL - 1u) / STOCHASTIC_GRADIENT_MIN_CELL)
+                    * ((sampledHeight + STOCHASTIC_GRADIENT_MIN_CELL - 1u) / STOCHASTIC_GRADIENT_MIN_CELL);
+                br::render::DispatchCompute(recording, bindings.gradientPipeline, constants,
+                    (cells + STOCHASTIC_TRACE_GROUP_SIZE - 1u) / STOCHASTIC_TRACE_GROUP_SIZE);
+            }
             return;
         }
         recording.BindComputePipeline(bindings.pipeline);
@@ -283,7 +335,23 @@ private:
             // The kernels' buffers hold slotCapacity samples per sampled pixel (at full resolution the setting's at the graph
             // build; a change of it rebuilds the graph).
             frame.sampleCount = std::min(frame.sampleCount, m_resources->slotCapacity);
-            if (!m_accumulate && m_resources->Denoised()) frame.flags |= STOCHASTIC_FLAG_DENOISED;
+            if (!m_accumulate && m_resources->Denoised()) {
+                frame.flags |= STOCHASTIC_FLAG_DENOISED;
+                // Guide-normalized accumulation (docs/stochastic_lighting.md "Guide-normalized accumulation"): shading divides by the guide.
+                if (SettingsManager::GetInstance().getSettingGetter<bool>("stochasticLightingNormalize")()) {
+                    frame.flags |= STOCHASTIC_FLAG_NORMALIZE;
+                    // The paired ratio ("Overhaul phase 3"): shading writes the unshadowed estimate in the noisy alphas.
+                    if (SettingsManager::GetInstance().getSettingGetter<bool>("stochasticLightingPaired")()) frame.flags |= STOCHASTIC_FLAG_PAIRED;
+                    // Visibility gradients (docs/stochastic_lighting.md "Visibility gradients"): last
+                    // frame's records are this pass's only if it kept them the frame before.
+                    if (m_resources->gradient
+                        && SettingsManager::GetInstance().getSettingGetter<bool>("stochasticLightingVisibilityGradient")()) {
+                        frame.flags |= STOCHASTIC_FLAG_GRADIENT;
+                        if (m_state->lastGradientFrame + 1u == update.frameNumber) frame.flags |= STOCHASTIC_FLAG_GRADIENT_VALID;
+                        m_state->lastGradientFrame = update.frameNumber;
+                    }
+                }
+            }
             if (SettingsManager::GetInstance().getSettingGetter<bool>("stochasticLightingGuiding")()) {
                 frame.flags |= STOCHASTIC_FLAG_GUIDING;
                 if (m_state->lastGuidedFrame + 1u == update.frameNumber) frame.flags |= STOCHASTIC_FLAG_HISTORY_VALID;

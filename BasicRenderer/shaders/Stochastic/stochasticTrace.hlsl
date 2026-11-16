@@ -99,6 +99,75 @@ void StochasticTraceRayProbe(uint2 pixel, float3 positionVS, float3 positionWS, 
     StochasticWriteDebugOutput(pixel / downsample, pixel, downsample, screen, debugDiffuse, debugSpecular);
 }
 
+// Visibility gradients (STOCHASTIC_FLAG_GRADIENT; stochasticLightingRootConstants.h, docs/stochastic_lighting.md "Visibility gradients"): one thread per cell re-traces the sample selection recorded there last frame, from the
+// same origin and the same point of the emitter's [0,1)^2 domain, toward the light where it is now (the light alive: its
+// generation unchanged). A change of visibility, weighted by the light's share of that pixel's unshadowed light, goes to the
+// cell the origin projects to this frame (the largest wins). Dispatched after the estimator's rays, only with
+// STOCHASTIC_FLAG_GRADIENT_VALID; it writes nothing the estimate reads.
+[numthreads(STOCHASTIC_TRACE_GROUP_SIZE, 1, 1)]
+void StochasticTraceGradientCS(uint3 id : SV_DispatchThreadID)
+{
+    ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+    const uint downsample = STOCHASTIC_DOWNSAMPLE_FACTOR > 1u ? 2u : 1u;
+    const uint2 screen = uint2(perFrame.screenResX, perFrame.screenResY);
+    const uint2 blocks = (screen + downsample - 1u) / downsample;
+    const uint2 cells = StochasticGradientCells(blocks);
+    if (id.x >= cells.x * cells.y)
+    {
+        return;
+    }
+    RWStructuredBuffer<uint> gradientBuffer = ResourceDescriptorHeap[STOCHASTIC_GRADIENT_UAV];
+    const uint capacity = StochasticGradientCapacity(blocks);
+    const uint base = StochasticGradientRecordBase(capacity, (CLOD_RT_SEC_FRAME & 1u) ^ 1u, id.x);
+    const float share = asfloat(gradientBuffer[base + 6u]);
+    const uint meta = gradientBuffer[base + 0u];
+    if (!(share > 0.0f) || (meta & STOCHASTIC_GRADIENT_COMPLETE) == 0u)
+    {
+        return;
+    }
+    const uint lightIndex = meta & STOCHASTIC_ENTRY_INDEX_MASK;
+    StructuredBuffer<LightInfo> lights = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Light::InfoBuffer)];
+    const LightInfo light = lights[lightIndex];
+    if (((meta >> 20u) & 0xFFu) != (light.generation & 0xFFu) || light.shadowCaster == 0u)
+    {
+        return; // Gone, or no longer shadowed: nothing to compare.
+    }
+    const float3 origin = float3(asfloat(gradientBuffer[base + 3u]), asfloat(gradientBuffer[base + 4u]), asfloat(gradientBuffer[base + 5u]));
+    const float2 u = float2(asfloat(gradientBuffer[base + 1u]), asfloat(gradientBuffer[base + 2u]));
+    RayDesc ray;
+    if (!StochasticLightShadowRayFrom(light, origin, u, ray))
+    {
+        return; // Inside or against the emitter now.
+    }
+    StructuredBuffer<Camera> cameras = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
+    const Camera camera = cameras[perFrame.mainCameraIndex];
+    const float visibleNow = StochasticTraceShadowRay(ray, camera, perFrame);
+    const float visibleThen = (meta & STOCHASTIC_GRADIENT_VISIBLE) != 0u ? 1.0f : 0.0f;
+    const float change = (visibleNow - visibleThen) * share;
+    // Where the origin is this frame (the camera may have moved): its cell takes the gradient, and counts the record
+    // whether or not it changed (the signed mean's denominator).
+    const float4 clip = mul(float4(origin, 1.0f), camera.viewProjection);
+    if (!(clip.w > 0.0f))
+    {
+        return;
+    }
+    const float2 ndc = clip.xy / clip.w;
+    const float2 position = float2(ndc.x * 0.5f + 0.5f, 0.5f - ndc.y * 0.5f) * float2(screen);
+    if (any(position < 0.0f) || any(position >= float2(screen)))
+    {
+        return;
+    }
+    const uint2 cell = min(uint2(position) / downsample / STOCHASTIC_GRADIENT_CELL, cells - 1u);
+    const uint raw = StochasticGradientRawIndex(capacity, cell.y * cells.x + cell.x);
+    if (change != 0.0f)
+    {
+        // Non-negative floats order as their bits.
+        InterlockedMax(gradientBuffer[raw], asuint(abs(change)));
+        InterlockedAdd(gradientBuffer[raw + 1u], uint(int(round(change * STOCHASTIC_GRADIENT_FIXED))));
+    }
+    InterlockedAdd(gradientBuffer[raw + 2u], 1u);
+}
+
 [numthreads(STOCHASTIC_TRACE_GROUP_SIZE, 1, 1)]
 void StochasticTraceCS(uint3 id : SV_DispatchThreadID)
 {

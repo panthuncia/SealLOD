@@ -764,6 +764,14 @@ void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     setStochasticLightingGuiding = settingsManager.getSettingSetter<bool>("stochasticLightingGuiding");
     getStochasticLightingDenoise = settingsManager.getSettingGetter<bool>("stochasticLightingDenoise");
     setStochasticLightingDenoise = settingsManager.getSettingSetter<bool>("stochasticLightingDenoise");
+    getStochasticLightingNormalize = settingsManager.getSettingGetter<bool>("stochasticLightingNormalize");
+    setStochasticLightingNormalize = settingsManager.getSettingSetter<bool>("stochasticLightingNormalize");
+    getStochasticLightingMixtureConfidence = settingsManager.getSettingGetter<bool>("stochasticLightingMixtureConfidence");
+    setStochasticLightingMixtureConfidence = settingsManager.getSettingSetter<bool>("stochasticLightingMixtureConfidence");
+    getStochasticLightingVisibilityGradient = settingsManager.getSettingGetter<bool>("stochasticLightingVisibilityGradient");
+    setStochasticLightingVisibilityGradient = settingsManager.getSettingSetter<bool>("stochasticLightingVisibilityGradient");
+    getStochasticLightingPaired = settingsManager.getSettingGetter<bool>("stochasticLightingPaired");
+    setStochasticLightingPaired = settingsManager.getSettingSetter<bool>("stochasticLightingPaired");
     setPathTracingEnabled = settingsManager.getSettingSetter<bool>("enablePathTracing");
     m_pathTracingEnabled = settingsManager.getSettingGetter<bool>("enablePathTracing")();
     // The renderer can turn it back off (no support, or a failed switch).
@@ -2047,6 +2055,47 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
             bool denoise = getStochasticLightingDenoise();
             if (ImGui::Checkbox("Stochastic Denoiser", &denoise)) {
                 setStochasticLightingDenoise(denoise);
+            }
+            // The denoiser's modes (docs/stochastic_lighting.md "Denoiser"), all per frame: guide-normalized accumulation, and on
+            // top of it light-mixture confidence and the paired shadowed / unshadowed ratio.
+            if (!denoise) {
+                ImGui::BeginDisabled();
+            }
+            bool normalize = getStochasticLightingNormalize();
+            if (ImGui::Checkbox("Normalize", &normalize)) {
+                setStochasticLightingNormalize(normalize);
+            }
+            if (!normalize) {
+                ImGui::BeginDisabled();
+            }
+            ImGui::SameLine();
+            bool mixtureConfidence = getStochasticLightingMixtureConfidence();
+            if (ImGui::Checkbox("Mixture Confidence", &mixtureConfidence)) {
+                setStochasticLightingMixtureConfidence(mixtureConfidence);
+            }
+            ImGui::SameLine();
+            bool visibilityGradient = getStochasticLightingVisibilityGradient();
+            if (ImGui::Checkbox("Visibility Gradient", &visibilityGradient)) {
+                setStochasticLightingVisibilityGradient(visibilityGradient);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("One matched shadow ray per cell re-traces a sample of last frame's; the history shortens where the\n"
+                    "same light's visibility changed (a light passing behind an edge).");
+            }
+            ImGui::SameLine();
+            bool paired = getStochasticLightingPaired();
+            if (ImGui::Checkbox("Paired", &paired)) {
+                setStochasticLightingPaired(paired);
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Paired ratio: needs the exact guide, so the guide walks every light of every froxel while it is on\n"
+                    "(the far-field guide is skipped: costly above ~32 lights per froxel). 1-4%% dark behind fast lights.");
+            }
+            if (!normalize) {
+                ImGui::EndDisabled();
+            }
+            if (!denoise) {
+                ImGui::EndDisabled();
             }
         }
         constexpr const char* primaryVisibilityModes[] = { "Raster", "Ray traced", "Raster, compare against rays (see log)" };

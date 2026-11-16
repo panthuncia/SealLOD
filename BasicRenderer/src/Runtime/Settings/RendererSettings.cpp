@@ -379,6 +379,31 @@ void Renderer::SetSettings() {
         const char* guiding = std::getenv("SARP_STOCHASTIC_GUIDING");
         settingsManager.registerSetting<bool>("stochasticLightingGuiding", !guiding || ReadTruthyEnvironmentFlag("SARP_STOCHASTIC_GUIDING"));
     }
+    // Guide-normalized accumulation in the denoiser (docs/stochastic_lighting.md "Denoiser", "Overhaul phase 2"; on unless
+    // SARP_STOCHASTIC_NORMALIZE=0, since overhaul phase 5). Per frame; the denoiser's history restarts when it changes.
+    {
+        const char* normalize = std::getenv("SARP_STOCHASTIC_NORMALIZE");
+        settingsManager.registerSetting<bool>("stochasticLightingNormalize", !normalize || ReadTruthyEnvironmentFlag("SARP_STOCHASTIC_NORMALIZE"));
+    }
+    // The paired shadowed / unshadowed ratio on top of it (docs/stochastic_lighting.md "The paired ratio"; SARP_STOCHASTIC_PAIRED=1).
+    // Only with stochasticLightingNormalize. Per frame; the denoiser's history restarts when it changes. It forces the exact guide
+    // (no far-field guide, "Correctness pass (2026-11-17)"), whose cost grows with the lights per froxel.
+    settingsManager.registerSetting<bool>("stochasticLightingPaired", ReadTruthyEnvironmentFlag("SARP_STOCHASTIC_PAIRED"));
+    // Light-mixture confidence on top of it (docs/stochastic_lighting.md "Guide-normalized accumulation"; on unless SARP_STOCHASTIC_MIXTURE=0,
+    // since overhaul phase 5): the history shortens where the lights its unshadowed light comes from have changed. Only with
+    // stochasticLightingNormalize. Per frame; the denoiser's history restarts when it changes.
+    {
+        const char* mixture = std::getenv("SARP_STOCHASTIC_MIXTURE");
+        settingsManager.registerSetting<bool>("stochasticLightingMixtureConfidence", !mixture || ReadTruthyEnvironmentFlag("SARP_STOCHASTIC_MIXTURE"));
+    }
+    // Visibility gradients (docs/stochastic_lighting.md "Visibility gradients"; on unless
+    // SARP_STOCHASTIC_VISIBILITY_GRADIENT=0): one matched shadow ray per cell of sampled pixels re-traces a sample of last frame's,
+    // and the history shortens where the same light's visibility changed. Only with stochasticLightingNormalize. Per frame; the
+    // denoiser's history restarts when it changes.
+    {
+        const char* gradient = std::getenv("SARP_STOCHASTIC_VISIBILITY_GRADIENT");
+        settingsManager.registerSetting<bool>("stochasticLightingVisibilityGradient", !gradient || ReadTruthyEnvironmentFlag("SARP_STOCHASTIC_VISIBILITY_GRADIENT"));
+    }
     // Lights drawn per pixel (1 to 4), each with one shadow ray. Per frame.
     {
         const char* samples = std::getenv("SARP_STOCHASTIC_SAMPLES");
@@ -633,8 +658,7 @@ void Renderer::SetSettings() {
         m_pipelineExtensionsDirty = true;
         rebuildRenderGraph = true;
     }));
-    // At full resolution the estimator's buffers hold the setting's samples per pixel (docs/stochastic_lighting.md "Kernel
-    // split"), so a change rebuilds them.
+    // At full resolution the estimator's buffers hold the setting's samples per pixel (docs/stochastic_lighting.md "Kernel split"), so a change rebuilds them.
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("stochasticLightingSamplesPerPixel", [this](const uint32_t&) {
         if (SettingsManager::GetInstance().getSettingGetter<uint32_t>("stochasticLightingDownsample")() == 1u) {
             m_pipelineExtensionsDirty = true;

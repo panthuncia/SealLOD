@@ -7,7 +7,7 @@ shader change can be judged by numbers. Start here to run it or to add a metric.
 |---|---|---|
 | `CLodCacheTool` | Source asset to complete cache, with no GPU | `BasicRenderer`, but never creates a device |
 | `CLodEval` | Orchestration, CPU analysis, comparison | `CLodCacheFormat` only |
-| `CLodCapture` | Renders a job file to a bundle of images. `CLodEval` does not drive it or score bundles yet. | `BasicRenderer` |
+| `CLodCapture` | Renders a job file to a bundle of images. `CLodEval` does not drive it or score bundles. | `BasicRenderer` |
 
 Each rebuilds without the others. After a generator edit, rebuild `CLodCacheTool` and rerun the
 suite. The suite notices the changed tool and rebuilds the caches. After a metric edit, rebuild
@@ -205,14 +205,14 @@ $env:BASICRENDERER_CLOD_COVERAGE_PRESERVATION_MODE = "voxel"
 
 Known limits:
 
-- **Skinned parts do not draw yet.** They are created as scene entities after the first frame, which avoids
-  a stall, but nothing is requested or covered: `resident_clod_groups` stays at 1 at every distance tried,
+- **Skinned parts do not draw.** They are created as scene entities after the first frame, which avoids
+  a stall, but nothing is requested or covered: `resident_clod_groups` stays at 1 at every distance,
   with or without a held bind pose. The cause is not known.
 - **Every view shares one field of view and near plane**, because a running scene can only move its camera.
 - **Frame from world bounds, not cache or accessor bounds.** glTF node transforms can shrink a model a lot:
   `dragon.glb` is about 0.12 units wide once its node chain is applied, against a mesh-space radius of 3.36.
 - **The readiness gate shows stability only.** It waits for 3 s of idle, unchanging residency. It does not
-  yet prove the view has every page it wants, because that needs the page-miss counters.
+  prove the view has every page it wants, which would need the page-miss counters.
 
 Do not turn `enableMaterialTextureStreaming` off for a capture. A material row is written once, usually before
 its image exists, and with streaming off nothing rewrites it, so every texture reads as black.
@@ -288,7 +288,7 @@ Limits:
 - **Coverage above 1 at a distance is not an error in itself.** Dropped coverage on thin triangles makes the triangle
   and leaf renders too sparse there, so neither is ground truth for aggregate coverage.
 
-## Design notes
+## Implementation notes
 
 - **Silent rebuilds are prevented with cache-only mode.** `CLodCache::SetCacheOnlyMode` makes the builder
   entry points throw and stops `TryLoadPrebuilt` deleting stale entries. Importers may catch that
@@ -298,8 +298,8 @@ Limits:
   importer lives there, but it creates no device. `d3d12.dll` and `dxgi.dll` are delay-loaded, and the tool fails at
   exit if either was loaded. Processed textures are compressed on the CPU, and their file layout is computed by
   `PlaceSubresource`, which `CLodCacheFormatTests` pins to sizes the D3D12 device produced.
-- **GPU BC7 compression is off (`kEnableGpuBc7Compression`).** It corrupted sRGB base colors, differently between
-  runs: lower mips came back blank or too bright. Mip generation alone passes `BR_TEXTURE_JOB_SELF_TEST`.
+- **GPU BC7 compression is off (`kEnableGpuBc7Compression`).** It corrupts sRGB base colors, differently between
+  runs: lower mips come back blank or too bright. Mip generation alone passes `BR_TEXTURE_JOB_SELF_TEST`.
 - **Hermetic builds.** The build key covers the tool binary, assets and settings. Each variant has its
   own cache root, because the cache root and settings are resolved once per process.
 - **`CLodCacheFormat` must stay free of USD and D3D12**, or `CLodEval` loses its fast rebuilds.

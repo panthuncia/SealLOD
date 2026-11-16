@@ -656,6 +656,14 @@ private:
     std::function<bool()> getStochasticLightingDenoise;
     std::function<void(bool)> setStochasticLightingDenoise;
     std::function<void(bool)> setStochasticLightingGuiding;
+    std::function<bool()> getStochasticLightingNormalize;
+    std::function<void(bool)> setStochasticLightingNormalize;
+    std::function<bool()> getStochasticLightingMixtureConfidence;
+    std::function<void(bool)> setStochasticLightingMixtureConfidence;
+    std::function<bool()> getStochasticLightingVisibilityGradient;
+    std::function<void(bool)> setStochasticLightingVisibilityGradient;
+    std::function<bool()> getStochasticLightingPaired;
+    std::function<void(bool)> setStochasticLightingPaired;
     std::function<void(uint32_t)> setStochasticLightingSamples;
     std::function<uint32_t()> getStochasticLightingDownsample;
     std::function<void(uint32_t)> setStochasticLightingDownsample;
