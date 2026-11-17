@@ -72,7 +72,7 @@ void CLodRtReflectionShadeCS(uint3 id : SV_DispatchThreadID)
     fragment.pixelCoords = id.xy;
     fragment.fragPosWorldSpace = position;
     fragment.fragPosViewSpace = mul(float4(position, 1.0f), camera.view).xyz;
-    FillFragmentInfoDirect(fragment, sample.materialInputs, -hit.direction, float2(id.xy), false, false, hit.frontFace != 0u, materialFlags);
+    FillFragmentInfoDirect(fragment, sample.materialInputs, -hit.direction, float2(id.xy), SCREEN_SPACE_AO_MODE_OFF, false, hit.frontFace != 0u, materialFlags);
 
     // This pass sets none of the lighting root switches, so it states its options: every light, and the sun's
     // visibility by ray.

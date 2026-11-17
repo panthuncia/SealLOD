@@ -93,6 +93,7 @@
 #include "Utilities/MathUtils.h"
 #include <BasicScene/MovementState.h>
 #include "ThirdParty/XeGTAO.h"
+#include "PostProcessing/AmbientOcclusion/AmbientOcclusionSettings.h"
 #include "Lighting/Environment/EnvironmentManager.h"
 #if BASICRENDERER_HAS_INTEROP_VALIDATION
 #include "Validation/SARPInteropValidation.h"
@@ -564,8 +565,14 @@ void Renderer::CreateRenderGraph() {
                 BuildMaterialEvaluationPipeline(newGraph, m_materialEvaluationInputs, terrainRvtEnabled);
                 break;
             case Gtao:
-                RegisterGTAOResources(newGraph);
-                BuildGTAOPipeline(newGraph, primaryCameraEntity.try_get<Components::Camera>());
+                // The screen-space AO slot: ambientOcclusionTechnique picks what fills it.
+                if (br::ambient_occlusion::ReadAmbientOcclusionTechnique() == br::ambient_occlusion::AmbientOcclusionTechnique::XeGTAO) {
+                    RegisterGTAOResources(newGraph);
+                    BuildGTAOPipeline(newGraph, primaryCameraEntity.try_get<Components::Camera>());
+                } else {
+                    RegisterCORTAOResources(newGraph);
+                    BuildCORTAOPipeline(newGraph);
+                }
                 break;
             case ClusteredLighting:
                 // Forward runs only when a transparency pass reads them (AVBOIT shading, deep visibility resolve).

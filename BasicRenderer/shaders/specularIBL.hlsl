@@ -47,12 +47,12 @@ float4 PSMain(FULLSCREEN_VS_OUTPUT input) : SV_Target
     float3 viewDirWS = normalize(mainCamera.positionWorldSpace.xyz - positionWS.xyz);
     
     FragmentInfo fragmentInfo;
-    GetFragmentInfoCanonicalSurface(input.position.xy, viewDirWS, positionVS, positionWS, GetRootEnableGTAO(), fragmentInfo);
+    GetFragmentInfoCanonicalSurface(input.position.xy, viewDirWS, positionVS, positionWS, GetRootScreenSpaceAOMode(), fragmentInfo);
     
     float3 specularIBL = evaluateSpecularIBLFromSSR(
         reflectionColor.rgb,
         fragmentInfo.normalWS,
-        fragmentInfo.normalWS,
+        fragmentInfo.bentNormalWS,
         fragmentInfo.diffuseAmbientOcclusion,
         fragmentInfo.albedo,
         fragmentInfo.dielectricSpecularF0,

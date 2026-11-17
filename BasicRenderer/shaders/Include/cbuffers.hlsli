@@ -166,7 +166,7 @@ uint GetRootPerMeshInstanceBufferIndex()
 // Lighting passes' switches (MiscShadowingMode and the rest in ShaderBuffers.h).
 uint GetRootShadowingMode() { return UintRootConstant24; } // SHADOWING_MODE_* (shaders/Common/defines.h)
 bool GetRootEnablePunctualLights() { return UintRootConstant25 != 0u; }
-bool GetRootEnableGTAO() { return UintRootConstant26 != 0u; }
+uint GetRootScreenSpaceAOMode() { return UintRootConstant26; } // SCREEN_SPACE_AO_MODE_* (shaders/Common/defines.h)
 bool GetRootEnableSkybox() { return UintRootConstant27 != 0u; }
 bool GetRootEnableRayTracedSunShadow() { return UintRootConstant28 != 0u; }
 // Primary deferred pass only: count VSM receiver lookup outcomes into CLodStats.

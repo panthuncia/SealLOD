@@ -2,6 +2,7 @@
 #define __UTILITY_HLSL__
 #include "include/structs.hlsli"
 #include "include/cbuffers.hlsli"
+#include "Common/defines.h"
 #include "include/vertex.hlsli"
 #include "include/materialFlags.hlsli"
 #include "include/parallax.hlsli"
@@ -4438,7 +4439,32 @@ void PopulateFragmentInfoFromOpenPBR(
     ret.F0 = saturate(dielectricSpecularWeight * dielectricF0 + metalSpecularWeight * metalF0);
 }
 
-void GetFragmentInfoCanonicalSurface(in uint2 pixelCoordinates, in float3 viewWS, in float3 fragPosViewSpace, in float3 fragPosWorldSpace, in bool enableGTAO, out FragmentInfo ret) {
+// Screen-space ambient occlusion at a pixel (screenSpaceAOMode is SCREEN_SPACE_AO_MODE_*, GetRootScreenSpaceAOMode() in
+// lighting passes): the diffuse occlusion is the smaller of the material's and the screen-space visibility, and the bent
+// normal is CORTAO's where it ran, the shading normal otherwise.
+void ApplyScreenSpaceAO(uint screenSpaceAOMode, uint2 pixel, float materialAO, float3 normalWS, out float diffuseAO, out float3 bentNormalWS)
+{
+    diffuseAO = materialAO;
+    bentNormalWS = normalWS;
+    if (screenSpaceAOMode == SCREEN_SPACE_AO_MODE_XEGTAO)
+    {
+        Texture2D<uint> aoTexture = ResourceDescriptorHeap[OptionalResourceDescriptorIndex(Builtin::GTAO::OutputAOTerm)];
+        diffuseAO = min(materialAO, float(aoTexture[pixel].x) / 255.0f);
+    }
+    else if (screenSpaceAOMode == SCREEN_SPACE_AO_MODE_CORTAO)
+    {
+        Texture2D<float4> aoTexture = ResourceDescriptorHeap[OptionalResourceDescriptorIndex(Builtin::CORTAO::OutputAO)];
+        const float4 ao = aoTexture[pixel];
+        diffuseAO = min(materialAO, ao.a);
+        // Zero where the filter cancelled the bent normal out.
+        if (dot(ao.xyz, ao.xyz) > 0.25f)
+        {
+            bentNormalWS = normalize(ao.xyz);
+        }
+    }
+}
+
+void GetFragmentInfoCanonicalSurface(in uint2 pixelCoordinates, in float3 viewWS, in float3 fragPosViewSpace, in float3 fragPosWorldSpace, in uint screenSpaceAOMode, out FragmentInfo ret) {
     ret.pixelCoords = pixelCoordinates;
     ret.fragPosViewSpace = fragPosViewSpace;
     ret.fragPosWorldSpace = fragPosWorldSpace;
@@ -4491,15 +4517,7 @@ void GetFragmentInfoCanonicalSurface(in uint2 pixelCoordinates, in float3 viewWS
     ret.reflectedWS = reflect(-ret.viewWS, ret.normalWS);
     ret.alpha = baseColorOpacity.a;
 
-    if (enableGTAO)
-    {
-        Texture2D<uint> aoTexture = ResourceDescriptorHeap[OptionalResourceDescriptorIndex(Builtin::GTAO::OutputAOTerm)];
-        ret.diffuseAmbientOcclusion = min(specularAo.a, float(aoTexture[pixelCoordinates].x) / 255.0f);
-    }
-    else
-    {
-        ret.diffuseAmbientOcclusion = specularAo.a;
-    }
+    ApplyScreenSpaceAO(screenSpaceAOMode, pixelCoordinates, specularAo.a, ret.normalWS, ret.diffuseAmbientOcclusion, ret.bentNormalWS);
 
     OpenPBRSurfaceSample surface = (OpenPBRSurfaceSample)0;
     surface.openPBRMaterialDataIndex = record.materialTableIndex;
@@ -4525,7 +4543,7 @@ void GetFragmentInfoCanonicalSurface(in uint2 pixelCoordinates, in float3 viewWS
     ret.materialFlags = record.flags;
 }
 
-void FillFragmentInfoDirect(inout FragmentInfo ret, in MaterialInputs materialInfo, in float3 viewWS, in float2 pixelCoords, in bool enableGTAO, in bool transparent, in bool isFrontFace, in uint materialFlags)
+void FillFragmentInfoDirect(inout FragmentInfo ret, in MaterialInputs materialInfo, in float3 viewWS, in float2 pixelCoords, in uint screenSpaceAOMode, in bool transparent, in bool isFrontFace, in uint materialFlags)
 {
     ret.materialFlags = materialFlags;
     ret.selectedMaterialMipLevel = materialInfo.selectedMaterialMipLevel;
@@ -4576,24 +4594,17 @@ void FillFragmentInfoDirect(inout FragmentInfo ret, in MaterialInputs materialIn
     {
         ret.alpha = materialInfo.opacity;
         ret.diffuseAmbientOcclusion = materialInfo.ambientOcclusion; // Screen-space AO not applied to transparent objects
+        ret.bentNormalWS = ret.normalWS;
     }
     else
     {
         ret.alpha = 1.0; // Opaque objects
-        if (enableGTAO)
-        {
-            Texture2D<uint> aoTexture = ResourceDescriptorHeap[OptionalResourceDescriptorIndex(Builtin::GTAO::OutputAOTerm)];
-            ret.diffuseAmbientOcclusion = min(materialInfo.ambientOcclusion, float(aoTexture[pixelCoords].x) / 255.0);
-        }
-        else
-        {
-            ret.diffuseAmbientOcclusion = materialInfo.ambientOcclusion;
-        }
+        ApplyScreenSpaceAO(screenSpaceAOMode, uint2(pixelCoords), materialInfo.ambientOcclusion, ret.normalWS, ret.diffuseAmbientOcclusion, ret.bentNormalWS);
     }
     
 }
 
-void GetFragmentInfoDirectPrecompiled(in PSInput input, in float3 viewWS, bool enableGTAO, bool transparent, bool isFrontFace, out FragmentInfo ret)
+void GetFragmentInfoDirectPrecompiled(in PSInput input, in float3 viewWS, uint screenSpaceAOMode, bool transparent, bool isFrontFace, out FragmentInfo ret)
 {
     ret.pixelCoords = input.position.xy;
     ret.fragPosViewSpace = input.positionViewSpace.xyz;
@@ -4606,10 +4617,10 @@ void GetFragmentInfoDirectPrecompiled(in PSInput input, in float3 viewWS, bool e
     PerMeshBuffer meshBuffer = perMeshBuffer[GetRootPerMeshBufferIndex()];
     StructuredBuffer<MaterialInfo> materialDataBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
     MaterialInfo materialData = materialDataBuffer[meshBuffer.materialDataIndex];
-    FillFragmentInfoDirect(ret, materialInfo, viewWS, input.position.xy, enableGTAO, transparent, isFrontFace, materialData.materialFlags);
+    FillFragmentInfoDirect(ret, materialInfo, viewWS, input.position.xy, screenSpaceAOMode, transparent, isFrontFace, materialData.materialFlags);
 }
 
-void GetFragmentInfoDirect(in PSInput input, in float3 viewWS, bool enableGTAO, bool transparent, bool isFrontFace, out FragmentInfo ret)
+void GetFragmentInfoDirect(in PSInput input, in float3 viewWS, uint screenSpaceAOMode, bool transparent, bool isFrontFace, out FragmentInfo ret)
 {
     ret.pixelCoords = input.position.xy;
     ret.fragPosViewSpace = input.positionViewSpace.xyz;
@@ -4622,7 +4633,7 @@ void GetFragmentInfoDirect(in PSInput input, in float3 viewWS, bool enableGTAO, 
     PerMeshBuffer meshBuffer = perMeshBuffer[GetRootPerMeshBufferIndex()];
     StructuredBuffer<MaterialInfo> materialDataBuffer = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerMaterialDataBuffer)];
     MaterialInfo materialData = materialDataBuffer[meshBuffer.materialDataIndex];
-    FillFragmentInfoDirect(ret, materialInfo, viewWS, input.position.xy, enableGTAO, transparent, isFrontFace, materialData.materialFlags);
+    FillFragmentInfoDirect(ret, materialInfo, viewWS, input.position.xy, screenSpaceAOMode, transparent, isFrontFace, materialData.materialFlags);
 }
 
 float unprojectDepth(float depth, float near, float far)

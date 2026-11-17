@@ -12,13 +12,14 @@
 #include "Runtime/Settings/SettingsManager.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "Runtime/Settings/RendererSettingsHelpers.h"
+#include "PostProcessing/AmbientOcclusion/AmbientOcclusionSettings.h"
 
 // The deferred pipeline follows the global PSO flags, so it is chosen per frame.
 struct DeferredShadingFrame {
 	org::PipelineState pipeline;
 	ShadowingMode shadowingMode = ShadowingMode::None;
 	bool punctualLights = true;
-	bool gtao = true;
+	ScreenSpaceAOMode screenSpaceAO = ScreenSpaceAOMode::Off;
 	bool skybox = false;
 	uint32_t groupsX = 0, groupsY = 0;
 	bool rayTracedSunShadow = false;
@@ -36,7 +37,8 @@ public:
 		// enableShadows follows ClusterLodShadowTechnique, and the graph is rebuilt when it changes. Stochastic lighting
 		// shadows every light itself, the sun included, and no shadow map exists then.
 		m_virtualShadowMaps = settingsManager.getSettingGetter<bool>("enableShadows")() && !stochasticLighting;
-		m_gtaoEnabled = settingsManager.getSettingGetter<bool>("enableGTAO")();
+		// The screen-space AO output is declared for the technique the graph was built with.
+		m_screenSpaceAOMode = br::ambient_occlusion::ReadScreenSpaceAOMode();
 		m_rayTracedSunShadow = settingsManager.getSettingGetter<bool>("enableRayTracedShadows")()
 			&& DeviceManager::GetInstance().GetCLodRayTracingSupported() && !stochasticLighting;
 		m_clusteredLightingEnabled = settingsManager.getSettingGetter<bool>("enableClusteredLighting")();
@@ -100,8 +102,10 @@ public:
 		if (m_stochasticLighting) {
 			builder.ShaderResource(Builtin::StochasticLighting::Diffuse, Builtin::StochasticLighting::Specular);
 		}
-		if (m_gtaoEnabled) {
+		if (m_screenSpaceAOMode == ScreenSpaceAOMode::XeGTAO) {
 			builder.ShaderResource(Builtin::GTAO::OutputAOTerm);
+		} else if (m_screenSpaceAOMode == ScreenSpaceAOMode::CORTAO) {
+			builder.ShaderResource(Builtin::CORTAO::OutputAO);
 		}
 
 		builder.ConstantBuffer(Builtin::PerFrameBuffer);
@@ -129,7 +133,8 @@ public:
 			frame.shadowingMode = ShadowingMode::None;
 		}
 		frame.punctualLights = lighting.punctualLightingEnabled;
-		frame.gtao = lighting.gtaoEnabled;
+		// Until the graph is rebuilt for a changed setting, only what was declared is read.
+		frame.screenSpaceAO = lighting.screenSpaceAOMode == m_screenSpaceAOMode ? m_screenSpaceAOMode : ScreenSpaceAOMode::Off;
 		frame.skybox = m_skyboxEnabled;
 		frame.groupsX = (resolution.x + 7u) / 8u; frame.groupsY = (resolution.y + 7u) / 8u;
 		frame.rayTracedSunShadow = m_rayTracedSunShadow;
@@ -141,7 +146,7 @@ public:
 		br::render::MiscConstants constants{};
 		constants[MiscShadowingMode] = static_cast<uint32_t>(frame.shadowingMode);
 		constants[MiscEnablePunctualLights] = frame.punctualLights ? 1u : 0u;
-		constants[MiscEnableGTAO] = frame.gtao ? 1u : 0u;
+		constants[MiscScreenSpaceAOMode] = static_cast<uint32_t>(frame.screenSpaceAO);
 		constants[MiscEnableSkybox] = frame.skybox ? 1u : 0u;
 		constants[MiscEnableRayTracedSunShadow] = frame.rayTracedSunShadow ? 1u : 0u;
 		constants[MiscEnableVirtualShadowReceiverTelemetry] = frame.virtualShadowReceiverTelemetry ? 1u : 0u;
@@ -168,7 +173,7 @@ private:
 	bool m_punctualLightingEnabled = true;
 	bool m_virtualShadowMaps = true;
 
-	bool m_gtaoEnabled = true;
+	ScreenSpaceAOMode m_screenSpaceAOMode = ScreenSpaceAOMode::Off;
 	bool m_rayTracedSunShadow = false;
 	bool m_virtualShadowReceiverTelemetry = false;
 	bool m_clusteredLightingEnabled = true;

@@ -74,6 +74,7 @@
 #include "BasicRenderer/Extensions/ShaderBuffers.h"
 #include "Utilities/ProportionalBudgetAllocator.h"
 #include "BuiltinResources.h"
+#include "PostProcessing/AmbientOcclusion/AmbientOcclusionSettings.h"
 
 namespace {
     template <typename... Args>
@@ -2237,7 +2238,10 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
         if (phaseFeedsPrimaryVisibility(phaseIndex)) {
             auto depthCopyInsertPoint = org::ExternalInsertPoint::Before("DeferredShadingPass");
             if (phaseIndex == 2u && SettingsManager::GetInstance().getSettingGetter<bool>("enableGTAO")()) {
-                depthCopyInsertPoint.AlsoBefore("GTAOFilterPass");
+                // The screen-space AO slot's first pass reads the linear depth.
+                depthCopyInsertPoint.AlsoBefore(br::ambient_occlusion::ReadAmbientOcclusionTechnique()
+                        == br::ambient_occlusion::AmbientOcclusionTechnique::XeGTAO
+                    ? "GTAOFilterPass" : "CORTAOPrepass");
             }
             depthCopyPassDesc.At(std::move(depthCopyInsertPoint));
         }

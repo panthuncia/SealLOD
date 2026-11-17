@@ -56,11 +56,20 @@ enum class ShadowingMode : uint32_t {
 	StochasticRayTraced = 2, // The sun through the virtual shadow map; point and spot lights sampled stochastically and traced.
 };
 
+// Which screen-space ambient occlusion lighting reads. Shaders read it from GetRootScreenSpaceAOMode() as
+// SCREEN_SPACE_AO_MODE_* (shaders/Common/defines.h). Off unless enableGTAO is on (GtaoTechnique is in the recipe); the
+// ambientOcclusionTechnique setting picks the technique.
+enum class ScreenSpaceAOMode : uint32_t {
+	Off = 0,
+	XeGTAO = 1, // Builtin::GTAO::OutputAOTerm: visibility only.
+	CORTAO = 2, // Builtin::CORTAO::OutputAO: world-space bent normal and visibility.
+};
+
 struct LightingFrameSettings {
 	bool imageBasedLightingEnabled = true;
 	bool punctualLightingEnabled = true;
 	ShadowingMode shadowingMode = ShadowingMode::None;
-	bool gtaoEnabled = true;
+	ScreenSpaceAOMode screenSpaceAOMode = ScreenSpaceAOMode::Off;
 	bool clusteredLightingEnabled = true;
 };
 

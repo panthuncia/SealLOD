@@ -40,6 +40,12 @@ struct Builtin {
     inline static constexpr std::string_view VoxelAttributeSamples = "Builtin::CLod::VoxelAttributeSamples";
     inline static constexpr std::string_view VoxelCubeRecords = "Builtin::CLod::VoxelCubeRecords";
   };
+  struct CORTAO {
+    inline static constexpr std::string_view ConstantsBuffer = "Builtin::CORTAO::ConstantsBuffer";
+    inline static constexpr std::string_view OutputAO = "Builtin::CORTAO::OutputAO";
+    inline static constexpr std::string_view PackedData = "Builtin::CORTAO::PackedData";
+    inline static constexpr std::string_view WorkingAO = "Builtin::CORTAO::WorkingAO";
+  };
   inline static constexpr std::string_view CameraBuffer = "Builtin::CameraBuffer";
   struct Color {
     inline static constexpr std::string_view HDRColorTarget = "Builtin::Color::HDRColorTarget";

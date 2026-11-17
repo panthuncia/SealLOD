@@ -7,6 +7,7 @@
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Render/Runtime/IDescriptorService.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include "ThirdParty/XeGTAO.h"
 
 struct GTAODenoiseFrame {
     uint32_t groupsX = 0, groupsY = 0;

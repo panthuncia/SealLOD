@@ -18,6 +18,7 @@
 #include "Terrain/RenderPasses/TerrainRvtPasses.h"
 #include <BasicRenderer/Extensions/IndirectCommand.h>
 #include "Lighting/Environment/RenderPasses/brdfIntegrationPass.h"
+#include "PostProcessing/AmbientOcclusion/RenderPasses/CORTAOPasses.h"
 #include "PostProcessing/AmbientOcclusion/RenderPasses/XeGTAODenoisePass.h"
 #include "PostProcessing/AmbientOcclusion/RenderPasses/XeGTAOFilterPass.h"
 #include "PostProcessing/AmbientOcclusion/RenderPasses/XeGTAOMainPass.h"
@@ -940,6 +941,45 @@ inline void BuildGTAOPipeline(org::RenderGraph* graph, const Components::Camera*
 
     graph->BuildPass<GTAODenoisePass>("GTAODenoisePass"); // Denoise pass
     TagPassTechnique(graph, "GTAODenoisePass", "Post Process::GTAO");
+}
+
+// CORTAO (docs/lighting.md "Ambient occlusion"), at render resolution:
+// - PackedData, R32_UInt with mips: linear depth with a packed normal in its low bits, mips 0 to CortaoMipCount - 1 written.
+// - WorkingAO, R32_UInt: the main pass's visibility and view-space bent normal as snorm8x4, gathered by the filter.
+// - OutputAO, R8G8B8A8_SNorm: the filtered world-space bent normal (rgb) and visibility (a), read by lighting.
+inline void RegisterCORTAOResources(org::RenderGraph* graph) {
+    const auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
+    const auto makeTexture = [&](rhi::Format format, bool mips, const char* name) {
+        org::TextureDescription desc;
+        desc.arraySize = 1;
+        desc.channels = format == rhi::Format::R8G8B8A8_SNorm ? 4 : 1;
+        desc.isCubemap = false;
+        desc.hasUAV = true;
+        desc.hasSRV = true;
+        desc.format = format;
+        desc.generateMipMaps = mips;
+        desc.allowAlias = true;
+        desc.imageDimensions.push_back(org::ImageDimensions{ resolution.x, resolution.y, 0, 0 });
+        auto texture = org::PixelBuffer::CreateSharedUnmaterialized(desc);
+        org::memory::SetResourceUsageHint(*texture, "CORTAO resources");
+        texture->SetName(name);
+        return texture;
+    };
+    graph->RegisterResource(Builtin::CORTAO::PackedData, makeTexture(rhi::Format::R32_UInt, true, "CORTAO Packed Data"));
+    graph->RegisterResource(Builtin::CORTAO::WorkingAO, makeTexture(rhi::Format::R32_UInt, false, "CORTAO Working AO"));
+    graph->RegisterResource(Builtin::CORTAO::OutputAO, makeTexture(rhi::Format::R8G8B8A8_SNorm, false, "CORTAO Output AO"));
+}
+
+inline void BuildCORTAOPipeline(org::RenderGraph* graph) {
+    graph->RegisterResource(Builtin::CORTAO::ConstantsBuffer,
+        CreateIndexedConstantBuffer(sizeof(br::ambient_occlusion::CORTAOConstants), "CORTAO constants"));
+
+    graph->BuildPass<br::ambient_occlusion::CORTAOPrepass>("CORTAOPrepass");
+    TagPassTechnique(graph, "CORTAOPrepass", "Post Process::CORTAO");
+    graph->BuildPass<br::ambient_occlusion::CORTAOMainPass>("CORTAOMainPass");
+    TagPassTechnique(graph, "CORTAOMainPass", "Post Process::CORTAO");
+    graph->BuildPass<br::ambient_occlusion::CORTAOFilterPass>("CORTAOFilterPass");
+    TagPassTechnique(graph, "CORTAOFilterPass", "Post Process::CORTAO");
 }
 
 // The light grid (docs/lighting.md "The light grid"): its buffers, sized from the render resolution, the grid settings and

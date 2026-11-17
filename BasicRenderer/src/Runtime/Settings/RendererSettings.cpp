@@ -23,6 +23,7 @@
 #include "PostProcessing/ToneMapping/TonemapTypes.h"
 #include "Utilities/Utilities.h"
 #include "Runtime/Settings/RendererSettingsHelpers.h"
+#include "PostProcessing/AmbientOcclusion/AmbientOcclusionSettings.h"
 #include "../shaders/PerPassRootConstants/materialTextureResolveConstants.h"
 #include "../shaders/PerPassRootConstants/lightCullingRootConstants.h"
 #include <nlohmann/json.hpp>
@@ -311,6 +312,19 @@ void Renderer::SetSettings() {
 	settingsManager.registerSetting<bool>("enableMeshShader", meshShaderSupported && m_useMeshShaders);
 	settingsManager.registerSetting<bool>("enableIndirectDraws", meshShaderSupported);
 	settingsManager.registerSetting<bool>("enableGTAO", m_gtaoEnabled);
+	{
+		namespace ao = br::ambient_occlusion;
+		settingsManager.registerSetting<uint32_t>(ao::TechniqueSettingName, ao::TechniqueDefault);
+		settingsManager.registerSetting<uint32_t>(ao::CortaoSampleCountSettingName, ao::CortaoSampleCountDefault);
+		settingsManager.registerSetting<float>(ao::CortaoRadiusSettingName, ao::CortaoRadiusDefault);
+		settingsManager.registerSetting<float>(ao::CortaoScreenRadiusRatioSettingName, ao::CortaoScreenRadiusRatioDefault);
+		settingsManager.registerSetting<float>(ao::CortaoMipBiasSettingName, ao::CortaoMipBiasDefault);
+		settingsManager.registerSetting<float>(ao::CortaoSlopeCompensationSettingName, ao::CortaoSlopeCompensationDefault);
+		settingsManager.registerSetting<float>(ao::CortaoBackfaceThresholdSettingName, ao::CortaoBackfaceThresholdDefault);
+		settingsManager.registerSetting<float>(ao::CortaoBackfaceBoostSettingName, ao::CortaoBackfaceBoostDefault);
+		settingsManager.registerSetting<float>(ao::CortaoFilterDepthSensitivitySettingName, ao::CortaoFilterDepthSensitivityDefault);
+		settingsManager.registerSetting<float>(ao::CortaoFilterNormalSensitivitySettingName, ao::CortaoFilterNormalSensitivityDefault);
+	}
 	settingsManager.registerSetting<bool>("enableOcclusionCulling", m_occlusionCulling);
     settingsManager.registerSetting<CLodCullingBackend>(CLodCullingBackendSettingName, CLodCullingBackend::PureCompute);
     settingsManager.registerSetting<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName, CLodSoftwareRasterMode::Compute);
@@ -718,6 +732,13 @@ void Renderer::SetSettings() {
         if (newValue) recipe.Add<br::pipeline::GtaoTechnique>();
         else recipe.Remove<br::pipeline::GtaoTechnique>();
         RequestPipelineReplacement(std::move(recipe));
+		}));
+    // Which technique fills the screen-space AO slot, and CORTAO's sample count (a pipeline define): both rebuild the graph.
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(br::ambient_occlusion::TechniqueSettingName, [this](const uint32_t&) {
+		rebuildRenderGraph = true;
+		}));
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(br::ambient_occlusion::CortaoSampleCountSettingName, [this](const uint32_t&) {
+		rebuildRenderGraph = true;
 		}));
 	m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableVisibilityRendering", [this](const bool& newValue) {
 		m_visibilityRendering = newValue;

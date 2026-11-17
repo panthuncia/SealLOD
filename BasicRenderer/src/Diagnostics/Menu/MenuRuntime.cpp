@@ -2004,8 +2004,11 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
         }
 
         if (ImGui::CollapsingHeader("Post Processing and Ray Tracing")) {
-		if (ImGui::Checkbox("Enable GTAO", &m_gtaoEnabled)) {
+		if (ImGui::Checkbox("Ambient Occlusion", &m_gtaoEnabled)) {
 			setGTAOEnabled(m_gtaoEnabled);
+		}
+		if (m_gtaoEnabled) {
+			DrawAmbientOcclusionSettings();
 		}
 		if (ImGui::Checkbox("Enable Bloom", &m_bloomEnabled)) {
 			setBloomEnabled(m_bloomEnabled);

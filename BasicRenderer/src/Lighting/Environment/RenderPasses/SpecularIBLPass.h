@@ -8,11 +8,12 @@
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "BasicRenderer/Scene/Scene.h"
+#include "PostProcessing/AmbientOcclusion/AmbientOcclusionSettings.h"
 
 struct SpecularIBLBindings {
     org::PipelineState pipeline;
     org::DeclaredViewToken target;
-    bool gtaoEnabled = false;
+    ScreenSpaceAOMode screenSpaceAO = ScreenSpaceAOMode::Off;
 };
 struct SpecularIBLFrame {
     uint32_t width = 0, height = 0;
@@ -22,8 +23,7 @@ class SpecularIBLPass : public org::TypedRenderGraphPass<SpecularIBLPass,
     SpecularIBLFrame, SpecularIBLBindings> {
 public:
     SpecularIBLPass() {
-        auto& settingsManager = SettingsManager::GetInstance();
-        m_gtaoEnabled = settingsManager.getSettingGetter<bool>("enableGTAO")();
+        m_screenSpaceAOMode = br::ambient_occlusion::ReadScreenSpaceAOMode();
     }
 
     SpecularIBLBindings Declare(org::PassBuilder& builder) {
@@ -49,10 +49,12 @@ public:
 
         builder.UnorderedAccess(Builtin::DebugVisualization);
 
-        if (m_gtaoEnabled) {
+        if (m_screenSpaceAOMode == ScreenSpaceAOMode::XeGTAO) {
             builder.ShaderResource(Builtin::GTAO::OutputAOTerm);
+        } else if (m_screenSpaceAOMode == ScreenSpaceAOMode::CORTAO) {
+            builder.ShaderResource(Builtin::CORTAO::OutputAO);
         }
-        return {builder.Pipeline(PipelineDesc()), builder.RenderTarget(org::ResourceIdentifier{Builtin::Color::HDRColorTarget}), m_gtaoEnabled};
+        return {builder.Pipeline(PipelineDesc()), builder.RenderTarget(org::ResourceIdentifier{Builtin::Color::HDRColorTarget}), m_screenSpaceAOMode};
     }
 
     void Initialize() {}
@@ -66,7 +68,7 @@ public:
     static void Record(const SpecularIBLBindings& bindings, const SpecularIBLFrame& frame,
         org::PassRecordContext& context) {
         br::render::MiscConstants constants{};
-        constants[MiscEnableGTAO] = bindings.gtaoEnabled;
+        constants[MiscScreenSpaceAOMode] = static_cast<uint32_t>(bindings.screenSpaceAO);
         br::render::DrawFullscreen(context, bindings.pipeline, constants, br::render::ColorTarget(context, bindings.target),
             frame.width, frame.height);
     }
@@ -77,7 +79,7 @@ public:
 
 private:
 
-    bool m_gtaoEnabled = true;
+    ScreenSpaceAOMode m_screenSpaceAOMode = ScreenSpaceAOMode::Off;
 
     static org::GraphicsPipelineDesc PipelineDesc() {
         org::GraphicsPipelineDesc desc;

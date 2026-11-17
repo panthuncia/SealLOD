@@ -40,7 +40,6 @@ DeepVisibilityResolvePass::DeepVisibilityResolvePass(
     m_getPunctualLightingEnabled = settingsManager.getSettingGetter<bool>("enablePunctualLighting");
     // Whether the virtual shadow map is built, not just shadows on: stochastic lighting replaces it (Renderer::VirtualShadowMapsActive).
     m_getShadowsEnabled = settingsManager.getSettingGetter<bool>("virtualShadowMapsActive");
-    m_gtaoEnabled = settingsManager.getSettingGetter<bool>("enableGTAO")();
 }
 
 DeepVisibilityResolveBindings DeepVisibilityResolvePass::Declare(org::PassBuilder& declaration)
@@ -131,7 +130,6 @@ DeepVisibilityResolveBindings DeepVisibilityResolvePass::Declare(org::PassBuilde
     bindings.ready = m_primaryHeadPointerTexture && m_pHDRTarget;
     bindings.shadows = shadowsEnabled;
     bindings.punctualLights = m_getPunctualLightingEnabled ? m_getPunctualLightingEnabled() : false;
-    bindings.gtao = m_gtaoEnabled;
     bindings.useNormalMaps = CLodReyesUseNormalMaps();
     bindings.terrainNormalBlend = CLodReyesTerrainNormalBlend();
     bindings.terrainNormalMipBias = CLodReyesTerrainNormalMipBias();
@@ -180,7 +178,7 @@ void DeepVisibilityResolvePass::Record(const DeepVisibilityResolveBindings& bind
     br::render::MiscConstants constants{};
     constants[MiscShadowingMode] = static_cast<uint32_t>(bindings.shadows ? ShadowingMode::VirtualShadowMaps : ShadowingMode::None);
     constants[MiscEnablePunctualLights] = bindings.punctualLights;
-    constants[MiscEnableGTAO] = bindings.gtao;
+    constants[MiscScreenSpaceAOMode] = static_cast<uint32_t>(ScreenSpaceAOMode::Off); // Transparent shading never reads screen-space AO.
     constants[CLOD_DEEP_VISIBILITY_RESOLVE_HEAD_POINTER_DESCRIPTOR_INDEX] = context.Index(bindings.headPointers);
     constants[CLOD_DEEP_VISIBILITY_RESOLVE_NODE_BUFFER_DESCRIPTOR_INDEX] = context.Index(bindings.nodes);
     constants[CLOD_DEEP_VISIBILITY_RESOLVE_COUNTER_DESCRIPTOR_INDEX] = context.Index(bindings.counter);

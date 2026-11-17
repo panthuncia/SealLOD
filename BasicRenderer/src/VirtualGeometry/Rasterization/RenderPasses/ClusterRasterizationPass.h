@@ -62,7 +62,7 @@ struct ClusterRasterFrame {
     uint32_t viewRasterInfoTable = 0;
     uint32_t deepVisibilityNodeCapacity = 1;
     uint32_t virtualShadowPageTableResolution = 0, virtualShadowVirtualResolution = 0;
-    bool shadows = false, punctualLights = false, gtao = false;
+    bool shadows = false, punctualLights = false;
     bool telemetryEnabled = false;
     bool phase1VisibilityDiagnostics = false;
 };
@@ -168,7 +168,6 @@ private:
     bool m_declaredShadowsEnabled = false;
     std::function<bool()> m_getPunctualLightingEnabled;
     std::function<bool()> m_getShadowsEnabled;
-    bool m_gtaoEnabled = false;
 
     RenderPhase m_renderPhase;
 };

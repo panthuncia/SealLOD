@@ -108,7 +108,7 @@ AVBOITShadeOutput AVBOITShadePSMain(VisBufferPSInput input, bool isFrontFace : S
             sample.materialInputs,
             viewWS,
             float2(pixel),
-            false,
+            SCREEN_SPACE_AO_MODE_OFF,
             true,
             isFrontFace,
             sample.materialFlags);

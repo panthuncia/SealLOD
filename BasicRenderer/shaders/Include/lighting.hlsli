@@ -769,7 +769,7 @@ void EvaluateFragmentIBL(
                 diffuseIBL,
                 specularIBL,
                 fragmentInfo.normalWS,
-                fragmentInfo.normalWS,
+                fragmentInfo.bentNormalWS,
                 fragmentInfo.albedo,
                 fragmentInfo.diffuseColor,
                 fragmentInfo.diffuseAmbientOcclusion,

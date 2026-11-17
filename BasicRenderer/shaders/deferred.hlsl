@@ -89,7 +89,7 @@ void DeferredCSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
         mainCamera.viewInverse).xyz;
 
     FragmentInfo fragmentInfo;
-    GetFragmentInfoCanonicalSurface(pixel, viewDirWS, positionVS, positionWS, GetRootEnableGTAO(), fragmentInfo);
+    GetFragmentInfoCanonicalSurface(pixel, viewDirWS, positionVS, positionWS, GetRootScreenSpaceAOMode(), fragmentInfo);
     
     DirectLightingOptions lightingOptions = DirectLightingOptionsFromRoot();
     if (GetRootEnableRayTracedSunShadow() && GetRootShadowingMode() == SHADOWING_MODE_VIRTUAL_SHADOW_MAPS)
@@ -124,6 +124,9 @@ void DeferredCSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
         switch (perFrameBuffer.outputType) {
             case OUTPUT_AO:
                 payload = PackDebugFloat3(fragmentInfo.diffuseAmbientOcclusion.xxx);
+                break;
+            case OUTPUT_BENT_NORMAL:
+                payload = PackDebugFloat3(fragmentInfo.bentNormalWS * 0.5f + 0.5f);
                 break;
             case OUTPUT_STOCHASTIC_LIGHTING:
                 payload = PackDebugFloat3(stochasticLighting / (1.0f + stochasticLighting));

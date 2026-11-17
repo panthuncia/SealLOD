@@ -287,6 +287,7 @@ private:
     void DrawCLodLodHeightModeCombo();
     void DrawUpscalingCombo();
     void DrawUpscalingQualityCombo();
+    void DrawAmbientOcclusionSettings();
     void DrawTonemapTypeDropdown();
     void DrawBrowseButton(const std::wstring& targetDirectory);
     void DrawLoadModelButton();

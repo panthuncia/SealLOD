@@ -16,3 +16,9 @@
 #define SHADOWING_MODE_NONE 0
 #define SHADOWING_MODE_VIRTUAL_SHADOW_MAPS 1 // The sun and the budgeted local lights through the virtual shadow map.
 #define SHADOWING_MODE_STOCHASTIC 2 // Every analytic light, the sun included, from stochastic lighting; no shadow map.
+
+// Which screen-space ambient occlusion lighting reads: ScreenSpaceAOMode in RenderContext.h, GetRootScreenSpaceAOMode() in
+// shaders.
+#define SCREEN_SPACE_AO_MODE_OFF 0
+#define SCREEN_SPACE_AO_MODE_XEGTAO 1 // Builtin::GTAO::OutputAOTerm: visibility only.
+#define SCREEN_SPACE_AO_MODE_CORTAO 2 // Builtin::CORTAO::OutputAO: world-space bent normal and visibility.

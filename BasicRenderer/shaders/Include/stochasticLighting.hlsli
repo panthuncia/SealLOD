@@ -101,7 +101,7 @@ bool StochasticLoadSurface(uint2 pixel, PerFrameBuffer perFrame, Camera camera, 
     const float3 positionVS = float3(ndc.x * camera.projectionInverse[0][0], ndc.y * camera.projectionInverse[1][1], -1.0f) * linearZ;
     const float3 positionWS = mul(float4(positionVS, 1.0f), camera.viewInverse).xyz;
     const float3 viewDirWS = mul(float4(normalize(-positionVS), 0.0f), camera.viewInverse).xyz;
-    GetFragmentInfoCanonicalSurface(pixel, viewDirWS, positionVS, positionWS, false, surface.fragment);
+    GetFragmentInfoCanonicalSurface(pixel, viewDirWS, positionVS, positionWS, SCREEN_SPACE_AO_MODE_OFF, surface.fragment);
     surface.parameters = MakeLightingParameters(surface.fragment);
     surface.baseState = MakeOpenPBRBaseLayerStateForLighting(surface.parameters);
     surface.position = positionWS;

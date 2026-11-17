@@ -1018,6 +1018,7 @@ struct FragmentInfo {
     float fuzzRoughness;
     float alpha;
     float diffuseAmbientOcclusion;
+    float3 bentNormalWS; // The least occluded direction, from screen-space AO when it has one; normalWS otherwise.
     float metallic;
     float perceptualRoughnessUnclamped;
     float perceptualRoughness;

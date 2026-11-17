@@ -41,7 +41,7 @@
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "Runtime/Resources/ResourceManager.h"
 #include "Lighting/Environment/RenderPasses/EnvironmentFilterPass.h"
-#include "ThirdParty/XeGTAO.h"
+#include "PostProcessing/AmbientOcclusion/AmbientOcclusionSettings.h"
 #include <BasicRenderer/Streaming/TaskScheduler.h>
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include <BasicRenderer/Streaming/VersionedGpuBuffer.h>
@@ -611,8 +611,7 @@ void Renderer::Update(float elapsedSeconds) {
             .getSettingGetter<bool>("enablePunctualLighting")(),
         .shadowingMode = !m_pipelineRecipe.Contains<br::pipeline::ClusterLodShadowTechnique>() ? ShadowingMode::None
             : StochasticLightingActive() ? ShadowingMode::StochasticRayTraced : ShadowingMode::VirtualShadowMaps,
-        .gtaoEnabled = SettingsManager::GetInstance()
-            .getSettingGetter<bool>("enableGTAO")(),
+        .screenSpaceAOMode = br::ambient_occlusion::ReadScreenSpaceAOMode(),
         .clusteredLightingEnabled = SettingsManager::GetInstance()
             .getSettingGetter<bool>("enableClusteredLighting")() };
     {

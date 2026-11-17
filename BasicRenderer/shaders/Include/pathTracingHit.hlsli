@@ -223,7 +223,7 @@ void CLodPathHitFillFragment(CLodPathHitSurface hit, float3 worldPosition, float
     fragment.pixelCoords = pixel;
     fragment.fragPosWorldSpace = worldPosition;
     fragment.fragPosViewSpace = mul(float4(worldPosition, 1.0f), cameras[perFrame.mainCameraIndex].view).xyz;
-    FillFragmentInfoDirect(fragment, hit.materialInputs, -rayDirection, float2(pixel), false, false, hit.frontFace, hit.materialFlags);
+    FillFragmentInfoDirect(fragment, hit.materialInputs, -rayDirection, float2(pixel), SCREEN_SPACE_AO_MODE_OFF, false, hit.frontFace, hit.materialFlags);
 }
 
 #endif // PATH_TRACING_HIT_HLSLI

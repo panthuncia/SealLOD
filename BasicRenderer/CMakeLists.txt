@@ -349,6 +349,7 @@ set(SOURCES
     "src/Runtime/Settings/SettingAccess.cpp"
     "src/Runtime/Settings/RendererSettings.cpp"
     # src/PostProcessing
+    "src/PostProcessing/AmbientOcclusion/CORTAOLookupTables.cpp"
     "src/PostProcessing/FidelityFX/FFXManager.cpp"
     "src/PostProcessing/Reflections/ScreenSpaceReflectionsGenerationService.cpp"
     "src/PostProcessing/Upscaling/UpscalingGenerationService.cpp"
@@ -436,6 +437,9 @@ set(SOURCES
     "src/Scene/Views/RenderPasses/PrimaryCameraUploadPass.h"
     "src/PostProcessing/Downsampling/RenderPasses/Downsample.h"
     "src/Scene/Views/RenderPasses/LinearDepthHistoryCopyPass.h"
+    "src/PostProcessing/AmbientOcclusion/AmbientOcclusionSettings.h"
+    "src/PostProcessing/AmbientOcclusion/CORTAOLookupTables.h"
+    "src/PostProcessing/AmbientOcclusion/RenderPasses/CORTAOPasses.h"
     "src/PostProcessing/AmbientOcclusion/RenderPasses/XeGTAODenoisePass.h"
     "src/PostProcessing/AmbientOcclusion/RenderPasses/XeGTAOFilterPass.h"
     "src/PostProcessing/AmbientOcclusion/RenderPasses/XeGTAOMainPass.h"

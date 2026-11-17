@@ -1036,7 +1036,7 @@ enum MiscUintRootConstants { // Used for pass-specific one-off constants, includ
     // Lighting passes' switches, read by cbuffers.hlsli's GetRoot* accessors.
     MiscShadowingMode = UintRootConstant24, // ShadowingMode (SHADOWING_MODE_*).
     MiscEnablePunctualLights = UintRootConstant25,
-    MiscEnableGTAO = UintRootConstant26,
+    MiscScreenSpaceAOMode = UintRootConstant26, // ScreenSpaceAOMode (SCREEN_SPACE_AO_MODE_*).
     MiscEnableSkybox = UintRootConstant27, // Deferred pass only.
     MiscEnableRayTracedSunShadow = UintRootConstant28, // Deferred pass only.
     MiscEnableVirtualShadowReceiverTelemetry = UintRootConstant29, // Deferred pass only.

@@ -15,7 +15,7 @@ struct DeepVisibilityResolveBindings {
     org::DeclaredViewToken headPointers, nodes, counter, overflow, visibleClusters, stats;
     org::DeclaredViewToken diceQueue, tessConfigs, tessVertices, tessTriangles;
     uint32_t patchIndexBase = 0, width = 0, height = 0, globalPsoFlags = 0;
-    bool ready = false, shadows = false, punctualLights = false, gtao = false;
+    bool ready = false, shadows = false, punctualLights = false;
     bool hasDiceQueue = false, hasTessTables = false;
     bool useNormalMaps = false;
     float terrainNormalBlend = 0, terrainNormalMipBias = 0, objectNormalMapBlend = 0;
@@ -70,6 +70,5 @@ private:
 
     std::function<bool()> m_getPunctualLightingEnabled;
     std::function<bool()> m_getShadowsEnabled;
-    bool m_gtaoEnabled = true;
     uint32_t m_renderWidth = 0, m_renderHeight = 0, m_globalPsoFlags = 0;
 };

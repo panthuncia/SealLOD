@@ -18,7 +18,7 @@ Feature development is driven purely by what I'm interested in at the moment.
 - Directional shadow mapping
 - Skinned meshes
 - Order-independent transparency using a per-pixel linked-list OR adaptive voxel-based OIT
-- SSAO with XeGTAO
+- SSAO with CORTAO (bent normals), or XeGTAO
 - Downsample/upsample bloom
 - Screen-space reflections with FidelityFX SSSR
 - TAA/upscaling with DLSS/FSR
@@ -64,6 +64,7 @@ Feature development is driven purely by what I'm interested in at the moment.
 - [ImGui](https://github.com/ocornut/imgui)
 - [assimp](https://github.com/assimp/assimp)
 - [flecs](https://www.flecs.dev/flecs/)
+- [CORTAO](https://github.com/theagentd/CORTAO)
 - [XeGTAO](https://github.com/GameTechDev/XeGTAO)
 - [FidelityFX SPD](https://gpuopen.com/fidelityfx-spd/)
 - [FidelityFX SSSR](https://gpuopen.com/fidelityfx-sssr/)

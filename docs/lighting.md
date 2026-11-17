@@ -1,7 +1,8 @@
 # Lighting
 
 How BasicRenderer evaluates analytic lights (point, spot, directional), how they are shadowed, and where a new
-shadowing technique plugs in. Image-based lighting and the environment are covered only where they meet this.
+shadowing technique plugs in, plus screen-space ambient occlusion. Image-based lighting and the environment are covered
+only where they meet this.
 
 ## Light data
 
@@ -315,3 +316,55 @@ to settle:
 - Light selection. The light grid covers only the primary camera's frustum, and only its visible surfaces (the forward
   runs extend to transparent fragments in front of them). Ray hits have no world-space light structure.
 - Temporal reuse, which needs `LightInfo::generation` to validate stored light slots.
+
+## Ambient occlusion
+
+Screen-space ambient occlusion has one slot in the recipe, `GtaoTechnique`, which the `enableGTAO` setting (the menu's
+Ambient Occlusion checkbox) adds or removes. The `ambientOcclusionTechnique` setting picks what fills it when the graph is
+built: `1` CORTAO (the default), `0` XeGTAO. Changing it rebuilds the graph. The path-traced recipe has no slot.
+
+`ScreenSpaceAOMode` (`RenderContext.h`; `SCREEN_SPACE_AO_MODE_*` in `shaders/Common/defines.h`) reaches lighting passes
+as `MiscScreenSpaceAOMode` (`GetRootScreenSpaceAOMode()`). `DeferredShadingPass` and `SpecularIBLPass` declare the output of
+the technique their graph was built with and send `Off` on a frame whose mode differs from it, so the frame between a
+setting change and the rebuild reads nothing undeclared. `ApplyScreenSpaceAO` (`utilities.hlsli`) fills
+`FragmentInfo::diffuseAmbientOcclusion` (the smaller of the material's and the screen-space visibility) and
+`FragmentInfo::bentNormalWS`, which the IBL takes as its bent normal (the diffuse irradiance is looked up along
+`normalize(normal + bentNormal)`). Forward, transparent and ray-hit paths pass `SCREEN_SPACE_AO_MODE_OFF`, and their bent
+normal is the shading normal. The debug outputs are AO and Bent Normal.
+
+| Technique | Passes | Output |
+|---|---|---|
+| XeGTAO | `GTAOFilterPass`, `GTAOMainPass`, `GTAODenoisePass` (`shaders/GTAO.hlsl`) | `Builtin::GTAO::OutputAOTerm`, R8_UInt visibility. Fixed settings (High quality, radius 0.5). |
+| CORTAO | `CORTAOPrepass`, `CORTAOMainPass`, `CORTAOFilterPass` (`CORTAOPasses.h`; `shaders/CORTAO*.hlsl`) | `Builtin::CORTAO::OutputAO`, R8G8B8A8_SNorm: world-space bent normal in rgb, visibility in a. |
+
+### CORTAO
+
+[CORTAO](https://github.com/theagentd/CORTAO) (v1.0.3, MIT, vendored unmodified in `shaders/CORTAO/` and
+`include/ThirdParty/CORTAO/`) traces 16 rays per pixel against circular occluders built from depth and normal samples.
+The passes run on the compute queue:
+
+1. The prepass packs linear depth with a dithered spheremap normal (10 bits) into `Builtin::CORTAO::PackedData` (R32_UInt),
+   mips 0 to `CortaoMipCount - 1` (at most 8) in one dispatch. Depth is the primary camera's linear depth map rather than
+   a hardware depth buffer: `cortao_loadDepth` returns 1 / linear depth (0 where the map holds FLT_MAX, the sky), and the
+   prepass's depth scale and offset are 1 and 0 so its linearization is the identity.
+2. The main pass samples the packed mips with integer `SampleLevel` (cs_6_7) and writes visibility and the view-space bent
+   normal as snorm8x4 into `Builtin::CORTAO::WorkingAO` (R32_UInt). `cortaoSampleCount` (4, 6, 8, 12, 16, 24 or 32;
+   default 8) is the pipeline's `CORTAO_SAMPLE_COUNT`, so changing it rebuilds the graph. Both lookup tables, the
+   24x24x16 occluder table and the 65536-entry bent normal table, are structured buffers the pass uploads once; the
+   occluder table's nearest/clamp lookup is done in the shader.
+3. The filter pass gathers both into a sparse depth- and normal-aware blur, 2x2 pixels per thread, and writes
+   `OutputAO` with the bent normal turned to world space.
+
+Conventions: the renderer's view space is right-handed and looks down -Z, as CORTAO's is, so normals are only rotated
+(`mul(normalWS, (float3x3)view)`). The projection is the jittered one with its inverse, stored as row-vector matrices, so
+the jitter sits in `[2][0]`/`[2][1]` where `populateMainPassParameters` reads it; `flipY` is set because texture v runs
+down.
+
+CORTAO has no temporal filter: it relies on the integrator's. While an upscaler runs (DLSS, FSR, Ray Reconstruction) the
+random seed changes every frame and the small (5-tap) filter kernel runs. With `upscalingMode` None the seed is fixed, so
+the noise is a stable pattern, and the large (13-tap) kernel runs. Both are chosen per frame.
+
+Settings, all read every frame except the sample count: `cortaoRadius` (world units, default 1), `cortaoScreenRadiusRatio`
+(the largest radius as a fraction of screen height, 0.2), `cortaoMipBias` (-4), `cortaoSlopeCompensation` (4),
+`cortaoBackfaceThreshold` (0.5), `cortaoBackfaceBoost` (0), `cortaoFilterDepthSensitivity` (512) and
+`cortaoFilterNormalSensitivity` (128). CORTAO's README describes each.

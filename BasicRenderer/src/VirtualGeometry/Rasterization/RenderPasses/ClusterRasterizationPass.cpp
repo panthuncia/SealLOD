@@ -94,7 +94,6 @@ ClusterRasterizationPass::ClusterRasterizationPass(
     m_getPunctualLightingEnabled = settingsManager.getSettingGetter<bool>("enablePunctualLighting");
     // Whether the virtual shadow map is built, not just shadows on: stochastic lighting replaces it (Renderer::VirtualShadowMapsActive).
     m_getShadowsEnabled = settingsManager.getSettingGetter<bool>("virtualShadowMapsActive");
-    m_gtaoEnabled = settingsManager.getSettingGetter<bool>("enableGTAO")();
 }
 
 ClusterRasterizationPass::~ClusterRasterizationPass() = default;
@@ -411,7 +410,6 @@ ClusterRasterFrame ClusterRasterizationPass::Prepare(
         // Only with the shadow map's resources declared: in stochastic mode it doesn't exist, and lights are unshadowed here.
         frame.shadows = m_declaredShadowsEnabled && context->lighting.shadowingMode == ShadowingMode::VirtualShadowMaps;
         frame.punctualLights = context->lighting.punctualLightingEnabled;
-        frame.gtao = context->lighting.gtaoEnabled;
     }
     // The view table and the single-view visibility UAV are resolved against
     // this frame's bindings (see CLodViewTables.h).
@@ -529,7 +527,7 @@ void ClusterRasterizationPass::Record(const ClusterRasterBindings& bindings, con
     if (bindings.avboitShading) {
         misc[MiscShadowingMode] = static_cast<uint32_t>(frame.shadows ? ShadowingMode::VirtualShadowMaps : ShadowingMode::None);
         misc[MiscEnablePunctualLights] = frame.punctualLights;
-        misc[MiscEnableGTAO] = frame.gtao;
+        misc[MiscScreenSpaceAOMode] = static_cast<uint32_t>(ScreenSpaceAOMode::Off); // Transparent shading never reads screen-space AO.
     }
     misc[CLOD_RASTER_RASTER_BUCKETS_HISTOGRAM_DESCRIPTOR_INDEX] = context.Index(bindings.histogram);
     misc[CLOD_RASTER_COMPACTED_VISIBLE_CLUSTERS_DESCRIPTOR_INDEX] = context.Index(bindings.visible);
