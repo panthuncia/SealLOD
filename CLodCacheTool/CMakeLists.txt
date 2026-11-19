@@ -29,6 +29,11 @@ target_link_libraries(CLodCacheTool PRIVATE
     delayimp
 )
 target_link_options(CLodCacheTool PRIVATE "LINKER:/DELAYLOAD:d3d12.dll" "LINKER:/DELAYLOAD:dxgi.dll")
+# The renderer library links the Nsight Perf host for GPU profiling, which the tool never calls. Without a delay load
+# the tool would not start unless that DLL were copied beside it.
+if(BASICRENDERER_ENABLE_NVPERF)
+    target_link_options(CLodCacheTool PRIVATE "LINKER:/DELAYLOAD:nvperf_grfx_host.dll")
+endif()
 target_include_directories(CLodCacheTool PRIVATE "${CLOD_CACHE_TOOL_BR_ROOT}/src")
 set_target_properties(CLodCacheTool PROPERTIES
     CXX_STANDARD 23

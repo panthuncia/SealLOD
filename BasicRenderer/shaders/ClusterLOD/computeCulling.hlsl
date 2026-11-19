@@ -246,7 +246,8 @@ bool CLodRtTakeCoarseCutWithoutTraversal(CLodMeshMetadata metadata, uint meshInd
     }
     StructuredBuffer<CullingCameraInfo> cameraInfos = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CullingCameraBuffer)];
     const CullingCameraInfo lodCam = cameraInfos[CLodResolveLodViewId(viewId)];
-    if (lodCam.isOrtho != 0u) {
+    // The per-mesh bounds below are quadric errors; a view selecting with error channels traverses.
+    if (lodCam.isOrtho != 0u || CLodSelectsWithErrorChannels(lodCam)) {
         return false;
     }
     const float scale = MaxAxisScale_RowVector(model);
@@ -978,7 +979,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
     const float nodeErrorOverDistance = ProjectedGeometricError(
         lodCheckWorldCenter,
         lodCheckWorldRadius,
-        node.metric.maxQuadricError,
+        CLodNodeSelectionError(node.metric, lodCam),
         lodUniformScale,
         lodCam.viewZ,
         lodCam.zNear,
@@ -1059,7 +1060,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
             const float childLodRadiusWorld = child.metric.lodCenterAndRadius.w * lodUniformScale;
             const float childEOD = ProjectedGeometricError(
                 childWorldCenter, childLodRadiusWorld,
-                child.metric.maxQuadricError, lodUniformScale,
+                CLodNodeSelectionError(child.metric, lodCam), lodUniformScale,
                 lodCam.viewZ, lodCam.zNear,
                 lodCameraIsOrtho);
             if (childEOD <= lodCam.errorOverDistanceThreshold) {

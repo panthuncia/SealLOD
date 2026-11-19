@@ -89,6 +89,8 @@ namespace br::import
 		std::uint32_t uvSetCount = 0;
 		// Index into SceneCacheDescription::materials; -1 is the default material.
 		std::int32_t material = -1;
+		// Stage 6: MeshCacheIdentity::appearanceHash, set only by builds that weigh texture damage by colour (written only then).
+		std::uint64_t clodAppearanceHash = 0;
 	};
 
 	// A placed mesh: a node of the source.

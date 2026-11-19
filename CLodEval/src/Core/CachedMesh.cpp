@@ -71,6 +71,10 @@ std::string CachedMesh::Name() const
 	// A full mesh's subset is a sentinel, possibly followed by a build suffix such as
 	// "|double-sided-voxel-normals". The suffix distinguishes caches, so it stays in the name.
 	std::string_view subset = source.subsetName;
+	// Stage 6: "|appearance=<hash>" names what a colour-weighted build read, not the mesh; builds compare by name without it.
+	if (const size_t appearance = subset.find("|appearance="); appearance != std::string_view::npos) {
+		subset = subset.substr(0, appearance);
+	}
 	if (subset.starts_with(kFullMeshSubset)) {
 		subset.remove_prefix(kFullMeshSubset.size());
 		return source.primPath + std::string(subset) + m_nameSuffix;

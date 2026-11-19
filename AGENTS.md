@@ -172,6 +172,15 @@ loop and its visibility options, and the shadowing modes a new technique slots i
 [docs/stochastic_lighting.md](docs/stochastic_lighting.md) is the reference for stochastic (MegaLights-style) direct
 lighting.
 
+[docs/clod-simplification-validation.md](docs/clod-simplification-validation.md) covers the opt-in validation of CLod
+simplification results against the original surface: checks, retry policy, settings and Bistro measurements. It also covers
+the later opt-in stages: replacement vertices, optimal placement, controlled topology changes (seam relaxation), and error channels with appearance-aware LOD selection
+(`CLodSelectionError`, the runtime settings `clodLodGeometricChannel` and `clodLodAppearanceWeight`).
+[docs/clod-appearance-stage6.md](docs/clod-appearance-stage6.md) is stage 6's design (independent appearance: remap and baked
+atlases, filtered normals) and its increments: the texture term of the appearance channel, CLodEval's `quality.texture`, its colour
+weighting, opt-in UV remap blocks in triangle pages (a material-evaluation lookup, `clodUvRemap.hlsli`), the builder defaults (the
+recommended build) and the single CLod cache format (schema 84).
+
 [docs/renderer-architecture.md](docs/renderer-architecture.md) covers renderer boundaries: ownership contracts,
 cross-subsystem dependencies and placement rules. [docs/unified-binding-ownership.md](docs/unified-binding-ownership.md)
 covers descriptor binding ownership across ORG publications.

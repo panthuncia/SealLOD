@@ -52,6 +52,12 @@ struct CullingCameraInfo {
     float viewportWidth = 0.0f;
     float viewportHeight = 0.0f;
     float reyesDiceRatePixels = 1.0f;
+    // LOD selection with error channels (docs/clod-simplification-validation.md, "Stage 3"): the appearance channel's weight
+    // (0: unused) and which geometric error selects (CLOD_LOD_GEOMETRIC_CHANNEL_*). 0 and 0 select by the quadric error alone.
+    float lodAppearanceWeight = 0.0f;
+    unsigned int lodGeometricChannel = 0;
+    float lodChannelReserved0 = 0.0f;
+    float lodChannelReserved1 = 0.0f;
     DirectX::XMFLOAT4 viewRightWorld;
     DirectX::XMFLOAT4 viewUpWorld;
     DirectX::XMFLOAT4 viewForwardWorld;
@@ -109,12 +115,16 @@ struct PerFrameCB {
     unsigned int terrainStochasticDerivativeNormalsEnabled = 1u;
     float terrainStochasticBlendCurve = 0.65f;
     unsigned int terrainGaussianStochasticEnabled = 0u;
-    unsigned int terrainStochasticRegisterPad = 0u;
+    // Stage 6 step 3: clodNormalSpreadRoughnessCap (CLodCommon.h), read by CLod material evaluation (clodNormalSpread.hlsli).
+    float clodNormalSpreadRoughnessCap = 0.0f;
     // Keep these scalar on both CPU and HLSL. An HLSL uint3 cannot straddle a
     // 16-byte constant-buffer register, while XMUINT3 has only scalar alignment.
-    unsigned int terrainStochasticPad0 = 0u;
-    unsigned int terrainStochasticPad1 = 0u;
-    unsigned int terrainStochasticPad2 = 0u;
+    // Stage 6 step 3: clodNormalSpreadRoughnessScale (CLodCommon.h), read by CLod material evaluation (clodNormalSpread.hlsli).
+    float clodNormalSpreadRoughnessScale = 0.0f;
+    // Stage 6 step 3 diagnostics: clodDebugMaterialRoughness / clodDebugMaterialMetallic (CLodCommon.h) plus one; 0 off, so binaries
+    // that still write these words as padding (0) leave materials alone.
+    float clodDebugMaterialRoughnessPlusOne = 0.0f;
+    float clodDebugMaterialMetallicPlusOne = 0.0f;
     unsigned int parallaxOcclusionMappingEnabled = 1u;
     unsigned int terrainParallaxOcclusionMappingEnabled = 1u;
     float terrainParallaxHeightScale = 0.03f;
@@ -139,10 +149,10 @@ struct PerFrameCB {
 
 static_assert(offsetof(PerFrameCB, shadowVirtualReceiverTraceEnabled) == 100, "PerFrameCB layout mismatch.");
 static_assert(offsetof(PerFrameCB, shadowVirtualReceiverTraceDepthSafetyScale) == 116, "PerFrameCB layout mismatch.");
-static_assert(offsetof(PerFrameCB, terrainStochasticRegisterPad) == 152, "PerFrameCB layout mismatch.");
-static_assert(offsetof(PerFrameCB, terrainStochasticPad0) == 156, "PerFrameCB layout mismatch.");
-static_assert(offsetof(PerFrameCB, terrainStochasticPad1) == 160, "PerFrameCB layout mismatch.");
-static_assert(offsetof(PerFrameCB, terrainStochasticPad2) == 164, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, clodNormalSpreadRoughnessCap) == 152, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, clodNormalSpreadRoughnessScale) == 156, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, clodDebugMaterialRoughnessPlusOne) == 160, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, clodDebugMaterialMetallicPlusOne) == 164, "PerFrameCB layout mismatch.");
 static_assert(offsetof(PerFrameCB, parallaxOcclusionMappingEnabled) == 168, "PerFrameCB layout mismatch.");
 static_assert(offsetof(PerFrameCB, terrainParallaxOcclusionMappingEnabled) == 172, "PerFrameCB layout mismatch.");
 static_assert(offsetof(PerFrameCB, terrainParallaxHeightScale) == 176, "PerFrameCB layout mismatch.");

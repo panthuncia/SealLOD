@@ -16,6 +16,11 @@ const std::vector<std::unique_ptr<IAnalyzer>>& AllAnalyzers()
 		list.push_back(MakeGeometryTruthAnalyzer());
 		list.push_back(MakeTransitionHierarchyAnalyzer());
 		list.push_back(MakeVoxelFidelityAnalyzer());
+		list.push_back(MakeNormalQualityAnalyzer());
+		list.push_back(MakeAppearanceAnalyzer());
+		list.push_back(MakeTexcoordDriftAnalyzer());
+		list.push_back(MakeTextureAppearanceAnalyzer());
+		list.push_back(MakeSpecularAnalyzer());
 		return list;
 	}();
 	return analyzers;

@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <span>
+#include <vector>
 
 #include <DirectXMath.h>
 
@@ -35,5 +36,25 @@ VoxelSurfaceTrace TraceVoxelSurface(
 	std::span<const std::array<int32_t, 3>> cells,
 	const DirectX::XMFLOAT3& origin,
 	float cellWidth);
+
+// The triangles' side of a trace: the blocks it traces and how many rays of each block and direction the triangles stop. It
+// depends on the triangles, the origin and the width alone, so tracing several cell sets against the same triangles gathers
+// and traces the triangles once.
+struct VoxelSurfaceSource {
+	DirectX::XMFLOAT3 origin{};
+	float cellWidth = 0.0f;
+	std::vector<std::array<int32_t, 3>> blocks;
+	std::vector<uint8_t> rays;  // per block and direction (7 each): rays counted
+	std::vector<uint8_t> sourceHits;  // rays the triangles stop
+	std::vector<uint64_t> rayMasks;  // which of the 36 rays are counted
+};
+
+VoxelSurfaceSource PrepareVoxelSurfaceSource(
+	std::span<const std::span<const DirectX::XMFLOAT3>> triangleLists,
+	const DirectX::XMFLOAT3& origin,
+	float cellWidth);
+
+// The same result as TraceVoxelSurface with the source's triangles, origin and width.
+VoxelSurfaceTrace TraceVoxelSurface(const VoxelSurfaceSource& source, std::span<const std::array<int32_t, 3>> cells);
 
 }

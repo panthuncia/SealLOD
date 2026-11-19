@@ -55,6 +55,17 @@ public:
 	// A meshlet vertex's UV in `uvSet` (0 when the page has fewer sets), as the resolve shaders decode it.
 	DirectX::XMFLOAT2 Uv(uint32_t meshletIndex, const TriangleMeshlet& meshlet, uint32_t uvSet, uint32_t vertexIndex) const;
 	DirectX::XMFLOAT3 Color(const TriangleMeshlet& meshlet, uint32_t vertexIndex) const;
+	// Stage 6 step 2: whether some cluster of the page has a UV remap block, and a cluster's block (ClusterLODUvRemap.h; empty
+	// when it has none). Parse validates every block against its cluster.
+	bool HasUvRemap() const { return (m_header.attributeMask & CLOD_PAGE_ATTRIBUTE_UV_REMAP) != 0u; }
+	std::span<const std::byte> UvRemapBlock(uint32_t meshletIndex) const;
+	// Stage 6 step 3: whether some cluster of the page has a normal spread block, and a cluster's block (ClusterLODNormalSpread.h;
+	// empty when it has none). Parse validates every block against its cluster.
+	bool HasNormalSpread() const { return (m_header.attributeMask & CLOD_PAGE_ATTRIBUTE_NORMAL_SPREAD) != 0u; }
+	std::span<const std::byte> NormalSpreadBlock(uint32_t meshletIndex) const;
+	// A meshlet vertex's stored normal spread v (ClusterLODNormalSpread.h: the second moment of the source normals about the drawn
+	// one), 0 without a block.
+	float NormalSpread(uint32_t meshletIndex, uint32_t vertexIndex) const;
 
 	std::vector<PageStream> Streams() const;
 

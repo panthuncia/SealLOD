@@ -42,8 +42,11 @@ constexpr int kExitError = 3;
 
 constexpr const char* kUsage = R"(CLodEval: measure CLod hierarchies.
 
-  CLodEval build <suite> [--variant name] [--force] [--workspace dir]
-      Build each variant's caches with CLodCacheTool. Skipped if nothing changed.
+  CLodEval build <suite> [--variant name] [--force] [--reuse-builds] [--meshes i,j,...] [--workspace dir]
+      Build each variant's caches with CLodCacheTool. Skipped if nothing changed. --reuse-builds keeps a build whose
+      settings match even though CLodCacheTool was rebuilt since. --meshes (glTF mesh indices, the N in /glTF/Mesh/N)
+      works on every suite command: each variant becomes "<variant>~m<tag>", built, analyzed and captured from those
+      meshes only, beside the full build. analyze --meshes without a subset build measures those meshes of the full one.
   CLodEval analyze <suite> [--variant name] [--filter asset] [--analyzer id ...] [--branch triangle|voxel] [--workspace dir]
       Run analyzers on built caches and write results/<variant>.jsonl and .csv. A forked mesh is measured per
       branch, as <mesh>#triangle and <mesh>#voxel, or only the --branch given under the mesh's own name.
@@ -77,6 +80,8 @@ constexpr const char* kUsage = R"(CLodEval: measure CLod hierarchies.
       Open the viewer on a built variant: debug views, hierarchy overlays, group selection and before/after compare.
   CLodEval full <suite> [same options as build]
       build, analyze, capture, score, then report.
+  CLodEval worst <results.jsonl | suite --variant name> --metric id [--tag key=value ...] [--top 10] [--baseline results.jsonl|variant]
+      Meshes ranked worst first by one metric (or by its change from the baseline), and the --meshes list for them.
   CLodEval list-analyzers
 )";
 
@@ -101,10 +106,10 @@ struct Arguments {
 // an error: a mistyped --filter that was quietly ignored would report on the wrong thing.
 Arguments ParseArguments(int argc, char** argv)
 {
-	static const std::vector<std::string> kFlags = { "--force", "--json", "--all" };
+	static const std::vector<std::string> kFlags = { "--force", "--json", "--all", "--reuse-builds" };
 	static const std::vector<std::string> kValued = {
 		"--variant", "--workspace", "--filter", "--analyzer", "--group", "--out", "--asset", "--threshold", "--budget", "--cache-tool", "--size", "--script", "--parts",
-		"--threads", "--reach-cut", "--branch" };
+		"--threads", "--reach-cut", "--branch", "--meshes", "--metric", "--top", "--tag", "--baseline" };
 	Arguments arguments;
 	for (int index = 2; index < argc; ++index) {
 		const std::string argument = argv[index];
@@ -129,15 +134,17 @@ Arguments ParseArguments(int argc, char** argv)
 
 std::vector<const SuiteVariant*> SelectVariants(const Suite& suite, const Arguments& arguments)
 {
+	// A mesh-subset variant answers to its base variant's name as well as its own.
+	const auto named = [](const SuiteVariant& variant, const std::string& name) { return variant.name == name || (!variant.baseName.empty() && variant.baseName == name); };
 	std::vector<const SuiteVariant*> selected;
 	const std::vector<std::string> names = arguments.Values("--variant");
 	for (const SuiteVariant& variant : suite.variants) {
-		if (names.empty() || std::ranges::find(names, variant.name) != names.end()) {
+		if (names.empty() || std::ranges::any_of(names, [&](const std::string& name) { return named(variant, name); })) {
 			selected.push_back(&variant);
 		}
 	}
 	for (const std::string& name : names) {
-		if (std::ranges::none_of(suite.variants, [&](const SuiteVariant& variant) { return variant.name == name; })) {
+		if (std::ranges::none_of(suite.variants, [&](const SuiteVariant& variant) { return named(variant, name); })) {
 			throw std::runtime_error(std::format("suite has no variant '{}'", name));
 		}
 	}
@@ -157,6 +164,7 @@ int CommandBuild(const Suite& suite, const Arguments& arguments)
 	BuildOptions options;
 	options.cacheTool = FindCacheTool(arguments);
 	options.force = arguments.Has("--force");
+	options.reuseBuilds = arguments.Has("--reuse-builds");
 	for (const SuiteVariant* variant : SelectVariants(suite, arguments)) {
 		std::string error;
 		switch (BuildVariant(suite, *variant, options, error)) {
@@ -820,6 +828,144 @@ int CommandCompare(const Arguments& arguments)
 	return ComparisonExitCode(comparison);
 }
 
+// The suite, with every variant replaced by its mesh subset when --meshes is given.
+Suite LoadSuiteForCommand(const std::string& command, const Arguments& arguments)
+{
+	if (arguments.positional.empty()) {
+		throw std::runtime_error(std::format("{} needs a suite file", command));
+	}
+	Suite suite = LoadSuite(arguments.positional.front(), arguments.Value("--workspace"));
+	if (arguments.Has("--meshes")) {
+		const std::vector<uint32_t> meshes = ParseMeshSubset(arguments.Value("--meshes"));
+		for (SuiteVariant& variant : suite.variants) {
+			variant = MakeMeshSubsetVariant(variant, meshes);
+		}
+	}
+	return suite;
+}
+
+// Meshes ranked worst first by one metric, optionally as a change from a baseline, ending with a --meshes list.
+int CommandWorst(const Arguments& arguments)
+{
+	if (arguments.positional.empty() || !arguments.Has("--metric")) {
+		throw std::runtime_error("worst needs a results file or a suite, and --metric");
+	}
+	const std::string metric = arguments.Value("--metric");
+	const size_t top = static_cast<size_t>(std::stoul(arguments.Value("--top", "10")));
+	Tags wantedTags;
+	for (const std::string& tag : arguments.Values("--tag")) {
+		const size_t equals = tag.find('=');
+		if (equals == std::string::npos) {
+			throw std::runtime_error(std::format("--tag '{}' is not key=value", tag));
+		}
+		wantedTags[tag.substr(0, equals)] = tag.substr(equals + 1);
+	}
+
+	// A results file, or a suite and one --variant (or a variant name for --baseline) whose results to read.
+	std::optional<Suite> suite;
+	if (fs::path(arguments.positional.front()).extension() != ".jsonl") {
+		suite = LoadSuite(arguments.positional.front(), arguments.Value("--workspace"));
+	}
+	const auto resultsPath = [&](const std::string& nameOrPath) -> fs::path {
+		if (fs::path(nameOrPath).extension() == ".jsonl" || !suite) {
+			return nameOrPath;
+		}
+		return GetResultsPath(*suite, nameOrPath);
+	};
+	fs::path path = arguments.positional.front();
+	if (suite) {
+		if (arguments.Values("--variant").size() != 1u) {
+			throw std::runtime_error("worst on a suite needs exactly one --variant");
+		}
+		path = resultsPath(arguments.Value("--variant"));
+	}
+
+	const auto selectedRecords = [&](const ResultSet& results) {
+		std::vector<const MetricRecord*> selected;
+		for (const MetricRecord& record : results.records) {
+			if (record.id != metric || record.mesh == kAssetRollupMesh) {
+				continue;
+			}
+			if (std::ranges::any_of(wantedTags, [&](const auto& tag) { const auto found = record.tags.find(tag.first); return found == record.tags.end() || found->second != tag.second; })) {
+				continue;
+			}
+			selected.push_back(&record);
+		}
+		return selected;
+	};
+
+	ResultSet results;
+	std::string error;
+	if (!ReadResults(path, results, error)) {
+		throw std::runtime_error(error);
+	}
+	const std::vector<const MetricRecord*> records = selectedRecords(results);
+	if (records.empty()) {
+		throw std::runtime_error(std::format("no per-mesh records of '{}'{} in '{}'", metric, wantedTags.empty() ? "" : " with those tags", path.string()));
+	}
+	std::map<std::string, double> baseline;
+	if (arguments.Has("--baseline")) {
+		ResultSet baselineResults;
+		if (!ReadResults(resultsPath(arguments.Value("--baseline")), baselineResults, error)) {
+			throw std::runtime_error(error);
+		}
+		for (const MetricRecord* record : selectedRecords(baselineResults)) {
+			baseline[record->Key()] = record->value;
+		}
+	}
+
+	// Worse is larger for lower-is-better and neutral metrics, smaller for higher-is-better ones. Each mesh index keeps
+	// its worst record over primitives and tag combinations.
+	const double sign = records.front()->better == Better::Higher ? -1.0 : 1.0;
+	struct Row {
+		int64_t index = -1;
+		const MetricRecord* record = nullptr;
+		double value = 0.0;
+		double badness = 0.0;
+	};
+	std::map<std::string, Row> worstByMesh;
+	for (const MetricRecord* record : records) {
+		double value = record->value;
+		if (!baseline.empty()) {
+			const auto found = baseline.find(record->Key());
+			if (found == baseline.end()) {
+				continue;
+			}
+			value -= found->second;
+		}
+		const int64_t index = MeshIndexOfName(record->mesh);
+		const std::string key = index >= 0 ? std::format("{}|{}", record->asset, index) : record->asset + "|" + record->mesh;
+		Row& row = worstByMesh[key];
+		if (row.record == nullptr || sign * value > row.badness) {
+			row = { index, record, value, sign * value };
+		}
+	}
+	std::vector<Row> rows;
+	for (const auto& [key, row] : worstByMesh) {
+		rows.push_back(row);
+	}
+	std::ranges::stable_sort(rows, [](const Row& a, const Row& b) { return a.badness > b.badness; });
+	rows.resize(std::min(rows.size(), top));
+
+	std::cout << std::format("{} meshes by {}{} ({}; worst first)\n", rows.size(), metric, baseline.empty() ? "" : " change from baseline", ToString(records.front()->better));
+	std::string list;
+	for (size_t rank = 0; rank < rows.size(); ++rank) {
+		const Row& row = rows[rank];
+		std::string tags;
+		for (const auto& [key, value] : row.record->tags) {
+			tags += std::format("{}{}={}", tags.empty() ? "" : " ", key, value);
+		}
+		std::cout << std::format("{:>3}  {:<32} {:>14.6g}  {}\n", rank + 1, row.record->mesh, row.value, tags);
+		if (row.index >= 0) {
+			list += (list.empty() ? "" : ",") + std::to_string(row.index);
+		}
+	}
+	if (!list.empty()) {
+		std::cout << "--meshes " << list << '\n';
+	}
+	return kExitOk;
+}
+
 int Run(int argc, char** argv)
 {
 	if (argc < 2) {
@@ -859,11 +1005,11 @@ int Run(int argc, char** argv)
 	if (command == "compare") {
 		return CommandCompare(arguments);
 	}
+	if (command == "worst") {
+		return CommandWorst(arguments);
+	}
 	if (command == "build" || command == "analyze" || command == "run") {
-		if (arguments.positional.empty()) {
-			throw std::runtime_error(std::format("{} needs a suite file", command));
-		}
-		const Suite suite = LoadSuite(arguments.positional.front(), arguments.Value("--workspace"));
+		const Suite suite = LoadSuiteForCommand(command, arguments);
 		if (command != "analyze") {
 			if (const int exitCode = CommandBuild(suite, arguments); exitCode != kExitOk || command == "build") {
 				return exitCode;
@@ -872,10 +1018,7 @@ int Run(int argc, char** argv)
 		return CommandAnalyze(suite, arguments);
 	}
 	if (command == "capture" || command == "score" || command == "report" || command == "full" || command == "transition" || command == "view") {
-		if (arguments.positional.empty()) {
-			throw std::runtime_error(std::format("{} needs a suite file", command));
-		}
-		const Suite suite = LoadSuite(arguments.positional.front(), arguments.Value("--workspace"));
+		const Suite suite = LoadSuiteForCommand(command, arguments);
 		if (command == "view") {
 			return CommandView(suite, arguments);
 		}

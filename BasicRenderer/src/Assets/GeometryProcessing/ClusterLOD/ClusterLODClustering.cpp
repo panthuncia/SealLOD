@@ -6,6 +6,13 @@
 #include "Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelFallback.h"
 #include "Assets/GeometryProcessing/ClusterLOD/ClusterLODHierarchy.h"
 #include "Assets/GeometryProcessing/ClusterLOD/ClusterLODSkinningSidecar.h"
+#include "Assets/GeometryProcessing/ClusterLOD/ClusterLODSimplifyValidation.h"
+#include "Assets/GeometryProcessing/ClusterLOD/ClusterLODReplacementVertices.h"
+#include "Assets/GeometryProcessing/ClusterLOD/ClusterLODOptimalSimplify.h"
+#include "Assets/GeometryProcessing/ClusterLOD/ClusterLODErrorChannels.h"
+#include <BasicRenderer/Assets/ClusterLODUvRemap.h>
+#include <BasicRenderer/Assets/ClusterLODNormalSpread.h>
+#include "Assets/GeometryProcessing/ClusterLOD/ClusterLODTopology.h"
 
 #include <limits>
 #include <memory>
@@ -36,6 +43,7 @@
 #include <iomanip>
 #include <map>
 
+#include <oneapi/tbb/task_arena.h>
 #include <spdlog/spdlog.h>
 #include <tracy/Tracy.hpp>
 
@@ -698,6 +706,7 @@ namespace
 		std::vector<std::byte> skinningChunk;
 		std::vector<int32_t> meshletRefinedGroups;
 		std::vector<uint32_t> meshletMaterialSlots;
+		std::vector<uint32_t> vertexGlobalIds; // each group vertex's build vertex id
 		std::vector<std::vector<std::byte>> pageBlobs;
 		ClusterLODGroupChunk groupChunk{};
 	};
@@ -714,7 +723,9 @@ namespace
 		float meshPositionQuantScale,
 		uint32_t meshPositionQuantExp,
 		uint32_t nodeBoneLimit,
-		bool recomputeNormals)
+		bool recomputeNormals,
+		bool reserveNormalSpread = false,
+		uint32_t remapReservePerTriangle = 0u)
 	{
 		ZoneScopedN("ClusterLODUtilities::Build::BuildClusterLODGroupOutput");
 		TracyPlot("CLOD.Build.GroupOutput.InputClusters", static_cast<int64_t>(capturedGroup.clusters.size()));
@@ -1374,6 +1385,7 @@ namespace
 				PageTotals totals;
 				uint32_t attributeMask = 0;
 				uint32_t uvSetCount = 0;
+				size_t spreadReserve = 0; // stage 6 step 3
 			};
 
 			std::vector<PageBin> pageBins;
@@ -1402,14 +1414,34 @@ namespace
 						candidateTotals.totalBoneIndexCount,
 						candidateTotals.totalTriangleBytes);
 
-					if (candidateSize > CLOD_PAGE_SIZE && !currentPage.meshletIndices.empty())
+					// Stage 6 step 3: leave room for the simplified clusters' normal spread blocks, which the mesh-wide pages append
+					// (a page holding one segment alone is then still no larger than a page).
+					// Stage 6 step 2 refinement (lodErrorChannelsTextureRemapReserve): likewise room for UV remap blocks.
+					const size_t remapReserve = mi < meshletBucketTag.size() && meshletBucketTag[mi] >= 0
+						? static_cast<size_t>(remapReservePerTriangle) * meshlet.triangle_count : 0u;
+					if (reserveNormalSpread && mi < meshletBucketTag.size() && meshletBucketTag[mi] >= 0)
 					{
+						currentPage.spreadReserve += clod_normal_spread::BlockSize(meshlet.vertex_count);
+					}
+					currentPage.spreadReserve += remapReserve;
+					if (candidateSize + currentPage.spreadReserve > CLOD_PAGE_SIZE && !currentPage.meshletIndices.empty())
+					{
+						if (reserveNormalSpread && mi < meshletBucketTag.size() && meshletBucketTag[mi] >= 0)
+						{
+							currentPage.spreadReserve -= clod_normal_spread::BlockSize(meshlet.vertex_count);
+						}
+						currentPage.spreadReserve -= remapReserve;
 						pageBins.emplace_back();
 						PageBin& newPage = pageBins.back();
 						newPage.attributeMask = comp.attributeMask;
 						newPage.uvSetCount = static_cast<uint32_t>(comp.uvSets.size());
 						newPage.totals = AddMeshletToPageTotals(PageTotals{}, 0u, 0u, newPage.attributeMask, newPage.uvSetCount, mi);
 						newPage.meshletIndices.push_back(mi);
+						if (reserveNormalSpread && mi < meshletBucketTag.size() && meshletBucketTag[mi] >= 0)
+						{
+							newPage.spreadReserve = clod_normal_spread::BlockSize(meshlet.vertex_count);
+						}
+						newPage.spreadReserve += remapReserve;
 						continue;
 					}
 
@@ -1868,6 +1900,7 @@ namespace
 		}
 
 		output.meshletRefinedGroups = std::move(meshletBucketTag);
+		output.vertexGlobalIds = std::move(groupLocalToGlobal);
 
 		return output;
 	}
@@ -1885,7 +1918,8 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 	const std::vector<MeshUvSetData>& uvSets,
 	unsigned int flags,
 	const ClusterLODBuilderSettings& settings,
-	const VoxelCoverageMaterialSampler* coverageMaterialSampler)
+	const VoxelCoverageMaterialSampler* coverageMaterialSampler,
+	const ClusterLODMaterialAppearance* materialAppearance)
 {
 	ZoneScopedN("ClusterLODUtilities::BuildClusterLODArtifactsFromGeometry");
 	CLodCache::ThrowIfCacheOnly("BuildClusterLODArtifactsFromGeometry");
@@ -1947,13 +1981,55 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 		simplifyAttributeCount += 4u;
 	}
 
-	if (simplifyAttributeCount > 0u)
+	// Replacement vertices (stage 2, docs/clod-simplification-validation.md): normals are fitted from the original, so they need
+	// imported normals that the output keeps; skinned meshes are left alone (moved positions would need new skin weights).
+	const bool hasSkinningStream = skinningVertices != nullptr && !skinningVertices->empty();
+	// Optimal placement (stage 4) commits replacement vertices through the same machinery, so it turns them on, with their restrictions.
+	// Stage 5's topology candidates are update candidates too.
+	const bool wantsReplacements = settings.simplifyUpdate || settings.simplifyOptimal || settings.simplifyTopology;
+	const bool simplifyUpdate = wantsReplacements && hasNormalStreamInSource && !hasSkinningStream && settings.preserveImportedNormals;
+	const bool simplifyOptimal = simplifyUpdate && settings.simplifyOptimal;
+	const bool simplifyTopology = simplifyUpdate && settings.simplifyTopology;
+	// Last-resort fit: the sloppy last resort's results get their normals refitted through the same fitter. On meshes stage 2
+	// leaves alone for their skinning it is the only user (no vertex moves; a replacement copies its parent's skinning row).
+	const bool lastResortFit = settings.disableSloppyFallback && settings.sloppyLastResort && settings.sloppyLastResortFit && !settings.simplifyValidation &&
+		hasNormalStreamInSource && settings.preserveImportedNormals;
+	const bool replacementsActive = simplifyUpdate || lastResortFit;
+	if (wantsReplacements && !simplifyUpdate)
+	{
+		spdlog::info("ClusterLOD: replacement vertices off for this mesh (normals={} skinning={} preserveImportedNormals={})",
+			hasNormalStreamInSource ? 1 : 0, hasSkinningStream ? 1 : 0, settings.preserveImportedNormals ? 1 : 0);
+	}
+	// Moving a vertex moves its UVs with it: the update solves them as attributes after the ranked ones, weighted so lightly that
+	// they hardly change which collapses happen. The record texcoord first, then the UV sets, as many as meshoptimizer's 32
+	// attributes allow.
+	constexpr float kUpdateUvWeight = 0.01f;
+	bool updateTexcoordSolved = false;
+	uint32_t updateUvSetsSolved = 0u;
+	std::vector<float> updateAttributeWeights;
+	if (simplifyUpdate && settings.simplifyUpdatePositions)
+	{
+		uint32_t budget = std::min<uint32_t>((32u - std::min(simplifyAttributeCount, 32u)) / 2u, 16u);
+		if (hasTexcoordStreamInSource && budget > 0u)
+		{
+			updateTexcoordSolved = true;
+			--budget;
+		}
+		while (updateUvSetsSolved < uvSets.size() && updateUvSetsSolved < budget && uvSets[updateUvSetsSolved].values.size() == globalVertexCount)
+		{
+			++updateUvSetsSolved;
+		}
+		updateAttributeWeights.assign(((updateTexcoordSolved ? 1u : 0u) + updateUvSetsSolved) * 2u, kUpdateUvWeight);
+	}
+	const uint32_t simplifyAttributeStride = simplifyAttributeCount + static_cast<uint32_t>(updateAttributeWeights.size());
+
+	if (simplifyAttributeStride > 0u)
 	{
 		ZoneScopedN("ClusterLODUtilities::Build::BuildSimplifyAttributes");
-		simplifyAttributeStream.resize(globalVertexCount * static_cast<size_t>(simplifyAttributeCount));
+		simplifyAttributeStream.resize(globalVertexCount * static_cast<size_t>(simplifyAttributeStride));
 		for (size_t vertexIndex = 0; vertexIndex < globalVertexCount; ++vertexIndex)
 		{
-			size_t destinationFloatOffset = vertexIndex * static_cast<size_t>(simplifyAttributeCount);
+			size_t destinationFloatOffset = vertexIndex * static_cast<size_t>(simplifyAttributeStride);
 
 			if (enableNormalAttributeSimplification && hasNormalStreamInSource)
 			{
@@ -1972,6 +2048,19 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 				destinationFloatOffset += 4ull;
 			}
 
+			if (updateTexcoordSolved)
+			{
+				const size_t texcoordSourceByteOffset = vertexIndex * vertexStrideBytes + MeshVertexLayout::TexcoordOffset(flags);
+				std::memcpy(&simplifyAttributeStream[destinationFloatOffset], vertices.data() + texcoordSourceByteOffset, sizeof(float) * 2);
+				destinationFloatOffset += 2ull;
+			}
+
+			for (uint32_t set = 0; set < updateUvSetsSolved; ++set)
+			{
+				simplifyAttributeStream[destinationFloatOffset + 0ull] = uvSets[set].values[vertexIndex].x;
+				simplifyAttributeStream[destinationFloatOffset + 1ull] = uvSets[set].values[vertexIndex].y;
+				destinationFloatOffset += 2ull;
+			}
 		}
 	}
 
@@ -1988,11 +2077,39 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 	mesh.vertex_positions_stride = vertexStrideBytes;
 
 	mesh.vertex_attributes = simplifyAttributeStream.empty() ? nullptr : simplifyAttributeStream.data();
-	mesh.vertex_attributes_stride = simplifyAttributeStream.empty() ? 0 : sizeof(float) * simplifyAttributeCount;
+	mesh.vertex_attributes_stride = simplifyAttributeStream.empty() ? 0 : sizeof(float) * simplifyAttributeStride;
 	mesh.vertex_lock = coveragePriorityFlags.empty() ? nullptr : coveragePriorityFlags.data();
 	mesh.attribute_weights = simplifyAttributeWeights.empty() ? nullptr : simplifyAttributeWeights.data();
 	mesh.attribute_count = simplifyAttributeStream.empty() ? 0 : simplifyAttributeCount;
 	mesh.attribute_protect_mask = simplifyAttributeStream.empty() ? 0 : simplifyProtectMask;
+	mesh.update_attribute_weights = updateAttributeWeights.empty() ? nullptr : updateAttributeWeights.data();
+	mesh.update_attribute_count = updateAttributeWeights.size();
+
+	// The build vertex buffer. With replacement vertices it is a builder-owned copy of the source that grows as groups commit new
+	// vertices (between levels, while no task reads it); the source itself stays untouched, for validation's original.
+	clod_detail::ReplacementVertexStore replacementStore;
+	std::vector<std::byte> replacementSkinning; // the skinning stream grown with the replacements (last-resort fit on skinned meshes)
+	if (replacementsActive)
+	{
+		ZoneScopedN("ClusterLODUtilities::Build::CopyReplacementStore");
+		replacementStore.vertices.reserve(vertices.size() + vertices.size() / 2u);
+		replacementStore.vertices = vertices;
+		replacementStore.uvSets = uvSets;
+		replacementStore.attributes = simplifyAttributeStream.empty() ? nullptr : &simplifyAttributeStream;
+		replacementStore.vertexLock = coveragePriorityFlags.empty() ? nullptr : &coveragePriorityFlags;
+		replacementStore.sourceVertexCount = globalVertexCount;
+		mesh.vertex_positions = reinterpret_cast<const float*>(replacementStore.vertices.data());
+		if (hasSkinningStream && skinningVertexSize >= sizeof(float) * 6u)
+		{
+			replacementSkinning = *skinningVertices;
+			replacementStore.skinning = &replacementSkinning;
+			replacementStore.skinningStride = skinningVertexSize;
+			replacementStore.skinningNormalOffset = sizeof(float) * 3u; // position, normal, influences
+		}
+	}
+	const std::vector<std::byte>& buildVertices = replacementsActive ? replacementStore.vertices : vertices;
+	const std::vector<MeshUvSetData>& buildUvSets = replacementsActive ? replacementStore.uvSets : uvSets;
+	const std::vector<std::byte>* buildSkinning = replacementStore.skinning != nullptr ? replacementStore.skinning : skinningVertices;
 
 	clodConfig config = clodDefaultConfig(/*max_triangles=*/MS_MESHLET_SIZE);
 	config.max_vertices = MS_MESHLET_SIZE;
@@ -2013,12 +2130,463 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 	const uint32_t partitionSizeFloor = std::max<uint32_t>(1u, settings.partitionSizeFloor);
 
 	config.simplify_fallback_sloppy = !disableSloppyFallback; // TODO: Useful?
+	config.simplify_last_resort_sloppy = disableSloppyFallback && settings.sloppyLastResort;
+	config.simplify_last_resort_rejected = settings.sloppyLastResortRejected;
+	config.simplify_error_factor_last_resort = std::max(0.0f, settings.sloppyLastResortErrorFactor);
 	config.simplify_error_factor_sloppy = sloppyFallbackErrorFactor; // Scales error for sloppy groups
 
+	config.simplify_permissive = settings.simplifyPermissive;
 	config.simplify_fallback_permissive = false; // Simplify in permissive, disable fallback-only
 
 	config.simplify_error_merge_additive = lodErrorMergeAdditive;
 	config.simplify_error_merge_previous = lodErrorMergePrevious;
+
+	// Validation of simplification results against the original surface (docs/clod-simplification-validation.md): clusterlod
+	// decides what to retry, this measures each candidate. Candidates index the build vertex buffer (the source, plus any
+	// replacement vertices), so one view of it serves every group input and every candidate; an update candidate brings its own
+	// private positions and normals. The original is the untouched source.
+	static_assert(uint32_t(clod_detail::SimplifyValidationReject_Fold) == uint32_t(clodValidateReject_Fold) &&
+		uint32_t(clod_detail::SimplifyValidationReject_Shading) == uint32_t(clodValidateReject_Shading) &&
+		uint32_t(clod_detail::SimplifyValidationReject_Coverage) == uint32_t(clodValidateReject_Coverage) &&
+		uint32_t(clod_detail::SimplifyValidationReject_Spurious) == uint32_t(clodValidateReject_Spurious) &&
+		uint32_t(clod_detail::SimplifyValidationReject_SourceCoverage) == uint32_t(clodValidateReject_SourceCoverage));
+	struct SimplifyValidationContext
+	{
+		std::optional<clod_detail::SimplifyValidator> validator;
+		clod_detail::SimplifySurfaceView source;
+		// The build vertex buffer; it grows only between levels, so its data pointer is read at each call.
+		const std::vector<std::byte>* buildVertices = nullptr;
+		std::atomic<uint64_t> nanoseconds = 0;
+		bool logCandidates = false;
+		// Stage 5: topology candidates' texture check (textureArea < 1 and texcoords present), and its counters.
+		clod_detail::TextureCheckSource textureSource;
+		float textureArea = 1.0f;
+		float textureSlide = 8.0f;
+		std::atomic<uint64_t> textureChecks = 0;
+		std::atomic<uint64_t> textureNanoseconds = 0;
+		// Follow-ups to the texture check: a UV-space tolerance (texels over a nominal resolution; 0 off) and chart identity (the
+		// build vertices' charts, null off). Each candidate the check rejects is also counted under every test that alone rejects it.
+		float textureUvTolerance = 0.0f;
+		const std::vector<uint32_t>* textureCharts = nullptr;
+		std::atomic<uint64_t> textureRejectedSlide = 0;
+		std::atomic<uint64_t> textureRejectedUv = 0;
+		std::atomic<uint64_t> textureRejectedCharts = 0;
+		// Stage 6 step 4: the chart test weighs displaced samples by the colour they draw (null: binary), and how many candidates the
+		// binary test would have rejected that the weighed one accepted.
+		const clod_detail::ErrorChannelTextureColor* textureColor = nullptr;
+		std::atomic<uint64_t> textureAcceptedColor = 0;
+
+		clod_detail::SimplifySurfaceView Build(const unsigned int* indices, size_t indexCount) const
+		{
+			clod_detail::SimplifySurfaceView view = source;
+			const std::byte* base = buildVertices->data();
+			view.positions = reinterpret_cast<const float*>(base);
+			view.normals = source.normals ? reinterpret_cast<const float*>(base + MeshVertexLayout::NormalOffset) : nullptr;
+			view.indices = indices;
+			view.indexCount = indexCount;
+			return view;
+		}
+
+		static unsigned int Validate(void* context, const clodMesh*, const clodValidateCandidate* candidate)
+		{
+			SimplifyValidationContext* self = static_cast<SimplifyValidationContext*>(context);
+			const auto start = std::chrono::steady_clock::now();
+			const clod_detail::SimplifySurfaceView input = self->Build(candidate->input_indices, candidate->input_index_count);
+			clod_detail::SimplifySurfaceView output = self->Build(candidate->output_indices, candidate->output_index_count);
+			if (candidate->output_positions)
+			{
+				output.positions = candidate->output_positions;
+				output.positionStride = sizeof(float) * 3u;
+				output.normals = self->source.normals ? candidate->output_normals : nullptr;
+				output.normalStride = sizeof(float) * 3u;
+			}
+			// A group's candidates run in turn on one task, attempt 0 first, and share their input: its baseline is measured once.
+			// A depth-0 group's input is the original.
+			thread_local clod_detail::SimplifyInputBaseline baseline;
+			if (candidate->attempt == 0)
+			{
+				baseline = candidate->depth == 0 ? clod_detail::SimplifyInputBaseline::Original() : clod_detail::SimplifyInputBaseline{};
+			}
+			clod_detail::SimplifyValidationMeasurement measurement;
+			uint32_t reasons = self->validator->Validate(
+				input, output, candidate->error, &baseline, &measurement, static_cast<uint32_t>(candidate->group));
+			if (self->logCandidates)
+			{
+				const double outputArea = std::max(measurement.outputArea, 1.0e-30);
+				const double inputArea = std::max(measurement.inputArea, 1.0e-30);
+				const double baselineArea = std::max(baseline.area, 1.0e-30);
+				spdlog::info(
+					"ClusterLOD simplify candidate: depth={} attempt={} method={} reasons={} input_triangles={} output_triangles={} "
+					"error={:.4g} radius={:.4g} fold={:.4f} shading={:.4f} unmatched={:.4f} uncovered={:.4f} source_uncovered={:.4f} input_fold={:.4f} "
+					"input_shading={:.4f} stopped_early={}",
+					candidate->depth, candidate->attempt, candidate->method, reasons, candidate->input_index_count / 3u,
+					candidate->output_index_count / 3u, candidate->error, measurement.radius, measurement.foldArea / outputArea,
+					measurement.shadingArea / outputArea, measurement.unmatchedArea / outputArea, measurement.uncoveredArea / inputArea,
+					measurement.sourceUncoveredArea / std::max(measurement.sourceArea, 1.0e-30),
+					measurement.inputMeasured ? baseline.foldArea / baselineArea : -1.0,
+					measurement.inputMeasured ? baseline.shadingArea / baselineArea : -1.0, measurement.stoppedEarly ? 1 : 0);
+			}
+			// Stage 5: a topology candidate (it brings its texcoords) must not slide the texture beyond the radius on too much area.
+			if (reasons == 0 && candidate->output_uvs && self->textureArea < 1.0f && self->textureSource.uvs)
+			{
+				const auto textureStart = std::chrono::steady_clock::now();
+				const float radius = self->validator->RadiusForError(candidate->error);
+				const bool followUps = self->textureUvTolerance > 0.0f || self->textureCharts != nullptr;
+				clod_detail::TextureDisplacement texture;
+				if (!followUps)
+				{
+					clod_detail::TextureCheckOptions options;
+					options.slideTolerance = radius * self->textureSlide;
+					options.samplesPerTriangle = self->validator->Thresholds().samplesPerTriangle;
+					texture = clod_detail::MeasureTextureDisplacement(*self->validator, self->textureSource, output, candidate->output_uvs, radius, options);
+				}
+				else
+				{
+					// The output vertices' charts: a private vertex is a build vertex (candidate->output_vertex_ids), whose chart the
+					// store carries; the source's are the store's first entries. The store grows only between levels.
+					thread_local std::vector<uint32_t> outputCharts;
+					clod_detail::TextureCheckSource source = self->textureSource;
+					clod_detail::TextureCheckOptions options;
+					options.slideTolerance = radius * self->textureSlide;
+					options.uvTolerance = self->textureUvTolerance;
+					options.samplesPerTriangle = self->validator->Thresholds().samplesPerTriangle;
+					if (self->textureCharts != nullptr && candidate->output_vertex_ids != nullptr)
+					{
+						outputCharts.resize(candidate->output_vertex_count);
+						for (size_t k = 0; k < candidate->output_vertex_count; ++k)
+						{
+							outputCharts[k] = (*self->textureCharts)[candidate->output_vertex_ids[k]];
+						}
+						source.charts = self->textureCharts->data();
+						options.outputCharts = outputCharts.data();
+					}
+					std::function<float(const clod_detail::TextureSampleQuery&)> colorWeight;
+					if (self->textureColor != nullptr)
+					{
+						colorWeight = [&](const clod_detail::TextureSampleQuery& query) {
+							return clod_detail::ColorSampleWeight(*self->textureColor, query, radius * std::max(self->textureColor->footprint, 0.0f));
+						};
+						options.sampleWeight = &colorWeight;
+					}
+					texture = clod_detail::MeasureTextureDisplacement(*self->validator, source, output, candidate->output_uvs, radius, options);
+				}
+				self->textureChecks.fetch_add(1u, std::memory_order_relaxed);
+				self->textureNanoseconds.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - textureStart).count()), std::memory_order_relaxed);
+				const double allowed = static_cast<double>(self->textureArea) * texture.area;
+				// Stage 6 step 4: weighed by colour, the displaced area is what the crossing draws visibly wrong.
+				const double displaced = followUps && self->textureColor != nullptr ? texture.weightedDisplacedArea : texture.displacedArea;
+				if (displaced <= allowed && texture.displacedArea > allowed)
+				{
+					self->textureAcceptedColor.fetch_add(1u, std::memory_order_relaxed);
+				}
+				if (displaced > allowed)
+				{
+					reasons |= clodValidateReject_Texture;
+					if (followUps)
+					{
+						self->textureRejectedSlide.fetch_add(texture.slideDisplacedArea > allowed ? 1u : 0u, std::memory_order_relaxed);
+						self->textureRejectedUv.fetch_add(texture.uvDisplacedArea > allowed ? 1u : 0u, std::memory_order_relaxed);
+						self->textureRejectedCharts.fetch_add(texture.chartArea > allowed ? 1u : 0u, std::memory_order_relaxed);
+					}
+				}
+				if (self->logCandidates)
+				{
+					const double area = std::max(texture.area, 1.0e-30);
+					spdlog::info("ClusterLOD topology texture: depth={} attempt={} output_triangles={} area={:.4g} measured={:.4f} displaced={:.4f} over1={:.4f} "
+						"over2={:.4f} over4={:.4f} over8={:.4f} slide={:.4f} uv={:.4f} uv_over1={:.4f} uv_over4={:.4f} uv_over16={:.4f} uv_over64={:.4f} charts={:.4f} "
+						"mixed={:.4f}", candidate->depth, candidate->attempt, candidate->output_index_count / 3u, texture.area,
+						texture.measuredArea / area, texture.displacedArea / area, texture.slideOverArea[0] / area, texture.slideOverArea[1] / area,
+						texture.slideOverArea[2] / area, texture.slideOverArea[3] / area, texture.slideDisplacedArea / area, texture.uvDisplacedArea / area,
+						texture.uvOverArea[0] / area, texture.uvOverArea[1] / area, texture.uvOverArea[2] / area, texture.uvOverArea[3] / area,
+						texture.chartArea / area, texture.mixedArea / area);
+				}
+			}
+			self->nanoseconds.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count()), std::memory_order_relaxed);
+			return reasons;
+		}
+
+		static void Level(void* context, const clodMesh*, int, const unsigned int* indices, const unsigned int* triangleGroups, size_t indexCount)
+		{
+			SimplifyValidationContext* self = static_cast<SimplifyValidationContext*>(context);
+			self->validator->SetLevel(self->Build(indices, indexCount), std::vector<uint32_t>(triangleGroups, triangleGroups + indexCount / 3u));
+		}
+	};
+	SimplifyValidationContext simplifyValidation;
+	simplifyValidation.buildVertices = &buildVertices;
+	clodValidationStats simplifyValidationStats{};
+	double simplifyValidationIndexMs = 0.0;
+	// Replacement vertices need the original indexed too, for fitting normals and measuring errors, with or without validation.
+	if (settings.simplifyValidation || replacementsActive)
+	{
+		ZoneScopedN("ClusterLODUtilities::Build::IndexOriginalForValidation");
+		const auto start = std::chrono::steady_clock::now();
+		constexpr float kDegreesToRadians = 3.14159265358979f / 180.0f;
+		clod_detail::SimplifyValidationThresholds thresholds{};
+		thresholds.foldCos = std::cos(std::clamp(settings.simplifyValidationFoldAngle, 0.0f, 180.0f) * kDegreesToRadians);
+		thresholds.foldAreaFraction = std::max(0.0f, settings.simplifyValidationFoldArea);
+		thresholds.shadingCos = std::cos(std::clamp(settings.simplifyValidationShadingAngle, 0.0f, 180.0f) * kDegreesToRadians);
+		thresholds.shadingAreaFraction = std::max(0.0f, settings.simplifyValidationShadingArea);
+		thresholds.radiusErrorScale = std::max(0.0f, settings.simplifyValidationRadiusScale);
+		thresholds.coverageAreaFraction = std::max(0.0f, settings.simplifyValidationCoverageArea);
+		thresholds.matchReachScale = std::max(1.0f, settings.simplifyMatchReach);
+		thresholds.matchMaxCandidates = settings.simplifyMatchCandidates;
+		thresholds.matchFacingGrid = ClusterLODMatchFacingGrid(settings);
+		thresholds.samplesPerTriangle = clod_detail::AreaSampleCount(settings.simplifyValidationSamples);
+
+		clod_detail::SimplifySurfaceView& source = simplifyValidation.source;
+		source.positions = reinterpret_cast<const float*>(vertices.data());
+		source.positionStride = vertexStrideBytes;
+		source.normals = hasNormalStreamInSource ? reinterpret_cast<const float*>(vertices.data() + MeshVertexLayout::NormalOffset) : nullptr;
+		source.normalStride = vertexStrideBytes;
+		source.indices = idx;
+		source.indexCount = indices.size();
+		simplifyValidation.validator.emplace(source, thresholds);
+		if (clod_detail::QueryStatsEnabled())
+		{
+			// Diagnostics: how much of the source repeats itself (overlapping sheets make the side-aware matches large). Triangles
+			// whose corner positions, snapped to a grid of 1e-5 of the diagonal (the match slack), equal another's in any order.
+			const float cell = std::max(simplifyValidation.validator->Diagonal() * 1.0e-5f, 1.0e-20f);
+			std::unordered_map<uint64_t, uint32_t> seen;
+			std::unordered_set<uint64_t> positions;
+			seen.reserve(indices.size() / 3u);
+			uint64_t duplicates = 0u, exactDuplicates = 0u;
+			std::unordered_set<uint64_t> exact;
+			for (size_t first = 0; first + 2u < indices.size(); first += 3u)
+			{
+				std::array<uint64_t, 3> snapped{}, bits{};
+				for (uint32_t corner = 0; corner < 3u; ++corner)
+				{
+					const float* p = reinterpret_cast<const float*>(vertices.data() + static_cast<size_t>(idx[first + corner]) * vertexStrideBytes);
+					uint64_t h = 1469598103934665603ull, e = 1469598103934665603ull;
+					for (int axis = 0; axis < 3; ++axis)
+					{
+						h = (h ^ static_cast<uint64_t>(static_cast<int64_t>(std::floor(p[axis] / cell)))) * 1099511628211ull;
+						e = (e ^ std::bit_cast<uint32_t>(p[axis])) * 1099511628211ull;
+					}
+					snapped[corner] = h;
+					bits[corner] = e;
+					positions.insert(e);
+				}
+				std::sort(snapped.begin(), snapped.end());
+				std::sort(bits.begin(), bits.end());
+				const uint64_t key = (snapped[0] * 31u + snapped[1]) * 31u + snapped[2];
+				const uint64_t exactKey = (bits[0] * 31u + bits[1]) * 31u + bits[2];
+				duplicates += seen[key]++ != 0u ? 1u : 0u;
+				exactDuplicates += exact.insert(exactKey).second ? 0u : 1u;
+			}
+			uint32_t mostRepeated = 0u;
+			for (const auto& [key, count] : seen)
+			{
+				mostRepeated = std::max(mostRepeated, count);
+			}
+			spdlog::info("ClusterLOD source overlap: triangles={} unique_positions={} duplicate_triangles_exact={} duplicate_triangles_snapped={} most_repeated={}",
+				indices.size() / 3u, positions.size(), exactDuplicates, duplicates, mostRepeated);
+		}
+		// Diagnostics only (not hashed): one log line per candidate.
+		simplifyValidation.logCandidates = !GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_SIMPLIFY_VALIDATION_LOG").empty();
+
+		if (settings.simplifyValidation)
+		{
+			config.simplify_validate = &SimplifyValidationContext::Validate;
+			config.simplify_validate_context = &simplifyValidation;
+			config.simplify_validate_level = &SimplifyValidationContext::Level;
+			config.simplify_validate_retries = static_cast<int>(std::min(settings.simplifyValidationRetries, 16u));
+			config.simplify_validate_stats = &simplifyValidationStats;
+		}
+		simplifyValidationIndexMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+	}
+
+	// Replacement vertices: clusterlod runs the update candidates and commits their vertices; the fitter owns their records.
+	std::optional<clod_detail::ReplacementVertexFitter> replacementFitter;
+	clodReplacementStats replacementStats{};
+	if (replacementsActive)
+	{
+		clod_detail::ReplacementVertexLayout layout{};
+		layout.vertexStride = vertexStrideBytes;
+		layout.normalOffset = MeshVertexLayout::NormalOffset;
+		const bool hasTangentStreamInSource = (flags & VertexFlags::VERTEX_TANGENTS) != 0u &&
+			vertexStrideBytes >= MeshVertexLayout::TangentOffset(flags) + sizeof(float) * 4;
+		layout.tangentOffset = hasTangentStreamInSource ? MeshVertexLayout::TangentOffset(flags) : SIZE_MAX;
+		layout.texcoordOffset = hasTexcoordStreamInSource ? MeshVertexLayout::TexcoordOffset(flags) : SIZE_MAX;
+		layout.attributeStride = simplifyAttributeStream.empty() ? 0u : simplifyAttributeStride;
+		layout.normalAttribute = enableNormalAttributeSimplification && hasNormalStreamInSource ? 0 : -1;
+		layout.tangentAttribute = enableNormalAttributeSimplification && !tangentAttributeStream.empty() ? (layout.normalAttribute >= 0 ? 3 : 0) : -1;
+		layout.uvAttribute = simplifyAttributeCount;
+		layout.texcoordSolved = updateTexcoordSolved;
+		layout.uvSetsSolved = updateUvSetsSolved;
+		constexpr float kDegreesToRadians = 3.14159265358979f / 180.0f;
+		layout.refitCos = std::cos(std::clamp(settings.simplifyUpdateRefitAngle, 0.0f, 180.0f) * kDegreesToRadians);
+		layout.transferUvs = settings.simplifyUpdateUvTransfer;
+		layout.fitSamples = settings.simplifyUpdateFitSamples & 31u;
+		layout.refitCheckCos = settings.simplifyUpdateRefitCheck > 0.0f
+			? std::cos(std::min(settings.simplifyUpdateRefitCheck, 180.0f) * kDegreesToRadians) : -2.0f;
+		replacementFitter.emplace(*simplifyValidation.validator, layout, replacementStore);
+
+		struct ReplacementCallbacks
+		{
+			static void Fit(void* context, const clodMesh* mesh, clodReplacementCandidate* candidate)
+			{
+				static_cast<clod_detail::ReplacementVertexFitter*>(context)->Fit(*mesh, *candidate);
+			}
+			static void Commit(void* context, clodMesh* mesh, const clodReplacementBatch* batch)
+			{
+				static_cast<clod_detail::ReplacementVertexFitter*>(context)->Commit(*mesh, *batch);
+			}
+			static float Measure(void* context, const clodMesh*, const clodValidateCandidate* candidate)
+			{
+				return static_cast<clod_detail::ReplacementVertexFitter*>(context)->Measure(*candidate);
+			}
+		};
+		config.simplify_update_fit = &ReplacementCallbacks::Fit;
+		config.simplify_update_commit = &ReplacementCallbacks::Commit;
+		config.simplify_update_context = &*replacementFitter;
+		config.simplify_update_record_size = replacementFitter->RecordSize();
+		config.simplify_update_positions = settings.simplifyUpdatePositions;
+		config.simplify_measure = settings.simplifyUpdateMeasuredError ? &ReplacementCallbacks::Measure : nullptr;
+		config.simplify_update_stats = &replacementStats;
+		config.simplify_update_fit_last_resort_only = !simplifyUpdate;
+		config.simplify_last_resort_fit = lastResortFit;
+	}
+
+	// Optimal placement (stage 4): clusterlod offers its candidate first; the original surface gives each candidate's source-sheet
+	// references.
+	std::optional<clod_detail::OptimalSimplifier> optimalSimplifier;
+	if (simplifyOptimal)
+	{
+		constexpr float kDegreesToRadians = 3.14159265358979f / 180.0f;
+		clod_detail::OptimalSimplifyParams params{};
+		params.sheetCos = std::cos(std::clamp(settings.simplifyOptimalSheetAngle, 0.0f, 180.0f) * kDegreesToRadians);
+		params.flipCos = std::cos(std::clamp(settings.simplifyOptimalFlipAngle, 0.0f, 180.0f) * kDegreesToRadians);
+		params.preserveFolds = settings.simplifyOptimalPreserveFolds;
+		params.moves = settings.simplifyOptimalMoves & 7u;
+		optimalSimplifier.emplace(*simplifyValidation.validator, params);
+		struct OptimalCallbacks
+		{
+			static size_t Simplify(void* context, const clodMesh* mesh, clodOptimalRequest* request)
+			{
+				return static_cast<const clod_detail::OptimalSimplifier*>(context)->Simplify(*mesh, *request);
+			}
+		};
+		config.simplify_optimal = &OptimalCallbacks::Simplify;
+		config.simplify_optimal_context = &*optimalSimplifier;
+	}
+
+	// Controlled topology changes (stage 5): a group about to be terminal tries update candidates with relaxed seams. They are
+	// validated against the original by stage 1's validator: by clusterlod's simplify_validate when validation is on, otherwise
+	// through simplify_topology with the same thresholds, which nothing else then uses. Diagnostics (not hashed; changes nothing
+	// built) classify why terminal groups stop.
+	clodTopologyStats topologyStats{};
+	std::vector<uint32_t> textureCharts; // follow-up: per build vertex, grown by the commits (simplifyTopologyTextureCharts)
+	// Stage 6 step 4: the colour the chart test weighs displaced samples by, and the decoded image (shared with the texture channel).
+	clod_detail::ErrorChannelTextureColor topologyTextureColor;
+	std::shared_ptr<const clod_texture::Texture> decodedBaseColor;
+	const char* topologyTextureColorSource = "off";
+	const bool topologyDiagnostics = !GetClusterLODEnvironmentVariable("BASICRENDERER_CLOD_TOPOLOGY_DIAG").empty();
+	// Seams whose protected attributes differ only in the normal are relaxable when the mesh carries no UV streams to tell UV seams
+	// apart (normals are attributes 0-2 when present); stage 2's fit rebuilds normals, not UVs.
+	config.simplify_topology_relax_mask = enableNormalAttributeSimplification && hasNormalStreamInSource ? 7u : 0u;
+	config.simplify_topology_relax_uv = settings.simplifyTopologyRelaxUv;
+	config.simplify_topology_update_fallback = settings.simplifyTopologyUpdateFallback;
+	if (topologyDiagnostics || simplifyTopology || config.simplify_last_resort_sloppy)
+	{
+		config.topology_stats = &topologyStats;
+		config.topology_diagnostics = topologyDiagnostics;
+	}
+	if (simplifyTopology)
+	{
+		config.simplify_topology = &SimplifyValidationContext::Validate;
+		config.simplify_topology_retries = static_cast<int>(std::min(settings.simplifyTopologyRetries, 16u));
+		config.simplify_validate_context = &simplifyValidation;
+		config.simplify_validate_level = &SimplifyValidationContext::Level;
+		if (hasTexcoordStreamInSource && settings.simplifyTopologyTextureArea < 1.0f)
+		{
+			simplifyValidation.textureSource.positions = reinterpret_cast<const float*>(vertices.data());
+			simplifyValidation.textureSource.positionStride = vertexStrideBytes;
+			simplifyValidation.textureSource.uvs = reinterpret_cast<const float*>(vertices.data() + MeshVertexLayout::TexcoordOffset(flags));
+			simplifyValidation.textureSource.uvStride = vertexStrideBytes;
+			simplifyValidation.textureSource.indices = idx;
+			simplifyValidation.textureSource.indexCount = indices.size();
+			simplifyValidation.textureArea = std::max(0.0f, settings.simplifyTopologyTextureArea);
+			simplifyValidation.textureSlide = std::max(0.0f, settings.simplifyTopologyTextureSlide);
+			// Follow-ups: the builder is given no texture sizes, so the texel tolerance is over a nominal resolution (a UV distance).
+			if (settings.simplifyTopologyTextureTexels > 0.0f)
+			{
+				simplifyValidation.textureUvTolerance = settings.simplifyTopologyTextureTexels / static_cast<float>(std::max(settings.simplifyTopologyTextureResolution, 1u));
+			}
+			if (settings.simplifyTopologyTextureCharts)
+			{
+				textureCharts = clod_detail::ComputeTextureCharts(simplifyValidation.textureSource.positions, vertexStrideBytes,
+					simplifyValidation.textureSource.uvs, vertexStrideBytes, globalVertexCount, idx, indices.size());
+				replacementStore.charts = &textureCharts;
+				simplifyValidation.textureCharts = &textureCharts;
+				// Stage 6 step 4: weigh the chart test's displaced samples by colour, from the importer's material; any reason it
+				// cannot leaves the test binary for this mesh, and says why.
+				if (ClusterLODTopologyTextureColorActive(settings))
+				{
+					if (materialAppearance == nullptr)
+					{
+						topologyTextureColorSource = "binary (the importer gave no material)";
+					}
+					else if (materialAppearance->baseColorTexCoord != 0u)
+					{
+						topologyTextureColorSource = "binary (the base colour reads another UV set)";
+					}
+					else if (materialAppearance->hasVertexColors)
+					{
+						topologyTextureColorSource = "binary (vertex colours)";
+					}
+					else
+					{
+						if (materialAppearance->hasBaseColorTexture && materialAppearance->decodeBaseColor)
+						{
+							decodedBaseColor = materialAppearance->decodeBaseColor();
+						}
+						if (materialAppearance->hasBaseColorTexture && (decodedBaseColor == nullptr || decodedBaseColor->Levels() == 0u))
+						{
+							topologyTextureColorSource = "binary (the base colour image did not decode)";
+						}
+						else
+						{
+							topologyTextureColor.baseColorFactor = materialAppearance->baseColorFactor;
+							topologyTextureColor.texture = decodedBaseColor.get();
+							topologyTextureColor.alphaMasked = materialAppearance->alphaMasked;
+							topologyTextureColor.alphaCutoff = materialAppearance->alphaCutoff;
+							topologyTextureColor.uvTransformed = materialAppearance->hasBaseColorUvTransform;
+							topologyTextureColor.uvTransform = materialAppearance->baseColorUvTransform;
+							topologyTextureColor.referenceDeltaE = settings.simplifyTopologyTextureColor;
+							topologyTextureColor.footprint = 1.0f;
+							simplifyValidation.textureColor = &topologyTextureColor;
+							topologyTextureColorSource = topologyTextureColor.texture != nullptr ? "texture" : "factor";
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Stage 6 texture channel (docs/clod-appearance-stage6.md): the appearance channel also counts texture displaced against the
+	// original's UV set 0 (the set glTF pages store and materials sample; the record texcoord without sets). It needs every build
+	// vertex's chart, grown by replacement commits like the chart test's, and each group vertex's build vertex id. Neither changes
+	// what is built: charts only label vertices, and the ids are kept beside the group streams.
+	const bool textureChannel = settings.lodErrorChannels && settings.lodErrorChannelsTexture > 0.0f && hasTexcoordStreamInSource;
+	const bool textureChannelUsesSets = !uvSets.empty() && uvSets[0].values.size() == globalVertexCount;
+	const float* textureChannelSourceUvs = nullptr;
+	size_t textureChannelSourceUvStride = 0;
+	if (textureChannel)
+	{
+		textureChannelSourceUvs = textureChannelUsesSets ? reinterpret_cast<const float*>(uvSets[0].values.data())
+			: reinterpret_cast<const float*>(vertices.data() + MeshVertexLayout::TexcoordOffset(flags));
+		textureChannelSourceUvStride = textureChannelUsesSets ? sizeof(DirectX::XMFLOAT2) : vertexStrideBytes;
+		if (textureCharts.empty())
+		{
+			textureCharts = clod_detail::ComputeTextureCharts(reinterpret_cast<const float*>(vertices.data()), vertexStrideBytes, textureChannelSourceUvs,
+				textureChannelSourceUvStride, globalVertexCount, idx, indices.size());
+		}
+		if (replacementsActive)
+		{
+			replacementStore.charts = &textureCharts;
+		}
+	}
 
 	constexpr uint32_t MaxGroupChildren = 8;
 	constexpr uint32_t TraversalNodeFanout = 8;
@@ -2051,12 +2619,24 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 			std::vector<std::vector<meshopt_Meshlet>>* groupMeshletChunks = nullptr;
 			std::vector<std::vector<uint8_t>>* groupMeshletTriangleChunks = nullptr;
 			std::vector<std::vector<int32_t>>* groupMeshletRefinedGroupChunks = nullptr;
+			std::vector<std::vector<uint32_t>>* groupVertexGlobalIdChunks = nullptr; // null: not kept (stage 6 texture channel off)
 			float meshPositionQuantScale = 1.0f;
 			uint32_t meshPositionQuantExp = 0;
 			uint32_t nodeBoneLimit = CLOD_NODE_BONE_LIMIT_DEFAULT;
 			bool recomputeGroupNormals = false;
+			bool reserveNormalSpread = false; // stage 6 step 3: lodNormalSpread
+			uint32_t remapReservePerTriangle = 0u; // stage 6 step 2 refinement: lodErrorChannelsTextureRemapReserve
 			std::atomic<uint32_t> nextGroupId = 0;
 			std::mutex finalizeMutex;
+			// Groups output but not yet built (FlushOutputs): their build is a function of the group and its id, so the builds run
+			// side by side once clodBuildEx is done, and are finalized in output order.
+			struct PendingOutput
+			{
+				uint32_t groupId;
+				clodGroup group;
+				CapturedClusterLODGroup captured;
+			};
+			std::vector<PendingOutput> pending;
 			uint32_t cumulativeMeshletCount = 0;
 			uint32_t cumulativeGroupVertexCount = 0;
 			uint32_t maxChildrenObserved = 0;
@@ -2108,72 +2688,107 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 					capturedGroup.clusters.push_back(std::move(capturedCluster));
 				}
 
-				ClusterLODGroupBuildOutput output;
-				{
-					ZoneScopedN("ClusterLODUtilities::Build::OutputGroup::BuildGroupOutput");
-					output = BuildClusterLODGroupOutput(
-						capturedGroup,
-						groupId,
-						*context->vertices,
-						*context->uvSets,
-						context->vertexFlags,
-						context->vertexStrideBytes,
-						context->skinningVertices,
-						context->skinningVertexStrideBytes,
-						context->meshPositionQuantScale,
-						context->meshPositionQuantExp,
-						context->nodeBoneLimit,
-						context->recomputeGroupNormals);
-				}
-
-				ClusterLODGroup finalizedGroup = output.group;
-
-				std::lock_guard<std::mutex> lock(context->finalizeMutex);
-
-				auto ensureIndexedStorage = [&](auto& container)
-					{
-						if (container.size() <= groupId)
-						{
-							container.resize(static_cast<size_t>(groupId) + 1ull);
-						}
-					};
-
-				ensureIndexedStorage(*context->groups);
-				ensureIndexedStorage(*context->groupChunks);
-				ensureIndexedStorage(*context->groupPageBlobs);
-				ensureIndexedStorage(*context->groupVertexChunks);
-				ensureIndexedStorage(*context->groupSkinningChunks);
-				ensureIndexedStorage(*context->groupMeshletVertexChunks);
-				ensureIndexedStorage(*context->groupMeshletChunks);
-				ensureIndexedStorage(*context->groupMeshletTriangleChunks);
-				ensureIndexedStorage(*context->groupMeshletRefinedGroupChunks);
-
-				finalizedGroup.firstMeshlet = context->cumulativeMeshletCount;
-				finalizedGroup.firstGroupVertex = context->cumulativeGroupVertexCount;
-				finalizedGroup.firstSegment = static_cast<uint32_t>(context->segments->size());
-
-				context->cumulativeMeshletCount += finalizedGroup.meshletCount;
-				context->cumulativeGroupVertexCount += finalizedGroup.groupVertexCount;
-				context->segments->insert(context->segments->end(), output.segments.begin(), output.segments.end());
-				context->segmentBounds->insert(context->segmentBounds->end(), output.segmentBounds.begin(), output.segmentBounds.end());
-
-				(*context->groupPageBlobs)[groupId] = std::move(output.pageBlobs);
-
-				// Store raw streams for voxel fallback candidate construction.
-				(*context->groupVertexChunks)[groupId] = std::move(output.vertexChunk);
-				(*context->groupSkinningChunks)[groupId] = std::move(output.skinningChunk);
-				(*context->groupMeshletVertexChunks)[groupId] = std::move(output.meshletVertices);
-				(*context->groupMeshletChunks)[groupId] = std::move(output.meshlets);
-				(*context->groupMeshletTriangleChunks)[groupId] = std::move(output.meshletTriangles);
-				(*context->groupMeshletRefinedGroupChunks)[groupId] = std::move(output.meshletRefinedGroups);
-
-				(*context->groupChunks)[groupId] = output.groupChunk;
-				(*context->groups)[groupId] = finalizedGroup;
-
-		context->maxChildrenObserved = std::max(context->maxChildrenObserved, finalizedGroup.segmentCount);
-				context->maxDepthObserved = (std::max)(context->maxDepthObserved, static_cast<uint32_t>(std::max(finalizedGroup.depth, 0)));
-
+				// clodBuildEx outputs groups one at a time, in order.
+				context->pending.push_back({ groupId, group, std::move(capturedGroup) });
 				return static_cast<int>(groupId);
+			}
+
+			static void FlushOutputs(CaptureOutputContext* context)
+			{
+				ZoneScopedN("ClusterLODUtilities::Build::FlushOutputs");
+				std::vector<ClusterLODGroupBuildOutput> outputs(context->pending.size());
+				const auto build = [&](size_t index) {
+					const CaptureOutputContext::PendingOutput& pendingOutput = context->pending[index];
+					const uint32_t groupId = pendingOutput.groupId;
+					ClusterLODGroupBuildOutput& output = outputs[index];
+					{
+						ZoneScopedN("ClusterLODUtilities::Build::OutputGroup::BuildGroupOutput");
+						output = BuildClusterLODGroupOutput(
+							pendingOutput.captured,
+							groupId,
+							*context->vertices,
+							*context->uvSets,
+							context->vertexFlags,
+							context->vertexStrideBytes,
+							context->skinningVertices,
+							context->skinningVertexStrideBytes,
+							context->meshPositionQuantScale,
+							context->meshPositionQuantExp,
+							context->nodeBoneLimit,
+							context->recomputeGroupNormals,
+							context->reserveNormalSpread,
+							context->remapReservePerTriangle);
+					}
+				};
+				oneapi::tbb::this_task_arena::isolate([&] {
+					TaskSchedulerManager::GetInstance().ParallelFor("ClusterLODUtilities::BuildGroupOutputs", context->pending.size(), build);
+				});
+				for (size_t index = 0; index < context->pending.size(); ++index)
+				{
+					const uint32_t groupId = context->pending[index].groupId;
+					const clodGroup& group = context->pending[index].group;
+					ClusterLODGroupBuildOutput& output = outputs[index];
+					ClusterLODGroup finalizedGroup = output.group;
+					finalizedGroup.flags = (finalizedGroup.flags & ~CLOD_GROUP_SIMPLIFY_METHOD_MASK) |
+						((static_cast<uint32_t>(group.simplify_method) << CLOD_GROUP_SIMPLIFY_METHOD_SHIFT) & CLOD_GROUP_SIMPLIFY_METHOD_MASK);
+					finalizedGroup.flags = (finalizedGroup.flags & ~CLOD_GROUP_SIMPLIFY_VALIDATION_MASK) |
+						((static_cast<uint32_t>(group.simplify_validation) << CLOD_GROUP_SIMPLIFY_VALIDATION_SHIFT) & CLOD_GROUP_SIMPLIFY_VALIDATION_MASK);
+					if (group.simplify_replaced)
+					{
+						finalizedGroup.flags |= CLOD_GROUP_FLAG_SIMPLIFY_REPLACED;
+					}
+
+
+					auto ensureIndexedStorage = [&](auto& container)
+						{
+							if (container.size() <= groupId)
+							{
+								container.resize(static_cast<size_t>(groupId) + 1ull);
+							}
+						};
+
+					ensureIndexedStorage(*context->groups);
+					ensureIndexedStorage(*context->groupChunks);
+					ensureIndexedStorage(*context->groupPageBlobs);
+					ensureIndexedStorage(*context->groupVertexChunks);
+					ensureIndexedStorage(*context->groupSkinningChunks);
+					ensureIndexedStorage(*context->groupMeshletVertexChunks);
+					ensureIndexedStorage(*context->groupMeshletChunks);
+					ensureIndexedStorage(*context->groupMeshletTriangleChunks);
+					ensureIndexedStorage(*context->groupMeshletRefinedGroupChunks);
+
+					finalizedGroup.firstMeshlet = context->cumulativeMeshletCount;
+					finalizedGroup.firstGroupVertex = context->cumulativeGroupVertexCount;
+					finalizedGroup.firstSegment = static_cast<uint32_t>(context->segments->size());
+
+					context->cumulativeMeshletCount += finalizedGroup.meshletCount;
+					context->cumulativeGroupVertexCount += finalizedGroup.groupVertexCount;
+					context->segments->insert(context->segments->end(), output.segments.begin(), output.segments.end());
+					context->segmentBounds->insert(context->segmentBounds->end(), output.segmentBounds.begin(), output.segmentBounds.end());
+
+					(*context->groupPageBlobs)[groupId] = std::move(output.pageBlobs);
+
+					// Store raw streams for voxel fallback candidate construction.
+					(*context->groupVertexChunks)[groupId] = std::move(output.vertexChunk);
+					(*context->groupSkinningChunks)[groupId] = std::move(output.skinningChunk);
+					(*context->groupMeshletVertexChunks)[groupId] = std::move(output.meshletVertices);
+					(*context->groupMeshletChunks)[groupId] = std::move(output.meshlets);
+					(*context->groupMeshletTriangleChunks)[groupId] = std::move(output.meshletTriangles);
+					(*context->groupMeshletRefinedGroupChunks)[groupId] = std::move(output.meshletRefinedGroups);
+					if (context->groupVertexGlobalIdChunks != nullptr)
+					{
+						ensureIndexedStorage(*context->groupVertexGlobalIdChunks);
+						(*context->groupVertexGlobalIdChunks)[groupId] = std::move(output.vertexGlobalIds);
+					}
+
+					(*context->groupChunks)[groupId] = output.groupChunk;
+					(*context->groups)[groupId] = finalizedGroup;
+
+			context->maxChildrenObserved = std::max(context->maxChildrenObserved, finalizedGroup.segmentCount);
+					context->maxDepthObserved = (std::max)(context->maxDepthObserved, static_cast<uint32_t>(std::max(finalizedGroup.depth, 0)));
+
+				}
+				context->pending.clear();
 			}
 
 			static void Iterate(void* iterationContext, void*, int, size_t taskCount)
@@ -2185,14 +2800,22 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 						clodBuild_iterationTask(iterationContext, taskIndex, 0);
 					});
 			}
+
+			// Splitting each depth's results into clusters (clodBuildParallelConfig::parallel_for).
+			static void ParallelFor(void*, size_t count, void (*body)(void*, size_t), void* bodyContext)
+			{
+				oneapi::tbb::this_task_arena::isolate([&] {
+					TaskSchedulerManager::GetInstance().ParallelFor("ClusterLODUtilities::BuildSplit", count, [&](size_t index) { body(bodyContext, index); });
+				});
+			}
 		};
 
 		CaptureOutputContext captureContext{};
-		captureContext.vertices = &vertices;
-		captureContext.uvSets = &uvSets;
+		captureContext.vertices = &buildVertices;
+		captureContext.uvSets = &buildUvSets;
 		captureContext.vertexFlags = flags;
 		captureContext.vertexStrideBytes = vertexStrideBytes;
-		captureContext.skinningVertices = skinningVertices;
+		captureContext.skinningVertices = buildSkinning;
 		captureContext.skinningVertexStrideBytes = skinningVertexSize;
 		captureContext.groups = &state.groups;
 		captureContext.segments = &state.segments;
@@ -2205,17 +2828,25 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 		captureContext.groupMeshletChunks = &state.groupMeshletChunks;
 		captureContext.groupMeshletTriangleChunks = &state.groupMeshletTriangleChunks;
 		captureContext.groupMeshletRefinedGroupChunks = &state.groupMeshletRefinedGroupChunks;
+		captureContext.groupVertexGlobalIdChunks = textureChannel ? &state.groupVertexGlobalIdChunks : nullptr;
 		captureContext.meshPositionQuantScale = meshPositionQuantScale;
 		captureContext.meshPositionQuantExp = meshPositionQuantExp;
 		captureContext.nodeBoneLimit = std::clamp(settings.nodeBoneLimit, 1u, CLOD_NODE_BONE_LIMIT_HARD_MAX);
 		captureContext.recomputeGroupNormals = recomputeGroupNormals;
+		captureContext.reserveNormalSpread = ClusterLODNormalSpreadActive(settings);
+		// Only meshes that can take blocks (the material gate the remap applies below).
+		captureContext.remapReservePerTriangle = textureChannel && ClusterLODUvRemapActive(settings) && materialAppearance != nullptr &&
+				!materialAppearance->alphaMasked && materialAppearance->hasBaseColorTexture
+			? settings.lodErrorChannelsTextureRemapReserve : 0u;
 		{
 			ZoneScopedN("ClusterLODUtilities::Build::clodBuildEx");
 			// Each depth's simplifications run in parallel; groups are still output and split in order, so the result is
 			// the serial one.
 			clodBuildParallelConfig parallelConfig{};
 			parallelConfig.iteration_callback = &ClodBuildCallbacks::Iterate;
+			parallelConfig.parallel_for = &ClodBuildCallbacks::ParallelFor;
 			clodBuildEx(config, mesh, &captureContext, &ClodBuildCallbacks::Output, &parallelConfig);
+			ClodBuildCallbacks::FlushOutputs(&captureContext);
 		}
 		TracyPlot("CLOD.Build.Groups", static_cast<int64_t>(state.groups.size()));
 		TracyPlot("CLOD.Build.Segments", static_cast<int64_t>(state.segments.size()));
@@ -2231,6 +2862,173 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 			}
 		}
 
+		if (settings.simplifyValidation)
+		{
+			const clodValidationStats& stats = simplifyValidationStats;
+			spdlog::info(
+				"ClusterLOD simplify validation: triangles={} candidates={} accepted={} rejected={} rejected_fold={} rejected_shading={} "
+				"rejected_coverage={} rejected_spurious={} rejected_source_coverage={} groups_first={} groups_retried={} groups_terminal={} sloppy_accepted={} "
+				"sloppy_rejected={} index_ms={:.2f} validate_ms={:.2f} candidate_ms={:.2f} coverage_ms={:.2f} baseline_ms={:.2f} source_ms={:.2f}",
+				indices.size() / 3u,
+				stats.candidates,
+				stats.accepted,
+				stats.rejected,
+				stats.rejected_reason[0],
+				stats.rejected_reason[1],
+				stats.rejected_reason[2],
+				stats.rejected_reason[3],
+				stats.rejected_reason[4],
+				stats.groups_first,
+				stats.groups_retried,
+				stats.groups_terminal,
+				stats.sloppy_accepted,
+				stats.sloppy_rejected,
+				simplifyValidationIndexMs,
+				static_cast<double>(simplifyValidation.nanoseconds.load()) * 1.0e-6,
+				static_cast<double>(simplifyValidation.validator->Times().candidate) * 1.0e-6,
+				static_cast<double>(simplifyValidation.validator->Times().coverage) * 1.0e-6,
+				static_cast<double>(simplifyValidation.validator->Times().baseline) * 1.0e-6,
+				static_cast<double>(simplifyValidation.validator->Times().source) * 1.0e-6);
+		}
+
+		if (replacementsActive)
+		{
+			const clodReplacementStats& stats = replacementStats;
+			const clod_detail::ReplacementVertexFitter::Stats fit = replacementFitter->GetStats();
+			spdlog::info(
+				"ClusterLOD simplify update: triangles={} vertices_source={} update_candidates={} update_offered={} update_accepted={} replaced_vertices={} "
+				"replaced_moved={} fit_refit={} locked_moved={} fit_vertices={} fit_fallbacks={} uv_clamped={} uv_nonfinite={} measured={} measured_raised={} "
+				"uv_transferred={} uv_transfer_outside={} fan_checks={} fan_hits={} check_skipped={} fit_ms={:.2f} deviation_ms={:.2f}",
+				indices.size() / 3u,
+				globalVertexCount,
+				stats.candidates,
+				stats.offered,
+				stats.accepted,
+				stats.vertices,
+				stats.vertices_moved,
+				fit.refitReplaced,
+				stats.locked_moved,
+				fit.fitVertices,
+				fit.fitFallbacks,
+				fit.uvClamped,
+				fit.uvNonFinite,
+				stats.measured,
+				stats.measured_raised,
+				fit.uvTransferred,
+				fit.uvTransferOutside,
+				fit.fanChecks,
+				fit.fanHits,
+				fit.checkSkipped,
+				static_cast<double>(fit.fitNs) * 1.0e-6,
+				static_cast<double>(simplifyValidation.validator->Times().deviation) * 1.0e-6);
+		}
+
+		if (simplifyOptimal)
+		{
+			const clodReplacementStats& stats = replacementStats;
+			const clod_detail::OptimalSimplifier::Stats optimal = optimalSimplifier->GetStats();
+			spdlog::info(
+				"ClusterLOD simplify optimal: triangles={} optimal_candidates={} optimal_offered={} optimal_accepted={} collapses={} moved_free={} "
+				"moved_line={} fallbacks={} rejected_flip={} rejected_sheet={} rejected_vanish={} solve_failed={} solve_clamped={} reference_samples={} "
+				"reference_unmatched={} reference_ms={:.2f} loop_ms={:.2f}",
+				indices.size() / 3u,
+				stats.optimal_candidates,
+				stats.optimal_offered,
+				stats.optimal_accepted,
+				optimal.loop.collapses,
+				optimal.loop.movedFree,
+				optimal.loop.movedLine,
+				optimal.loop.fallbacks,
+				optimal.loop.rejectedFlip,
+				optimal.loop.rejectedSheet,
+				optimal.loop.rejectedVanish,
+				optimal.loop.solveFailed,
+				optimal.loop.solveClamped,
+				optimal.referenceSamples,
+				optimal.referenceUnmatched,
+				static_cast<double>(optimal.referenceNs) * 1.0e-6,
+				static_cast<double>(optimal.loopNs) * 1.0e-6);
+		}
+
+		if (config.topology_stats && config.simplify_last_resort_sloppy)
+		{
+			spdlog::info("ClusterLOD sloppy last resort: groups={} triangles={} rejected_first={} rejected_first_triangles={} stuck_left={} stuck_left_triangles={}",
+				topologyStats.last_resort, topologyStats.last_resort_triangles, topologyStats.last_resort_rejected,
+				topologyStats.last_resort_rejected_triangles, topologyStats.stuck, topologyStats.stuck_triangles);
+			if (topologyDiagnostics && topologyStats.last_resort != 0u)
+			{
+				const auto& c = topologyStats.last_resort_class_triangles;
+				spdlog::info("ClusterLOD sloppy last resort classes: mesh_triangles={} root_triangles={} boundary={} normal_seams={} protected_seams={} "
+					"seams={} boundary_seams={} components={} other={}",
+					indices.size() / 3u, topologyStats.root_triangles + topologyStats.stuck_triangles + topologyStats.rejected_triangles,
+					c[0], c[1], c[2], c[3], c[4], c[5], c[6]);
+			}
+		}
+		if (config.topology_stats)
+		{
+			const clodTopologyStats& stats = topologyStats;
+			spdlog::info(
+				"ClusterLOD topology: triangles={} roots={} root_triangles={} rejected={} rejected_triangles={} stuck={} stuck_triangles={} "
+				"boundary={} boundary_triangles={} normal_seams={} normal_seams_triangles={} protected_seams={} protected_seams_triangles={} "
+				"seams={} seams_triangles={} boundary_seams={} boundary_seams_triangles={} components={} "
+				"components_triangles={} other={} other_triangles={} stuck_components={} stuck_small_triangles={} stuck_boundary_vertices={} "
+				"stuck_positions={} stuck_uv_seam_vertices={} stuck_uv_seam_tiny={} stuck_uv_seam_integer={} topology_groups={} topology_offered={} "
+				"topology_rejected={} topology_rejected_fold={} topology_rejected_shading={} topology_rejected_coverage={} topology_rejected_spurious={} "
+				"topology_rejected_source_coverage={} topology_rejected_texture={} topology_stuck={} topology_accepted={} topology_accepted_triangles={} "
+				"topology_relaxed_vertices={} texture_checks={} texture_ms={:.2f} texture_rejected_slide={} texture_rejected_uv={} texture_rejected_charts={}",
+				indices.size() / 3u,
+				stats.roots,
+				stats.root_triangles,
+				stats.rejected,
+				stats.rejected_triangles,
+				stats.stuck,
+				stats.stuck_triangles,
+				stats.stuck_class[0],
+				stats.stuck_class_triangles[0],
+				stats.stuck_class[1],
+				stats.stuck_class_triangles[1],
+				stats.stuck_class[2],
+				stats.stuck_class_triangles[2],
+				stats.stuck_class[3],
+				stats.stuck_class_triangles[3],
+				stats.stuck_class[4],
+				stats.stuck_class_triangles[4],
+				stats.stuck_class[5],
+				stats.stuck_class_triangles[5],
+				stats.stuck_class[6],
+				stats.stuck_class_triangles[6],
+				stats.stuck_components,
+				stats.stuck_small_triangles,
+				stats.stuck_boundary_vertices,
+				stats.stuck_positions,
+				stats.stuck_uv_seam_vertices,
+				stats.stuck_uv_seam_tiny,
+				stats.stuck_uv_seam_integer,
+				stats.topology_groups,
+				stats.topology_offered,
+				stats.topology_rejected,
+				stats.topology_rejected_reason[0],
+				stats.topology_rejected_reason[1],
+				stats.topology_rejected_reason[2],
+				stats.topology_rejected_reason[3],
+				stats.topology_rejected_reason[4],
+				stats.topology_rejected_reason[5],
+				stats.topology_stuck,
+				stats.topology_accepted,
+				stats.topology_accepted_triangles,
+				stats.topology_relaxed_vertices,
+				simplifyValidation.textureChecks.load(),
+				static_cast<double>(simplifyValidation.textureNanoseconds.load()) * 1.0e-6,
+				simplifyValidation.textureRejectedSlide.load(),
+				simplifyValidation.textureRejectedUv.load(),
+				simplifyValidation.textureRejectedCharts.load());
+			if (ClusterLODTopologyTextureColorActive(settings))
+			{
+				spdlog::info("ClusterLOD topology texture colour: source={} reference_delta_e={:.6g} accepted_by_colour={}", topologyTextureColorSource,
+					settings.simplifyTopologyTextureColor, simplifyValidation.textureAcceptedColor.load());
+			}
+		}
+
 		if (refinedCapSplitPartitionCount > 0)
 		{
 			spdlog::info(
@@ -2239,6 +3037,230 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 				TargetBucketClusters);
 		}
 	}
+
+	// Error channels (stage 3, docs/clod-simplification-validation.md): every group's simplified output measured against the
+	// original, from the raw group streams while they are held. The traversal hierarchy stores them in its nodes.
+	// Stage 6 step 3 (lodNormalSpread): the same measurement gives each simplified cluster's per-vertex normal spread, with or
+	// without the channels; without them the channels it also computes are dropped below, so nodes and metadata stay as they were.
+	const bool normalSpreadRequested = ClusterLODNormalSpreadActive(settings);
+	if (settings.lodErrorChannels || normalSpreadRequested)
+	{
+		ZoneScopedN("ClusterLODUtilities::Build::MeasureErrorChannels");
+		std::optional<clod_detail::SimplifyValidator> channelOriginal;
+		const clod_detail::SimplifyValidator* original = simplifyValidation.validator ? &*simplifyValidation.validator : nullptr;
+		if (original == nullptr)
+		{
+			clod_detail::SimplifySurfaceView source{};
+			source.positions = reinterpret_cast<const float*>(vertices.data());
+			source.positionStride = vertexStrideBytes;
+			source.normals = hasNormalStreamInSource ? reinterpret_cast<const float*>(vertices.data() + MeshVertexLayout::NormalOffset) : nullptr;
+			source.normalStride = vertexStrideBytes;
+			source.indices = idx;
+			source.indexCount = indices.size();
+			clod_detail::SimplifyValidationThresholds channelThresholds{};
+			channelThresholds.matchReachScale = std::max(1.0f, settings.simplifyMatchReach);
+			channelThresholds.matchMaxCandidates = settings.simplifyMatchCandidates;
+			channelThresholds.matchFacingGrid = ClusterLODMatchFacingGrid(settings);
+			channelOriginal.emplace(source, channelThresholds);
+			original = &*channelOriginal;
+		}
+		clod_detail::ErrorChannelTextureInputs textureInputs;
+		if (textureChannel)
+		{
+			textureInputs.source.positions = reinterpret_cast<const float*>(vertices.data());
+			textureInputs.source.positionStride = vertexStrideBytes;
+			textureInputs.source.uvs = textureChannelSourceUvs;
+			textureInputs.source.uvStride = textureChannelSourceUvStride;
+			textureInputs.source.indices = idx;
+			textureInputs.source.indexCount = indices.size();
+			textureInputs.source.charts = textureCharts.data();
+			if (textureChannelUsesSets)
+			{
+				textureInputs.buildUvs = reinterpret_cast<const float*>(buildUvSets[0].values.data());
+				textureInputs.buildUvStride = sizeof(DirectX::XMFLOAT2);
+				textureInputs.buildVertexCount = buildUvSets[0].values.size();
+			}
+			else
+			{
+				textureInputs.buildUvs = reinterpret_cast<const float*>(buildVertices.data() + MeshVertexLayout::TexcoordOffset(flags));
+				textureInputs.buildUvStride = vertexStrideBytes;
+				textureInputs.buildVertexCount = buildVertices.size() / vertexStrideBytes;
+			}
+			textureInputs.buildCharts = &textureCharts;
+			textureInputs.weight = settings.lodErrorChannelsTexture;
+			textureInputs.slide = settings.lodErrorChannelsTextureSlide;
+		}
+		// Stage 6 step 1: weight the displaced samples by the colour difference they draw, from the importer's material. Any
+		// reason it cannot (no material from this importer, another UV set, vertex colours, an image that does not decode)
+		// leaves this mesh with the binary term, and says why.
+		const bool textureColorRequested = textureChannel && ClusterLODTextureColorActive(settings);
+		clod_detail::ErrorChannelTextureColor textureColor;
+		std::shared_ptr<const clod_texture::Texture> textureColorImage;
+		const char* textureColorSource = "binary";
+		if (textureColorRequested)
+		{
+			if (materialAppearance == nullptr)
+			{
+				textureColorSource = "binary (the importer gave no material)";
+			}
+			else if (materialAppearance->baseColorTexCoord != 0u)
+			{
+				textureColorSource = "binary (the base colour reads another UV set)";
+			}
+			else if (materialAppearance->hasVertexColors)
+			{
+				textureColorSource = "binary (vertex colours)";
+			}
+			else
+			{
+				if (materialAppearance->hasBaseColorTexture && materialAppearance->decodeBaseColor)
+				{
+					textureColorImage = decodedBaseColor != nullptr ? decodedBaseColor : materialAppearance->decodeBaseColor();
+				}
+				if (materialAppearance->hasBaseColorTexture && (textureColorImage == nullptr || textureColorImage->Levels() == 0u))
+				{
+					textureColorSource = "binary (the base colour image did not decode)";
+				}
+				else
+				{
+					textureColor.baseColorFactor = materialAppearance->baseColorFactor;
+					textureColor.texture = textureColorImage.get();
+					textureColor.alphaMasked = materialAppearance->alphaMasked;
+					textureColor.alphaCutoff = materialAppearance->alphaCutoff;
+					textureColor.uvTransformed = materialAppearance->hasBaseColorUvTransform;
+					textureColor.uvTransform = materialAppearance->baseColorUvTransform;
+					textureColor.referenceDeltaE = settings.lodErrorChannelsTextureColor;
+					textureColor.footprint = settings.lodErrorChannelsTextureColorFootprint;
+					textureColor.everySample = settings.lodErrorChannelsTextureColorAll;
+					textureInputs.color = &textureColor;
+					textureColorSource = textureColor.texture != nullptr ? "texture" : "factor";
+				}
+			}
+		}
+		// Stage 6 step 2: UV remap blocks for damaged groups. They need the importer's material: one that is not alpha-masked
+		// (raster, shadow and ray alpha tests read the corners' UVs) and has a base colour texture (else nothing is drawn wrong).
+		clod_detail::ErrorChannelTextureRemap textureRemap;
+		const char* textureRemapSource = "off";
+		if (textureChannel && ClusterLODUvRemapActive(settings))
+		{
+			if (materialAppearance == nullptr)
+			{
+				textureRemapSource = "none (the importer gave no material)";
+			}
+			else if (materialAppearance->alphaMasked)
+			{
+				textureRemapSource = "none (alpha-masked material)";
+			}
+			else if (!materialAppearance->hasBaseColorTexture)
+			{
+				textureRemapSource = "none (untextured material)";
+			}
+			else
+			{
+				textureRemap.minDisplacedShare = settings.lodErrorChannelsTextureRemap;
+				textureRemap.settings.texel = std::max(settings.lodErrorChannelsTextureRemapTexel, 0.0f);
+				textureRemap.settings.maxNodes = settings.lodErrorChannelsTextureRemapMaxNodes;
+				textureRemap.settings.layout = std::clamp(settings.lodErrorChannelsTextureRemapLayout, 1u, 2u);
+				textureRemap.settings.cellMiss = std::max(settings.lodErrorChannelsTextureRemapCellMiss, 0.0f);
+				// The builder knows a texture's size only when the colour weight decoded it; otherwise the texture check's nominal one.
+				const uint32_t resolution = textureColorImage != nullptr && textureColorImage->width > 0u
+					? std::max(textureColorImage->width, textureColorImage->height)
+					: std::max(settings.simplifyTopologyTextureResolution, 1u);
+				textureRemap.settings.sourceTexelUv = 1.0f / static_cast<float>(resolution);
+				textureRemap.settings.slide = settings.lodErrorChannelsTextureSlide;
+				textureInputs.remap = &textureRemap;
+				textureRemapSource = "remap";
+			}
+		}
+		// Stage 6 step 3: the blocks are addressed through the UV set 0 descriptor, and measured against the original's normals.
+		const char* normalSpreadSource = "off";
+		bool normalSpread = false;
+		if (normalSpreadRequested)
+		{
+			if (!hasNormalStreamInSource)
+			{
+				normalSpreadSource = "none (no normals)";
+			}
+			else if (buildUvSets.empty() && !hasTexcoordStreamInSource)
+			{
+				normalSpreadSource = "none (no UV set to address the blocks)";
+			}
+			else
+			{
+				normalSpreadSource = "spread";
+				normalSpread = true;
+			}
+		}
+		const clod_detail::ErrorChannelStats stats = clod_detail::MeasureClusterLODErrorChannels(
+			state, *original, vertexStrideBytes, hasNormalStreamInSource, textureChannel ? &textureInputs : nullptr, normalSpread,
+			settings.lodErrorChannels, settings.lodNormalSpreadFootprint, settings.lodNormalSpreadSampleCap, settings.lodErrorChannelsSamples);
+		if (!settings.lodErrorChannels)
+		{
+			state.errorChannels.clear();
+		}
+		if (normalSpreadRequested)
+		{
+			spdlog::info("ClusterLOD normal spread: source={} footprint={:.6g} sample_cap={:.6g} clusters={} vertices={} bytes={} sampled_area={:.6g} mean_v={:.6g} "
+				"vertices_zero={} vertices_under_16={} vertices_under_64={} vertices_over_64={} spread_ms={:.2f} measure_ms={:.2f}",
+				normalSpreadSource, settings.lodNormalSpreadFootprint, settings.lodNormalSpreadSampleCap, stats.spreadClusters, stats.spreadVertices, stats.spreadBytes, stats.spreadArea,
+				stats.spreadArea > 0.0 ? stats.spreadQ / stats.spreadArea : 0.0, stats.spreadVertexBands[0], stats.spreadVertexBands[1],
+				stats.spreadVertexBands[2], stats.spreadVertexBands[3], stats.spreadMs, stats.measureMs);
+		}
+		if (textureChannel && ClusterLODUvRemapActive(settings))
+		{
+			spdlog::info("ClusterLOD texture remap: source={} min_displaced_share={:.6g} texel={:.6g} max_nodes={} groups={} clusters={} triangles={} "
+				"nodes={} nodes_unmatched={} nodes_along_normal={} bytes={} triangles_over_budget={} sub_triangles={} straddling_charts={} straddling_seams={} displaced_before={:.6g} displaced_after={:.6g} q_before={:.6g} q_after={:.6g} "
+				"slide_before={:.6g} slide_after={:.6g} chart_before={:.6g} chart_after={:.6g} mixed_before={:.6g} mixed_after={:.6g} remap_ms={:.2f}",
+				textureRemapSource, settings.lodErrorChannelsTextureRemap, settings.lodErrorChannelsTextureRemapTexel,
+				settings.lodErrorChannelsTextureRemapMaxNodes, stats.remapGroups, stats.remapClusters, stats.remapTriangles, stats.remapNodes,
+				stats.remapNodesUnmatched, stats.remapNodesAlongNormal, stats.remapBytes, stats.remapTrianglesOverBudget, stats.remapSubTriangles,
+				stats.remapSubTrianglesCharts, stats.remapSubTrianglesSeams, stats.remapDisplacedBefore, stats.remapDisplacedAfter,
+				stats.remapQBefore, stats.remapQAfter, stats.remapSlideBefore, stats.remapSlideAfter, stats.remapChartBefore, stats.remapChartAfter,
+				stats.remapMixedBefore, stats.remapMixedAfter, stats.remapMs);
+			if (settings.lodErrorChannelsTextureRemapLayout >= 2u)
+			{
+				spdlog::info("ClusterLOD texture remap regions: layout=2 cell_miss={:.6g} triangles_regions={} triangles_grid={} regions={} region_cells={} region_area={:.6g} "
+					"region_miss_area={:.6g} points_unlabeled={} regions_fitted={} regions_planar_pieces={} triangles_regions_rejected={} "
+					"cell_grid_2={} cell_grid_3={} cell_grid_5={} cell_grid_9={} cell_grid_17={}",
+					settings.lodErrorChannelsTextureRemapCellMiss, stats.remapTrianglesRegions, stats.remapTrianglesGrid, stats.remapRegions, stats.remapRegionCells, stats.remapRegionArea,
+					stats.remapRegionMissArea, stats.remapPointsUnlabeled, stats.remapRegionsFitted, stats.remapRegionsPlanarPieces,
+					stats.remapTrianglesRegionsRejected, stats.remapRegionGridCounts[0], stats.remapRegionGridCounts[1], stats.remapRegionGridCounts[2],
+					stats.remapRegionGridCounts[3], stats.remapRegionGridCounts[4]);
+			}
+		}
+		if (textureChannel)
+		{
+			spdlog::info(
+				"ClusterLOD texture channel: weight={:.6g} slide={:.6g} uv_sets={} measured_area={:.6g} displaced_area={:.6g} groups_displaced={} texture_ms={:.2f}",
+				settings.lodErrorChannelsTexture, settings.lodErrorChannelsTextureSlide, textureChannelUsesSets ? 1 : 0, stats.textureMeasuredArea,
+				stats.textureDisplacedArea, stats.textureGroupsDisplaced, stats.textureMs);
+		}
+		if (textureColorRequested)
+		{
+			spdlog::info("ClusterLOD texture colour: reference_de={:.6g} footprint={:.6g} source={} image={}x{} weighted_area={:.6g} displaced_area={:.6g} "
+				"samples_de_under_1={} under_3={} under_reference={} over_reference={} unmatched={}",
+				settings.lodErrorChannelsTextureColor, settings.lodErrorChannelsTextureColorFootprint, textureColorSource, textureColorImage ? textureColorImage->width : 0u,
+				textureColorImage ? textureColorImage->height : 0u, textureInputs.color != nullptr ? stats.textureWeightedArea : stats.textureDisplacedArea,
+				stats.textureDisplacedArea, stats.textureColorSamples[0], stats.textureColorSamples[1], stats.textureColorSamples[2],
+				stats.textureColorSamples[3], stats.textureColorSamples[4]);
+		}
+		if (settings.lodErrorChannels)
+		spdlog::info(
+			"ClusterLOD error channels: triangles={} groups={} simplified_triangles={} samples={} samples_without_normal={} source_triangles={} "
+			"raised_over_quadric={} envelope_raised_geometric={} envelope_raised_appearance={} measure_ms={:.2f}",
+			indices.size() / 3u,
+			stats.groups,
+			stats.simplifiedTriangles,
+			stats.samples,
+			stats.samplesWithoutNormal,
+			stats.sourceTriangles,
+			stats.raisedOverQuadric,
+			stats.envelopeRaisedGeometric,
+			stats.envelopeRaisedAppearance,
+			stats.measureMs);
+	}
+
+	clod_detail::LogQueryStats("cumulative");
 
 	const uint32_t totalGroupCount = static_cast<uint32_t>(state.groups.size());
 	uint32_t groupsWithRefinedChildren = 0;
@@ -2298,6 +3320,35 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 			coverageMaterialSampler,
 			settings);
 	}
+	if (!state.meshletNormalSpreads.empty())
+	{
+		// Stage 6 step 3: as the channels below, a mesh with voxel groups or a forked DAG keeps no normal spread (it was measured on
+		// the triangle hierarchy the fork replaces).
+		const bool voxelized = std::any_of(state.groups.begin(), state.groups.end(), [](const ClusterLODGroup& group) {
+			return (group.flags & (CLOD_GROUP_FLAG_IS_VOXEL | CLOD_GROUP_BRANCH_FLAGS)) != 0u;
+		});
+		if (voxelized)
+		{
+			spdlog::info("ClusterLOD normal spread: dropped, the mesh has voxel groups or a forked DAG");
+			state.meshletNormalSpreads.clear();
+		}
+	}
+	if (!state.errorChannels.empty())
+	{
+		// The channels measure triangle representations. A voxel group or a forked DAG draws something else at its boundaries,
+		// so such a mesh keeps none and selects by its stored errors alone.
+		const bool voxelized = state.errorChannels.size() != state.groups.size() ||
+			std::any_of(state.groups.begin(), state.groups.end(), [](const ClusterLODGroup& group) {
+				return (group.flags & (CLOD_GROUP_FLAG_IS_VOXEL | CLOD_GROUP_BRANCH_FLAGS)) != 0u;
+			});
+		if (voxelized)
+		{
+			spdlog::info("ClusterLOD error channels: dropped, the mesh has voxel groups or a forked DAG");
+			state.errorChannels.clear();
+			// Stage 6 step 2: the remaps go with them (they were judged by the channels' texture term).
+			state.meshletUvRemaps.clear();
+		}
+	}
 	{
 		ZoneScopedN("ClusterLODUtilities::Build::ReleaseRawStreamsAfterVoxelFallback");
 		std::vector<std::vector<std::byte>>().swap(state.groupVertexChunks);
@@ -2306,6 +3357,7 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 		std::vector<std::vector<meshopt_Meshlet>>().swap(state.groupMeshletChunks);
 		std::vector<std::vector<uint8_t>>().swap(state.groupMeshletTriangleChunks);
 		std::vector<std::vector<int32_t>>().swap(state.groupMeshletRefinedGroupChunks);
+		std::vector<std::vector<uint32_t>>().swap(state.groupVertexGlobalIdChunks);
 	}
 
 	// Build traversal hierarchy.
@@ -2370,6 +3422,12 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 	artifacts.prebuiltData.lodLevelRoots = std::move(state.lodLevelRoots);
 	artifacts.prebuiltData.maxDepth = state.maxDepth;
 	artifacts.prebuiltData.maxTraversalDepth = state.maxTraversalDepth;
+	artifacts.prebuiltData.uvRemapClusters = state.uvRemapClustersWritten;
+	artifacts.prebuiltData.uvRemapBytes = state.uvRemapBytesWritten;
+	std::vector<std::vector<std::vector<std::byte>>>().swap(state.meshletUvRemaps);
+	artifacts.prebuiltData.normalSpreadClusters = state.normalSpreadClustersWritten;
+	artifacts.prebuiltData.normalSpreadBytes = state.normalSpreadBytesWritten;
+	std::vector<std::vector<std::vector<std::byte>>>().swap(state.meshletNormalSpreads);
 	AssignSingleRootPartRecord(artifacts.prebuiltData, state.topRootNode);
 
 	artifacts.cacheBuildData.groupPageBlobs = std::move(state.groupPageBlobs);

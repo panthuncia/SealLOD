@@ -15,6 +15,8 @@ set(BR_SRC "${BR_ROOT}/src")
 
 find_package(Boost REQUIRED CONFIG COMPONENTS container_hash)
 find_package(DirectX-Headers CONFIG REQUIRED)
+find_package(directxtex CONFIG REQUIRED)
+find_package(Ktx CONFIG REQUIRED)
 find_package(Tracy REQUIRED CONFIG)
 find_package(embree CONFIG REQUIRED)
 find_package(flecs CONFIG REQUIRED)
@@ -54,6 +56,9 @@ add_library(CLodCacheFormat STATIC
     "${BR_SRC}/Assets/Cache/ClusterLOD/CLodCache.cpp"
     "${BR_SRC}/Assets/Cache/ClusterLOD/CLodOpacityMicromapCache.cpp"
     "${BR_SRC}/Assets/Cache/ClusterLOD/CLodPageDecoder.cpp"
+    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODTextureColor.cpp"
+    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODTextureDecode.cpp"
+    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODUvRemap.cpp"
     "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/DefaultCLodSettings.cpp"
     "${BR_SRC}/Assets/GeometryProcessing/Voxels/VoxelSurfaceTrace.cpp"
 )
@@ -74,6 +79,9 @@ target_link_libraries(CLodCacheFormat
         nlohmann_json::nlohmann_json
     PRIVATE
         Boost::container_hash
+        KTX::ktx               # ClusterLODTextureDecode: KTX2 base colour for the stage 6 colour tests
+        Microsoft::DirectXTex  # and its block decoding
+        TBB::tbb               # VoxelSurfaceTrace: its gathering and rays run as tasks
         Tracy::TracyClient
 )
 
@@ -85,10 +93,16 @@ add_library(CLodBuildCore STATIC
     "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODAssembly.cpp"
     "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODMergeHierarchy.cpp"
     "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODClustering.cpp"
+    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODErrorChannels.cpp"
     "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODHierarchy.cpp"
     "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODPagePacking.cpp"
     "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODPagePackingTelemetry.cpp"
+    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODOptimalSimplify.cpp"
+    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODReplacementVertices.cpp"
+    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODSimplifyValidation.cpp"
     "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODSkinningSidecar.cpp"
+    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODTopology.cpp"
+    "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODUvRemapBuilder.cpp"
     "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODValidation.cpp"
     "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelFallback.cpp"
     "${BR_SRC}/Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelOnly.cpp"
@@ -122,7 +136,9 @@ target_link_libraries(CLodBuildCore
         lz4::lz4
         bcrypt.lib
 )
-# oneTBB headers with vcpkg's import library: see the note at the top of CLodCacheTool/CMakeLists.txt.
+# oneTBB headers with vcpkg's import library: see the note at the top of CLodCacheTool/CMakeLists.txt. CLodCacheFormat needs it
+# too (VoxelSurfaceTrace).
 if(BASICRENDERER_VCPKG_TBB12_LIBRARY)
+    target_link_libraries(CLodCacheFormat PUBLIC "${BASICRENDERER_VCPKG_TBB12_LIBRARY}")
     target_link_libraries(CLodBuildCore PUBLIC "${BASICRENDERER_VCPKG_TBB12_LIBRARY}")
 endif()

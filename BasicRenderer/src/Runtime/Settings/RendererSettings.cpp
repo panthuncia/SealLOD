@@ -4,6 +4,7 @@
 #include <rhi_debug.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -349,6 +350,34 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<uint32_t>(CLodVisibleClusterCapacitySettingName, CLodDefaultVisibleClusterCapacity);
     settingsManager.registerSetting<bool>(CLodFrustumCullingSettingName, true);
     settingsManager.registerSetting<float>(CLodLodErrorPixelsSettingName, 1.0f);
+    // Error-channel LOD selection (CLodCommon.h). SARP_CLOD_LOD_APPEARANCE_WEIGHT and SARP_CLOD_LOD_GEOMETRIC_CHANNEL
+    // (0 quadric, 1 measured, 2 max) set the starting values for headless runs.
+    settingsManager.registerSetting<float>(CLodLodAppearanceWeightSettingName, [] {
+        const char* value = std::getenv("SARP_CLOD_LOD_APPEARANCE_WEIGHT");
+        const float weight = value ? static_cast<float>(std::atof(value)) : 0.0f;
+        return std::isfinite(weight) && weight > 0.0f ? weight : 0.0f;
+    }());
+    settingsManager.registerSetting<uint32_t>(CLodLodGeometricChannelSettingName, [] {
+        const char* value = std::getenv("SARP_CLOD_LOD_GEOMETRIC_CHANNEL");
+        const int channel = value ? std::atoi(value) : 0;
+        return channel >= 0 && channel <= static_cast<int>(CLodLodGeometricChannelMax) ? static_cast<uint32_t>(channel) : 0u;
+    }());
+    settingsManager.registerSetting<float>(CLodNormalSpreadRoughnessScaleSettingName, [] {
+        const char* value = std::getenv("SARP_CLOD_NORMAL_SPREAD_ROUGHNESS");
+        const float scale = value ? static_cast<float>(std::atof(value)) : 1.0f;
+        return std::isfinite(scale) && scale > 0.0f ? scale : 0.0f;
+    }());
+    settingsManager.registerSetting<float>(CLodNormalSpreadRoughnessCapSettingName, [] {
+        const char* value = std::getenv("SARP_CLOD_NORMAL_SPREAD_ROUGHNESS_CAP");
+        const float cap = value ? static_cast<float>(std::atof(value)) : 1.0f;
+        return std::isfinite(cap) && cap > 0.0f ? cap : 0.0f;
+    }());
+    for (const auto& [name, variable] : { std::pair{ CLodDebugMaterialRoughnessSettingName, "SARP_CLOD_DEBUG_MATERIAL_ROUGHNESS" },
+             std::pair{ CLodDebugMaterialMetallicSettingName, "SARP_CLOD_DEBUG_MATERIAL_METALLIC" } }) {
+        const char* value = std::getenv(variable);
+        const float parsed = value ? static_cast<float>(std::atof(value)) : -1.0f;
+        settingsManager.registerSetting<float>(name, std::isfinite(parsed) && parsed >= 0.0f ? std::min(parsed, 1.0f) : -1.0f);
+    }
     settingsManager.registerSetting<uint32_t>(MaterialResolvedTextureCapacitySettingName, MATERIAL_RESOLVED_TEXTURE_MIN_CAPACITY);
     settingsManager.registerSetting<uint32_t>(
         CLodPureComputePhase2ExpansionFactorSettingName,

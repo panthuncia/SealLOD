@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <set>
 #include <string>
 
 #include <BasicRenderer/Assets/Import/ImportProfile.h>
@@ -20,13 +21,15 @@ struct GltfSceneBuildOptions
 	// ECMAScript regexes over mesh names: only meshes matching onlyMeshes (when set), none matching skipMeshes.
 	std::string onlyMeshes;
 	std::string skipMeshes;
+	// Only meshes with these glTF mesh indices (when not empty), as in the /glTF/Mesh/<index> prim paths.
+	std::set<std::size_t> onlyMeshIndices;
 	// Meshes whose index % shardCount == shardIndex.
 	std::uint32_t shardIndex = 0;
 	std::uint32_t shardCount = 1;
 	// Primitives building at once are bounded by triangles * bytesPerTriangle against this, and by the process's private
 	// bytes; 0 picks three quarters of the memory available when the build starts.
 	std::uint64_t memoryBudgetBytes = 0;
-	std::uint64_t bytesPerTriangle = 320;
+	std::uint64_t bytesPerTriangle = 1800;
 	unsigned jobs = 0;
 	// Report misses instead of building, and leave the manifest as it is.
 	bool cacheOnly = false;

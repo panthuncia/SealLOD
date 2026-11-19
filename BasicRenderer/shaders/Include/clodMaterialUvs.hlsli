@@ -4,6 +4,8 @@
 // Decodes each UV set a material samples, with derivatives from the pixel's barycentrics.
 // Requires clodResolveMeshlet.hlsli.
 
+#include "include/clodUvRemap.hlsli"
+
 struct MeshletUvDecodeInfo
 {
     CLodMeshletUvDescriptor uvDesc;
@@ -88,6 +90,25 @@ void AppendClodMaterialUvSample(
     sample.uv = float2(interpU.x, interpV.x);
     sample.dUVdx = float2(interpU.y, interpV.y);
     sample.dUVdy = float2(interpU.z, interpV.z);
+#if CLOD_UV_REMAP
+    // Stage 6 step 2: a remapped cluster's UV set 0 comes from its remap block (clodUvRemap.hlsli), derivatives through the remap.
+    if (uvSetIndex == 0u && uvInfo.uvDesc.reserved0 != 0u && g_clodUvRemapTriangle != CLOD_UV_REMAP_UNKNOWN_TRIANGLE)
+    {
+        const bool swapped = (g_clodUvRemapTriangle & CLOD_UV_REMAP_SWAPPED_CORNERS) != 0u;
+        const float3 lambda = swapped ? bary.m_lambda.xzy : bary.m_lambda;
+        const float3 lambdaDdx = swapped ? bary.m_ddx.xzy : bary.m_ddx;
+        const float3 lambdaDdy = swapped ? bary.m_ddy.xzy : bary.m_ddy;
+        ByteAddressBuffer remapSlab = ResourceDescriptorHeap[NonUniformResourceIndex(md.pagePoolSlabDescriptorIndex)];
+        const CLodUvRemapSample remap = CLodEvaluateUvRemap(
+            remapSlab, md.pageByteOffset + uvInfo.uvDesc.reserved0, g_clodUvRemapTriangle & ~CLOD_UV_REMAP_SWAPPED_CORNERS, lambda.y, lambda.z);
+        if (remap.remapped)
+        {
+            sample.uv = remap.uv;
+            sample.dUVdx = remap.dUvDb1 * lambdaDdx.y + remap.dUvDb2 * lambdaDdx.z;
+            sample.dUVdy = remap.dUvDb1 * lambdaDdy.y + remap.dUvDb2 * lambdaDdy.z;
+        }
+    }
+#endif
 
 #if defined(MATERIAL_EVAL_SINGLE_UV_SET)
     if (cache.count == 0u) // One UV set: only the first append holds a set the slots can bind (MaterialUvCacheAt).

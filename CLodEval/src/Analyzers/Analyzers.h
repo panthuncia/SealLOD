@@ -14,5 +14,10 @@ std::unique_ptr<IAnalyzer> MakeVoxelDistributionAnalyzer();
 std::unique_ptr<IAnalyzer> MakeVoxelFidelityAnalyzer();
 std::unique_ptr<IAnalyzer> MakeGeometryTruthAnalyzer();
 std::unique_ptr<IAnalyzer> MakeTransitionHierarchyAnalyzer();
+std::unique_ptr<IAnalyzer> MakeNormalQualityAnalyzer();
+std::unique_ptr<IAnalyzer> MakeAppearanceAnalyzer();
+std::unique_ptr<IAnalyzer> MakeTexcoordDriftAnalyzer();
+std::unique_ptr<IAnalyzer> MakeTextureAppearanceAnalyzer();
+std::unique_ptr<IAnalyzer> MakeSpecularAnalyzer();
 
 }

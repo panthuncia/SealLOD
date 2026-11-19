@@ -137,6 +137,7 @@ bool CLodResolvePathHit(
     const uint materialFlags = materialInfo.materialFlags;
 
     const uint3 triIdx = DecodeTriangleCompact(primitive, md);
+    g_clodUvRemapTriangle = primitive; // stage 6 step 2: the triangle a UV remap is read for (clodUvRemap.hlsli)
     const ClodResolvedTriangle tri = CLodResolveLoadTriangle(triIdx, md, g_clodRtHitTransformIndex);
     const PerObjectBuffer obj = LoadInstanceTransformForDrawWithAssemblyTransform(md.objAndMesh.x, g_clodRtHitTransformIndex);
     const float3 edge1WS = mul(float4(tri.p1 - tri.p0, 0.0f), obj.model).xyz;

@@ -238,6 +238,10 @@ struct CullingCameraInfo
     float viewportWidth;
     float viewportHeight;
     float reyesDiceRatePixels;
+    float lodAppearanceWeight; // error channels: the appearance channel's weight, 0 unused (docs/clod-simplification-validation.md)
+    uint lodGeometricChannel; // CLOD_LOD_GEOMETRIC_CHANNEL_*: which geometric error selects
+    float lodChannelReserved0;
+    float lodChannelReserved1;
     float4 viewRightWorld;
     float4 viewUpWorld;
     float4 viewForwardWorld;
@@ -285,10 +289,10 @@ struct PerFrameBuffer {
     uint terrainStochasticDerivativeNormalsEnabled;
     float terrainStochasticBlendCurve;
     uint terrainGaussianStochasticEnabled;
-    uint terrainStochasticRegisterPad;
-    uint terrainStochasticPad0;
-    uint terrainStochasticPad1;
-    uint terrainStochasticPad2;
+    float clodNormalSpreadRoughnessCap; // stage 6 step 3 (clodNormalSpread.hlsli); was terrainStochasticRegisterPad
+    float clodNormalSpreadRoughnessScale; // stage 6 step 3 (clodNormalSpread.hlsli); was terrainStochasticPad0
+    float clodDebugMaterialRoughnessPlusOne; // stage 6 step 3 diagnostics (clodNormalSpread.hlsli), 0 off; was terrainStochasticPad1
+    float clodDebugMaterialMetallicPlusOne;  // was terrainStochasticPad2
     uint parallaxOcclusionMappingEnabled;
     uint terrainParallaxOcclusionMappingEnabled;
     float terrainParallaxHeightScale;

@@ -178,6 +178,15 @@ void ::ResourceManager::UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, U
 		SettingsManager::GetInstance().getSettingGetter<float>("objectReyesDisplacementScale")();
 	perFrameCBData.objectParallaxHeightScale =
 		SettingsManager::GetInstance().getSettingGetter<float>("objectParallaxHeightScale")();
+	perFrameCBData.clodNormalSpreadRoughnessScale =
+		SettingsManager::GetInstance().getSettingGetter<float>(CLodNormalSpreadRoughnessScaleSettingName)();
+	perFrameCBData.clodNormalSpreadRoughnessCap =
+		SettingsManager::GetInstance().getSettingGetter<float>(CLodNormalSpreadRoughnessCapSettingName)();
+	const auto debugMaterialPlusOne = [](float value) { return value >= 0.0f ? std::min(value, 1.0f) + 1.0f : 0.0f; };
+	perFrameCBData.clodDebugMaterialRoughnessPlusOne =
+		debugMaterialPlusOne(SettingsManager::GetInstance().getSettingGetter<float>(CLodDebugMaterialRoughnessSettingName)());
+	perFrameCBData.clodDebugMaterialMetallicPlusOne =
+		debugMaterialPlusOne(SettingsManager::GetInstance().getSettingGetter<float>(CLodDebugMaterialMetallicSettingName)());
 	if (TerrainParallaxDiagnosticsEnabled()) {
 		static std::atomic_bool logged{ false };
 		bool expected = false;

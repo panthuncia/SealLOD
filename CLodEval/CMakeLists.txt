@@ -4,6 +4,7 @@
 
 cmake_minimum_required(VERSION 3.16)
 
+find_package(Ktx CONFIG REQUIRED)  # the tests write KTX2 sources
 find_package(lz4 CONFIG REQUIRED)
 find_package(nlohmann_json REQUIRED CONFIG)
 
@@ -12,16 +13,25 @@ get_filename_component(CLOD_EVAL_BR_ROOT "${CMAKE_CURRENT_LIST_DIR}/../BasicRend
 add_library(CLodEvalCore STATIC
     "src/Analyzers/Analyzers.cpp"
     "src/Analyzers/Analyzers.h"
+    "src/Analyzers/AppearanceAnalyzers.cpp"
     "src/Analyzers/GeometryAnalyzers.cpp"
     "src/Analyzers/HierarchyAnalyzers.cpp"
     "src/Analyzers/MemoryAnalyzers.cpp"
+    "src/Analyzers/NormalAnalyzers.cpp"
+    "src/Analyzers/SpecularAnalyzers.cpp"
+    "src/Analyzers/TexcoordAnalyzers.cpp"
+    "src/Analyzers/TextureAnalyzers.cpp"
     "src/Analyzers/VoxelFidelity.cpp"
     "src/Analyzers/VoxelFidelity.h"
     "src/Capture.cpp"
     "src/Capture.h"
     "src/Core/Analyzer.h"
+    "src/Core/Appearance.cpp"
+    "src/Core/Appearance.h"
     "src/Core/CachedMesh.cpp"
     "src/Core/CachedMesh.h"
+    "src/Core/ErrorChannels.cpp"
+    "src/Core/ErrorChannels.h"
     "src/Core/Image.cpp"
     "src/Core/Image.h"
     "src/Core/MergeHierarchy.cpp"
@@ -32,6 +42,10 @@ add_library(CLodEvalCore STATIC
     "src/Core/Process.h"
     "src/Core/Results.cpp"
     "src/Core/Results.h"
+    "src/Core/SourceTextures.cpp"
+    "src/Core/SourceTextures.h"
+    "src/Core/TriangleGrid.cpp"
+    "src/Core/TriangleGrid.h"
     "src/Suite.cpp"
     "src/Transition.cpp"
     "src/Transition.h"
@@ -66,7 +80,7 @@ set_target_properties(CLodEval PROPERTIES
 )
 
 add_executable(CLodEvalTests "tests/CLodEvalTests.cpp")
-target_link_libraries(CLodEvalTests PRIVATE CLodEvalCore CLodBuildCore)
+target_link_libraries(CLodEvalTests PRIVATE CLodEvalCore CLodBuildCore KTX::ktx)
 
 foreach(_clod_eval_target CLodEvalCore CLodEval CLodEvalTests)
     set_target_properties(${_clod_eval_target} PROPERTIES CXX_STANDARD 23 CXX_STANDARD_REQUIRED ON)

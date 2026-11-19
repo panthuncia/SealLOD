@@ -74,8 +74,7 @@ namespace {
 			{ "assets", { { { "path", asset.path.generic_string() } } } },
 			{ "resolution", { capture.width * scale, capture.height * scale } },
 			{ "output", output.generic_string() },
-			{ "cache_only", true },
-			{ "ready_timeout_seconds", capture.readyTimeoutSeconds },
+			{ "cache_only", true },			{ "ready_timeout_seconds", capture.readyTimeoutSeconds },
 			{ "views", std::move(views) },
 			{ "probes", std::move(probes) },
 		};

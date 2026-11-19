@@ -17,6 +17,12 @@ static constexpr uint32_t CLOD_PAGE_ATTRIBUTE_JOINTS = 1u << 1;
 static constexpr uint32_t CLOD_PAGE_ATTRIBUTE_WEIGHTS = 1u << 2;
 static constexpr uint32_t CLOD_PAGE_ATTRIBUTE_COLOR = 1u << 3;
 static constexpr uint32_t CLOD_PAGE_ATTRIBUTE_TANGENT_FRAME = 1u << 4;
+// Stage 6 step 2 (docs/clod-appearance-stage6.md): some cluster of the page has a UV remap block (ClusterLODUvRemap.h), whose
+// page-relative byte offset is its UV set 0 descriptor's reserved0. Only builds with lodErrorChannelsTextureRemap write it.
+static constexpr uint32_t CLOD_PAGE_ATTRIBUTE_UV_REMAP = 1u << 5;
+// Stage 6 step 3: some cluster of the page has a normal spread block (ClusterLODNormalSpread.h), whose page-relative byte offset is its
+// UV set 0 descriptor's reserved1. Only builds with lodNormalSpread write it.
+static constexpr uint32_t CLOD_PAGE_ATTRIBUTE_NORMAL_SPREAD = 1u << 6;
 
 static constexpr uint32_t CLOD_POSITION_FORMAT_FLOAT3 = 1u;
 static constexpr uint32_t CLOD_POSITION_FORMAT_FLOAT3_STRIDE_BYTES = sizeof(float) * 3u;
@@ -219,6 +225,27 @@ static constexpr uint32_t CLOD_GROUP_FLAG_BRANCH_VOXEL = 1u << 5;    // only in 
 // the traversal hierarchy.
 static constexpr uint32_t CLOD_GROUP_FLAG_BRANCH_SHADOW = 1u << 6;
 static constexpr uint32_t CLOD_GROUP_BRANCH_FLAGS = CLOD_GROUP_FLAG_BRANCH_TRIANGLE | CLOD_GROUP_FLAG_BRANCH_VOXEL | CLOD_GROUP_FLAG_BRANCH_SHADOW;
+// Build diagnostics, read by no shader: which meshoptimizer path simplified this group into the clusters of the segments
+// that refine into it (clodSimplifyMethod in clusterlod.h: 0 none, 1 regular, 2 permissive fallback, 3 sloppy fallback).
+// Set only by the clusterlod builder; merge hierarchies and voxel builds leave it 0. Read it with ClusterLODGroupSimplifyMethod.
+static constexpr uint32_t CLOD_GROUP_SIMPLIFY_METHOD_SHIFT = 7u;
+static constexpr uint32_t CLOD_GROUP_SIMPLIFY_METHOD_MASK = 3u << CLOD_GROUP_SIMPLIFY_METHOD_SHIFT;
+inline constexpr uint32_t ClusterLODGroupSimplifyMethod(uint32_t groupFlags)
+{
+	return (groupFlags & CLOD_GROUP_SIMPLIFY_METHOD_MASK) >> CLOD_GROUP_SIMPLIFY_METHOD_SHIFT;
+}
+// Build diagnostics, read by no shader: what simplification validation decided for this group (clodSimplifyValidation in
+// clusterlod.h: 0 not validated, 1 first candidate accepted, 2 accepted after a rejection, 3 every candidate rejected, so the
+// group is terminal). 0 unless ClusterLODBuilderSettings::simplifyValidation is on. Read it with ClusterLODGroupSimplifyValidation.
+static constexpr uint32_t CLOD_GROUP_SIMPLIFY_VALIDATION_SHIFT = 9u;
+static constexpr uint32_t CLOD_GROUP_SIMPLIFY_VALIDATION_MASK = 3u << CLOD_GROUP_SIMPLIFY_VALIDATION_SHIFT;
+inline constexpr uint32_t ClusterLODGroupSimplifyValidation(uint32_t groupFlags)
+{
+	return (groupFlags & CLOD_GROUP_SIMPLIFY_VALIDATION_MASK) >> CLOD_GROUP_SIMPLIFY_VALIDATION_SHIFT;
+}
+// Build diagnostics, read by no shader: the clusters of the segments that refine into this group came from an update candidate
+// with replacement vertices (clodGroup::simplify_replaced). 0 unless ClusterLODBuilderSettings::simplifyUpdate is on.
+static constexpr uint32_t CLOD_GROUP_FLAG_SIMPLIFY_REPLACED = 1u << 11;
 // A voxel group is one material: its part-local material slot (palette index before the portal's material base) is in
 // the flags' top 16 bits. Triangle clusters name theirs in their descriptors.
 static constexpr uint32_t CLOD_GROUP_VOXEL_MATERIAL_SLOT_SHIFT = 16u;

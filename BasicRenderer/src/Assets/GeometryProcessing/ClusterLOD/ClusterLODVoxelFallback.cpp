@@ -31,6 +31,7 @@
 #include <iomanip>
 #include <map>
 
+#include <oneapi/tbb/task_arena.h>
 #include <spdlog/spdlog.h>
 #include <tracy/Tracy.hpp>
 
@@ -46,6 +47,7 @@
 
 #include "Assets/GeometryProcessing/ClusterLOD/ClusterLODBuildState.h"
 #include "Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelFallback.h"
+#include "Assets/GeometryProcessing/ClusterLOD/ClusterLODVoxelClosure.h"
 
 namespace clod_detail
 {
@@ -246,6 +248,18 @@ namespace clod_detail
 		return 0.5f * std::sqrt(cx * cx + cy * cy + cz * cz);
 	}
 
+	// Room for count more elements, growing geometrically: reserving exactly the new size on every append copies the whole
+	// vector each time, which is quadratic over a mesh's groups.
+	template <typename T>
+	void ReserveForAppend(std::vector<T>& values, size_t count)
+	{
+		const size_t needed = values.size() + count;
+		if (needed > values.capacity())
+		{
+			values.reserve(std::max(needed, values.capacity() * 2u));
+		}
+	}
+
 	std::vector<uint32_t> BuildGroupTriangleIndices(
 		const std::vector<meshopt_Meshlet>& meshlets,
 		const std::vector<uint32_t>& meshletVertices,
@@ -262,10 +276,15 @@ namespace clod_detail
 		const uint32_t endMeshlet = std::min<uint32_t>(
 			static_cast<uint32_t>(meshlets.size()),
 			firstMeshlet + meshletCount);
+		size_t indexCount = 0u;
+		for (uint32_t meshletIndex = firstMeshlet; meshletIndex < endMeshlet; ++meshletIndex)
+		{
+			indexCount += static_cast<size_t>(meshlets[meshletIndex].triangle_count) * 3ull;
+		}
+		triangleIndices.reserve(indexCount);
 		for (uint32_t meshletIndex = firstMeshlet; meshletIndex < endMeshlet; ++meshletIndex)
 		{
 			const meshopt_Meshlet& meshlet = meshlets[meshletIndex];
-			triangleIndices.reserve(triangleIndices.size() + static_cast<size_t>(meshlet.triangle_count) * 3ull);
 			for (uint32_t triangleIndex = 0; triangleIndex < meshlet.triangle_count; ++triangleIndex)
 			{
 				const uint32_t triBase = meshlet.triangle_offset + triangleIndex * 3u;
@@ -691,8 +710,8 @@ namespace clod_detail
 			state.groupMeshletChunks[groupIndex],
 			state.groupMeshletVertexChunks[groupIndex],
 			state.groupMeshletTriangleChunks[groupIndex]);
-		buildInput.voxelTriangleIndices.reserve(buildInput.voxelTriangleIndices.size() + triangles.size());
-		buildInput.voxelTriangleRefinedGroupIds.reserve(buildInput.voxelTriangleRefinedGroupIds.size() + triangles.size() / 3ull);
+		ReserveForAppend(buildInput.voxelTriangleIndices, triangles.size());
+		ReserveForAppend(buildInput.voxelTriangleRefinedGroupIds, triangles.size() / 3ull);
 		for (uint32_t index : triangles)
 		{
 			buildInput.voxelTriangleIndices.push_back(vertexBase + index);
@@ -760,8 +779,8 @@ namespace clod_detail
 			state.groupMeshletTriangleChunks[groupIndex],
 			firstMeshlet,
 			segment.meshletCount);
-		buildInput.voxelTriangleIndices.reserve(buildInput.voxelTriangleIndices.size() + triangles.size());
-		buildInput.voxelTriangleRefinedGroupIds.reserve(buildInput.voxelTriangleRefinedGroupIds.size() + triangles.size() / 3ull);
+		ReserveForAppend(buildInput.voxelTriangleIndices, triangles.size());
+		ReserveForAppend(buildInput.voxelTriangleRefinedGroupIds, triangles.size() / 3ull);
 		for (uint32_t index : triangles)
 		{
 			buildInput.voxelTriangleIndices.push_back(vertexBase + index);
@@ -837,8 +856,8 @@ namespace clod_detail
 					state.groupMeshletTriangleChunks[groupIndex],
 					meshletIndex,
 					1u);
-				buildInput.voxelTriangleIndices.reserve(buildInput.voxelTriangleIndices.size() + triangles.size());
-				buildInput.voxelTriangleRefinedGroupIds.reserve(buildInput.voxelTriangleRefinedGroupIds.size() + triangles.size() / 3ull);
+				ReserveForAppend(buildInput.voxelTriangleIndices, triangles.size());
+				ReserveForAppend(buildInput.voxelTriangleRefinedGroupIds, triangles.size() / 3ull);
 				for (uint32_t index : triangles)
 				{
 					buildInput.voxelTriangleIndices.push_back(vertexBase + index);
@@ -2201,6 +2220,7 @@ namespace clod_detail
 		std::vector<uint8_t>& seedMask)
 	{
 		ZoneScopedN("ClusterLODUtilities::VoxelFallback::RejectVoxelSeedsThatLoseSurfaces");
+		const auto seedsStart = std::chrono::steady_clock::now();
 		const uint32_t groupCount = static_cast<uint32_t>(groupInputs.size());
 		std::vector<std::vector<uint32_t>> children(groupCount), parents(groupCount);
 		std::vector<uint32_t> depthOrder;
@@ -2236,12 +2256,10 @@ namespace clod_detail
 		}
 
 		std::map<std::pair<uint32_t, float>, bool> verdicts;
-		uint32_t traced = 0u, trialled = 0u, emptyProposals = 0u;
-		const auto passes = [&](uint32_t groupIndex, float width) -> bool {
-			const auto cached = verdicts.find({ groupIndex, width });
-			if (cached != verdicts.end()) {
-				return cached->second;
-			}
+		std::atomic<uint32_t> traced = 0u, trialled = 0u, emptyProposals = 0u;
+		// Whether a group voxelized at a width keeps its surfaces: a function of the two alone (thread-safe, without a material
+		// sampler), so the verdicts a sweep will ask for can be worked out ahead, side by side.
+		const auto evaluate = [&](uint32_t groupIndex, float width) -> bool {
 			bool result = true;
 			const VoxelFallbackGroupAnalysis& analysis = groupInputs[groupIndex].analysis;
 			std::vector<std::span<const DirectX::XMFLOAT3>> lists;
@@ -2262,7 +2280,9 @@ namespace clod_detail
 			if (analysis.valid && width > 0.0f && !lists.empty()) {
 				++traced;
 				// With no cells, this is all that any voxelization at this width could lose. Most aggregate geometry ends here.
-				const CLodCache::VoxelSurfaceTrace walls = CLodCache::TraceVoxelSurface(lists, {}, analysis.aabbMin, width);
+				// The triangles' side is gathered and traced once, for the walls and for the proposal's cells.
+				const CLodCache::VoxelSurfaceSource surface = CLodCache::PrepareVoxelSurfaceSource(lists, analysis.aabbMin, width);
+				const CLodCache::VoxelSurfaceTrace walls = CLodCache::TraceVoxelSurface(surface, {});
 				VoxelFallbackGroupBuildInput source;
 				if (walls.SurfaceLoss() > settings.voxelSurfaceLossLimit && BuildVoxelFallbackSourceGeometry(state, groupIndex, vertexStrideBytes, source)) {
 					++trialled;
@@ -2297,7 +2317,10 @@ namespace clod_detail
 						spdlog::warn("ClusterLOD voxel surface test: group={} depth={} width={} produced no cells to test", groupIndex, state.groups[groupIndex].depth, width);
 					}
 					else {
-						const CLodCache::VoxelSurfaceTrace trace = CLodCache::TraceVoxelSurface(lists, cells, proposal.renderPayload.aabbMin, width);
+						const DirectX::XMFLOAT3& cellOrigin = proposal.renderPayload.aabbMin;
+						const bool sameOrigin = cellOrigin.x == surface.origin.x && cellOrigin.y == surface.origin.y && cellOrigin.z == surface.origin.z;
+						const CLodCache::VoxelSurfaceTrace trace =
+							sameOrigin ? CLodCache::TraceVoxelSurface(surface, cells) : CLodCache::TraceVoxelSurface(lists, cells, cellOrigin, width);
 						result = trace.SurfaceLoss() <= settings.voxelSurfaceLossLimit;
 						spdlog::info(
 							"ClusterLOD voxel surface test: group={} depth={} width={} cells={} surface_loss={} wall_share={} wall_deficit={} deficit={} seed={} passes={}",
@@ -2305,15 +2328,94 @@ namespace clod_detail
 					}
 				}
 			}
+			return result;
+		};
+		const auto passes = [&](uint32_t groupIndex, float width) -> bool {
+			const auto cached = verdicts.find({ groupIndex, width });
+			if (cached != verdicts.end()) {
+				return cached->second;
+			}
+			const bool result = evaluate(groupIndex, width);
 			verdicts.insert({ { groupIndex, width }, result });
 			return result;
 		};
+		// The sweep below asks for verdicts in depth order and stops at the first failure, which withdraws that group and the
+		// groups below it. A group with no wanted voxel child asks at its own width, which no verdict changes, and any group below a
+		// failure comes before it in depth order, so each such verdict is asked for in some sweep: they are worked out first, at
+		// most kParallelVerdicts at a time as tasks (each voxelizes), together with every seed's own-width verdict, and the sweeps
+		// read them. A group with voxel children grows from them and is asked
+		// only once they pass, so it is asked one by one. A material sampler may not be thread-safe: with one, all are one by one.
+		constexpr size_t kParallelVerdicts = 8u;
+		const bool parallelVerdicts = coverageMaterialSampler == nullptr;
 
 		const uint32_t seedsBefore = static_cast<uint32_t>(std::count(seedMask.begin(), seedMask.end(), uint8_t{ 1u }));
 		std::vector<uint8_t> wanted(groupCount, 0u);
 		std::vector<float> widths(groupCount, 0.0f);
+		// What the seeds ask for, and the width each group would get: a voxel parent grows from its widest voxel child. requests
+		// receives the (group, width) of every wanted group without a wanted child.
+		const auto plan = [&](std::vector<std::pair<uint32_t, float>>* requests) {
+			std::fill(wanted.begin(), wanted.end(), uint8_t{ 0u });
+			for (const uint32_t groupIndex : depthOrder) {
+				bool hasVoxelChild = false;
+				float widestChild = 0.0f;
+				for (const uint32_t child : children[groupIndex]) {
+					if (wanted[child] != 0u) {
+						hasVoxelChild = true;
+						widestChild = std::max(widestChild, widths[child]);
+					}
+				}
+				if (seedMask[groupIndex] == 0u && !hasVoxelChild) {
+					continue;
+				}
+				wanted[groupIndex] = 1u;
+				if (hasVoxelChild) {
+					widths[groupIndex] = widestChild * std::max(1.01f, settings.voxelFallbackGrowthFactor);
+				}
+				else {
+					const float acceptance = groupInputs[groupIndex].autoAcceptanceErrorReference / std::max(1.0f, settings.voxelFallbackAcceptanceBias);
+					widths[groupIndex] = acceptance > 0.0f ? std::min(groupInputs[groupIndex].analysis.targetVoxelWidth, acceptance) : groupInputs[groupIndex].analysis.targetVoxelWidth;
+				}
+				if (!hasVoxelChild) {
+					requests->push_back({ groupIndex, widths[groupIndex] });
+				}
+			}
+		};
 		for (bool withdrew = true; withdrew;) {
 			withdrew = false;
+			if (parallelVerdicts) {
+				std::vector<std::pair<uint32_t, float>> requests, pending;
+				plan(&requests);
+				// Every seed is also asked at its own width once the seeds below it withdraw, which on dense meshes is a chain of
+				// single verdicts up the hierarchy. A verdict is a function of group and width alone, so those are worked out here
+				// too: the sweeps then find them, and one that no sweep asks for only costs its time.
+				std::vector<std::pair<uint32_t, float>> ownWidths;
+				for (const uint32_t groupIndex : depthOrder) {
+					if (seedMask[groupIndex] != 0u) {
+						const float acceptance = groupInputs[groupIndex].autoAcceptanceErrorReference / std::max(1.0f, settings.voxelFallbackAcceptanceBias);
+						ownWidths.push_back({ groupIndex, acceptance > 0.0f ? std::min(groupInputs[groupIndex].analysis.targetVoxelWidth, acceptance) : groupInputs[groupIndex].analysis.targetVoxelWidth });
+					}
+				}
+				for (const std::vector<std::pair<uint32_t, float>>* list : { &requests, &ownWidths }) {
+					for (const auto& request : *list) {
+						if (verdicts.find(request) == verdicts.end() && std::find(pending.begin(), pending.end(), request) == pending.end()) {
+							pending.push_back(request);
+						}
+					}
+				}
+				// At most kParallelVerdicts at once (each voxelizes), each taking the next pending verdict as it finishes one.
+				std::vector<uint8_t> results(pending.size(), 0u);
+				std::atomic<size_t> next = 0u;
+				oneapi::tbb::this_task_arena::isolate([&] {
+					TaskSchedulerManager::GetInstance().ParallelFor("ClusterLODVoxelFallback::SeedVerdicts", std::min(kParallelVerdicts, pending.size()), [&](size_t) {
+						for (size_t k = next.fetch_add(1u); k < pending.size(); k = next.fetch_add(1u)) {
+							results[k] = evaluate(pending[k].first, pending[k].second) ? 1u : 0u;
+						}
+					});
+				});
+				for (size_t k = 0; k < pending.size(); ++k) {
+					verdicts.insert({ pending[k], results[k] != 0u });
+				}
+			}
 			// What the seeds ask for, and the width each group would get: a voxel parent grows from its widest voxel child.
 			std::fill(wanted.begin(), wanted.end(), uint8_t{ 0u });
 			for (const uint32_t groupIndex : depthOrder) {
@@ -2355,8 +2457,9 @@ namespace clod_detail
 			}
 		}
 		spdlog::info(
-			"ClusterLOD voxel surface test: seeds {} of {} kept, {} groups traced, {} trial voxelizations, {} with no cells",
-			std::count(seedMask.begin(), seedMask.end(), uint8_t{ 1u }), seedsBefore, traced, trialled, emptyProposals);
+			"ClusterLOD voxel surface test: seeds {} of {} kept, {} groups traced, {} trial voxelizations, {} with no cells, {:.0f} ms",
+			std::count(seedMask.begin(), seedMask.end(), uint8_t{ 1u }), seedsBefore, traced.load(), trialled.load(), emptyProposals.load(),
+			std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - seedsStart).count());
 	}
 
 	// What the voxel pass replaces in place, kept for a fork: the triangle groups before the pass and the triangle pages of
@@ -2552,17 +2655,25 @@ namespace clod_detail
 			originalGroupErrors[groupIndex] = state.groups[groupIndex].bounds.error;
 		}
 
+		for (uint32_t groupIndex = 0; groupIndex < originalGroupCount; ++groupIndex)
 		{
-			ZoneScopedN("ClusterLODUtilities::VoxelFallback::AnalyzeGroups");
-			for (uint32_t groupIndex = 0; groupIndex < originalGroupCount; ++groupIndex)
-			{
-				stats.analyzedGroups++;
-				maxDepth = std::max(maxDepth, static_cast<uint32_t>(std::max(state.groups[groupIndex].depth, 0)));
+			maxDepth = std::max(maxDepth, static_cast<uint32_t>(std::max(state.groups[groupIndex].depth, 0)));
+		}
+
+		// Each group's source and analysis are its own (a function of the group alone), so they are worked out only for the groups
+		// that can need them, when they first may: an automatic fork's possible seeds first, then the groups the surface test asks
+		// about, then the groups voxels are built for. Groups run as tasks; the counts are summed afterwards.
+		constexpr uint8_t kFailed = 1u, kValid = 2u, kAutoCandidate = 3u;
+		std::vector<uint8_t> outcomes(originalGroupCount, 0u);
+		std::vector<uint8_t> analyzed(originalGroupCount, 0u);
+		std::atomic<uint64_t> sourceUs = 0u, analysisUs = 0u;
+		const auto analyzeGroup = [&](uint32_t groupIndex) {
+				uint8_t& outcome = outcomes[groupIndex];
 				if (groupIndex >= state.groupVertexChunks.size() || groupIndex >= state.groupMeshletVertexChunks.size() ||
 					groupIndex >= state.groupMeshletChunks.size() || groupIndex >= state.groupMeshletTriangleChunks.size())
 				{
-					stats.failedBuilds++;
-					continue;
+					outcome = kFailed;
+					return;
 				}
 
 				const ClusterLODGroup& group = state.groups[groupIndex];
@@ -2570,23 +2681,23 @@ namespace clod_detail
 				const auto sourceBuildStart = std::chrono::steady_clock::now();
 				if (!BuildVoxelFallbackSourceGeometry(state, groupIndex, vertexStrideBytes, buildInput))
 				{
-					stats.sourceBuildUs += elapsedUsSince(sourceBuildStart);
-					stats.failedBuilds++;
-					continue;
+					sourceUs.fetch_add(elapsedUsSince(sourceBuildStart), std::memory_order_relaxed);
+					outcome = kFailed;
+					return;
 				}
-				stats.sourceBuildUs += elapsedUsSince(sourceBuildStart);
+				sourceUs.fetch_add(elapsedUsSince(sourceBuildStart), std::memory_order_relaxed);
 
 				const auto analysisStart = std::chrono::steady_clock::now();
 				buildInput.analysis = AnalyzeVoxelFallbackBuildInput(state, buildInput, vertexStrideBytes, settings);
-				stats.analysisUs += elapsedUsSince(analysisStart);
+				analysisUs.fetch_add(elapsedUsSince(analysisStart), std::memory_order_relaxed);
 
 				if (!buildInput.analysis.valid)
 				{
-					stats.failedBuilds++;
-					continue;
+					outcome = kFailed;
+					return;
 				}
 
-				stats.validGroups++;
+				outcome = kValid;
 				const bool hasOnlyRefinedDomain = group.segmentCount != 0u && group.terminalSegmentCount == 0u;
 				const bool hasFiniteTriangleReductionError = finiteVoxelDecisionError(originalGroupErrors[groupIndex]);
 				const RefinedChildErrorRange childErrorRange = GetRefinedChildTraversalErrorRange(state, groupIndex);
@@ -2605,14 +2716,38 @@ namespace clod_detail
 					targetVoxelRepresentationError * std::max(1.0f, settings.voxelFallbackAcceptanceBias) <= buildInput.autoAcceptanceErrorReference;
 				if (buildInput.autoWouldFitBudget)
 				{
-					stats.autoCandidateGroups++;
+					outcome = kAutoCandidate;
 				}
 				groupInputs[groupIndex].analysis = buildInput.analysis;
 				groupInputs[groupIndex].autoWouldFitBudget = buildInput.autoWouldFitBudget;
 				groupInputs[groupIndex].autoAcceptanceErrorReference = buildInput.autoAcceptanceErrorReference;
 				groupInputs[groupIndex].sourcePrimitiveCountForCubeBudget = buildInput.sourcePrimitiveCountForCubeBudget;
+			};
+		const auto analyzeGroups = [&](const std::vector<uint8_t>& wanted) {
+			ZoneScopedN("ClusterLODUtilities::VoxelFallback::AnalyzeGroups");
+			std::vector<uint32_t> pending;
+			for (uint32_t groupIndex = 0; groupIndex < originalGroupCount; ++groupIndex)
+			{
+				if (wanted[groupIndex] != 0u && analyzed[groupIndex] == 0u)
+				{
+					pending.push_back(groupIndex);
+					analyzed[groupIndex] = 1u;
+				}
 			}
-		}
+			oneapi::tbb::this_task_arena::isolate([&] {
+				TaskSchedulerManager::GetInstance().ParallelFor("ClusterLODVoxelFallback::AnalyzeGroups", pending.size(),
+					[&](size_t k) { analyzeGroup(pending[k]); });
+			});
+			for (const uint32_t groupIndex : pending)
+			{
+				stats.analyzedGroups++;
+				stats.failedBuilds += outcomes[groupIndex] == kFailed ? 1u : 0u;
+				stats.validGroups += outcomes[groupIndex] >= kValid ? 1u : 0u;
+				stats.autoCandidateGroups += outcomes[groupIndex] == kAutoCandidate ? 1u : 0u;
+			}
+			stats.sourceBuildUs = sourceUs.load();
+			stats.analysisUs = analysisUs.load();
+		};
 		TracyPlot("CLOD.VoxelFallback.ValidGroups", static_cast<int64_t>(stats.validGroups));
 		TracyPlot("CLOD.VoxelFallback.AutoCandidateGroups", static_cast<int64_t>(stats.autoCandidateGroups));
 
@@ -2620,7 +2755,7 @@ namespace clod_detail
 		VoxelSourceTriangleBVH sharedCoverageSourceTriangles;
 		const VoxelSourceTriangleBVH* sharedVoxelCoverageSourceTriangles = nullptr;
 
-		auto buildVoxelGroup = [&](uint32_t groupIndex, const std::vector<uint8_t>& requiredVoxelSourceMask, bool requireBudgetFit, bool requireQualityFit, bool forceReplaceGroupWithVoxels) -> bool
+		auto buildVoxelGroup = [&](uint32_t groupIndex, const std::vector<uint8_t>& requiredVoxelSourceMask, bool requireBudgetFit, bool requireQualityFit, bool forceReplaceGroupWithVoxels, bool allowReplaceGroupWithVoxels) -> bool
 		{
 			ZoneScopedN("ClusterLODUtilities::VoxelFallback::BuildVoxelGroup");
 			if (groupIndex >= groupInputs.size())
@@ -3145,7 +3280,7 @@ namespace clod_detail
 
 			const float triangleError = group.bounds.error;
 			const bool terminalErrorSentinel = triangleError >= std::numeric_limits<float>::max() * 0.5f;
-			const bool replaceGroupWithVoxels = forceReplaceGroupWithVoxels || group.terminalSegmentCount == 0u;
+			const bool replaceGroupWithVoxels = forceReplaceGroupWithVoxels || (allowReplaceGroupWithVoxels && group.terminalSegmentCount == 0u);
 			group.representationError = packedVoxelRepresentationError;
 			if (replaceGroupWithVoxels)
 			{
@@ -3220,14 +3355,9 @@ namespace clod_detail
 		std::vector<uint8_t> replaceVoxelGroupMask(originalGroupCount, 0u);
 		std::vector<uint8_t> buildVoxelGroupMask(originalGroupCount, 0u);
 		std::vector<uint8_t> seedVoxelGroupMask(originalGroupCount, 0u);
-		for (uint32_t groupIndex = 0; groupIndex < originalGroupCount; ++groupIndex)
-		{
-			if (groupInputs[groupIndex].autoWouldFitBudget)
-			{
-				seedVoxelGroupMask[groupIndex] = 1u;
-			}
-		}
 		uint32_t forkStallRejectedSeeds = 0u;
+		// Groups that may be seeds: every group, or with an automatic fork those whose triangle reduction stalls (below).
+		std::vector<uint8_t> mayBeSeed(originalGroupCount, forkMode == ClusterLODVoxelForkMode::Auto ? 0u : 1u);
 		if (forkMode == ClusterLODVoxelForkMode::Auto)
 		{
 			// Voxels win where triangle reduction stalls: the next level keeps most of a seed's triangles (or there is no
@@ -3259,19 +3389,23 @@ namespace clod_detail
 			}
 			for (uint32_t groupIndex = 0; groupIndex < originalGroupCount; ++groupIndex)
 			{
-				if (seedVoxelGroupMask[groupIndex] == 0u)
-				{
-					continue;
-				}
 				const bool stalled = hasParent[groupIndex] == 0u ||
 					static_cast<double>(trianglesKeptByParents[groupIndex]) >
 						static_cast<double>(settings.voxelForkStallRatio) * static_cast<double>(groupTriangles[groupIndex]);
-				if (!stalled || groupTriangles[groupIndex] < settings.voxelForkMinTriangles)
-				{
-					seedVoxelGroupMask[groupIndex] = 0u;
-					++forkStallRejectedSeeds;
-				}
+				mayBeSeed[groupIndex] = stalled && groupTriangles[groupIndex] >= settings.voxelForkMinTriangles ? 1u : 0u;
 			}
+		}
+		// A seed is a group whose voxels would be no worse than its children's triangle cut (its analysis says), among those.
+		analyzeGroups(mayBeSeed);
+		for (uint32_t groupIndex = 0; groupIndex < originalGroupCount; ++groupIndex)
+		{
+			if (groupInputs[groupIndex].autoWouldFitBudget)
+			{
+				seedVoxelGroupMask[groupIndex] = 1u;
+			}
+		}
+		if (forkMode == ClusterLODVoxelForkMode::Auto)
+		{
 			if (std::none_of(seedVoxelGroupMask.begin(), seedVoxelGroupMask.end(), [](uint8_t seed) { return seed != 0u; }))
 			{
 				state.voxelGroupMapping = {};
@@ -3327,6 +3461,8 @@ namespace clod_detail
 					}
 				}
 			}
+			// The seeds and their ancestors are the groups the test asks about.
+			analyzeGroups(reachable);
 			for (bool grew = true; grew;) {
 				grew = false;
 				for (uint32_t groupIndex = 0; groupIndex < originalGroupCount; ++groupIndex) {
@@ -3408,6 +3544,9 @@ namespace clod_detail
 			}
 		}
 
+		// The groups voxels are built for (the replaced groups and their descendants).
+		analyzeGroups(buildVoxelGroupMask);
+
 		auto hasMarkedVoxelRefinedChild = [&](uint32_t groupIndex) -> bool
 		{
 			if (groupIndex >= originalGroupCount)
@@ -3466,6 +3605,31 @@ namespace clod_detail
 				{
 					buildVoxelGroupMask[groupIndex] = 0u;
 				}
+			}
+		}
+
+		// A voxel group may only be refined from voxel parents (ValidateVoxelParentClosure below): ComputeVoxelReplaceClosure.
+		std::vector<uint8_t> dependencyVoxelReplaceMask;
+		{
+			std::vector<std::vector<uint32_t>> voxelClosureParents(originalGroupCount);
+			std::vector<uint32_t> terminalSegmentCounts(originalGroupCount, 0u);
+			for (uint32_t parentGroupIndex = 0; parentGroupIndex < originalGroupCount; ++parentGroupIndex)
+			{
+				terminalSegmentCounts[parentGroupIndex] = state.groups[parentGroupIndex].terminalSegmentCount;
+				for (uint32_t childGroupIndex : CollectUniqueRefinedChildren(state, parentGroupIndex))
+				{
+					if (childGroupIndex < originalGroupCount)
+					{
+						voxelClosureParents[childGroupIndex].push_back(parentGroupIndex);
+					}
+				}
+			}
+			uint32_t keptTriangleGroups = 0u;
+			dependencyVoxelReplaceMask = ComputeVoxelReplaceClosure(
+				voxelClosureParents, replaceVoxelGroupMask, buildVoxelGroupMask, terminalSegmentCounts, &keptTriangleGroups);
+			if (keptTriangleGroups != 0u)
+			{
+				spdlog::debug("ClusterLOD voxel fallback: {} group(s) below a seed keep triangles (a parent stays triangles)", keptTriangleGroups);
 			}
 		}
 
@@ -3533,7 +3697,7 @@ namespace clod_detail
 				const bool seedVoxelPath = seedVoxelGroupMask[groupIndex] != 0u;
 				const bool requireBudgetFit = seedVoxelPath && !inheritedVoxelPath;
 				const bool requireQualityFit = seedVoxelPath && !inheritedVoxelPath;
-				const bool builtVoxelGroup = buildVoxelGroup(groupIndex, buildVoxelGroupMask, requireBudgetFit, requireQualityFit, inheritedVoxelPath);
+				const bool builtVoxelGroup = buildVoxelGroup(groupIndex, buildVoxelGroupMask, requireBudgetFit, requireQualityFit, inheritedVoxelPath, dependencyVoxelReplaceMask[groupIndex] != 0u);
 				if (!builtVoxelGroup)
 				{
 					throw std::runtime_error(

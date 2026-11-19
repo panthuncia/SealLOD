@@ -1,13 +1,17 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <map>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 
+#include "Core/ErrorChannels.h"
 #include "Core/Results.h"
+#include "Core/SourceTextures.h"
 
 namespace clodeval {
 
@@ -22,7 +26,19 @@ struct SuiteVariant {
 	std::string name;
 	std::map<std::string, std::string> settings;
 	std::filesystem::path assetSettings;  // empty: no per-asset rules
+	// A mesh subset of another variant (--meshes): only these glTF mesh indices are built, analyzed and drawn. Its name is
+	// "<base>~m<tag>", so its build, results and captures sit beside the base variant's and never replace them.
+	std::string baseName;
+	std::vector<uint32_t> meshSubset;
 };
+
+// Parses --meshes: comma-separated glTF mesh indices, as in the /glTF/Mesh/<index> mesh names results use. An item may
+// also be a whole mesh name ("/glTF/Mesh/12/Primitive/0"). Throws on anything else.
+std::vector<uint32_t> ParseMeshSubset(const std::string& text);
+// The glTF mesh index in a mesh name such as "/glTF/Mesh/12/Primitive/0", or -1.
+int64_t MeshIndexOfName(std::string_view meshName);
+// The variant restricted to a mesh subset, named "<base>~m<tag>".
+SuiteVariant MakeMeshSubsetVariant(const SuiteVariant& base, const std::vector<uint32_t>& meshes);
 
 // How a suite's builds are rendered. See docs/clod-evaluation.md for what each view and probe is for.
 struct SuiteCapture {
@@ -30,7 +46,9 @@ struct SuiteCapture {
 	uint32_t width = 1280u;
 	uint32_t height = 720u;
 	uint32_t referenceScale = 4u;  // the reference renders this many times larger per axis
-	uint32_t accumulateFrames = 64u;  // the period of the SGGX sample sequence
+	// Frames each probe averages. Raster triangles are the same every frame, so one is enough; suites with voxels ask
+	// for 64, the period of the SGGX sample sequence.
+	uint32_t accumulateFrames = 1u;
 	double fovDegrees = 60.0;
 	double farRadii = 400.0;
 	double readyTimeoutSeconds = 240.0;
@@ -59,6 +77,16 @@ struct Suite {
 	std::vector<std::string> analyzers;  // empty: all
 	std::vector<Budget> budgets;
 	SuiteCapture capture;
+	// false: CLodCacheTool --no-textures, for geometry-only suites over assets whose textures take long to process.
+	bool textures = true;
+	// Runtime LOD selection rules quality.appearance's cut sweep evaluates besides the stored errors, each under a "rule" tag
+	// (docs/clod-evaluation.md). Analysis only: they do not change what is built.
+	std::vector<CutRule> cutRules;
+	// Simulated appearance bakes quality.texture sweeps besides the stored UVs (docs/clod-appearance-stage6.md). Analysis only.
+	std::vector<TextureBake> textureBakes;
+	// quality.specular's footprint (AnalysisContext::specularFootprint). Analysis only.
+	double specularFootprint = 1.0;
+	double specularSpreadCap = 1.0; // AnalysisContext::specularSpreadCap. Analysis only.
 };
 
 // Throws std::runtime_error, naming the problem, if the suite is malformed.
@@ -79,10 +107,14 @@ enum class BuildOutcome { Built, UpToDate, Failed };
 struct BuildOptions {
 	std::filesystem::path cacheTool;
 	bool force = false;
+	// Keep an existing build whose settings, assets and mesh subset match even though the tool binary changed since
+	// (--reuse-builds): for variants a generator change cannot affect, such as ones that leave a new feature off.
+	bool reuseBuilds = false;
 };
 
 // Runs CLodCacheTool for a variant unless nothing it depends on has changed. A changed tool binary
-// counts, so editing the generator and rebuilding the tool is enough to invalidate the cache.
+// counts, so editing the generator and rebuilding the tool is enough to invalidate the cache, unless
+// reuseBuilds is set.
 BuildOutcome BuildVariant(const Suite& suite, const SuiteVariant& variant, const BuildOptions& options, std::string& outError);
 
 // Where the variant's results go.
@@ -96,11 +128,16 @@ struct AnalyzeOptions {
 	// A forked mesh (CachedMesh::IsForked) is measured per branch: "" both, as "<mesh>#triangle" and "<mesh>#voxel";
 	// "triangle" or "voxel" just that one, under the mesh's own name (comparable with an unforked build).
 	std::string branch;
+	std::vector<CutRule> cutRules;  // AnalysisContext::cutRules; AnalyzeVariant uses the suite's when empty
+	std::vector<TextureBake> textureBakes;  // AnalysisContext::textureBakes; AnalyzeVariant uses the suite's when empty
+	double specularFootprint = 0.0;         // AnalysisContext::specularFootprint; AnalyzeVariant uses the suite's when 0
+	double specularSpreadCap = -1.0;        // AnalysisContext::specularSpreadCap; AnalyzeVariant uses the suite's when below 0
 };
 
 struct MeshToAnalyze {
 	std::filesystem::path metadataPath;
 	std::string asset;
+	std::filesystem::path source;  // the source asset, when known: quality.texture reads a .glb's materials from it
 };
 
 // Runs the analyzers over caches. Fails if an analyzer is unknown or a cache cannot be opened:

@@ -29,6 +29,7 @@
 #include "include/clodResolveTerrainDerivatives.hlsli"
 #include "include/clodResolveMeshlet.hlsli"
 #include "include/clodMaterialUvs.hlsli"
+#include "include/clodNormalSpread.hlsli"
 #include "include/clodResolveVoxel.hlsli"
 #include "include/clodResolveReyes.hlsli"
 
@@ -644,6 +645,9 @@ MaterialInputs CLodResolveEvaluateMaterial(
     }
 #endif
 
+    // Stage 6 step 3: a coarse cluster's normal spread widens the material's roughness (clodNormalSpread.hlsli).
+    CLodApplyNormalSpread(md, triIdx, bary.m_lambda, materialInputs);
+
     surface.dpdx = dpdx;
     surface.dpdy = dpdy;
     return materialInputs;
@@ -763,6 +767,10 @@ bool ResolveClodCommonSampleFromVisKeyWithFace(uint64_t vis, uint2 pixel, bool i
         microTrianglePatchDomain1 = microTrianglePatchDomain2;
         microTrianglePatchDomain2 = microTrianglePatchDomainTmp;
     }
+#if !defined(PSO_CLOD_REYES_PATCH)
+    // Stage 6 step 2: the triangle a UV remap is read for (clodUvRemap.hlsli). Reyes patches leave it unset.
+    g_clodUvRemapTriangle = meshletTriangleIndex | (isBackface ? CLOD_UV_REMAP_SWAPPED_CORNERS : 0u);
+#endif
 
     const ClodResolvedTriangle tri = CLodResolveLoadTriangle(triIdx, md, assemblyTransformIndex);
 

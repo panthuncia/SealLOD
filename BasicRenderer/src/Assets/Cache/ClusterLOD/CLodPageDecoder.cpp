@@ -1,4 +1,6 @@
 #include <BasicRenderer/Assets/CLodPageDecoder.h>
+#include <BasicRenderer/Assets/ClusterLODUvRemap.h>
+#include <BasicRenderer/Assets/ClusterLODNormalSpread.h>
 
 #include <algorithm>
 #include <bit>
@@ -100,8 +102,71 @@ bool TrianglePage::Parse(std::span<const std::byte> page, TrianglePage& out, std
 				return Fail(outError, std::format("meshlet {} normals do not fit in the page", meshletIndex));
 			}
 		}
+		if (out.HasUvRemap() && out.m_header.uvSetCount != 0u && out.m_header.uvDescriptorOffset != 0u) {
+			const uint64_t descriptorOffset = static_cast<uint64_t>(out.m_header.uvDescriptorOffset) +
+				static_cast<uint64_t>(meshletIndex) * out.m_header.uvSetCount * sizeof(CLodMeshletUvDescriptor);
+			if (!RangeFits(descriptorOffset, sizeof(CLodMeshletUvDescriptor), page.size())) {
+				return Fail(outError, std::format("meshlet {} UV descriptor does not fit in the page", meshletIndex));
+			}
+			const uint32_t blockOffset = Load<CLodMeshletUvDescriptor>(page, static_cast<size_t>(descriptorOffset)).reserved0;
+			std::string blockError;
+			if (blockOffset != 0u && (blockOffset >= page.size() || (blockOffset % 4u) != 0u ||
+				!clod_uv_remap::ValidateBlock(page.subspan(blockOffset), meshlet.triangleCount, &blockError))) {
+				return Fail(outError, std::format("meshlet {} UV remap block at {}: {}", meshletIndex, blockOffset, blockError));
+			}
+		}
+		if (out.HasNormalSpread() && out.m_header.uvSetCount != 0u && out.m_header.uvDescriptorOffset != 0u) {
+			const uint64_t descriptorOffset = static_cast<uint64_t>(out.m_header.uvDescriptorOffset) +
+				static_cast<uint64_t>(meshletIndex) * out.m_header.uvSetCount * sizeof(CLodMeshletUvDescriptor);
+			if (!RangeFits(descriptorOffset, sizeof(CLodMeshletUvDescriptor), page.size())) {
+				return Fail(outError, std::format("meshlet {} UV descriptor does not fit in the page", meshletIndex));
+			}
+			const uint32_t blockOffset = Load<CLodMeshletUvDescriptor>(page, static_cast<size_t>(descriptorOffset)).reserved1;
+			if (blockOffset != 0u && (blockOffset >= page.size() || (blockOffset % 4u) != 0u ||
+				!clod_normal_spread::ValidateBlock(page.subspan(blockOffset), meshlet.vertexCount))) {
+				return Fail(outError, std::format("meshlet {} normal spread block at {} is malformed", meshletIndex, blockOffset));
+			}
+		}
 	}
 	return true;
+}
+
+std::span<const std::byte> TrianglePage::UvRemapBlock(uint32_t meshletIndex) const
+{
+	if (!HasUvRemap() || m_header.uvSetCount == 0u || m_header.uvDescriptorOffset == 0u || meshletIndex >= m_header.meshletCount) {
+		return {};
+	}
+	const uint32_t blockOffset = Load<CLodMeshletUvDescriptor>(
+		m_page, static_cast<size_t>(m_header.uvDescriptorOffset) +
+			static_cast<size_t>(meshletIndex) * m_header.uvSetCount * sizeof(CLodMeshletUvDescriptor)).reserved0;
+	if (blockOffset == 0u || blockOffset >= m_page.size()) {
+		return {};
+	}
+	const std::span<const std::byte> rest = m_page.subspan(blockOffset);
+	const uint32_t size = clod_uv_remap::BlockSize(rest);
+	return size != 0u && size <= rest.size() ? rest.first(size) : std::span<const std::byte>{};
+}
+
+std::span<const std::byte> TrianglePage::NormalSpreadBlock(uint32_t meshletIndex) const
+{
+	if (!HasNormalSpread() || m_header.uvSetCount == 0u || m_header.uvDescriptorOffset == 0u || meshletIndex >= m_header.meshletCount) {
+		return {};
+	}
+	const uint32_t blockOffset = Load<CLodMeshletUvDescriptor>(
+		m_page, static_cast<size_t>(m_header.uvDescriptorOffset) +
+			static_cast<size_t>(meshletIndex) * m_header.uvSetCount * sizeof(CLodMeshletUvDescriptor)).reserved1;
+	if (blockOffset == 0u || blockOffset >= m_page.size()) {
+		return {};
+	}
+	const uint32_t size = clod_normal_spread::BlockSize(Meshlet(meshletIndex).vertexCount);
+	const std::span<const std::byte> rest = m_page.subspan(blockOffset);
+	return size <= rest.size() ? rest.first(size) : std::span<const std::byte>{};
+}
+
+float TrianglePage::NormalSpread(uint32_t meshletIndex, uint32_t vertexIndex) const
+{
+	const std::span<const std::byte> block = NormalSpreadBlock(meshletIndex);
+	return block.empty() ? 0.0f : clod_normal_spread::Decode(clod_normal_spread::VertexByte(block, vertexIndex));
 }
 
 TriangleMeshlet TrianglePage::Meshlet(uint32_t meshletIndex) const
@@ -178,6 +243,28 @@ DirectX::XMFLOAT3 TrianglePage::Color(const TriangleMeshlet& meshlet, uint32_t v
 
 std::vector<PageStream> TrianglePage::Streams() const
 {
+	// Stage 6 step 2: the remap blocks follow the triangle stream; their region starts at the first block.
+	uint32_t uvRemapOffset = 0u;
+	if (HasUvRemap()) {
+		for (uint32_t meshletIndex = 0; meshletIndex < m_header.meshletCount; ++meshletIndex) {
+			const std::span<const std::byte> block = UvRemapBlock(meshletIndex);
+			if (!block.empty()) {
+				const uint32_t offset = static_cast<uint32_t>(block.data() - m_page.data());
+				uvRemapOffset = uvRemapOffset == 0u ? offset : std::min(uvRemapOffset, offset);
+			}
+		}
+	}
+	// Stage 6 step 3: the normal spread blocks follow the remap blocks.
+	uint32_t normalSpreadOffset = 0u;
+	if (HasNormalSpread()) {
+		for (uint32_t meshletIndex = 0; meshletIndex < m_header.meshletCount; ++meshletIndex) {
+			const std::span<const std::byte> block = NormalSpreadBlock(meshletIndex);
+			if (!block.empty()) {
+				const uint32_t offset = static_cast<uint32_t>(block.data() - m_page.data());
+				normalSpreadOffset = normalSpreadOffset == 0u ? offset : std::min(normalSpreadOffset, offset);
+			}
+		}
+	}
 	// In the order the encoder lays them out. An offset of 0 means the stream is absent.
 	const struct { const char* name; uint32_t offset; } layout[] = {
 		{ "header", 0u },
@@ -192,6 +279,8 @@ std::vector<PageStream> TrianglePage::Streams() const
 		{ "uvs", m_header.uvBitstreamDirectoryOffset },
 		{ "bone_indices", m_header.boneIndexStreamOffset },
 		{ "triangles", m_header.triangleStreamOffset },
+		{ "uv_remap", uvRemapOffset },
+		{ "normal_spread", normalSpreadOffset },
 	};
 	std::vector<PageStream> streams;
 	size_t index = 0;

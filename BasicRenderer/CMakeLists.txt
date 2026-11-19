@@ -847,7 +847,7 @@ target_compile_features(MergeHierarchyTests PRIVATE cxx_std_23)
 target_compile_definitions(MergeHierarchyTests PRIVATE NOMINMAX)
 
 add_executable(CLodCacheFormatTests "tests/CLodCacheFormatTests.cpp")
-target_link_libraries(CLodCacheFormatTests PRIVATE CLodBuildCore)
+target_link_libraries(CLodCacheFormatTests PRIVATE CLodBuildCore KTX::ktx)  # libktx writes the KTX2 decoder test's files
 target_compile_features(CLodCacheFormatTests PRIVATE cxx_std_23)
 target_compile_definitions(CLodCacheFormatTests PRIVATE NOMINMAX)
 

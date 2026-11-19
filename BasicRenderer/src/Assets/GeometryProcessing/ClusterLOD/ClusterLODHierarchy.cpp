@@ -52,6 +52,32 @@ namespace clod_detail
 {
 	namespace
 	{
+		// Error channels (stage 3): an internal node holds the largest of its children's, present only when every child has them.
+		// A structural node is always opened, so its geometric channel carries the structural error as maxQuadricError does.
+		void MergeChildErrorChannels(ClusterLODNode& node, const ClusterLODNode* children, uint32_t childCount, bool structuralNode)
+		{
+			ClusterLODTraversalMetric& metric = node.traversalMetric;
+			metric.maxMeasuredGeometricError = 0.0f;
+			metric.maxAppearanceError = 0.0f;
+			metric.channelFlags = CLOD_NODE_CHANNELS_PRESENT;
+			for (uint32_t c = 0; c < childCount; ++c)
+			{
+				metric.maxMeasuredGeometricError = std::max(metric.maxMeasuredGeometricError, children[c].traversalMetric.maxMeasuredGeometricError);
+				metric.maxAppearanceError = std::max(metric.maxAppearanceError, children[c].traversalMetric.maxAppearanceError);
+				metric.channelFlags &= children[c].traversalMetric.channelFlags;
+			}
+			if ((metric.channelFlags & CLOD_NODE_CHANNELS_PRESENT) == 0u)
+			{
+				metric.maxMeasuredGeometricError = 0.0f;
+				metric.maxAppearanceError = 0.0f;
+				metric.channelFlags = 0u;
+			}
+			else if (structuralNode)
+			{
+				metric.maxMeasuredGeometricError = std::max(kClusterLODStructuralTraversalError, metric.maxMeasuredGeometricError);
+			}
+		}
+
 		// A forked DAG: each branch has its own parents. A group in one branch takes that branch's; a shared group keeps
 		// the triangle branch's in its record, and gets a shadow record (CLOD_GROUP_FLAG_BRANCH_SHADOW, appended after
 		// every group) for the voxel branch when its bounds or parent differ there.
@@ -280,6 +306,9 @@ namespace clod_detail
 			AssignForkedParents(state);
 		}
 
+		// Error channels (stage 3) for every group, or none: a forked DAG's shadow records have none, and such meshes keep none.
+		const bool channelsPresent = !state.errorChannels.empty() && state.errorChannels.size() == state.groups.size();
+
 		state.lodNodeRanges.assign(lodLevelCount, {});
 		state.lodLevelRoots.resize(lodLevelCount);
 		for (uint32_t d = 0; d < lodLevelCount; ++d) {
@@ -399,6 +428,13 @@ namespace clod_detail
 					leafError = std::max(leafError, state.forkVoxelBounds[info.ownerGroupId].error);
 				}
 				node.traversalMetric.maxQuadricError = TraversalNodeErrorFromGroupError(leafError);
+				if (channelsPresent)
+				{
+					const ClusterLODGroupErrorChannels& channels = state.errorChannels[info.ownerGroupId];
+					node.traversalMetric.maxMeasuredGeometricError = TraversalNodeErrorFromGroupError(channels.geometric);
+					node.traversalMetric.maxAppearanceError = channels.appearance;
+					node.traversalMetric.channelFlags = CLOD_NODE_CHANNELS_PRESENT;
+				}
 			}
 
 			if (leafCount == 1)
@@ -455,6 +491,7 @@ namespace clod_detail
 					for (uint32_t c = 0; c < childCount; ++c)
 						maxErr = std::max(maxErr, children[c].traversalMetric.maxQuadricError);
 					node.traversalMetric.maxQuadricError = maxErr;
+					MergeChildErrorChannels(node, children, childCount, false);
 
 					meshopt_Bounds mergedCull = meshopt_computeSphereBounds(
 						&children[0].traversalMetric.cullingSphere.x,
@@ -509,6 +546,7 @@ namespace clod_detail
 				node.traversalMetric.maxQuadricError = structuralNode
 					? std::max(kClusterLODStructuralTraversalError, maxErr)
 					: maxErr;
+				MergeChildErrorChannels(node, children, childCount, structuralNode);
 
 				meshopt_Bounds mergedCull = meshopt_computeSphereBounds(
 					&children[0].traversalMetric.cullingSphere.x,

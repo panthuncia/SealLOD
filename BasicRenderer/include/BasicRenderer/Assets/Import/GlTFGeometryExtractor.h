@@ -10,6 +10,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <string>
 #include <string_view>
@@ -66,12 +67,14 @@ struct ExtractOptions {
 	std::function<void(const PrimitiveOutcome&)> onOutcome;
 	// A cache miss is reported as Missing instead of building.
 	bool cacheOnly = false;
-	// A primitive that throws is reported as Failed and the rest go on; otherwise the first failure is rethrown.
+	// A primitive that throws is reported as Failed and the rest go on; otherwise the first failure is rethrown. One that runs
+	// out of memory (std::bad_alloc) is first retried alone once the others have finished, and nothing more is admitted until
+	// the primitives building beside it are done.
 	bool continueOnError = false;
 	// Bounds the memory of primitives building at once: each is admitted at triangles * bytesPerTriangle, largest first,
 	// and one always runs. 0: no bound (the scheduler's ParallelFor).
 	std::uint64_t memoryBudgetBytes = 0;
-	std::uint64_t bytesPerTriangle = 320;
+	std::uint64_t bytesPerTriangle = 1800;
 	// Most primitives admitted at once when memoryBudgetBytes bounds them. 0: only the budget limits them.
 	unsigned jobs = 0;
 	// The identity a cache was built for; a file now hashing differently is reported (its caches will miss).
@@ -93,6 +96,11 @@ struct PrimitiveFormat {
 	std::uint32_t uvSetCount = 0;
 };
 PrimitiveFormat DescribePrimitiveFormat(const nlohmann::json& gltf, const std::string& sourceIdentifier, size_t meshIndex, size_t primitiveIndex);
+// The same, reading the source file at sourcePath for what only it holds: with the stage 6 colour-weighted texture term enabled
+// (ClusterLODMaterialAppearanceWanted: the colour weight or the UV remap), the primitive's material appearance hash (base colour factor, texture parameters and image
+// content), which goes in identity.appearanceHash. Otherwise exactly the overload above.
+PrimitiveFormat DescribePrimitiveFormat(const nlohmann::json& gltf, const std::string& sourceIdentifier, size_t meshIndex, size_t primitiveIndex,
+	const std::filesystem::path& sourcePath);
 
 // Required extensions this importer reads. A file requiring any other is refused.
 bool IsSupportedRequiredExtension(std::string_view extension);

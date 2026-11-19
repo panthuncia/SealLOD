@@ -19,9 +19,18 @@ The run has four stages:
 
 1. **Geometry.** Every primitive's CLod data is loaded from the cache if current, or built and saved.
    - Primitives are built largest first.
-   - They are admitted while their estimated memory (`--bytes-per-triangle`, default 320) fits `--memory-budget-gb`. The
+   - They are admitted while their estimated memory (`--bytes-per-triangle`, default 1800) fits `--memory-budget-gb`. The
      default budget is three quarters of the RAM available when the run starts. A live check of the process's committed
      memory also holds admission back.
+   - 1800 bytes per triangle is the default build's peak committed memory per admitted triangle on Zorah's dense meshes:
+     about 1.7 kB private and 1.5 kB working set, against about 0.6 kB with the old defaults. See "Memory" under
+     [Build cost](clod-appearance-stage6.md#build-cost). The run's summary line "At most N M triangles admitted at once: B
+     bytes/triangle of peak working set" measures it for the scene at hand.
+   - A primitive that runs out of memory (`bad allocation`) is not failed straight away. Nothing more is admitted until the
+     primitives building beside it have finished. Once everything else is done, it is retried alone, and only a second
+     failure is final. One allocation failure therefore no longer cascades into every primitive in flight.
+   - An image that cannot be read because memory ran out fails its primitive instead of hashing as unreadable. Before, that
+     hash entered the primitive's cache key, so such entries were saved under keys no later run looks up.
    - Each primitive's data is dropped once saved, so the scene's geometry is never all in memory.
    - meshopt-compressed buffer views are freed when the last primitive reading them finishes.
 2. **Scene.** The tool describes the scene as the cache will hold it (`GlTFLoader::DescribeScene`, below).

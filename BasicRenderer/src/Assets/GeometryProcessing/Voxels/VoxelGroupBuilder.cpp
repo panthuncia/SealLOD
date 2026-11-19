@@ -4,11 +4,13 @@
 #include <array>
 #include <cassert>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <limits>
 #include <memory>
 #include <memory_resource>
+#include <mutex>
 #include <numeric>
 #include <random>
 #include <unordered_map>
@@ -16,6 +18,10 @@
 #include <vector>
 
 #include <embree4/rtcore.h>
+#include <oneapi/tbb/enumerable_thread_specific.h>
+#include <oneapi/tbb/parallel_invoke.h>
+#include <oneapi/tbb/parallel_sort.h>
+#include <oneapi/tbb/task_arena.h>
 #include <spdlog/spdlog.h>
 #include <tracy/Tracy.hpp>
 
@@ -90,6 +96,57 @@ namespace
 		{
 			CurrentVoxelizationScratchResource() = previous;
 		}
+	};
+
+	// One voxelization's scratch, as a pool per thread: tasks allocate from their own thread's pool, so they do not queue on one
+	// lock the way they did on a synchronized pool. A block remembers its pool, because scratch made in one task can be grown
+	// or freed in another, and a pool's own lock is then taken (rarely contended) to give it back.
+	class PerThreadPoolResource final : public std::pmr::memory_resource
+	{
+	public:
+		PerThreadPoolResource() = default;
+		PerThreadPoolResource(const PerThreadPoolResource&) = delete;
+		PerThreadPoolResource& operator=(const PerThreadPoolResource&) = delete;
+
+	private:
+		struct alignas(64) Pool
+		{
+			std::mutex mutex;
+			std::pmr::unsynchronized_pool_resource pool;
+		};
+		struct Header
+		{
+			Pool* owner = nullptr;
+		};
+
+		static size_t HeaderBytes(size_t alignment) { return std::max(sizeof(Header), alignment); }
+
+		void* do_allocate(size_t bytes, size_t alignment) override
+		{
+			Pool& pool = m_pools.local();
+			const size_t headerBytes = HeaderBytes(alignment);
+			std::byte* block;
+			{
+				std::lock_guard lock(pool.mutex);
+				block = static_cast<std::byte*>(pool.pool.allocate(bytes + headerBytes, std::max(alignment, alignof(Header))));
+			}
+			std::byte* user = block + headerBytes;
+			reinterpret_cast<Header*>(user - sizeof(Header))->owner = &pool;
+			return user;
+		}
+
+		void do_deallocate(void* pointer, size_t bytes, size_t alignment) override
+		{
+			std::byte* user = static_cast<std::byte*>(pointer);
+			Pool* owner = reinterpret_cast<Header*>(user - sizeof(Header))->owner;
+			const size_t headerBytes = HeaderBytes(alignment);
+			std::lock_guard lock(owner->mutex);
+			owner->pool.deallocate(user - headerBytes, bytes + headerBytes, std::max(alignment, alignof(Header)));
+		}
+
+		bool do_is_equal(const std::pmr::memory_resource& other) const noexcept override { return this == &other; }
+
+		oneapi::tbb::enumerable_thread_specific<Pool> m_pools;
 	};
 
 	using PmrUInt32Vector = std::pmr::vector<uint32_t>;
@@ -190,29 +247,6 @@ namespace
 		}
 	};
 
-	struct WeldedEdgeKey
-	{
-		uint32_t a = 0;
-		uint32_t b = 0;
-
-		bool operator==(const WeldedEdgeKey&) const = default;
-	};
-
-	struct WeldedEdgeKeyHash
-	{
-		size_t operator()(const WeldedEdgeKey& key) const
-		{
-			return (static_cast<size_t>(key.a) << 32u) ^ static_cast<size_t>(key.b);
-		}
-	};
-
-	struct UvChartEdge
-	{
-		uint32_t triangleIndex = 0;
-		DirectX::XMFLOAT2 uvA{};
-		DirectX::XMFLOAT2 uvB{};
-	};
-
 	class DisjointSet
 	{
 	public:
@@ -303,8 +337,62 @@ namespace
 		const float positionEpsilon = std::max(1.0e-6f, std::isfinite(boundsDiagonal) ? boundsDiagonal * 1.0e-6f : 1.0e-6f);
 		const float invPositionEpsilon = 1.0f / positionEpsilon;
 
-		std::unordered_map<WeldCellKey, std::vector<uint32_t>, WeldCellKeyHash> weldGrid;
-		weldGrid.reserve(vertexCount);
+		// The weld grid: an open-addressed table from cell to the first and last weld id in it, the ids in a cell chained in the
+		// order they were made (what a list per cell would hold, without an allocation per cell).
+		struct WeldCell
+		{
+			uint32_t first = std::numeric_limits<uint32_t>::max(); // its cell is weldCellOf[first]
+			uint32_t last = 0u;
+		};
+		std::vector<WeldCellKey> weldCellOf;
+		size_t cellCapacity = 16u;
+		while (cellCapacity < static_cast<size_t>(vertexCount) * 2u)
+		{
+			cellCapacity *= 2u;
+		}
+		std::vector<WeldCell> weldGrid(cellCapacity);
+		const auto cellHash = [](const WeldCellKey& key) {
+			uint64_t h = static_cast<uint64_t>(key.x) * 0x9E3779B97F4A7C15ull;
+			h = (h ^ (h >> 29) ^ static_cast<uint64_t>(key.y)) * 0xBF58476D1CE4E5B9ull;
+			h = (h ^ (h >> 31) ^ static_cast<uint64_t>(key.z)) * 0x94D049BB133111EBull;
+			return static_cast<size_t>(h ^ (h >> 32));
+		};
+		// Most of a vertex's 27 neighbour cells are empty, and hashing and probing the grid for each misses the cache. A bit per
+		// filter key (a few bits per cell, small enough to stay in cache) says which cells may hold a weld; a clear bit skips the
+		// probe, which would have found nothing, so the welds are the same. The key is linear in the cell, so a neighbour's is the
+		// cell's plus a constant.
+		const size_t filterBits = std::min<size_t>(cellCapacity * 4u, size_t(1) << 27u);
+		const uint32_t filterShift = 64u - static_cast<uint32_t>(std::countr_zero(filterBits));
+		std::vector<uint64_t> cellFilter(filterBits / 64u, 0u);
+		constexpr uint64_t kFilterX = 0x9E3779B97F4A7C15ull, kFilterY = 0xC2B2AE3D27D4EB4Full, kFilterZ = 0x165667B19E3779F9ull;
+		const auto filterKey = [](const WeldCellKey& key) {
+			return static_cast<uint64_t>(key.x) * kFilterX + static_cast<uint64_t>(key.y) * kFilterY + static_cast<uint64_t>(key.z) * kFilterZ;
+		};
+		const auto filterHas = [&](uint64_t key) {
+			const uint64_t bit = key >> filterShift;
+			return (cellFilter[bit >> 6u] & (uint64_t{ 1u } << (bit & 63u))) != 0u;
+		};
+		uint64_t neighbourKeyOffsets[27];
+		for (int32_t dz = -1, i = 0; dz <= 1; ++dz)
+		{
+			for (int32_t dy = -1; dy <= 1; ++dy)
+			{
+				for (int32_t dx = -1; dx <= 1; ++dx, ++i)
+				{
+					neighbourKeyOffsets[i] = static_cast<uint64_t>(static_cast<int64_t>(dx)) * kFilterX +
+						static_cast<uint64_t>(static_cast<int64_t>(dy)) * kFilterY + static_cast<uint64_t>(static_cast<int64_t>(dz)) * kFilterZ;
+				}
+			}
+		}
+		const auto findCellHashed = [&](const WeldCellKey& key, size_t hash) -> WeldCell& {
+			size_t slot = hash & (cellCapacity - 1u);
+			while (weldGrid[slot].first != std::numeric_limits<uint32_t>::max() && !(weldCellOf[weldGrid[slot].first] == key))
+			{
+				slot = (slot + 1u) & (cellCapacity - 1u);
+			}
+			return weldGrid[slot];
+		};
+		std::vector<uint32_t> nextInCell;
 		std::vector<Float3> weldPositions;
 		std::vector<uint32_t> vertexWeldIds(vertexCount);
 		for (uint32_t vertexIndex = 0u; vertexIndex < vertexCount; ++vertexIndex)
@@ -314,6 +402,8 @@ namespace
 			{
 				vertexWeldIds[vertexIndex] = static_cast<uint32_t>(weldPositions.size());
 				weldPositions.push_back(position);
+				nextInCell.push_back(std::numeric_limits<uint32_t>::max());
+				weldCellOf.push_back(WeldCellKey{ INT64_MIN, INT64_MIN, INT64_MIN });
 				continue;
 			}
 			const WeldCellKey cell{
@@ -321,18 +411,20 @@ namespace
 				static_cast<int64_t>(std::floor(position.y * invPositionEpsilon)),
 				static_cast<int64_t>(std::floor(position.z * invPositionEpsilon)) };
 			uint32_t weldId = std::numeric_limits<uint32_t>::max();
-			for (int32_t dz = -1; dz <= 1 && weldId == std::numeric_limits<uint32_t>::max(); ++dz)
+			const uint64_t cellKey = filterKey(cell);
+			for (int32_t dz = -1, i = 0; dz <= 1 && weldId == std::numeric_limits<uint32_t>::max(); ++dz)
 			{
 				for (int32_t dy = -1; dy <= 1 && weldId == std::numeric_limits<uint32_t>::max(); ++dy)
 				{
-					for (int32_t dx = -1; dx <= 1 && weldId == std::numeric_limits<uint32_t>::max(); ++dx)
+					for (int32_t dx = -1; dx <= 1 && weldId == std::numeric_limits<uint32_t>::max(); ++dx, ++i)
 					{
-						const auto it = weldGrid.find(WeldCellKey{ cell.x + dx, cell.y + dy, cell.z + dz });
-						if (it == weldGrid.end())
+						if (!filterHas(cellKey + neighbourKeyOffsets[i]))
 						{
 							continue;
 						}
-						for (uint32_t candidate : it->second)
+						const WeldCellKey neighbour{ cell.x + dx, cell.y + dy, cell.z + dz };
+						const WeldCell& found = findCellHashed(neighbour, cellHash(neighbour));
+						for (uint32_t candidate = found.first; candidate != std::numeric_limits<uint32_t>::max(); candidate = nextInCell[candidate])
 						{
 							const Float3 delta = weldPositions[candidate] - position;
 							if (delta.lengthSq() <= positionEpsilon * positionEpsilon)
@@ -348,7 +440,20 @@ namespace
 			{
 				weldId = static_cast<uint32_t>(weldPositions.size());
 				weldPositions.push_back(position);
-				weldGrid[cell].push_back(weldId);
+				nextInCell.push_back(std::numeric_limits<uint32_t>::max());
+				weldCellOf.push_back(cell);
+				const uint64_t bit = cellKey >> filterShift;
+				cellFilter[bit >> 6u] |= uint64_t{ 1u } << (bit & 63u);
+				WeldCell& slot = findCellHashed(cell, cellHash(cell));
+				if (slot.first == std::numeric_limits<uint32_t>::max())
+				{
+					slot.first = weldId;
+				}
+				else
+				{
+					nextInCell[slot.last] = weldId;
+				}
+				slot.last = weldId;
 			}
 			vertexWeldIds[vertexIndex] = weldId;
 		}
@@ -362,8 +467,16 @@ namespace
 				std::abs(lhs.y - rhs.y) <= kUvContinuityEpsilon;
 		};
 
+		// Triangles sharing a welded edge with matching UVs join one chart. Each triangle is united with every earlier one on its
+		// edge that matches, and the chart ids are each component's lowest triangle, so the result depends only on which pairs
+		// match: the edges are grouped by sorting, not by a map of lists.
 		DisjointSet charts(triangleCount);
-		std::unordered_map<WeldedEdgeKey, std::vector<UvChartEdge>, WeldedEdgeKeyHash> edges;
+		struct EdgeEntry
+		{
+			uint32_t weldA, weldB, triangleIndex;
+			DirectX::XMFLOAT2 uvA, uvB;
+		};
+		std::vector<EdgeEntry> edges;
 		edges.reserve(static_cast<size_t>(triangleCount) * 3u);
 		for (uint32_t triangleIndex = 0u; triangleIndex < triangleCount; ++triangleIndex)
 		{
@@ -392,17 +505,30 @@ namespace
 					std::swap(weldA, weldB);
 					std::swap(uvA, uvB);
 				}
-				const WeldedEdgeKey key{ weldA, weldB };
-				std::vector<UvChartEdge>& matches = edges[key];
-				for (const UvChartEdge& match : matches)
+				edges.push_back(EdgeEntry{ weldA, weldB, triangleIndex, uvA, uvB });
+			}
+		}
+		oneapi::tbb::parallel_sort(edges.begin(), edges.end(), [](const EdgeEntry& lhs, const EdgeEntry& rhs) {
+			return lhs.weldA != rhs.weldA ? lhs.weldA < rhs.weldA : lhs.weldB != rhs.weldB ? lhs.weldB < rhs.weldB : lhs.triangleIndex < rhs.triangleIndex;
+		});
+		for (size_t first = 0u; first < edges.size();)
+		{
+			size_t end = first + 1u;
+			while (end < edges.size() && edges[end].weldA == edges[first].weldA && edges[end].weldB == edges[first].weldB)
+			{
+				++end;
+			}
+			for (size_t i = first + 1u; i < end; ++i)
+			{
+				for (size_t j = first; j < i; ++j)
 				{
-					if (uvMatches(uvA, match.uvA) && uvMatches(uvB, match.uvB))
+					if (uvMatches(edges[i].uvA, edges[j].uvA) && uvMatches(edges[i].uvB, edges[j].uvB))
 					{
-						charts.Unite(triangleIndex, match.triangleIndex);
+						charts.Unite(edges[i].triangleIndex, edges[j].triangleIndex);
 					}
 				}
-				matches.push_back(UvChartEdge{ triangleIndex, uvA, uvB });
 			}
+			first = end;
 		}
 
 		std::vector<uint32_t> componentMinimum(triangleCount, std::numeric_limits<uint32_t>::max());
@@ -582,8 +708,8 @@ namespace
 				if (axis.lengthSq() < 1e-12f)
 					continue;
 				float pa = a.dot(axis), pb = b.dot(axis), pc = c.dot(axis);
-				float triMin = std::min({ pa, pb, pc });
-				float triMax = std::max({ pa, pb, pc });
+				float triMin = std::min(std::min(pa, pb), pc);
+				float triMax = std::max(std::max(pa, pb), pc);
 				float r = boxHalfSize.x * std::abs(axis.x) +
 					boxHalfSize.y * std::abs(axis.y) +
 					boxHalfSize.z * std::abs(axis.z);
@@ -592,9 +718,9 @@ namespace
 			}
 		}
 
-		if (std::min({ a.x, b.x, c.x }) > boxHalfSize.x + kOverlapEpsilon || std::max({ a.x, b.x, c.x }) < -boxHalfSize.x - kOverlapEpsilon) return false;
-		if (std::min({ a.y, b.y, c.y }) > boxHalfSize.y + kOverlapEpsilon || std::max({ a.y, b.y, c.y }) < -boxHalfSize.y - kOverlapEpsilon) return false;
-		if (std::min({ a.z, b.z, c.z }) > boxHalfSize.z + kOverlapEpsilon || std::max({ a.z, b.z, c.z }) < -boxHalfSize.z - kOverlapEpsilon) return false;
+		if (std::min(std::min(a.x, b.x), c.x) > boxHalfSize.x + kOverlapEpsilon || std::max(std::max(a.x, b.x), c.x) < -boxHalfSize.x - kOverlapEpsilon) return false;
+		if (std::min(std::min(a.y, b.y), c.y) > boxHalfSize.y + kOverlapEpsilon || std::max(std::max(a.y, b.y), c.y) < -boxHalfSize.y - kOverlapEpsilon) return false;
+		if (std::min(std::min(a.z, b.z), c.z) > boxHalfSize.z + kOverlapEpsilon || std::max(std::max(a.z, b.z), c.z) < -boxHalfSize.z - kOverlapEpsilon) return false;
 
 		Float3 triNormal = edges[0].cross(edges[1]);
 		float d = triNormal.dot(a);
@@ -1388,14 +1514,14 @@ namespace
 			const Float3 v2 = ReadPosition(vertices, vertexStrideBytes, i2);
 
 			Float3 triMin = {
-				std::min({ v0.x, v1.x, v2.x }),
-				std::min({ v0.y, v1.y, v2.y }),
-				std::min({ v0.z, v1.z, v2.z })
+				std::min(std::min(v0.x, v1.x), v2.x),
+				std::min(std::min(v0.y, v1.y), v2.y),
+				std::min(std::min(v0.z, v1.z), v2.z)
 			};
 			Float3 triMax = {
-				std::max({ v0.x, v1.x, v2.x }),
-				std::max({ v0.y, v1.y, v2.y }),
-				std::max({ v0.z, v1.z, v2.z })
+				std::max(std::max(v0.x, v1.x), v2.x),
+				std::max(std::max(v0.y, v1.y), v2.y),
+				std::max(std::max(v0.z, v1.z), v2.z)
 			};
 
 			const uint32_t cxMin = ToCellCoord(triMin.x - halfCell.x, aabbMin.x, invCellSize.x, resolution);
@@ -2156,103 +2282,113 @@ void VoxelSourceTriangleBVH::Build(
 	}
 
 	std::unique_ptr<EmbreeScene> embreeScene = std::make_unique<EmbreeScene>();
-	embreeScene->triangleUvChartIds = BuildTriangleUvChartIds(*vertices, vertexStrideBytes, *triangleIndices);
-	const size_t sourceVertexCount = vertices->size() / vertexStrideBytes;
-	embreeScene->vertices.resize(sourceVertexCount);
-	for (size_t vertexIndex = 0; vertexIndex < sourceVertexCount; ++vertexIndex)
+	// The UV charts (a serial weld) and the Embree scenes are independent: built side by side.
+	std::vector<uint32_t> triangleUvChartIds;
+	const auto buildScenes = [&]()
 	{
-		embreeScene->vertices[vertexIndex] = ToXM(ReadPosition(*vertices, vertexStrideBytes, static_cast<uint32_t>(vertexIndex)));
-	}
-
-	auto buildEmbreeSceneForTriangles = [&](int32_t refinedGroup, std::vector<uint32_t> sourceTriangleIndices) -> bool
-	{
-		if (sourceTriangleIndices.empty())
+		const size_t sourceVertexCount = vertices->size() / vertexStrideBytes;
+		embreeScene->vertices.resize(sourceVertexCount);
+		for (size_t vertexIndex = 0; vertexIndex < sourceVertexCount; ++vertexIndex)
 		{
-			return false;
+			embreeScene->vertices[vertexIndex] = ToXM(ReadPosition(*vertices, vertexStrideBytes, static_cast<uint32_t>(vertexIndex)));
 		}
 
-		std::vector<EmbreeScene::Triangle> embreeTriangles;
-		embreeTriangles.reserve(sourceTriangleIndices.size());
-		for (uint32_t triangleIndex : sourceTriangleIndices)
+		auto buildEmbreeSceneForTriangles = [&](int32_t refinedGroup, std::vector<uint32_t> sourceTriangleIndices) -> bool
 		{
-			const size_t triangleBase = static_cast<size_t>(triangleIndex) * 3u;
-			embreeTriangles.push_back(EmbreeScene::Triangle{
-				(*triangleIndices)[triangleBase + 0u],
-				(*triangleIndices)[triangleBase + 1u],
-				(*triangleIndices)[triangleBase + 2u],
-			});
-		}
-
-		EmbreeScene::RefinedGroupScene refinedGroupScene{};
-		refinedGroupScene.refinedGroup = refinedGroup;
-		refinedGroupScene.sourceTriangleIndices = std::move(sourceTriangleIndices);
-		refinedGroupScene.scene = rtcNewScene(device);
-		RTCGeometry geometry = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_TRIANGLE);
-		DirectX::XMFLOAT3* embreeVertices = static_cast<DirectX::XMFLOAT3*>(rtcSetNewGeometryBuffer(
-			geometry,
-			RTC_BUFFER_TYPE_VERTEX,
-			0,
-			RTC_FORMAT_FLOAT3,
-			sizeof(DirectX::XMFLOAT3),
-			embreeScene->vertices.size()));
-		if (embreeVertices != nullptr && !embreeScene->vertices.empty())
-		{
-			std::memcpy(embreeVertices, embreeScene->vertices.data(), embreeScene->vertices.size() * sizeof(DirectX::XMFLOAT3));
-		}
-
-		EmbreeScene::Triangle* embreeTriangleBuffer = static_cast<EmbreeScene::Triangle*>(rtcSetNewGeometryBuffer(
-			geometry,
-			RTC_BUFFER_TYPE_INDEX,
-			0,
-			RTC_FORMAT_UINT3,
-			sizeof(EmbreeScene::Triangle),
-			embreeTriangles.size()));
-		if (embreeTriangleBuffer != nullptr && !embreeTriangles.empty())
-		{
-			std::memcpy(embreeTriangleBuffer, embreeTriangles.data(), embreeTriangles.size() * sizeof(EmbreeScene::Triangle));
-		}
-
-		rtcCommitGeometry(geometry);
-		rtcAttachGeometry(refinedGroupScene.scene, geometry);
-		rtcReleaseGeometry(geometry);
-		rtcCommitScene(refinedGroupScene.scene);
-		embreeScene->refinedGroupScenes.push_back(std::move(refinedGroupScene));
-		return true;
-	};
-
-	std::vector<uint32_t> allTriangleIndices(triangleCount);
-	std::iota(allTriangleIndices.begin(), allTriangleIndices.end(), 0u);
-	{
-		ZoneScopedN("VoxelSourceTriangleBVH::Build::EmbreeUnfilteredScene");
-		buildEmbreeSceneForTriangles(EmbreeScene::kUnfilteredRefinedGroupScene, std::move(allTriangleIndices));
-	}
-
-	if (buildRefinedGroupScenes)
-	{
-		std::unordered_map<int32_t, std::vector<uint32_t>> trianglesByRefinedGroup;
-		trianglesByRefinedGroup.reserve(triangleCount);
-		{
-			ZoneScopedN("VoxelSourceTriangleBVH::Build::GroupTriangles");
-			for (uint32_t triangleIndex = 0; triangleIndex < triangleCount; ++triangleIndex)
+			if (sourceTriangleIndices.empty())
 			{
-				int32_t refinedGroup = -1;
-				if (triangleRefinedGroupIds != nullptr && triangleIndex < triangleRefinedGroupIds->size())
+				return false;
+			}
+
+			std::vector<EmbreeScene::Triangle> embreeTriangles;
+			embreeTriangles.reserve(sourceTriangleIndices.size());
+			for (uint32_t triangleIndex : sourceTriangleIndices)
+			{
+				const size_t triangleBase = static_cast<size_t>(triangleIndex) * 3u;
+				embreeTriangles.push_back(EmbreeScene::Triangle{
+					(*triangleIndices)[triangleBase + 0u],
+					(*triangleIndices)[triangleBase + 1u],
+					(*triangleIndices)[triangleBase + 2u],
+				});
+			}
+
+			EmbreeScene::RefinedGroupScene refinedGroupScene{};
+			refinedGroupScene.refinedGroup = refinedGroup;
+			refinedGroupScene.sourceTriangleIndices = std::move(sourceTriangleIndices);
+			refinedGroupScene.scene = rtcNewScene(device);
+			RTCGeometry geometry = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_TRIANGLE);
+			DirectX::XMFLOAT3* embreeVertices = static_cast<DirectX::XMFLOAT3*>(rtcSetNewGeometryBuffer(
+				geometry,
+				RTC_BUFFER_TYPE_VERTEX,
+				0,
+				RTC_FORMAT_FLOAT3,
+				sizeof(DirectX::XMFLOAT3),
+				embreeScene->vertices.size()));
+			if (embreeVertices != nullptr && !embreeScene->vertices.empty())
+			{
+				std::memcpy(embreeVertices, embreeScene->vertices.data(), embreeScene->vertices.size() * sizeof(DirectX::XMFLOAT3));
+			}
+
+			EmbreeScene::Triangle* embreeTriangleBuffer = static_cast<EmbreeScene::Triangle*>(rtcSetNewGeometryBuffer(
+				geometry,
+				RTC_BUFFER_TYPE_INDEX,
+				0,
+				RTC_FORMAT_UINT3,
+				sizeof(EmbreeScene::Triangle),
+				embreeTriangles.size()));
+			if (embreeTriangleBuffer != nullptr && !embreeTriangles.empty())
+			{
+				std::memcpy(embreeTriangleBuffer, embreeTriangles.data(), embreeTriangles.size() * sizeof(EmbreeScene::Triangle));
+			}
+
+			rtcCommitGeometry(geometry);
+			rtcAttachGeometry(refinedGroupScene.scene, geometry);
+			rtcReleaseGeometry(geometry);
+			rtcCommitScene(refinedGroupScene.scene);
+			embreeScene->refinedGroupScenes.push_back(std::move(refinedGroupScene));
+			return true;
+		};
+
+		std::vector<uint32_t> allTriangleIndices(triangleCount);
+		std::iota(allTriangleIndices.begin(), allTriangleIndices.end(), 0u);
+		{
+			ZoneScopedN("VoxelSourceTriangleBVH::Build::EmbreeUnfilteredScene");
+			buildEmbreeSceneForTriangles(EmbreeScene::kUnfilteredRefinedGroupScene, std::move(allTriangleIndices));
+		}
+
+		if (buildRefinedGroupScenes)
+		{
+			std::unordered_map<int32_t, std::vector<uint32_t>> trianglesByRefinedGroup;
+			trianglesByRefinedGroup.reserve(triangleCount);
+			{
+				ZoneScopedN("VoxelSourceTriangleBVH::Build::GroupTriangles");
+				for (uint32_t triangleIndex = 0; triangleIndex < triangleCount; ++triangleIndex)
 				{
-					refinedGroup = (*triangleRefinedGroupIds)[triangleIndex];
+					int32_t refinedGroup = -1;
+					if (triangleRefinedGroupIds != nullptr && triangleIndex < triangleRefinedGroupIds->size())
+					{
+						refinedGroup = (*triangleRefinedGroupIds)[triangleIndex];
+					}
+					trianglesByRefinedGroup[refinedGroup].push_back(triangleIndex);
 				}
-				trianglesByRefinedGroup[refinedGroup].push_back(triangleIndex);
 			}
-		}
-		TracyPlot("CLOD.Voxel.BVH.RefinedGroupScenes", static_cast<int64_t>(trianglesByRefinedGroup.size()));
+			TracyPlot("CLOD.Voxel.BVH.RefinedGroupScenes", static_cast<int64_t>(trianglesByRefinedGroup.size()));
 
-		{
-			ZoneScopedN("VoxelSourceTriangleBVH::Build::EmbreeRefinedGroupScenes");
-			for (auto& [refinedGroup, sourceTriangleIndices] : trianglesByRefinedGroup)
 			{
-				buildEmbreeSceneForTriangles(refinedGroup, std::move(sourceTriangleIndices));
+				ZoneScopedN("VoxelSourceTriangleBVH::Build::EmbreeRefinedGroupScenes");
+				for (auto& [refinedGroup, sourceTriangleIndices] : trianglesByRefinedGroup)
+				{
+					buildEmbreeSceneForTriangles(refinedGroup, std::move(sourceTriangleIndices));
+				}
 			}
 		}
-	}
+	};
+	oneapi::tbb::this_task_arena::isolate([&] {
+		oneapi::tbb::parallel_invoke(
+			[&] { triangleUvChartIds = BuildTriangleUvChartIds(*vertices, vertexStrideBytes, *triangleIndices); },
+			buildScenes);
+	});
+	embreeScene->triangleUvChartIds = std::move(triangleUvChartIds);
 
 	if (!embreeScene->refinedGroupScenes.empty())
 	{
@@ -3035,7 +3171,7 @@ DirectX::XMFLOAT2 VoxelSourceTriangleBVH::ComputeUvDensity() const
 VoxelizeTrianglesResult VoxelizeTrianglesDetailed(const VoxelizeTrianglesInput& input)
 {
 	ZoneScopedN("VoxelGroupBuilder::VoxelizeTrianglesDetailed");
-	std::pmr::synchronized_pool_resource scratchResource;
+	PerThreadPoolResource scratchResource;
 	ScopedVoxelizationScratchResource scratchScope(&scratchResource);
 	VoxelizeScratchState scratch;
 	scratch.Begin();

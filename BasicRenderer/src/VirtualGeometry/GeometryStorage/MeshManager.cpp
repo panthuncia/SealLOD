@@ -1179,6 +1179,42 @@ bool MeshManager::AddMesh(std::shared_ptr<Mesh>& mesh, bool useMeshletReorderedV
 				segment.pageIndex += pageMapGlobalBase;
 			}
 			std::vector<ClusterLODNode> gpuNodes = mesh->GetCLodNodes();
+			// Error channels (stage 3, docs/clod-simplification-validation.md). The GPU copy of a group carries its measured
+			// geometric and appearance errors where the CPU copy keeps groupVertexCount and terminalSegmentCount, which no shader
+			// reads; its nodes carry their subtree's in their own words. A mesh built without them (or one whose boundaries come
+			// from voxels, forks, merges or assemblies) gets its stored errors there instead: the geometric channel equals the
+			// quadric error and the appearance channel is 0, so every selection rule draws exactly what the quadric error does.
+			{
+				const auto& groups = mesh->GetCLodGroups();
+				bool channels = mesh->GetCLodAssemblyInstances().empty() && mesh->GetPortalParts().empty() &&
+					std::any_of(gpuNodes.begin(), gpuNodes.end(), [](const ClusterLODNode& node) {
+						return (node.traversalMetric.channelFlags & CLOD_NODE_CHANNELS_PRESENT) != 0u;
+					});
+				for (const ClusterLODGroup& group : groups) {
+					if ((group.flags & (CLOD_GROUP_FLAG_IS_VOXEL | CLOD_GROUP_FLAG_IS_ASSEMBLY_PROXY | CLOD_GROUP_FLAG_IS_ASSEMBLY_VOXEL |
+							CLOD_GROUP_FLAG_MERGE_CHILD | CLOD_GROUP_BRANCH_FLAGS)) != 0u) {
+						channels = false;
+					}
+				}
+				std::vector<float> measured(groups.size()), appearance(groups.size(), 0.0f);
+				for (size_t index = 0; index < groups.size(); ++index) measured[index] = groups[index].bounds.error;
+				for (ClusterLODNode& node : gpuNodes) {
+					ClusterLODTraversalMetric& metric = node.traversalMetric;
+					if (!channels || (metric.channelFlags & CLOD_NODE_CHANNELS_PRESENT) == 0u) {
+						metric.maxMeasuredGeometricError = metric.maxQuadricError;
+						metric.maxAppearanceError = 0.0f;
+						metric.channelFlags = 0u;
+					}
+					else if (node.range.isGroup == CLOD_NODE_SEGMENT_LEAF && node.range.ownerGroupId < groups.size()) {
+						measured[node.range.ownerGroupId] = metric.maxMeasuredGeometricError;
+						appearance[node.range.ownerGroupId] = metric.maxAppearanceError;
+					}
+				}
+				for (size_t index = 0; index < gpuGroups.size(); ++index) {
+					std::memcpy(&gpuGroups[index].groupVertexCount, &measured[index], sizeof(float));
+					std::memcpy(&gpuGroups[index].terminalSegmentCount, &appearance[index], sizeof(float));
+				}
+			}
 			for (ClusterLODNode& node : gpuNodes) {
 				switch (node.range.isGroup) {
 				case CLOD_NODE_INTERNAL:

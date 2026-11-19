@@ -166,6 +166,7 @@ namespace
 			identity.sourceIdentifier = written.sourceIdentifier;
 			identity.primPath = primitive.primPath;
 			identity.doubleSidedVoxelSourceNormals = primitive.doubleSidedVoxelSourceNormals;
+			identity.appearanceHash = primitive.clodAppearanceHash;
 			if (CLodCacheLoader::TryLoadPrebuilt(identity)) present.fetch_add(1, std::memory_order_relaxed);
 		});
 		if (present.load() == written.primitives.size()) {
@@ -202,7 +203,8 @@ bool BuildGltfScene(const fs::path& scenePath, const GltfSceneBuildOptions& opti
 			(options.shardCount > 1u && meshIndex % options.shardCount != options.shardIndex) ||
 			(options.profile && options.profile->SkipsMesh(name)) ||
 			(skip && std::regex_match(text, *skip)) ||
-			(only && !std::regex_match(text, *only));
+			(only && !std::regex_match(text, *only)) ||
+			(!options.onlyMeshIndices.empty() && !options.onlyMeshIndices.contains(meshIndex));
 		(skipped ? skippedMeshes : selectedMeshes).fetch_add(1, std::memory_order_relaxed);
 		return skipped;
 	};
@@ -316,10 +318,10 @@ bool BuildGltfScene(const fs::path& scenePath, const GltfSceneBuildOptions& opti
 	try {
 		br::import::ImportSettings settings;
 		settings.profile = options.profile;
-		auto includeMesh = [&](size_t, std::string_view name) {
+		auto includeMesh = [&](size_t meshIndex, std::string_view name) {
 			const std::string text(name);
 			return !(options.profile && options.profile->SkipsMesh(name)) && !(skip && std::regex_match(text, *skip)) &&
-				!(only && !std::regex_match(text, *only));
+				!(only && !std::regex_match(text, *only)) && (options.onlyMeshIndices.empty() || options.onlyMeshIndices.contains(meshIndex));
 		};
 		scene = GlTFLoader::DescribeScene(result.gltf, scenePath.string(), settings, result.sourceIdentifier, includeMesh);
 		size_t placements = 0;

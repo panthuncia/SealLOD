@@ -21,7 +21,8 @@ ClusterLODPrebuildArtifacts MeshIngestBuilder::BuildClusterLODArtifacts(
 		m_uvSets,
 		m_flags,
 		m_clusterLODBuilderSettings,
-		coverageMaterialSampler);
+		coverageMaterialSampler,
+		m_materialAppearance.get());
 }
 
 ClusterLODPrebuildArtifacts MeshIngestBuilder::BuildVoxelOnlyClusterLODArtifacts(uint32_t maxCubesPerCluster) const {

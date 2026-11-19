@@ -100,6 +100,14 @@ namespace clod_detail {
 		return align4(size);
 	}
 
+	// One group's error channels (stage 3, docs/clod-simplification-validation.md), mesh units: what the group's simplified output
+	// (the clusters of the segments that refine into it) deviates from the original surface, made monotone through the DAG.
+	struct ClusterLODGroupErrorChannels
+	{
+		float geometric = 0.0f;  // two-sided sampled deviation; FLT_MAX for a terminal group
+		float appearance = 0.0f; // sqrt of the integrated squared shading-normal chord (sqrt Q_N)
+	};
+
 	struct ClusterLODBuildState
 	{
 		std::vector<ClusterLODGroup> groups;
@@ -115,6 +123,8 @@ namespace clod_detail {
 		std::vector<std::vector<meshopt_Meshlet>> groupMeshletChunks;
 		std::vector<std::vector<uint8_t>> groupMeshletTriangleChunks;
 		std::vector<std::vector<int32_t>> groupMeshletRefinedGroupChunks;
+		// Stage 6 texture channel only (lodErrorChannelsTexture): each group vertex's build vertex id, to read its UV set and chart.
+		std::vector<std::vector<uint32_t>> groupVertexGlobalIdChunks;
 
 		std::vector<ClusterLODNode> nodes;
 		std::vector<ClusterLODNodeRangeAlloc> lodNodeRanges;
@@ -130,6 +140,22 @@ namespace clod_detail {
 		// BuildClusterLODTraversalHierarchy turns them, and any parent that differs per branch, into shadow records.
 		std::vector<clodBounds> forkVoxelBounds;
 		std::vector<uint8_t> forkHasVoxelBounds;
+		// Per group when ClusterLODBuilderSettings::lodErrorChannels measured them; empty otherwise. The traversal hierarchy
+		// writes them into its nodes.
+		std::vector<ClusterLODGroupErrorChannels> errorChannels;
+
+		// Stage 6 step 2 (ClusterLODBuilderSettings::lodErrorChannelsTextureRemap): per group, per meshlet of its raw meshlet chunk
+		// (the order of its page blobs), the cluster's UV remap block (ClusterLODUvRemap.h), empty for most and when the setting is
+		// off. FinalizeMeshWidePagePacking appends them to their clusters' pages and counts what it wrote.
+		std::vector<std::vector<std::vector<std::byte>>> meshletUvRemaps;
+		uint32_t uvRemapClustersWritten = 0;
+		uint64_t uvRemapBytesWritten = 0;
+		// Stage 6 step 3 (ClusterLODBuilderSettings::lodNormalSpread): per group, per meshlet of its raw meshlet chunk, the cluster's
+		// normal spread block (ClusterLODNormalSpread.h), empty for leaves, flat clusters and when the setting is off.
+		// FinalizeMeshWidePagePacking appends them to their clusters' pages after any remap block and counts what it wrote.
+		std::vector<std::vector<std::vector<std::byte>>> meshletNormalSpreads;
+		uint32_t normalSpreadClustersWritten = 0;
+		uint64_t normalSpreadBytesWritten = 0;
 	};
 
 	// One group's clusters to pages, for builders that form their own groups (merge hierarchies).

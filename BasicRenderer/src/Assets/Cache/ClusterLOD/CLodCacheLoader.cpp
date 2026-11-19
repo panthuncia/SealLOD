@@ -6,6 +6,7 @@
 #include <BasicRenderer/Assets/DefaultCLodSettings.h>
 
 #include <atomic>
+#include <cstdio>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -38,13 +39,25 @@ namespace {
 		}
 	}
 
+	// Stage 6: the appearance a build weighed texture damage by names the entry, like the double-sided suffix, so the subset
+	// stored in its metadata carries it and every reader of the key agrees. Empty (the key as before) when there is none.
+	std::string AppearanceSuffix(const MeshCacheIdentity& identity)
+	{
+		if (identity.appearanceHash == 0u) {
+			return {};
+		}
+		char text[32];
+		std::snprintf(text, sizeof(text), "|appearance=%016llx", static_cast<unsigned long long>(identity.appearanceHash));
+		return text;
+	}
+
 		std::mutex& GetCacheSaveMutexForIdentity(const MeshCacheIdentity& identity)
 		{
 			static std::mutex cacheMutexTableGuard;
 			static std::unordered_map<std::string, std::unique_ptr<std::mutex>> cacheMutexTable;
 
 			const std::string key = identity.sourceIdentifier + "|" + identity.primPath + "|" + identity.subsetName +
-				(identity.doubleSidedVoxelSourceNormals ? "|double-sided-voxel-normals" : "");
+				(identity.doubleSidedVoxelSourceNormals ? "|double-sided-voxel-normals" : "") + AppearanceSuffix(identity);
 
 			std::lock_guard<std::mutex> lock(cacheMutexTableGuard);
 			auto& mutexPtr = cacheMutexTable[key];
@@ -68,6 +81,7 @@ namespace {
 		if (identity.doubleSidedVoxelSourceNormals) {
 			key.subsetName += "|double-sided-voxel-normals";
 		}
+		key.subsetName += AppearanceSuffix(identity);
 		return key;
 	}
 

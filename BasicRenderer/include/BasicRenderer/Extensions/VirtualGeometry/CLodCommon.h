@@ -38,6 +38,28 @@ inline constexpr const char* CLodPureComputeReplayExpansionFactorSettingName = "
 inline constexpr const char* CLodFrustumCullingSettingName = "clodFrustumCulling";
 inline constexpr const char* CLodLodHeightModeSettingName = "clodLodHeightMode";
 inline constexpr const char* CLodLodErrorPixelsSettingName = "clodLodErrorPixels";
+// LOD selection with error channels (docs/clod-simplification-validation.md, "Stage 3"), for caches built with
+// BASICRENDERER_CLOD_ERROR_CHANNELS. The appearance channel's weight (float, 0 = unused) and which geometric error selects
+// (uint32: CLodLodGeometricChannel*). Their defaults select by the quadric error alone, as before. Shadow views ignore the
+// appearance weight: shading normals do not reach a shadow map.
+inline constexpr const char* CLodLodAppearanceWeightSettingName = "clodLodAppearanceWeight";
+inline constexpr const char* CLodLodGeometricChannelSettingName = "clodLodGeometricChannel";
+// Stage 6 step 3 (docs/clod-appearance-stage6.md): how much of a coarse cluster's stored normal spread (caches built with
+// BASICRENDERER_CLOD_NORMAL_SPREAD) widens material roughness in material evaluation and path-traced hit shading:
+// alpha'^2 = alpha^2 + scale * v. Float, default 1; 0 shades with the material's roughness alone. Caches without spread blocks
+// are unaffected at any value. SARP_CLOD_NORMAL_SPREAD_ROUGHNESS sets the starting value for headless runs.
+inline constexpr const char* CLodNormalSpreadRoughnessScaleSettingName = "clodNormalSpreadRoughnessScale";
+// The widening is at most this times the material lobe's own variance: alpha'^2 = alpha^2 + min(scale * v, cap * alpha^2). Float,
+// default 1 (at most doubling alpha^2); 0 turns the widening off. SARP_CLOD_NORMAL_SPREAD_ROUGHNESS_CAP sets it headless.
+inline constexpr const char* CLodNormalSpreadRoughnessCapSettingName = "clodNormalSpreadRoughnessCap";
+// Diagnostics for judging specular appearance on scenes without glossy materials (stage 6 step 3): when at least 0, CLod material
+// evaluation and path-traced hit shading replace every surface's perceptual roughness / metalness with this (before the normal
+// spread widens the roughness). Float, default -1 (off). SARP_CLOD_DEBUG_MATERIAL_ROUGHNESS / _METALLIC set them headless.
+inline constexpr const char* CLodDebugMaterialRoughnessSettingName = "clodDebugMaterialRoughness";
+inline constexpr const char* CLodDebugMaterialMetallicSettingName = "clodDebugMaterialMetallic";
+inline constexpr uint32_t CLodLodGeometricChannelQuadric = 0u;  // meshoptimizer's accumulated quadric error (default)
+inline constexpr uint32_t CLodLodGeometricChannelMeasured = 1u; // the measured two-sided deviation from the original
+inline constexpr uint32_t CLodLodGeometricChannelMax = 2u;      // the larger of the two
 // Shadow culling at SARP's radius-100 sampling scene (pitch -45, VSM cache off)
 // emits about 2.9M contributing clusters. Past capacity the cull drops writes in
 // atomic order, so a different subset is lost each frame and shadows flicker.

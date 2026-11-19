@@ -85,6 +85,8 @@ static const uint CLOD_PAGE_ATTRIBUTE_JOINTS = 1u << 1;
 static const uint CLOD_PAGE_ATTRIBUTE_WEIGHTS = 1u << 2;
 static const uint CLOD_PAGE_ATTRIBUTE_COLOR = 1u << 3;
 static const uint CLOD_PAGE_ATTRIBUTE_TANGENT_FRAME = 1u << 4;
+static const uint CLOD_PAGE_ATTRIBUTE_UV_REMAP = 1u << 5; // stage 6 step 2: UV remap blocks (clodUvRemap.hlsli)
+static const uint CLOD_PAGE_ATTRIBUTE_NORMAL_SPREAD = 1u << 6; // stage 6 step 3: normal spread blocks (clodNormalSpread.hlsli)
 
 static const uint CLOD_POSITION_FORMAT_FLOAT3 = 1u;
 static const uint CLOD_POSITION_FORMAT_FLOAT3_STRIDE_BYTES = 12u;
@@ -287,11 +289,14 @@ struct ClusterLODGroup
     int depth;
 
     uint partIndex; // GPU copy: the CLodMeshMetadata row of the part that owns this group (CPU: firstGroupVertex)
-    uint groupVertexCount;
+    // GPU copy: the group's measured geometric error channel, mesh units (CPU: groupVertexCount). bounds.error when the mesh has
+    // no error channels. See CLodGroupSelectionError and docs/clod-simplification-validation.md, "Stage 3".
+    float measuredGeometricError;
     uint firstSegment;
     uint segmentCount;
 
-    uint terminalSegmentCount;
+    // GPU copy: the group's appearance error channel, mesh units (CPU: terminalSegmentCount). 0 without error channels.
+    float appearanceError;
     uint flags;
     uint pageMapBase; // first mesh-local page-map slot owned by this group
     uint pageCount;   // number of group-owned page-map slots / streamable pages
@@ -351,6 +356,8 @@ static const uint CLOD_GROUP_FLAG_MERGE_CHILD = 1u << 3; // streaming parent is 
 static const uint CLOD_GROUP_FLAG_BRANCH_TRIANGLE = 1u << 4;
 static const uint CLOD_GROUP_FLAG_BRANCH_VOXEL = 1u << 5;
 static const uint CLOD_GROUP_FLAG_BRANCH_SHADOW = 1u << 6;
+// Bits 7-8, 9-10 and 11 hold build diagnostics no shader reads (CLOD_GROUP_SIMPLIFY_METHOD_*, CLOD_GROUP_SIMPLIFY_VALIDATION_*,
+// CLOD_GROUP_FLAG_SIMPLIFY_REPLACED, ClusterLODShaderTypes.h).
 static const uint CLOD_GROUP_VOXEL_MATERIAL_SLOT_SHIFT = 16u; // a voxel group's material slot (ClusterLODShaderTypes.h)
 
 static const uint CLOD_VOXEL_STATIC_BONE_INDEX = 0xFFFFFFFFu;

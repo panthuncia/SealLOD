@@ -29,7 +29,8 @@ ClusterLODPrebuildArtifacts BuildClusterLODArtifactsFromGeometry(
 	const std::vector<MeshUvSetData>& uvSets,
 	unsigned int flags,
 	const ClusterLODBuilderSettings& settings,
-	const VoxelCoverageMaterialSampler* coverageMaterialSampler = nullptr);
+	const VoxelCoverageMaterialSampler* coverageMaterialSampler = nullptr,
+	const ClusterLODMaterialAppearance* materialAppearance = nullptr);
 
 ClusterLODPrebuildArtifacts BuildVoxelOnlyClusterLODArtifactsFromGeometry(
 	const std::vector<std::byte>& vertices,

@@ -102,7 +102,11 @@ struct ClusterLODTraversalMetric
     float4 cullCenterAndRadius; // xyz center (mesh space), w radius (mesh space)
     float4 lodCenterAndRadius; // xyz center (mesh space), w radius (mesh space)
     float maxQuadricError; // mesh-space conservative error bound for this subtree/leaf
-    float pad0[3];
+    // Error channels (docs/clod-simplification-validation.md, "Stage 3"): the subtree's largest measured geometric and appearance
+    // errors, mesh units. Without channels the upload sets them to maxQuadricError and 0. See CLodNodeSelectionError.
+    float maxMeasuredGeometricError;
+    float maxAppearanceError;
+    uint channelFlags;
 };
 
 struct ClusterLODNode
@@ -2632,6 +2636,50 @@ bool SphereOutsideFrustumViewSpace(float3 viewSpaceCenter, float radius, float4 
     return false;
 }
 
+// LOD selection error, mesh units (docs/clod-simplification-validation.md, "Stage 3"). The geometric error the view selects
+// with (meshoptimizer's quadric error, the measured two-sided deviation from the original, or the larger), or the appearance
+// channel times the view's weight, whichever is larger. The appearance channel is sqrt(Q_N), the root of the group's
+// integrated squared shading-normal chord against the original, so ProjectedGeometricError turns it into the root of the
+// screen-integrated squared shading error (p * sqrt(Q_N) at p pixels per unit, under Lambertian light): refining when it is over
+// the threshold refines when that error is over (threshold pixels / weight)^2. Both channels are monotone through the DAG, so
+// the result is for any weight, and every test below takes the same value for one group. Channel 0 with weight 0 is the
+// quadric error itself. Shadow maps never see shading normals: their views have weight 0, and the shadow raster ignores it.
+static const uint CLOD_LOD_GEOMETRIC_CHANNEL_QUADRIC = 0u;
+static const uint CLOD_LOD_GEOMETRIC_CHANNEL_MEASURED = 1u;
+static const uint CLOD_LOD_GEOMETRIC_CHANNEL_MAX = 2u;
+
+float CLodSelectionError(float quadricError, float measuredError, float appearanceError, CullingCameraInfo lodCam)
+{
+    float error = quadricError;
+    if (lodCam.lodGeometricChannel == CLOD_LOD_GEOMETRIC_CHANNEL_MEASURED) {
+        error = measuredError;
+    } else if (lodCam.lodGeometricChannel == CLOD_LOD_GEOMETRIC_CHANNEL_MAX) {
+        error = max(quadricError, measuredError);
+    }
+#if !CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
+    if (lodCam.lodAppearanceWeight > 0.0f) {
+        error = max(error, lodCam.lodAppearanceWeight * appearanceError);
+    }
+#endif
+    return error;
+}
+
+float CLodGroupSelectionError(ClusterLODGroup group, CullingCameraInfo lodCam)
+{
+    return CLodSelectionError(group.bounds.error, group.measuredGeometricError, group.appearanceError, lodCam);
+}
+
+float CLodNodeSelectionError(ClusterLODTraversalMetric metric, CullingCameraInfo lodCam)
+{
+    return CLodSelectionError(metric.maxQuadricError, metric.maxMeasuredGeometricError, metric.maxAppearanceError, lodCam);
+}
+
+// Whether the view selects by anything but the quadric error.
+bool CLodSelectsWithErrorChannels(CullingCameraInfo lodCam)
+{
+    return lodCam.lodGeometricChannel != CLOD_LOD_GEOMETRIC_CHANNEL_QUADRIC || lodCam.lodAppearanceWeight > 0.0f;
+}
+
 // Perspective views attenuate projected geometric error by view-space depth.
 #define CLOD_RT_OFFSCREEN_LOD_SCALE 8.0f
 #define CLOD_RT_OFFSCREEN_MAX_DISTANCE 16384.0f // Four exterior cells.
@@ -2717,6 +2765,8 @@ ClusterLODGroup CLodViewGroup(ClusterLODGroup group)
         group.bounds = shadow.bounds;
         group.parentGroupId = shadow.parentGroupId;
         group.maxParentError = shadow.maxParentError;
+        group.measuredGeometricError = shadow.measuredGeometricError;
+        group.appearanceError = shadow.appearanceError;
     }
 #endif
     return group;
@@ -2758,7 +2808,7 @@ bool CLodInstanceRootWantsTraversal(
     const float proxyErrorOverDistance = ProjectedGeometricError(
         proxyWorldCenter,
         proxyWorldRadius,
-        proxyGroup.bounds.error,
+        CLodGroupSelectionError(proxyGroup, lodCam),
         lodUniformScale,
         lodCam.viewZ,
         lodCam.zNear,
@@ -3005,7 +3055,7 @@ bool CLodRefinedChildSuppressesParent(
     const float childBoundaryEOD = ProjectedGeometricError(
         childWorldCenter,
         childWorldRadius,
-        childGroup.bounds.error,
+        CLodGroupSelectionError(childGroup, lodCam),
         lodUniformScale,
         lodCam.viewZ,
         lodCam.zNear,
@@ -3114,7 +3164,7 @@ bool CLodPrepareRenderableLeaf(
     leaf.errorOverDistance = ProjectedGeometricError(
         groupWorldCenter,
         groupWorldRadius,
-        leaf.group.bounds.error,
+        CLodGroupSelectionError(leaf.group, lodCam),
         lodUniformScale,
         lodCam.viewZ,
         lodCam.zNear,
@@ -3946,7 +3996,7 @@ void WG_TraverseNodes(
                 const float nodeErrorOverDistance = ProjectedGeometricError(
                     lodCheckWorldCenter,
                     lodCheckWorldRadius,
-                    node.metric.maxQuadricError,
+                    CLodNodeSelectionError(node.metric, lodCam),
                     lodUniformScale,
                     lodCam.viewZ,
                     lodCam.zNear,
@@ -4038,7 +4088,7 @@ void WG_TraverseNodes(
                                     const float childLodRadiusWorld = child.metric.lodCenterAndRadius.w * lodUniformScale;
                                     const float childEOD = ProjectedGeometricError(
                                         childWorldCenter, childLodRadiusWorld,
-                                        child.metric.maxQuadricError, lodUniformScale,
+                                        CLodNodeSelectionError(child.metric, lodCam), lodUniformScale,
                                         lodCam.viewZ, lodCam.zNear,
                                         lodCameraIsOrtho);
                                     if (childEOD <= lodCam.errorOverDistanceThreshold) {
@@ -4714,7 +4764,7 @@ void ClusterCullBody(
             const float3 ownWorldCenter = mul(float4(ownGrp.bounds.centerAndRadius.xyz, 1.0f), objectModelMatrix).xyz;
             const float ownWorldRadius = ownGrp.bounds.centerAndRadius.w * lodUniformScale;
             ownGroupErrorOverDistance = ProjectedGeometricError(
-                ownWorldCenter, ownWorldRadius, ownGrp.bounds.error, lodUniformScale,
+                ownWorldCenter, ownWorldRadius, CLodGroupSelectionError(ownGrp, lodCam), lodUniformScale,
                 lodCam.viewZ, lodCam.zNear,
                 lodCameraIsOrtho);
         }

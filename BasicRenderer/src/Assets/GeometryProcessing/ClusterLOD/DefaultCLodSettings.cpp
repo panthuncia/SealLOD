@@ -160,6 +160,10 @@ namespace
         ReadSetting(object, "voxelForkDoubleSidedOnly", settings.voxelForkDoubleSidedOnly);
         ReadSetting(object, "voxelForkSurfaceLoss", settings.voxelForkSurfaceLoss);
         ReadSetting(object, "disableSloppyFallback", settings.disableSloppyFallback);
+        ReadSetting(object, "sloppyLastResort", settings.sloppyLastResort);
+        ReadSetting(object, "sloppyLastResortRejected", settings.sloppyLastResortRejected);
+        ReadSetting(object, "sloppyLastResortFit", settings.sloppyLastResortFit);
+        ReadSetting(object, "sloppyLastResortErrorFactor", settings.sloppyLastResortErrorFactor);
         ReadSetting(object, "sloppyFallbackErrorFactor", settings.sloppyFallbackErrorFactor);
         ReadSetting(object, "lodErrorMergePrevious", settings.lodErrorMergePrevious);
         ReadSetting(object, "lodErrorMergeAdditive", settings.lodErrorMergeAdditive);
@@ -168,6 +172,57 @@ namespace
         ReadSetting(object, "preserveImportedNormals", settings.preserveImportedNormals);
         ReadSetting(object, "enableNormalAttributeSimplification", settings.enableNormalAttributeSimplification);
         ReadSetting(object, "normalAttributeWeight", settings.normalAttributeWeight);
+        ReadSetting(object, "simplifyPermissive", settings.simplifyPermissive);
+        ReadSetting(object, "simplifyValidation", settings.simplifyValidation);
+        ReadSetting(object, "simplifyValidationRetries", settings.simplifyValidationRetries);
+        ReadSetting(object, "simplifyValidationFoldAngle", settings.simplifyValidationFoldAngle);
+        ReadSetting(object, "simplifyValidationFoldArea", settings.simplifyValidationFoldArea);
+        ReadSetting(object, "simplifyValidationShadingAngle", settings.simplifyValidationShadingAngle);
+        ReadSetting(object, "simplifyValidationShadingArea", settings.simplifyValidationShadingArea);
+        ReadSetting(object, "simplifyValidationRadiusScale", settings.simplifyValidationRadiusScale);
+        ReadSetting(object, "simplifyValidationCoverageArea", settings.simplifyValidationCoverageArea);
+        ReadSetting(object, "simplifyUpdate", settings.simplifyUpdate);
+        ReadSetting(object, "simplifyUpdatePositions", settings.simplifyUpdatePositions);
+        ReadSetting(object, "simplifyUpdateRefitAngle", settings.simplifyUpdateRefitAngle);
+        ReadSetting(object, "simplifyUpdateMeasuredError", settings.simplifyUpdateMeasuredError);
+        ReadSetting(object, "simplifyUpdateUvTransfer", settings.simplifyUpdateUvTransfer);
+        ReadSetting(object, "simplifyMatchReach", settings.simplifyMatchReach);
+        ReadSetting(object, "simplifyMatchCandidates", settings.simplifyMatchCandidates);
+        ReadSetting(object, "simplifyMatchFacingBins", settings.simplifyMatchFacingBins);
+        ReadSetting(object, "simplifyUpdateFitSamples", settings.simplifyUpdateFitSamples);
+        ReadSetting(object, "simplifyUpdateRefitCheck", settings.simplifyUpdateRefitCheck);
+        ReadSetting(object, "lodErrorChannelsSamples", settings.lodErrorChannelsSamples);
+        ReadSetting(object, "simplifyValidationSamples", settings.simplifyValidationSamples);
+        ReadSetting(object, "simplifyOptimal", settings.simplifyOptimal);
+        ReadSetting(object, "simplifyOptimalSheetAngle", settings.simplifyOptimalSheetAngle);
+        ReadSetting(object, "simplifyOptimalFlipAngle", settings.simplifyOptimalFlipAngle);
+        ReadSetting(object, "simplifyOptimalPreserveFolds", settings.simplifyOptimalPreserveFolds);
+        ReadSetting(object, "simplifyOptimalMoves", settings.simplifyOptimalMoves);
+        ReadSetting(object, "lodErrorChannels", settings.lodErrorChannels);
+        ReadSetting(object, "lodErrorChannelsTexture", settings.lodErrorChannelsTexture);
+        ReadSetting(object, "lodErrorChannelsTextureSlide", settings.lodErrorChannelsTextureSlide);
+        ReadSetting(object, "lodErrorChannelsTextureColor", settings.lodErrorChannelsTextureColor);
+        ReadSetting(object, "lodErrorChannelsTextureColorFootprint", settings.lodErrorChannelsTextureColorFootprint);
+        ReadSetting(object, "lodErrorChannelsTextureColorAll", settings.lodErrorChannelsTextureColorAll);
+        ReadSetting(object, "lodErrorChannelsTextureRemap", settings.lodErrorChannelsTextureRemap);
+        ReadSetting(object, "lodErrorChannelsTextureRemapTexel", settings.lodErrorChannelsTextureRemapTexel);
+        ReadSetting(object, "lodErrorChannelsTextureRemapMaxNodes", settings.lodErrorChannelsTextureRemapMaxNodes);
+        ReadSetting(object, "lodErrorChannelsTextureRemapLayout", settings.lodErrorChannelsTextureRemapLayout);
+        ReadSetting(object, "lodErrorChannelsTextureRemapCellMiss", settings.lodErrorChannelsTextureRemapCellMiss);
+        ReadSetting(object, "lodErrorChannelsTextureRemapReserve", settings.lodErrorChannelsTextureRemapReserve);
+        ReadSetting(object, "lodNormalSpread", settings.lodNormalSpread);
+        ReadSetting(object, "lodNormalSpreadFootprint", settings.lodNormalSpreadFootprint);
+        ReadSetting(object, "lodNormalSpreadSampleCap", settings.lodNormalSpreadSampleCap);
+        ReadSetting(object, "simplifyTopology", settings.simplifyTopology);
+        ReadSetting(object, "simplifyTopologyRetries", settings.simplifyTopologyRetries);
+        ReadSetting(object, "simplifyTopologyRelaxUv", settings.simplifyTopologyRelaxUv);
+        ReadSetting(object, "simplifyTopologyUpdateFallback", settings.simplifyTopologyUpdateFallback);
+        ReadSetting(object, "simplifyTopologyTextureArea", settings.simplifyTopologyTextureArea);
+        ReadSetting(object, "simplifyTopologyTextureSlide", settings.simplifyTopologyTextureSlide);
+        ReadSetting(object, "simplifyTopologyTextureCharts", settings.simplifyTopologyTextureCharts);
+        ReadSetting(object, "simplifyTopologyTextureTexels", settings.simplifyTopologyTextureTexels);
+        ReadSetting(object, "simplifyTopologyTextureResolution", settings.simplifyTopologyTextureResolution);
+        ReadSetting(object, "simplifyTopologyTextureColor", settings.simplifyTopologyTextureColor);
         ReadSetting(object, "simplifyTangentWeight", settings.simplifyTangentWeight);
         ReadSetting(object, "simplifyTangentSignWeight", settings.simplifyTangentSignWeight);
         ReadSetting(object, "voxelGridBaseResolution", settings.voxelGridBaseResolution);
@@ -187,16 +242,15 @@ namespace
 
 ClusterLODBuilderSettings GetDefaultBuilderSettings(std::string_view assetIdentifier)
 {
+    // Simplification and appearance settings (sloppy fallback, permissive, normal weight, stages 1-6) keep the struct's defaults:
+    // the cache key hashes their effective values over those defaults (CLodCache::ComputeBuildConfigHash).
     ClusterLODBuilderSettings settings;
-    settings.disableSloppyFallback = false;
-    settings.sloppyFallbackErrorFactor = 2.0f;
     settings.lodErrorMergePrevious = 1.5f;
     settings.lodErrorMergeAdditive = 0.0f;
     settings.partitionSizeFloor = 8u;
     settings.nodeBoneLimit = CLOD_NODE_BONE_LIMIT_DEFAULT;
     settings.preserveImportedNormals = true;
     settings.enableNormalAttributeSimplification = true;
-    settings.normalAttributeWeight = 1.0f;
     settings.simplifyTangentWeight = 0.01f;
     settings.simplifyTangentSignWeight = 0.5f;
     settings.coveragePreservationMode = ClusterLODCoveragePreservationMode::PrioritizeEdges;

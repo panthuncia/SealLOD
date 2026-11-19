@@ -1182,7 +1182,9 @@ static bool WriteBuildManifest(const fs::path& manifestPath, const std::vector<M
              "BASICRENDERER_CLOD_VOXEL_RAYS", "BASICRENDERER_CLOD_VOXEL_SCALE", "BASICRENDERER_CLOD_VOXEL_RETRIES",
              "BASICRENDERER_CLOD_VOXEL_GROWTH", "BASICRENDERER_CLOD_VOXEL_ACCEPTANCE_BIAS", "BASICRENDERER_CLOD_VOXEL_OPACITY_THRESHOLD",
              "BASICRENDERER_CLOD_VOXEL_TAIL_LEVELS", "BASICRENDERER_CLOD_VOXEL_TAIL_GROWTH", "BASICRENDERER_CLOD_VOXEL_SURFACE_LOSS", "BASICRENDERER_CLOD_NODE_BONE_LIMIT",
-             "BASICRENDERER_CLOD_DISABLE_SLOPPY_FALLBACK", "BASICRENDERER_CLOD_SLOPPY_ERROR_FACTOR", "SARP_ASSET_SETTINGS_CONFIG" }) {
+             "BASICRENDERER_CLOD_DISABLE_SLOPPY_FALLBACK", "BASICRENDERER_CLOD_SLOPPY_ERROR_FACTOR", "BASICRENDERER_CLOD_SLOPPY_LAST_RESORT", "BASICRENDERER_CLOD_SLOPPY_LAST_RESORT_REJECTED",
+             "BASICRENDERER_CLOD_SLOPPY_LAST_RESORT_FIT", "BASICRENDERER_CLOD_SLOPPY_LAST_RESORT_ERROR_FACTOR",
+             "SARP_ASSET_SETTINGS_CONFIG" }) {
         if (const std::string value = GetClusterLODEnvironmentVariable(name); !value.empty()) {
             settings[name] = value;
         }
@@ -1297,6 +1299,18 @@ static bool TryConsumeOption(const std::string& arg) {
     if (auto v = value("--outcomes-csv=")) { g_gltfScene.outcomesCsv = *v; return true; }
     if (auto v = value("--only-mesh=")) { g_gltfScene.onlyMeshes = *v; return true; }
     if (auto v = value("--skip-meshes=")) { g_gltfScene.skipMeshes = *v; return true; }
+    if (auto v = value("--only-mesh-index=")) {
+        // A comma-separated list of glTF mesh indices.
+        size_t start = 0;
+        while (start <= v->size()) {
+            const size_t end = (std::min)(v->find(',', start), v->size());
+            const std::string item = v->substr(start, end - start);
+            if (!item.empty()) g_gltfScene.onlyMeshIndices.insert(static_cast<size_t>(number(item, "--only-mesh-index")));
+            start = end + 1;
+        }
+        if (g_gltfScene.onlyMeshIndices.empty()) throw std::runtime_error("--only-mesh-index needs at least one index");
+        return true;
+    }
     if (auto v = value("--memory-budget-gb=")) {
         g_gltfScene.memoryBudgetBytes = static_cast<uint64_t>(number(*v, "--memory-budget-gb") * 1024.0 * 1024.0 * 1024.0);
         return true;
@@ -1603,9 +1617,10 @@ int main(int argc, char* argv[]) {
                 "  --profile=profile.json     import profile: mesh skips and material channel conventions\n"
                 "  --only-mesh=regex          glTF: only meshes whose name matches\n"
                 "  --skip-meshes=regex        glTF: leave out meshes whose name matches\n"
+                "  --only-mesh-index=i,j,...  glTF: only meshes with these indices (the N in /glTF/Mesh/N)\n"
                 "  --shard-index=i --shard-count=n  glTF: meshes whose index % n == i\n"
                 "  --memory-budget-gb=N       glTF: bound primitives building at once (default 3/4 of available RAM)\n"
-                "  --bytes-per-triangle=N     glTF: build memory estimate per triangle (default 320)\n"
+                "  --bytes-per-triangle=N     glTF: build memory estimate per triangle (default 1800)\n"
                 "  --jobs=N                   glTF: primitives building at once at most (default hardware threads)\n"
                 "  --cache-only               report misses instead of building\n"
                 "  --no-textures              glTF: skip the texture stage\n"

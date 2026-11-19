@@ -43,7 +43,10 @@ bool AcquireMappedContainer(
 	uint32_t expectedPageCount,
 	std::shared_ptr<const MappedContainerLease>& outLease);
 
-inline constexpr uint32_t kSchemaVersion = 81; // 81: forked triangle/voxel DAGs (ClusterLODGroup::branchGroupId, branch flags).
+// 84: one metadata layout for every mesh. The appearance block counts (UV remap and normal spread blocks in the triangle pages,
+// ClusterLODPrebuiltData::uvRemapClusters/normalSpreadClusters) are always written, zero for a mesh without them, and the remap
+// blocks have one layout (clod_uv_remap::kVersion). This binary reads only this version: older caches are rejected and rebuilt.
+inline constexpr uint32_t kSchemaVersion = 84;
 
 struct CacheKey {
 	std::string sourceIdentifier;

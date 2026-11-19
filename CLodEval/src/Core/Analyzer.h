@@ -7,8 +7,10 @@
 #include <vector>
 
 #include "Core/CachedMesh.h"
+#include "Core/ErrorChannels.h"
 #include "Core/MergeHierarchy.h"
 #include "Core/Metrics.h"
+#include "Core/SourceTextures.h"
 
 namespace clodeval {
 
@@ -21,6 +23,16 @@ struct AnalysisContext {
 	MergePartLibrary* mergeParts = nullptr;
 	// The coarsest cut the renderer asks of a root: see MergeIssues.
 	float mergeReachCut = 440.0f;
+	// Selection rules quality.appearance sweeps besides the stored errors (a suite's "cut_rules"). Null or empty: none.
+	const std::vector<CutRule>* cutRules = nullptr;
+	// The source asset's materials (base colour textures), when it is a .glb the run could open: quality.texture needs them.
+	const SourceMaterials* materials = nullptr;
+	// Simulated appearance bakes quality.texture also sweeps (a suite's "texture_bakes"). Null or empty: none.
+	const std::vector<TextureBake>* textureBakes = nullptr;
+	// quality.specular's footprint in pixels of a one-pixel threshold at each segment's finest cut (a suite's "specular_footprint").
+	double specularFootprint = 1.0;
+	// quality.specular's widening cap, as clodNormalSpreadRoughnessCap (a suite's "specular_spread_cap"; default 1).
+	double specularSpreadCap = 1.0;
 };
 
 struct AnalyzerInfo {

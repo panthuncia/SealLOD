@@ -43,6 +43,8 @@
 #include "../shaders/Common/defines.h"
 
 #include "Assets/GeometryProcessing/ClusterLOD/ClusterLODBuildState.h"
+#include <BasicRenderer/Assets/ClusterLODUvRemap.h>
+#include <BasicRenderer/Assets/ClusterLODNormalSpread.h>
 
 namespace clod_detail
 {
@@ -68,6 +70,8 @@ namespace clod_detail
 		uint32_t totalColorWords = 0;
 		uint32_t totalBoneIndexCount = 0;
 		uint32_t totalTriangleBytes = 0;
+		uint32_t totalUvRemapBytes = 0; // stage 6 step 2: the clusters' remap blocks, appended after the triangle stream
+		uint32_t totalNormalSpreadBytes = 0; // stage 6 step 3: the clusters' normal spread blocks, after the remap blocks
 	};
 
 	struct VoxelMeshPageBuildTotals
@@ -251,6 +255,53 @@ namespace clod_detail
 		}
 	}
 
+	// Stage 6 step 2: the remap block of a cluster of a group's page blob (empty: none). A group's page blobs hold its raw meshlets in
+	// order (BuildClusterLODGroupOutput bins them sequentially), so the raw index is the page's first meshlet plus the local one.
+	const std::vector<std::byte>* FindMeshletBlock(
+		const ClusterLODBuildState& state,
+		const std::vector<std::vector<std::vector<std::byte>>>& perGroupBlocks,
+		uint32_t groupIndex,
+		uint32_t sourcePageIndex,
+		uint32_t sourceMeshletIndex)
+	{
+		if (groupIndex >= perGroupBlocks.size() || perGroupBlocks[groupIndex].empty() ||
+			groupIndex >= state.groupPageBlobs.size())
+		{
+			return nullptr;
+		}
+		uint32_t rawMeshlet = sourceMeshletIndex;
+		const std::vector<std::vector<std::byte>>& pages = state.groupPageBlobs[groupIndex];
+		for (uint32_t page = 0; page < sourcePageIndex && page < pages.size(); ++page)
+		{
+			rawMeshlet += ReadUint32At(pages[page], offsetof(CLodPageHeader, meshletCount));
+		}
+		const std::vector<std::vector<std::byte>>& blocks = perGroupBlocks[groupIndex];
+		if (rawMeshlet >= blocks.size() || blocks[rawMeshlet].empty())
+		{
+			return nullptr;
+		}
+		return &blocks[rawMeshlet];
+	}
+
+	const std::vector<std::byte>* FindMeshletUvRemap(
+		const ClusterLODBuildState& state,
+		uint32_t groupIndex,
+		uint32_t sourcePageIndex,
+		uint32_t sourceMeshletIndex)
+	{
+		return FindMeshletBlock(state, state.meshletUvRemaps, groupIndex, sourcePageIndex, sourceMeshletIndex);
+	}
+
+	// Stage 6 step 3: the normal spread block of a cluster of a group's page blob (empty: none), indexed as the remap blocks are.
+	const std::vector<std::byte>* FindMeshletNormalSpread(
+		const ClusterLODBuildState& state,
+		uint32_t groupIndex,
+		uint32_t sourcePageIndex,
+		uint32_t sourceMeshletIndex)
+	{
+		return FindMeshletBlock(state, state.meshletNormalSpreads, groupIndex, sourcePageIndex, sourceMeshletIndex);
+	}
+
 	TriangleMeshPageBuildTotals ComputeTriangleMeshPageTotals(
 		const ClusterLODBuildState& state,
 		std::span<const TriangleMeshPageSegmentRef> segments,
@@ -294,6 +345,17 @@ namespace clod_detail
 				totals.totalColorWords += ((attributeMask & CLOD_PAGE_ATTRIBUTE_COLOR) != 0u) ? vertexCount : 0u;
 				totals.totalBoneIndexCount += CLodClusterCullMetadataBoneCount(desc.boneCount);
 				totals.totalTriangleBytes += triangleCount * 3u;
+				if (uvSetCount > 0u)
+				{
+					if (const std::vector<std::byte>* remap = FindMeshletUvRemap(state, segment.groupIndex, segment.sourcePageIndex, sourceMeshletIndex))
+					{
+						totals.totalUvRemapBytes += static_cast<uint32_t>(remap->size());
+					}
+					if (const std::vector<std::byte>* spread = FindMeshletNormalSpread(state, segment.groupIndex, segment.sourcePageIndex, sourceMeshletIndex))
+					{
+						totals.totalNormalSpreadBytes += static_cast<uint32_t>(spread->size());
+					}
+				}
 
 				for (uint32_t uvSetIndex = 0; uvSetIndex < uvSetCount; ++uvSetIndex)
 				{
@@ -388,7 +450,27 @@ namespace clod_detail
 		const uint32_t boneIndexStreamOffset = static_cast<uint32_t>(align4(uvBitstreamCursor));
 		const size_t boneIndexBytes = static_cast<size_t>(totals.totalBoneIndexCount) * sizeof(uint32_t);
 		const uint32_t triangleStreamOffset = static_cast<uint32_t>(align4(boneIndexStreamOffset + boneIndexBytes));
-		const size_t totalBlobSize = align4(triangleStreamOffset + totals.totalTriangleBytes);
+		// Stage 6 step 2: remap blocks after the triangle stream (word multiples, so each starts aligned). Absent: the size it was.
+		// A page whose segments alone come close to the page size (packing splits only between segments) keeps its geometry and
+		// drops its remaps, so its clusters draw with their corner UVs.
+		const uint32_t uvRemapOffset = static_cast<uint32_t>(align4(triangleStreamOffset + totals.totalTriangleBytes));
+		const bool includeUvRemaps = totals.totalUvRemapBytes != 0u &&
+			align4(static_cast<size_t>(uvRemapOffset) + totals.totalUvRemapBytes) <= CLOD_PAGE_SIZE;
+		if (totals.totalUvRemapBytes != 0u && !includeUvRemaps)
+		{
+			spdlog::warn("ClusterLOD: a page of {} clusters drops {} bytes of UV remap blocks that do not fit", totals.meshletCount, totals.totalUvRemapBytes);
+		}
+		// Stage 6 step 3: normal spread blocks after the remap blocks, on the same terms (dropped when they do not fit).
+		const uint32_t normalSpreadOffset = static_cast<uint32_t>(align4(static_cast<size_t>(uvRemapOffset) + (includeUvRemaps ? totals.totalUvRemapBytes : 0u)));
+		const bool includeNormalSpreads = totals.totalNormalSpreadBytes != 0u &&
+			align4(static_cast<size_t>(normalSpreadOffset) + totals.totalNormalSpreadBytes) <= CLOD_PAGE_SIZE;
+		if (totals.totalNormalSpreadBytes != 0u && !includeNormalSpreads)
+		{
+			spdlog::warn("ClusterLOD: a page of {} clusters drops {} bytes of normal spread blocks that do not fit", totals.meshletCount, totals.totalNormalSpreadBytes);
+		}
+		const size_t totalBlobSize = includeNormalSpreads
+			? align4(static_cast<size_t>(normalSpreadOffset) + totals.totalNormalSpreadBytes)
+			: align4(static_cast<size_t>(uvRemapOffset) + (includeUvRemaps ? totals.totalUvRemapBytes : 0u));
 		if (totalBlobSize > CLOD_PAGE_SIZE)
 		{
 			return {};
@@ -405,6 +487,10 @@ namespace clod_detail
 		uint32_t vertexAttributeCursor = 0u;
 		uint32_t boneIndexCursor = 0u;
 		uint32_t triangleByteCursor = 0u;
+		uint32_t uvRemapCursor = 0u;
+		uint32_t uvRemapClusters = 0u;
+		uint32_t normalSpreadCursor = 0u;
+		uint32_t normalSpreadClusters = 0u;
 
 		for (const TriangleMeshPageSegmentRef& segment : segments)
 		{
@@ -531,6 +617,28 @@ namespace clod_detail
 					}
 					uvDescriptors[static_cast<size_t>(outputMeshletIndex) * static_cast<size_t>(uvSetCount) + uvSetIndex] = destUvDesc;
 				}
+				if (includeUvRemaps)
+				{
+					if (const std::vector<std::byte>* remap = FindMeshletUvRemap(state, segment.groupIndex, segment.sourcePageIndex, sourceMeshletIndex))
+					{
+						const uint32_t blockOffset = uvRemapOffset + uvRemapCursor;
+						std::memcpy(blob.data() + blockOffset, remap->data(), remap->size());
+						uvDescriptors[static_cast<size_t>(outputMeshletIndex) * static_cast<size_t>(uvSetCount)].reserved0 = blockOffset;
+						uvRemapCursor += static_cast<uint32_t>(remap->size());
+						++uvRemapClusters;
+					}
+				}
+				if (includeNormalSpreads && uvSetCount > 0u)
+				{
+					if (const std::vector<std::byte>* spread = FindMeshletNormalSpread(state, segment.groupIndex, segment.sourcePageIndex, sourceMeshletIndex))
+					{
+						const uint32_t blockOffset = normalSpreadOffset + normalSpreadCursor;
+						std::memcpy(blob.data() + blockOffset, spread->data(), spread->size());
+						uvDescriptors[static_cast<size_t>(outputMeshletIndex) * static_cast<size_t>(uvSetCount)].reserved1 = blockOffset;
+						normalSpreadCursor += static_cast<uint32_t>(spread->size());
+						++normalSpreadClusters;
+					}
+				}
 
 				positionByteCursor += positionBytesForMeshlet;
 				vertexAttributeCursor += vertexCount;
@@ -560,7 +668,8 @@ namespace clod_detail
 		CLodPageHeader header{};
 		header.meshletCount = totals.meshletCount;
 		header.compressedPositionQuantExp = CLOD_NATIVE_POSITION_FORMAT;
-		header.attributeMask = attributeMask;
+		header.attributeMask = attributeMask | (uvRemapClusters != 0u ? CLOD_PAGE_ATTRIBUTE_UV_REMAP : 0u) |
+			(normalSpreadClusters != 0u ? CLOD_PAGE_ATTRIBUTE_NORMAL_SPREAD : 0u);
 		header.uvSetCount = uvSetCount;
 		header.descriptorOffset = descriptorOffset;
 		header.uvDescriptorOffset = uvDescriptorOffset;
@@ -993,7 +1102,7 @@ namespace clod_detail
 					candidateTotals.totalTangentFrameWords,
 					candidateTotals.totalColorWords,
 					candidateTotals.totalBoneIndexCount,
-					candidateTotals.totalTriangleBytes);
+					candidateTotals.totalTriangleBytes) + candidateTotals.totalUvRemapBytes + candidateTotals.totalNormalSpreadBytes;
 			},
 			[](const ClusterLODBuildState& packState, std::span<const PagePackingSegmentRef> segments, const TrianglePageTraits& traits) -> std::vector<std::byte>
 			{
@@ -1002,6 +1111,57 @@ namespace clod_detail
 
 		outTrianglePageCount = static_cast<uint32_t>(outMeshPageBlobs.size());
 		outVoxelPageBase = outTrianglePageCount;
+
+		// Stage 6 step 2: what of the remap blocks reached the pages.
+		state.uvRemapClustersWritten = 0u;
+		state.uvRemapBytesWritten = 0u;
+		if (!state.meshletUvRemaps.empty())
+		{
+			for (const std::vector<std::byte>& page : outMeshPageBlobs)
+			{
+				CLodPageHeader header{};
+				if (!ReadTrianglePageHeader(page, header) || (header.attributeMask & CLOD_PAGE_ATTRIBUTE_UV_REMAP) == 0u)
+				{
+					continue;
+				}
+				for (uint32_t meshlet = 0; meshlet < header.meshletCount; ++meshlet)
+				{
+					CLodMeshletUvDescriptor uvDesc{};
+					if (ReadTriangleUvDescriptor(page, header, meshlet, 0u, uvDesc) && uvDesc.reserved0 != 0u)
+					{
+						++state.uvRemapClustersWritten;
+						state.uvRemapBytesWritten += clod_uv_remap::BlockSize(
+							std::span<const std::byte>(page.data() + uvDesc.reserved0, page.size() - uvDesc.reserved0));
+					}
+				}
+			}
+		}
+
+		// Stage 6 step 3: what of the normal spread blocks reached the pages.
+		state.normalSpreadClustersWritten = 0u;
+		state.normalSpreadBytesWritten = 0u;
+		if (!state.meshletNormalSpreads.empty())
+		{
+			for (const std::vector<std::byte>& page : outMeshPageBlobs)
+			{
+				CLodPageHeader header{};
+				if (!ReadTrianglePageHeader(page, header) || (header.attributeMask & CLOD_PAGE_ATTRIBUTE_NORMAL_SPREAD) == 0u)
+				{
+					continue;
+				}
+				for (uint32_t meshlet = 0; meshlet < header.meshletCount; ++meshlet)
+				{
+					CLodMeshletUvDescriptor uvDesc{};
+					CLodMeshletDescriptor desc{};
+					if (ReadTriangleUvDescriptor(page, header, meshlet, 0u, uvDesc) && uvDesc.reserved1 != 0u &&
+						ReadTriangleMeshletDescriptor(page, header, meshlet, desc))
+					{
+						++state.normalSpreadClustersWritten;
+						state.normalSpreadBytesWritten += clod_normal_spread::BlockSize(DecodeMeshletVertexCount(desc));
+					}
+				}
+			}
+		}
 
 		struct VoxelPageTraits
 		{

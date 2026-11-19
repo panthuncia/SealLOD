@@ -16,7 +16,9 @@
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <deque>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -39,6 +41,9 @@
 #include <BasicRenderer/Scene/VertexFlags.h>
 #include <BasicRenderer/Assets/DefaultCLodSettings.h>
 #include <BasicRenderer/Assets/CachePaths.h>
+#include <BasicRenderer/Assets/ClusterLODTextureColor.h>
+#include <BasicRenderer/Assets/ClusterLODTextureDecode.h>
+#include "ThirdParty/stb/stb_image.h"
 
 using nlohmann::json;
 using namespace DirectX;
@@ -115,9 +120,20 @@ struct ParsedDocument {
 	// Primitives still to run that read each compressed bufferView; a view is released when its count reaches zero, so a
 	// scene's decompressed geometry is never all held at once.
 	std::unordered_map<size_t, size_t> pendingViewUsers;
+	// Primitives building now that read each view. A view nobody is reading but that later primitives still need is kept
+	// only while the idle decoded bytes fit kIdleDecodedViewBytes (oldest evicted first) and is decoded again when needed:
+	// primitives run largest first, so views shared across sizes otherwise stayed resident for most of the run (Zorah
+	// decodes to 59 GiB).
+	std::unordered_map<size_t, size_t> activeViewUsers;
+	std::map<uint64_t, size_t> idleViews;              // idle sequence -> view
+	std::unordered_map<size_t, uint64_t> idleSequence; // view -> idle sequence
+	uint64_t nextIdleSequence = 0;
+	uint64_t idleViewBytes = 0;
 
 	// The file's CLod cache identity: its name and a hash of its JSON and its buffers' sizes.
 	std::string sourceIdentifier;
+	// Where it was read from (stage 6: material images are read from it when the colour-weighted texture term is on).
+	std::filesystem::path sourcePath;
 };
 
 uint64_t HashBytes(uint64_t hash, const void* data, size_t size) {
@@ -816,6 +832,7 @@ ParsedDocument ParseDocument(const std::string& filePath) {
 	char hashText[17];
 	std::snprintf(hashText, sizeof(hashText), "%016llx", static_cast<unsigned long long>(contentHash));
 	doc.sourceIdentifier = "gltf://" + path.filename().string() + "#" + hashText;
+	doc.sourcePath = path;
 
 	return doc;
 }
@@ -933,6 +950,245 @@ std::vector<XMFLOAT3> ComputeSmoothNormals(
 // Per-primitive Preprocessing
 
 // nullopt: cacheOnly and the primitive is not cached.
+// Stage 6 material appearance (docs/clod-appearance-stage6.md): a primitive's base colour for the CLod builder's colour-weighted
+// texture term, read only when that term is enabled. Images are read from the file as encoded, hashed by content once per
+// process, and decoded on demand by the builder; a decoded image is shared by the builds holding it and freed after them.
+
+// The encoded bytes of a glTF image: a data or file URI, or a bufferView of a file-backed buffer (the GLB binary chunk for a
+// URI-less buffer of a .glb). Empty when it cannot be read.
+std::vector<uint8_t> ReadImageBytes(const json& gltf, const std::filesystem::path& sourcePath, size_t imageIndex) {
+	try {
+		if (!gltf.contains("images") || imageIndex >= gltf["images"].size()) return {};
+		const json& image = gltf["images"][imageIndex];
+		if (image.contains("uri")) {
+			const std::string uri = image["uri"].get<std::string>();
+			if (uri.rfind("data:", 0) == 0) return DecodeDataUri(uri);
+			const std::filesystem::path file = sourcePath.parent_path() / std::filesystem::path(uri);
+			return ReadFileRange(file, 0, GetFileSize(file));
+		}
+		if (!image.contains("bufferView") || !gltf.contains("bufferViews")) return {};
+		const size_t viewIndex = image["bufferView"].get<size_t>();
+		if (viewIndex >= gltf["bufferViews"].size()) return {};
+		const BufferViewInfo view = GetBufferViewInfo(gltf, viewIndex);
+		if (!gltf.contains("buffers") || view.bufferIndex >= gltf["buffers"].size()) return {};
+		const json& buffer = gltf["buffers"][view.bufferIndex];
+		if (buffer.contains("uri")) {
+			const std::string uri = buffer["uri"].get<std::string>();
+			if (uri.rfind("data:", 0) == 0) {
+				const std::vector<uint8_t> bytes = DecodeDataUri(uri);
+				if (view.byteOffset + view.byteLength > bytes.size()) return {};
+				return std::vector<uint8_t>(bytes.begin() + view.byteOffset, bytes.begin() + view.byteOffset + view.byteLength);
+			}
+			return ReadFileRange(sourcePath.parent_path() / std::filesystem::path(uri), view.byteOffset, view.byteLength);
+		}
+		const uint64_t fileSize = GetFileSize(sourcePath);
+		for (const GLBChunkSpan& chunk : ReadGLBChunkSpans(sourcePath, fileSize)) {
+			if (chunk.type != kBinChunkType) continue;
+			if (view.byteOffset + view.byteLength > chunk.length) return {};
+			return ReadFileRange(sourcePath, chunk.dataOffset + view.byteOffset, view.byteLength);
+		}
+	}
+	catch (const std::bad_alloc&) {
+		// Not the image's fault: an unreadable image hashes as 0, which would key the primitive's cache differently from a run
+		// that read it. The primitive fails (and is retried) instead.
+		throw;
+	}
+	catch (const std::exception& error) {
+		spdlog::warn("glTF {}: image {} cannot be read for the CLod texture term: {}", sourcePath.string(), imageIndex, error.what());
+	}
+	return {};
+}
+
+// One image of one source file, process-wide: its content hash (computed once) and its decoded mip chain while any build holds it
+// (or the recent decodes below keep it). An image that does not decode is not read again.
+struct AppearanceImage {
+	std::once_flag hashOnce;
+	uint64_t contentHash = 0; // 0: unreadable
+	std::mutex decodeMutex;
+	std::weak_ptr<const clod_texture::Texture> decoded;
+	bool undecodable = false;
+};
+
+// The most recent decodes, kept alive up to a byte budget, so builds of meshes sharing an image one after another decode it once.
+void KeepRecentDecode(std::shared_ptr<const clod_texture::Texture> texture) {
+	constexpr size_t kBudgetBytes = size_t{ 1 } << 30;
+	static std::mutex mutex;
+	static std::deque<std::pair<std::shared_ptr<const clod_texture::Texture>, size_t>> recent;
+	static size_t heldBytes = 0;
+	size_t bytes = 0;
+	for (const std::vector<uint8_t>& mip : texture->mips) bytes += mip.size();
+	std::lock_guard lock(mutex);
+	recent.emplace_back(std::move(texture), bytes);
+	heldBytes += bytes;
+	while (heldBytes > kBudgetBytes && recent.size() > 1u) {
+		heldBytes -= recent.front().second;
+		recent.pop_front();
+	}
+}
+
+AppearanceImage& GetAppearanceImage(const std::filesystem::path& sourcePath, size_t imageIndex) {
+	static std::mutex mutex;
+	static std::unordered_map<std::string, std::unique_ptr<AppearanceImage>> images;
+	const std::string key = sourcePath.lexically_normal().string() + "#" + std::to_string(imageIndex);
+	std::lock_guard lock(mutex);
+	auto& entry = images[key];
+	if (!entry) entry = std::make_unique<AppearanceImage>();
+	return *entry;
+}
+
+uint64_t AppearanceImageHash(const json& gltf, const std::filesystem::path& sourcePath, size_t imageIndex) {
+	AppearanceImage& image = GetAppearanceImage(sourcePath, imageIndex);
+	std::call_once(image.hashOnce, [&] {
+		const std::vector<uint8_t> bytes = ReadImageBytes(gltf, sourcePath, imageIndex);
+		image.contentHash = bytes.empty() ? 0u : clod_texture::HashBytes(bytes.data(), bytes.size());
+		// A KTX2 the decoder reads also carries the decoder's revision: builds from before it did (or from another revision)
+		// weighed it as undecodable, and must not be reused. Other images keep their hash as it was.
+		if (const uint32_t decoder = clod_texture::Ktx2DecoderIdentity(bytes); decoder != 0u && image.contentHash != 0u) {
+			image.contentHash = clod_texture::HashBytes(&decoder, sizeof(decoder), image.contentHash);
+		}
+	});
+	return image.contentHash;
+}
+
+// Decodes image `documentImage` of `document` (the source's JSON, or an excerpt of it), sharing the result under the image's
+// place in the source (sourceImage).
+std::shared_ptr<const clod_texture::Texture> DecodeAppearanceImage(
+	const json& document, size_t documentImage, const std::filesystem::path& sourcePath, size_t sourceImage) {
+	AppearanceImage& image = GetAppearanceImage(sourcePath, sourceImage);
+	std::lock_guard lock(image.decodeMutex);
+	if (auto held = image.decoded.lock()) return held;
+	if (image.undecodable) return nullptr;
+	const std::vector<uint8_t> bytes = ReadImageBytes(document, sourcePath, documentImage);
+	if (bytes.empty() || bytes.size() > static_cast<size_t>((std::numeric_limits<int>::max)())) {
+		image.undecodable = true;
+		return nullptr;
+	}
+	if (clod_texture::IsKtx2(bytes)) {
+		std::string error;
+		std::shared_ptr<const clod_texture::Texture> result = clod_texture::DecodeKtx2(bytes, &error);
+		if (result == nullptr) {
+			image.undecodable = true;
+			spdlog::warn("glTF {}: image {} (KTX2: {}) does not decode for the CLod texture term; its meshes keep the binary term", sourcePath.string(),
+				sourceImage, error);
+			return nullptr;
+		}
+		image.decoded = result;
+		KeepRecentDecode(result);
+		return result;
+	}
+	int w = 0, h = 0, channels = 0;
+	stbi_uc* pixels = stbi_load_from_memory(bytes.data(), static_cast<int>(bytes.size()), &w, &h, &channels, 4);
+	if (pixels == nullptr && stbi_failure_reason() != nullptr && std::strcmp(stbi_failure_reason(), "outofmem") == 0) {
+		// Out of memory is not undecodable: remembering it would build this image's meshes with the binary term from now on.
+		throw std::bad_alloc();
+	}
+	if (pixels == nullptr || w <= 0 || h <= 0) {
+		stbi_image_free(pixels);
+		image.undecodable = true;
+		spdlog::warn("glTF {}: image {} does not decode for the CLod texture term; its meshes keep the binary term", sourcePath.string(), sourceImage);
+		return nullptr;
+	}
+	auto texture = std::make_shared<clod_texture::Texture>();
+	texture->width = static_cast<uint32_t>(w);
+	texture->height = static_cast<uint32_t>(h);
+	texture->mips.emplace_back(pixels, pixels + static_cast<size_t>(w) * static_cast<size_t>(h) * 4u);
+	stbi_image_free(pixels);
+	clod_texture::BuildMips(*texture);
+	std::shared_ptr<const clod_texture::Texture> result = std::move(texture);
+	image.decoded = result;
+	KeepRecentDecode(result);
+	return result;
+}
+
+// The appearance of a primitive's material (glTF's default material without one), with its content hash. The decode callback
+// keeps only an excerpt of the document: the image, its bufferView and buffer.
+std::shared_ptr<ClusterLODMaterialAppearance> DescribePrimitiveAppearance(
+	const json& gltf, const std::filesystem::path& sourcePath, size_t meshIndex, size_t primitiveIndex) {
+	const json& primitive = gltf.at("meshes").at(meshIndex).at("primitives").at(primitiveIndex);
+	auto appearance = std::make_shared<ClusterLODMaterialAppearance>();
+	appearance->hasVertexColors = primitive.contains("attributes") && primitive["attributes"].contains("COLOR_0");
+	int64_t imageIndex = -1;
+	if (primitive.contains("material") && gltf.contains("materials") && primitive["material"].get<size_t>() < gltf["materials"].size()) {
+		const json& material = gltf["materials"][primitive["material"].get<size_t>()];
+		if (const auto pbr = material.find("pbrMetallicRoughness"); pbr != material.end()) {
+			if (const auto factor = pbr->find("baseColorFactor"); factor != pbr->end() && factor->is_array() && factor->size() == 4u) {
+				for (size_t c = 0; c < 4u; ++c) appearance->baseColorFactor[c] = (*factor)[c].get<float>();
+			}
+			if (const auto texture = pbr->find("baseColorTexture"); texture != pbr->end()) {
+				const size_t textureIndex = texture->value("index", size_t{ 0 });
+				appearance->baseColorTexCoord = texture->value("texCoord", 0u);
+				if (gltf.contains("textures") && textureIndex < gltf["textures"].size()) {
+					// KHR_texture_basisu's KTX2 image when there is one (as the loader draws it), else the image.
+					const json& textureJson = gltf["textures"][textureIndex];
+					const json* sourceJson = textureJson.contains("source") ? &textureJson["source"] : nullptr;
+					if (textureJson.contains("extensions") && textureJson["extensions"].contains("KHR_texture_basisu")) {
+						const json& basisu = textureJson["extensions"]["KHR_texture_basisu"];
+						if (basisu.contains("source")) sourceJson = &basisu["source"];
+					}
+					const int64_t source = sourceJson != nullptr ? sourceJson->get<int64_t>() : -1;
+					if (source >= 0 && gltf.contains("images") && static_cast<size_t>(source) < gltf["images"].size()) imageIndex = source;
+				}
+				// KHR_texture_transform: offset, rotation and scale as one affine UV matrix (T * R * S), and its texCoord override.
+				if (texture->contains("extensions") && (*texture)["extensions"].contains("KHR_texture_transform")) {
+					const json& transform = (*texture)["extensions"]["KHR_texture_transform"];
+					std::array<float, 2> offset{ 0.0f, 0.0f }, scale{ 1.0f, 1.0f };
+					if (transform.contains("offset") && transform["offset"].size() == 2u) offset = { transform["offset"][0].get<float>(), transform["offset"][1].get<float>() };
+					if (transform.contains("scale") && transform["scale"].size() == 2u) scale = { transform["scale"][0].get<float>(), transform["scale"][1].get<float>() };
+					const float rotation = transform.value("rotation", 0.0f);
+					const float c = std::cos(rotation), s = std::sin(rotation);
+					appearance->hasBaseColorUvTransform = true;
+					appearance->baseColorUvTransform = { c * scale[0], s * scale[1], offset[0], -s * scale[0], c * scale[1], offset[1] };
+					appearance->baseColorTexCoord = transform.value("texCoord", appearance->baseColorTexCoord);
+				}
+			}
+		}
+		appearance->alphaMasked = material.value("alphaMode", std::string("OPAQUE")) == "MASK";
+		appearance->alphaCutoff = material.value("alphaCutoff", 0.5f);
+	}
+	appearance->hasBaseColorTexture = imageIndex >= 0;
+	uint64_t hash = clod_texture::HashBytes(appearance->baseColorFactor.data(), sizeof(float) * 4u);
+	const uint32_t flags = (appearance->hasBaseColorTexture ? 1u : 0u) | (appearance->hasVertexColors ? 2u : 0u) | (appearance->alphaMasked ? 4u : 0u);
+	hash = clod_texture::HashBytes(&flags, sizeof(flags), hash);
+	hash = clod_texture::HashBytes(&appearance->baseColorTexCoord, sizeof(uint32_t), hash);
+	hash = clod_texture::HashBytes(&appearance->alphaCutoff, sizeof(float), hash);
+	if (appearance->hasBaseColorUvTransform) {
+		// Only with a transform, so the hashes of untransformed materials stay as they were.
+		hash = clod_texture::HashBytes(appearance->baseColorUvTransform.data(), sizeof(float) * 6u, hash);
+	}
+	if (appearance->hasBaseColorTexture) {
+		const size_t sourceImage = static_cast<size_t>(imageIndex);
+		const uint64_t imageHash = AppearanceImageHash(gltf, sourcePath, sourceImage);
+		hash = clod_texture::HashBytes(&imageHash, sizeof(imageHash), hash);
+		json excerpt = json::object();
+		json imageJson = gltf["images"][sourceImage];
+		if (imageJson.contains("bufferView") && gltf.contains("bufferViews") && imageJson["bufferView"].get<size_t>() < gltf["bufferViews"].size()) {
+			json view = gltf["bufferViews"][imageJson["bufferView"].get<size_t>()];
+			const size_t bufferIndex = view.value("buffer", size_t{ 0 });
+			if (gltf.contains("buffers") && bufferIndex < gltf["buffers"].size()) excerpt["buffers"] = json::array({ gltf["buffers"][bufferIndex] });
+			view["buffer"] = 0;
+			excerpt["bufferViews"] = json::array({ std::move(view) });
+			imageJson["bufferView"] = 0;
+		}
+		excerpt["images"] = json::array({ std::move(imageJson) });
+		appearance->decodeBaseColor = [excerpt = std::move(excerpt), sourcePath, sourceImage] {
+			return DecodeAppearanceImage(excerpt, 0u, sourcePath, sourceImage);
+		};
+	}
+	appearance->contentHash = hash != 0u ? hash : 1u;
+	return appearance;
+}
+
+// Whether builds of this source weigh texture damage by colour or write UV remaps (the effective settings, environment included),
+// so need the material's appearance. Once per source:
+// the settings lookup logs when an asset override matches.
+bool TextureColorActiveFor(const std::string& sourceIdentifier) {
+	static std::mutex mutex;
+	static std::unordered_map<std::string, bool> active;
+	std::lock_guard lock(mutex);
+	if (const auto it = active.find(sourceIdentifier); it != active.end()) return it->second;
+	return active[sourceIdentifier] = ClusterLODMaterialAppearanceWanted(GetDefaultBuilderSettings(sourceIdentifier));
+}
+
 std::optional<MeshPreprocessResult> BuildPrimitivePreprocessData(
 	ParsedDocument& doc,
 	const json& primitive,
@@ -1066,7 +1322,7 @@ std::optional<MeshPreprocessResult> BuildPrimitivePreprocessData(
     }
 
 	const GlTFGeometryExtractor::PrimitiveFormat format =
-		GlTFGeometryExtractor::DescribePrimitiveFormat(doc.gltf, doc.sourceIdentifier, meshIndex, primitiveIndex);
+		GlTFGeometryExtractor::DescribePrimitiveFormat(doc.gltf, doc.sourceIdentifier, meshIndex, primitiveIndex, doc.sourcePath);
 	const unsigned int meshFlags = format.vertexFlags;
 	const unsigned int vertexSize = format.vertexSize;
 	const unsigned int skinningVertexSize = format.skinningVertexSize;
@@ -1080,6 +1336,10 @@ std::optional<MeshPreprocessResult> BuildPrimitivePreprocessData(
 	ClusterLODBuilderSettings builderSettings = GetDefaultBuilderSettings(cacheIdentity.sourceIdentifier);
 	builderSettings.doubleSidedVoxelSourceNormals = doubleSidedVoxelSourceNormals;
 	MeshIngestBuilder ingest(vertexSize, skinningVertexSize, meshFlags, builderSettings);
+	if (cacheIdentity.appearanceHash != 0u && !prebuiltData.has_value()) {
+		// Stage 6: the material the colour-weighted texture term reads (its hash is already in the identity).
+		ingest.SetMaterialAppearance(DescribePrimitiveAppearance(doc.gltf, doc.sourcePath, meshIndex, primitiveIndex));
+	}
     std::vector<MeshUvSetData> uvSets;
     if (hasAnyTexcoordSet && prebuiltData.has_value()) {
         // A cached mesh's UVs are in its CLod pages. The sets are named so the mesh knows how many there are; their
@@ -1396,6 +1656,15 @@ PrimitiveFormat DescribePrimitiveFormat(const json& gltf, const std::string& sou
 	return format;
 }
 
+PrimitiveFormat DescribePrimitiveFormat(const json& gltf, const std::string& sourceIdentifier, size_t meshIndex, size_t primitiveIndex,
+	const std::filesystem::path& sourcePath) {
+	PrimitiveFormat format = DescribePrimitiveFormat(gltf, sourceIdentifier, meshIndex, primitiveIndex);
+	if (!sourcePath.empty() && TextureColorActiveFor(sourceIdentifier)) {
+		format.identity.appearanceHash = DescribePrimitiveAppearance(gltf, sourcePath, meshIndex, primitiveIndex)->contentHash;
+	}
+	return format;
+}
+
 bool IsSupportedRequiredExtension(std::string_view extension) {
 	return extension == "EXT_meshopt_compression" ||
 		extension == "EXT_mesh_gpu_instancing" ||
@@ -1503,8 +1772,56 @@ ExtractionResult ExtractAll(const std::string& filePath, const ExtractOptions& o
 
 	std::mutex failureMutex;
 	std::exception_ptr firstFailure;
-	auto runItem = [&](size_t workIndex) {
+	// Primitives that ran out of memory while others were building: retried alone once everything else is done, so one
+	// allocation failure does not cascade into every primitive building beside it.
+	std::vector<size_t> outOfMemory;
+	// Set by an allocation failure: nothing more is admitted until the primitives still building have finished.
+	std::atomic<bool> draining = false;
+	constexpr uint64_t kIdleDecodedViewBytes = 4ull << 30;
+	// Called with the view mutex held.
+	auto releaseView = [&](size_t view, bool finished) {
+		if (finished && --doc.pendingViewUsers[view] == 0) {
+			--doc.activeViewUsers[view];
+			auto idle = doc.idleSequence.find(view);
+			if (idle != doc.idleSequence.end()) {
+				doc.idleViews.erase(idle->second);
+				doc.idleSequence.erase(idle);
+			}
+			doc.decompressedBufferViews.erase(view);
+			return;
+		}
+		if (--doc.activeViewUsers[view] != 0) return;
+		auto decoded = doc.decompressedBufferViews.find(view);
+		if (decoded == doc.decompressedBufferViews.end()) return;
+		doc.idleViews.emplace(doc.nextIdleSequence, view);
+		doc.idleSequence[view] = doc.nextIdleSequence++;
+		doc.idleViewBytes += decoded->second.size;
+		while (doc.idleViewBytes > kIdleDecodedViewBytes && !doc.idleViews.empty()) {
+			const size_t oldest = doc.idleViews.begin()->second;
+			doc.idleViews.erase(doc.idleViews.begin());
+			doc.idleSequence.erase(oldest);
+			auto evicted = doc.decompressedBufferViews.find(oldest);
+			if (evicted != doc.decompressedBufferViews.end()) {
+				doc.idleViewBytes -= evicted->second.size;
+				doc.decompressedBufferViews.erase(evicted);
+			}
+		}
+	};
+	auto runItem = [&](size_t workIndex, bool retryOutOfMemory) {
 		const PrimitiveWorkItem& workItem = workItems[workIndex];
+		if (!workItem.compressedViews.empty()) {
+			std::lock_guard lock(*doc.decompressedViewsMutex);
+			for (const size_t view : workItem.compressedViews) {
+				++doc.activeViewUsers[view];
+				auto idle = doc.idleSequence.find(view);
+				if (idle != doc.idleSequence.end()) {
+					doc.idleViews.erase(idle->second);
+					doc.idleSequence.erase(idle);
+					auto decoded = doc.decompressedBufferViews.find(view);
+					if (decoded != doc.decompressedBufferViews.end()) doc.idleViewBytes -= decoded->second.size;
+				}
+			}
+		}
 		PrimitiveOutcome outcome;
 		outcome.meshIndex = workItem.meshIndex;
 		outcome.primitiveIndex = workItem.primitiveIndex;
@@ -1526,6 +1843,29 @@ ExtractionResult ExtractAll(const std::string& filePath, const ExtractOptions& o
 				}
 			}
 		}
+		catch (const std::bad_alloc& error) {
+			if (retryOutOfMemory) {
+				spdlog::warn("glTF mesh {} primitive {} ({} triangles) ran out of memory ({}); it is retried alone at the end",
+					workItem.meshIndex, workItem.primitiveIndex, workItem.triangles, error.what());
+				draining = true;
+				{
+					std::lock_guard lock(failureMutex);
+					outOfMemory.push_back(workIndex);
+				}
+				// Not finished: it runs again, so its views stay pending.
+				if (!workItem.compressedViews.empty()) {
+					std::lock_guard lock(*doc.decompressedViewsMutex);
+					for (const size_t view : workItem.compressedViews) releaseView(view, false);
+				}
+				return;
+			}
+			outcome.kind = PrimitiveOutcome::Kind::Failed;
+			outcome.error = error.what();
+			if (!options.continueOnError) {
+				std::lock_guard lock(failureMutex);
+				if (!firstFailure) firstFailure = std::current_exception();
+			}
+		}
 		catch (const std::exception& error) {
 			outcome.kind = PrimitiveOutcome::Kind::Failed;
 			outcome.error = error.what();
@@ -1537,15 +1877,14 @@ ExtractionResult ExtractAll(const std::string& filePath, const ExtractOptions& o
 		outcome.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
 		if (!workItem.compressedViews.empty()) {
 			std::lock_guard lock(*doc.decompressedViewsMutex);
-			for (const size_t view : workItem.compressedViews) {
-				if (--doc.pendingViewUsers[view] == 0) doc.decompressedBufferViews.erase(view);
-			}
+			for (const size_t view : workItem.compressedViews) releaseView(view, true);
 		}
 		if (options.onOutcome) options.onOutcome(outcome);
 	};
 
 	if (options.memoryBudgetBytes == 0) {
-		TaskSchedulerManager::GetInstance().ParallelFor("GlTFGeometryExtractor::PreprocessPrimitives", workItems.size(), runItem);
+		TaskSchedulerManager::GetInstance().ParallelFor("GlTFGeometryExtractor::PreprocessPrimitives", workItems.size(),
+			[&](size_t workIndex) { runItem(workIndex, true); });
 	}
 	else {
 		// Largest first, so the biggest builds do not end up alone at the tail. A primitive is admitted while the admitted
@@ -1579,7 +1918,8 @@ ExtractionResult ExtractAll(const std::string& filePath, const ExtractOptions& o
 			{
 				std::lock_guard lock(mutex);
 				while (firstUntaken < order.size() && taken[firstUntaken]) ++firstUntaken;
-				const bool memoryFull = running != 0 && firstUntaken < order.size() && overBudget();
+				if (running == 0) draining = false;
+				const bool memoryFull = running != 0 && firstUntaken < order.size() && (draining || overBudget());
 				// A smaller primitive may overtake one that does not fit yet only while there are idle workers: letting
 				// small ones keep the budget full starved the large ones until the end, where they ran alone.
 				bool largerWaiting = false;
@@ -1600,7 +1940,7 @@ ExtractionResult ExtractAll(const std::string& filePath, const ExtractOptions& o
 			}
 			for (const size_t workIndex : admitted) {
 				spawn([&, workIndex] {
-					runItem(workIndex);
+					runItem(workIndex, true);
 					{
 						std::lock_guard lock(mutex);
 						admittedBytes -= cost(workIndex);
@@ -1611,6 +1951,16 @@ ExtractionResult ExtractAll(const std::string& filePath, const ExtractOptions& o
 			}
 		};
 		TaskSchedulerManager::GetInstance().RunTaskGroup("GlTFGeometryExtractor::PreprocessPrimitives", admit);
+	}
+
+	// Each primitive that ran out of memory beside others, alone now that nothing else holds memory (its own ParallelFors still
+	// use every worker). A second failure is final.
+	std::sort(outOfMemory.begin(), outOfMemory.end());
+	if (!outOfMemory.empty()) {
+		spdlog::info("glTF: retrying {} primitive(s) that ran out of memory, one at a time", outOfMemory.size());
+	}
+	for (const size_t workIndex : outOfMemory) {
+		runItem(workIndex, false);
 	}
 
 	if (firstFailure) std::rethrow_exception(firstFailure);

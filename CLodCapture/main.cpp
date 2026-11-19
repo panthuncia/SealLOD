@@ -97,6 +97,7 @@ struct Job {
 	bool holdBindPose = true;
 	double readyTimeoutSeconds = 300.0;
 	std::string partFilter;
+	bool pathTracing = false;
 };
 
 XMFLOAT3 ReadVector(const nlohmann::json& json)
@@ -156,6 +157,11 @@ Job LoadJob(const fs::path& path)
 	job.holdBindPose = json.value("hold_bind_pose", job.holdBindPose);
 	job.readyTimeoutSeconds = json.value("ready_timeout_seconds", job.readyTimeoutSeconds);
 	job.partFilter = json.value("part_filter", job.partFilter);
+	job.pathTracing = json.value("path_tracing", job.pathTracing);
+	if (job.pathTracing) {
+		// Every layer is read inside a raster pass (kSurfaceAnchor, kLightingAnchor), and the path-traced recipe has none.
+		throw std::runtime_error("path_tracing: CLodCapture renders raster only; its layers are read from raster passes the path-traced pipeline removes");
+	}
 	if (job.assets.empty() || job.views.empty() || job.probes.empty()) {
 		throw std::runtime_error("a job needs assets, views and probes");
 	}
@@ -494,6 +500,10 @@ int RunJob(const Job& job)
 	// Deleted only on success. A failed run exits straight away, because unwinding would destroy the
 	// renderer mid-frame and turn the error into a crash with the wrong exit code.
 	// Path tracing is the renderer default where the device can run it; captures and the viewer measure raster CLod.
+	// Say so when the environment asked for path tracing, so a "path-traced" run is not mistaken for one.
+	if (const char* requested = std::getenv("SARP_RT_PATH_TRACING"); requested != nullptr && std::string_view(requested) != "0") {
+		spdlog::warn("SARP_RT_PATH_TRACING={} is ignored: CLodCapture renders raster only", requested);
+	}
 	_putenv_s("SARP_RT_PATH_TRACING", "0");
 	Renderer& renderer = *new Renderer();
 	renderer.Initialize(window, job.width, job.height, job.pipeline == "sarp" ? br::pipeline::MakeSarpPipeline() : MakeCapturePipeline());

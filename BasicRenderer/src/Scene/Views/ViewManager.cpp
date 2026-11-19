@@ -53,7 +53,8 @@ namespace
             headPointers.GetHeight() == visibilityBuffer.GetHeight();
     }
 
-    CullingCameraInfo BuildCullingCameraInfo(const CameraInfo& cameraInfo)
+    // shadowView: the view renders a shadow map, which shading normals never reach, so it selects LODs by geometry alone.
+    CullingCameraInfo BuildCullingCameraInfo(const CameraInfo& cameraInfo, bool shadowView)
     {
         CullingCameraInfo cullInfo{};
         cullInfo.positionWorldSpace = cameraInfo.positionWorldSpace;
@@ -65,6 +66,8 @@ namespace
         cullInfo.viewportWidth = static_cast<float>(cameraInfo.depthResX);
         cullInfo.viewportHeight = static_cast<float>(cameraInfo.depthResY);
         cullInfo.reyesDiceRatePixels = CLodReyesDiceRatePixels();
+        cullInfo.lodAppearanceWeight = shadowView ? 0.0f : (std::max)(0.0f, br::extensions::MakeSettingGetter<float>(CLodLodAppearanceWeightSettingName)());
+        cullInfo.lodGeometricChannel = (std::min)(br::extensions::MakeSettingGetter<uint32_t>(CLodLodGeometricChannelSettingName)(), CLodLodGeometricChannelMax);
         DirectX::XMStoreFloat4(&cullInfo.viewRightWorld, DirectX::XMVectorSetW(cameraInfo.viewInverse.r[0], 0.0f));
         DirectX::XMStoreFloat4(&cullInfo.viewUpWorld, DirectX::XMVectorSetW(cameraInfo.viewInverse.r[1], 0.0f));
         DirectX::XMStoreFloat4(&cullInfo.viewForwardWorld, DirectX::XMVectorSetW(DirectX::XMVectorNegate(cameraInfo.viewInverse.r[2]), 0.0f));
@@ -133,7 +136,7 @@ uint64_t ViewManager::CreateView(const CameraInfo& cameraInfo,
     v.gpu.cameraBufferIndex = static_cast<uint32_t>(v.gpu.cameraBufferView->GetOffset() / sizeof(CameraInfo));
     m_cameraBuffer->UpdateView(v.gpu.cameraBufferView.get(), &cameraInfo);
 
-    CullingCameraInfo cullCam = BuildCullingCameraInfo(cameraInfo);
+    CullingCameraInfo cullCam = BuildCullingCameraInfo(cameraInfo, flags.shadow);
 
 	m_cullingCameraBuffer->UpdateView(v.gpu.cullingCameraBufferView.get(), &cullCam);
 
@@ -268,7 +271,7 @@ void ViewManager::UpdateCamera(uint64_t viewID, const CameraInfo& cameraInfo) {
     v->cameraInfo = cameraInfo;
     if (!v->flags.primaryCamera) {
         m_cameraBuffer->UpdateView(v->gpu.cameraBufferView.get(), &cameraInfo);
-	    CullingCameraInfo cullInfo = BuildCullingCameraInfo(cameraInfo);
+	    CullingCameraInfo cullInfo = BuildCullingCameraInfo(cameraInfo, v->flags.shadow);
 	    m_cullingCameraBuffer->UpdateView(v->gpu.cullingCameraBufferView.get(), &cullInfo);
         m_publicationRevision.fetch_add(1, std::memory_order_release);
     } else {
@@ -302,7 +305,7 @@ br::render::PrimaryCameraFrameUpload ViewManager::CapturePrimaryCameraUpload(
     if (!view) return {};
     return {
         .camera = view->cameraInfo,
-        .cullingCamera = BuildCullingCameraInfo(view->cameraInfo),
+        .cullingCamera = BuildCullingCameraInfo(view->cameraInfo, view->flags.shadow),
         .viewID = view->id,
         .revision = m_primaryCameraRevision.load(std::memory_order_acquire),
         .frameNumber = frameNumber,

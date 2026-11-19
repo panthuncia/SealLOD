@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -18,6 +19,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -563,8 +565,13 @@ namespace CLodCache {
 			WritePod(out, prebuiltData.rootPartIndex);
 			WritePod(out, prebuiltData.maxDepth);
 			WritePod(out, prebuiltData.maxTraversalDepth);
-			// Optional trailing section: material slots. Absent for single-material meshes, so their metadata is
-			// byte-identical to before.
+			// Stage 6 appearance blocks in the triangle pages (docs/clod-appearance-stage6.md), written for every mesh: zero counts
+			// when its pages carry none. Whether a cluster has a block is its page's attribute bits and UV set 0 descriptor.
+			WritePod(out, prebuiltData.uvRemapClusters);
+			WritePod(out, prebuiltData.uvRemapBytes);
+			WritePod(out, prebuiltData.normalSpreadClusters);
+			WritePod(out, prebuiltData.normalSpreadBytes);
+			// Optional trailing section: material slots. Absent for single-material meshes.
 			if (prebuiltData.materialSlotCount > 1u || !prebuiltData.assemblyTransformMaterialBases.empty()) {
 				WritePod(out, kMaterialSlotSectionTag);
 				WritePod(out, prebuiltData.materialSlotCount);
@@ -630,6 +637,13 @@ namespace CLodCache {
 			if (!ReadPod(blob, offset, out.prebuiltData.rootPartIndex)) return false;
 			if (!ReadPod(blob, offset, out.prebuiltData.maxDepth)) return false;
 			if (!ReadPod(blob, offset, out.prebuiltData.maxTraversalDepth)) return false;
+			if (!ReadPod(blob, offset, out.prebuiltData.uvRemapClusters)) return false;
+			if (!ReadPod(blob, offset, out.prebuiltData.uvRemapBytes)) return false;
+			if (!ReadPod(blob, offset, out.prebuiltData.normalSpreadClusters)) return false;
+			if (!ReadPod(blob, offset, out.prebuiltData.normalSpreadBytes)) return false;
+			// Blocks and their bytes come together.
+			if ((out.prebuiltData.uvRemapClusters == 0u) != (out.prebuiltData.uvRemapBytes == 0u)) return false;
+			if ((out.prebuiltData.normalSpreadClusters == 0u) != (out.prebuiltData.normalSpreadBytes == 0u)) return false;
 			out.prebuiltData.materialSlotCount = 1u;
 			out.prebuiltData.assemblyTransformMaterialBases.clear();
 			out.prebuiltData.externalParts.clear();
@@ -652,7 +666,6 @@ namespace CLodCache {
 					return false;
 				}
 			}
-
 			return offset == blob.size();
 		}
 
@@ -1167,6 +1180,117 @@ namespace CLodCache {
 		}
 	}
 
+	namespace {
+		// The variables ApplyClusterLODBuilderEnvironmentOverrides reads for the settings HashSimplificationSettings covers.
+		constexpr const char* kSimplificationEnvironmentVariables[] = {
+			"BASICRENDERER_CLOD_DISABLE_SLOPPY_FALLBACK", "BASICRENDERER_CLOD_SLOPPY_ERROR_FACTOR", "BASICRENDERER_CLOD_SLOPPY_LAST_RESORT", "BASICRENDERER_CLOD_SLOPPY_LAST_RESORT_REJECTED",
+			"BASICRENDERER_CLOD_SLOPPY_LAST_RESORT_FIT", "BASICRENDERER_CLOD_SLOPPY_LAST_RESORT_ERROR_FACTOR",
+			"BASICRENDERER_CLOD_SIMPLIFY_PERMISSIVE", "BASICRENDERER_CLOD_NORMAL_WEIGHT",
+			"BASICRENDERER_CLOD_SIMPLIFY_VALIDATION", "BASICRENDERER_CLOD_SIMPLIFY_VALIDATION_RETRIES",
+			"BASICRENDERER_CLOD_SIMPLIFY_VALIDATION_FOLD_ANGLE", "BASICRENDERER_CLOD_SIMPLIFY_VALIDATION_FOLD_AREA",
+			"BASICRENDERER_CLOD_SIMPLIFY_VALIDATION_SHADING_ANGLE", "BASICRENDERER_CLOD_SIMPLIFY_VALIDATION_SHADING_AREA",
+			"BASICRENDERER_CLOD_SIMPLIFY_VALIDATION_RADIUS_SCALE", "BASICRENDERER_CLOD_SIMPLIFY_VALIDATION_COVERAGE_AREA",
+			"BASICRENDERER_CLOD_SIMPLIFY_UPDATE", "BASICRENDERER_CLOD_SIMPLIFY_UPDATE_POSITIONS",
+			"BASICRENDERER_CLOD_SIMPLIFY_UPDATE_REFIT_ANGLE", "BASICRENDERER_CLOD_SIMPLIFY_UPDATE_MEASURED_ERROR",
+			"BASICRENDERER_CLOD_SIMPLIFY_UPDATE_UV_TRANSFER", "BASICRENDERER_CLOD_SIMPLIFY_MATCH_REACH", "BASICRENDERER_CLOD_SIMPLIFY_MATCH_CANDIDATES",
+			"BASICRENDERER_CLOD_SIMPLIFY_UPDATE_FIT_SAMPLES", "BASICRENDERER_CLOD_SIMPLIFY_UPDATE_REFIT_CHECK", "BASICRENDERER_CLOD_SIMPLIFY_MATCH_FACING_BINS", "BASICRENDERER_CLOD_ERROR_CHANNELS_SAMPLES", "BASICRENDERER_CLOD_SIMPLIFY_VALIDATION_SAMPLES",
+			"BASICRENDERER_CLOD_SIMPLIFY_OPTIMAL", "BASICRENDERER_CLOD_SIMPLIFY_OPTIMAL_SHEET_ANGLE",
+			"BASICRENDERER_CLOD_SIMPLIFY_OPTIMAL_FLIP_ANGLE", "BASICRENDERER_CLOD_SIMPLIFY_OPTIMAL_PRESERVE_FOLDS",
+			"BASICRENDERER_CLOD_SIMPLIFY_OPTIMAL_MOVES",
+			"BASICRENDERER_CLOD_ERROR_CHANNELS", "BASICRENDERER_CLOD_ERROR_CHANNELS_TEXTURE",
+			"BASICRENDERER_CLOD_ERROR_CHANNELS_TEXTURE_SLIDE", "BASICRENDERER_CLOD_ERROR_CHANNELS_TEXTURE_COLOR",
+			"BASICRENDERER_CLOD_ERROR_CHANNELS_TEXTURE_COLOR_FOOTPRINT", "BASICRENDERER_CLOD_ERROR_CHANNELS_TEXTURE_COLOR_ALL",
+			"BASICRENDERER_CLOD_ERROR_CHANNELS_TEXTURE_REMAP", "BASICRENDERER_CLOD_ERROR_CHANNELS_TEXTURE_REMAP_TEXEL",
+			"BASICRENDERER_CLOD_ERROR_CHANNELS_TEXTURE_REMAP_MAX_NODES", "BASICRENDERER_CLOD_ERROR_CHANNELS_TEXTURE_REMAP_LAYOUT",
+			"BASICRENDERER_CLOD_ERROR_CHANNELS_TEXTURE_REMAP_CELL_MISS", "BASICRENDERER_CLOD_ERROR_CHANNELS_TEXTURE_REMAP_RESERVE",
+			"BASICRENDERER_CLOD_NORMAL_SPREAD", "BASICRENDERER_CLOD_NORMAL_SPREAD_FOOTPRINT", "BASICRENDERER_CLOD_NORMAL_SPREAD_SAMPLE_CAP",
+			"BASICRENDERER_CLOD_SIMPLIFY_TOPOLOGY", "BASICRENDERER_CLOD_SIMPLIFY_TOPOLOGY_RETRIES",
+			"BASICRENDERER_CLOD_SIMPLIFY_TOPOLOGY_RELAX_UV", "BASICRENDERER_CLOD_SIMPLIFY_TOPOLOGY_UPDATE_FALLBACK",
+			"BASICRENDERER_CLOD_SIMPLIFY_TOPOLOGY_TEXTURE_AREA", "BASICRENDERER_CLOD_SIMPLIFY_TOPOLOGY_TEXTURE_SLIDE",
+			"BASICRENDERER_CLOD_SIMPLIFY_TOPOLOGY_TEXTURE_CHARTS", "BASICRENDERER_CLOD_SIMPLIFY_TOPOLOGY_TEXTURE_TEXELS",
+			"BASICRENDERER_CLOD_SIMPLIFY_TOPOLOGY_TEXTURE_RESOLUTION", "BASICRENDERER_CLOD_SIMPLIFY_TOPOLOGY_TEXTURE_COLOR",
+		};
+
+		// Every output-affecting simplification and appearance setting, by value (floats by their bits).
+		size_t HashSimplificationSettings(const ClusterLODBuilderSettings& settings)
+		{
+			size_t seed = 0x5349'4D50u; // "SIMP"
+			const auto add = [&seed](auto value) {
+				if constexpr (std::is_same_v<decltype(value), float>) {
+					boost::hash_combine(seed, std::bit_cast<uint32_t>(value));
+				}
+				else {
+					boost::hash_combine(seed, static_cast<uint32_t>(value));
+				}
+			};
+			add(settings.disableSloppyFallback);
+			add(settings.disableSloppyFallback && settings.sloppyLastResort); // only acts without the global fallback
+			add(settings.disableSloppyFallback && settings.sloppyLastResort && settings.sloppyLastResortRejected);
+			add(settings.disableSloppyFallback && settings.sloppyLastResort && settings.sloppyLastResortFit);
+			add(settings.disableSloppyFallback && settings.sloppyLastResort ? settings.sloppyLastResortErrorFactor : 0.0f);
+			add(settings.sloppyFallbackErrorFactor);
+			add(settings.simplifyPermissive);
+			add(settings.normalAttributeWeight);
+			add(settings.simplifyValidation);
+			add(settings.simplifyValidationRetries);
+			add(settings.simplifyValidationFoldAngle);
+			add(settings.simplifyValidationFoldArea);
+			add(settings.simplifyValidationShadingAngle);
+			add(settings.simplifyValidationShadingArea);
+			add(settings.simplifyValidationRadiusScale);
+			add(settings.simplifyValidationCoverageArea);
+			add(settings.simplifyUpdate);
+			add(settings.simplifyUpdatePositions);
+			add(settings.simplifyUpdateRefitAngle);
+			add(settings.simplifyUpdateMeasuredError);
+			add(settings.simplifyUpdateUvTransfer);
+			add(settings.simplifyOptimal);
+			add(settings.simplifyOptimalSheetAngle);
+			add(settings.simplifyOptimalFlipAngle);
+			add(settings.simplifyOptimalPreserveFolds);
+			add(settings.simplifyOptimalMoves);
+			add(settings.lodErrorChannels);
+			add(settings.lodErrorChannelsTexture);
+			add(settings.lodErrorChannelsTextureSlide);
+			add(settings.lodErrorChannelsTextureColor);
+			add(settings.lodErrorChannelsTextureColorFootprint);
+			add(settings.lodErrorChannelsTextureColorAll);
+			add(settings.lodErrorChannelsTextureRemap);
+			add(settings.lodErrorChannelsTextureRemapTexel);
+			add(settings.lodErrorChannelsTextureRemapMaxNodes);
+			add(settings.lodErrorChannelsTextureRemapLayout);
+			add(settings.lodErrorChannelsTextureRemapCellMiss);
+			add(settings.lodErrorChannelsTextureRemapReserve);
+			add(settings.lodNormalSpread);
+			add(settings.lodNormalSpreadFootprint);
+			add(settings.lodNormalSpreadSampleCap);
+			add(settings.simplifyTopology);
+			add(settings.simplifyTopologyRetries);
+			add(settings.simplifyTopologyRelaxUv);
+			add(settings.simplifyTopologyUpdateFallback);
+			add(settings.simplifyTopologyTextureArea);
+			add(settings.simplifyTopologyTextureSlide);
+			add(settings.simplifyTopologyTextureCharts);
+			add(settings.simplifyTopologyTextureTexels);
+			add(settings.simplifyTopologyTextureResolution);
+			add(settings.simplifyTopologyTextureColor);
+			// Build cost: the side-aware match's shell and the sample counts, by the values the builder uses.
+			const uint32_t facingGrid = ClusterLODMatchFacingGrid(settings);
+			add(settings.simplifyMatchReach);
+			add(facingGrid != 0u ? 0u : std::min(settings.simplifyMatchCandidates, 32u));
+			add(facingGrid);
+			add(settings.simplifyUpdateFitSamples & 31u);
+			const auto areaSamples = [](uint32_t requested) { return requested == 1u || requested == 2u ? requested : 4u; };
+			add(areaSamples(settings.lodErrorChannelsSamples));
+			add(areaSamples(settings.simplifyValidationSamples));
+			if (settings.simplifyUpdateRefitCheck > 0.0f)
+			{
+				add(std::min(settings.simplifyUpdateRefitCheck, 180.0f));
+			}
+			return seed;
+		}
+	}
+
 	uint64_t ComputeBuildConfigHash(std::string_view assetIdentifier)
 	{
 		// This runs for every mesh of every cached asset, and reading the environment takes
@@ -1180,6 +1304,11 @@ namespace CLodCache {
 			return value->second;
 		};
 		size_t seed = 0;
+		// Bump when the builder's output changes for the same settings and format (a cache built by an older builder is then
+		// rebuilt instead of reused). 1: binned SAH split in the simplification BVH (SimplifyTriangleBvh::BuildNode). 2: facing bins
+		// and one error-channel area sample per triangle by default, and unused update candidates left unfitted.
+		constexpr uint32_t kBuilderRevision = 2u;
+		boost::hash_combine(seed, kBuilderRevision);
 		auto hashEnvironmentString = [&seed, &environmentVariable](const char* name)
 		{
 			boost::hash_combine(seed, environmentVariable(name));
@@ -1244,8 +1373,22 @@ namespace CLodCache {
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_FORK_DOUBLE_SIDED_ONLY");
 		hashEnvironmentString("BASICRENDERER_CLOD_VOXEL_FORK_SURFACE_LOSS");
 		hashEffectiveNodeBoneLimit();
-		hashEnvironmentString("BASICRENDERER_CLOD_DISABLE_SLOPPY_FALLBACK");
-		hashEnvironmentString("BASICRENDERER_CLOD_SLOPPY_ERROR_FACTOR");
+		// Simplification and appearance (docs/clod-simplification-validation.md, docs/clod-appearance-stage6.md): the effective
+		// values, so a variable set to its default value keys the same caches as leaving it unset, and changing a default
+		// invalidates the caches built under the old one. Builders take these from GetDefaultBuilderSettings, whose base is the
+		// settings struct's defaults, and nothing in code changes them afterwards, so the struct defaults under the environment
+		// are what every build uses. An asset settings rule may set them too: its document is hashed above, and for such an asset
+		// every variable set also enters by its text, since there a variable equal to the struct default can differ from unset.
+		thread_local const size_t effectiveSettingsHash = HashSimplificationSettings(ApplyClusterLODBuilderEnvironmentOverrides({}));
+		boost::hash_combine(seed, effectiveSettingsHash);
+		if (GetCLodAssetSettingsHash(assetIdentifier) != 0u) {
+			for (const char* name : kSimplificationEnvironmentVariables) {
+				if (!environmentVariable(name).empty()) {
+					boost::hash_combine(seed, std::string_view(name));
+					hashEnvironmentString(name);
+				}
+			}
+		}
 		return static_cast<uint64_t>(seed);
 	}
 

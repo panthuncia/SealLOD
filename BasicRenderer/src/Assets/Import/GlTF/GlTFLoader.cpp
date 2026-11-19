@@ -1941,12 +1941,13 @@ br::import::SceneCacheDescription DescribeScene(
         if (mesh.contains("primitives") && (!includeMesh || includeMesh(meshIndex, mesh.value("name", std::string())))) {
             const auto& primitives = mesh["primitives"];
             for (size_t primitiveIndex = 0; primitiveIndex < primitives.size(); ++primitiveIndex) {
-                const auto format = GlTFGeometryExtractor::DescribePrimitiveFormat(gltf, sourceIdentifier, meshIndex, primitiveIndex);
+                const auto format = GlTFGeometryExtractor::DescribePrimitiveFormat(gltf, sourceIdentifier, meshIndex, primitiveIndex, sourcePath);
                 br::import::SceneCachePrimitive record;
                 record.mesh = static_cast<uint32_t>(meshIndex);
                 record.primitive = static_cast<uint32_t>(primitiveIndex);
                 record.primPath = format.identity.primPath;
                 record.doubleSidedVoxelSourceNormals = format.identity.doubleSidedVoxelSourceNormals;
+                record.clodAppearanceHash = format.identity.appearanceHash;
                 record.vertexFlags = format.vertexFlags;
                 record.vertexSize = format.vertexSize;
                 record.skinningVertexSize = format.skinningVertexSize;
@@ -2039,6 +2040,7 @@ std::optional<br::import::ImportedAssetPayload> LoadImportedAssetFromSceneCache(
             identity.primPath = primitive.primPath;
             identity.subsetName = "";
             identity.doubleSidedVoxelSourceNormals = primitive.doubleSidedVoxelSourceNormals;
+            identity.appearanceHash = primitive.clodAppearanceHash;
             prebuilt[index] = CLodCacheLoader::TryLoadPrebuilt(identity);
             if (!prebuilt[index]) missing.fetch_add(1, std::memory_order_relaxed);
         });

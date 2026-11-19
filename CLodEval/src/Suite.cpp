@@ -5,6 +5,7 @@
 #include <thread>
 #include <array>
 #include <cctype>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -59,12 +60,23 @@ namespace {
 		return hash;
 	}
 
-	std::string BuildKey(const Suite& suite, const SuiteVariant& variant, const fs::path& cacheTool)
+	// Without the tool, the key says only what was asked for: --reuse-builds matches on that.
+	std::string BuildKey(const Suite& suite, const SuiteVariant& variant, const fs::path* cacheTool)
 	{
 		uint64_t hash = 1469598103934665603ull;
-		hash = HashFileIdentity(hash, cacheTool);
+		if (cacheTool != nullptr) {
+			hash = HashFileIdentity(hash, *cacheTool);
+		}
+		if (!variant.meshSubset.empty()) {
+			for (const uint32_t mesh : variant.meshSubset) {
+				hash = HashBytes(hash, std::format("mesh{}", mesh));
+			}
+		}
 		for (const SuiteAsset& asset : suite.assets) {
 			hash = HashFileIdentity(hash, asset.path);
+		}
+		if (!suite.textures) {
+			hash = HashBytes(hash, "no-textures");
 		}
 		for (const auto& [name, value] : variant.settings) {
 			hash = HashBytes(HashBytes(hash, name), value);
@@ -191,6 +203,44 @@ Suite LoadSuite(const fs::path& path, const fs::path& workspaceOverride)
 	if (const auto analyzers = json.find("analyzers"); analyzers != json.end()) {
 		suite.analyzers = analyzers->get<std::vector<std::string>>();
 	}
+	suite.textures = json.value("textures", true);
+	if (const auto rules = json.find("cut_rules"); rules != json.end()) {
+		for (const auto& rule : *rules) {
+			CutRule parsed;
+			parsed.name = rule.at("name").get<std::string>();
+			const std::string geometric = rule.value("geometric", std::string("quadric"));
+			if (parsed.name.empty() || !ParseCutGeometricChannel(geometric, parsed.geometric)) {
+				throw std::runtime_error(std::format("cut rule '{}': geometric must be quadric, measured or max, not '{}'", parsed.name, geometric));
+			}
+			parsed.appearanceWeight = rule.value("appearance_weight", 0.0f);
+			if (!(parsed.appearanceWeight >= 0.0f)) {
+				throw std::runtime_error(std::format("cut rule '{}': appearance_weight must be at least 0", parsed.name));
+			}
+			suite.cutRules.push_back(std::move(parsed));
+		}
+	}
+	if (const auto bakes = json.find("texture_bakes"); bakes != json.end()) {
+		for (const auto& bake : *bakes) {
+			TextureBake parsed;
+			parsed.name = bake.at("name").get<std::string>();
+			parsed.texelScale = bake.value("texel_scale", parsed.texelScale);
+			parsed.minDepth = bake.value("min_depth", parsed.minDepth);
+			parsed.minDeltaE = bake.value("min_delta_e", parsed.minDeltaE);
+			parsed.remap = bake.value("mode", std::string("color")) == "remap";
+			if (parsed.name.empty() || !(parsed.texelScale > 0.0)) {
+				throw std::runtime_error(std::format("texture bake '{}': needs a name and a texel_scale above 0", parsed.name));
+			}
+			suite.textureBakes.push_back(std::move(parsed));
+		}
+	}
+	suite.specularFootprint = json.value("specular_footprint", suite.specularFootprint);
+	if (!(suite.specularFootprint > 0.0)) {
+		throw std::runtime_error("specular_footprint must be above 0");
+	}
+	suite.specularSpreadCap = json.value("specular_spread_cap", suite.specularSpreadCap);
+	if (!(suite.specularSpreadCap >= 0.0)) {
+		throw std::runtime_error("specular_spread_cap must be at least 0");
+	}
 	if (const auto budgets = json.find("budgets"); budgets != json.end()) {
 		suite.budgets = ParseBudgets(*budgets);
 	}
@@ -202,8 +252,7 @@ Suite LoadSuite(const fs::path& path, const fs::path& workspaceOverride)
 			parsed.height = resolution->at(1).get<uint32_t>();
 		}
 		parsed.referenceScale = capture->value("reference_scale", parsed.referenceScale);
-		parsed.accumulateFrames = capture->value("accumulate_frames", parsed.accumulateFrames);
-		parsed.fovDegrees = capture->value("fov_degrees", parsed.fovDegrees);
+		parsed.accumulateFrames = capture->value("accumulate_frames", parsed.accumulateFrames);		parsed.fovDegrees = capture->value("fov_degrees", parsed.fovDegrees);
 		parsed.farRadii = capture->value("far_radii", parsed.farRadii);
 		parsed.readyTimeoutSeconds = capture->value("ready_timeout_seconds", parsed.readyTimeoutSeconds);
 		parsed.cornerNdc = capture->value("corner_ndc", parsed.cornerNdc);
@@ -229,6 +278,72 @@ Suite LoadSuite(const fs::path& path, const fs::path& workspaceOverride)
 	return suite;
 }
 
+int64_t MeshIndexOfName(std::string_view meshName)
+{
+	constexpr std::string_view kPrefix = "/glTF/Mesh/";
+	if (!meshName.starts_with(kPrefix)) {
+		return -1;
+	}
+	meshName.remove_prefix(kPrefix.size());
+	int64_t index = -1;
+	const auto [end, status] = std::from_chars(meshName.data(), meshName.data() + meshName.size(), index);
+	if (status != std::errc() || (end != meshName.data() + meshName.size() && *end != '/')) {
+		return -1;
+	}
+	return index;
+}
+
+std::vector<uint32_t> ParseMeshSubset(const std::string& text)
+{
+	std::vector<uint32_t> meshes;
+	size_t start = 0;
+	while (start <= text.size()) {
+		const size_t end = std::min(text.find(',', start), text.size());
+		const std::string_view item = std::string_view(text).substr(start, end - start);
+		start = end + 1;
+		if (item.empty()) {
+			continue;
+		}
+		int64_t index = MeshIndexOfName(item);
+		if (index < 0) {
+			const auto [last, status] = std::from_chars(item.data(), item.data() + item.size(), index);
+			if (status != std::errc() || last != item.data() + item.size() || index < 0) {
+				throw std::runtime_error(std::format("--meshes: '{}' is not a glTF mesh index or a /glTF/Mesh/<index> name", item));
+			}
+		}
+		meshes.push_back(static_cast<uint32_t>(index));
+	}
+	std::ranges::sort(meshes);
+	meshes.erase(std::unique(meshes.begin(), meshes.end()), meshes.end());
+	if (meshes.empty()) {
+		throw std::runtime_error("--meshes needs at least one mesh index");
+	}
+	return meshes;
+}
+
+SuiteVariant MakeMeshSubsetVariant(const SuiteVariant& base, const std::vector<uint32_t>& meshes)
+{
+	SuiteVariant subset = base;
+	subset.baseName = base.name;
+	subset.meshSubset = meshes;
+	// A short list names itself; a long one is named by its hash, so paths stay short.
+	std::string tag;
+	if (meshes.size() <= 4u) {
+		for (const uint32_t mesh : meshes) {
+			tag += (tag.empty() ? "" : "-") + std::to_string(mesh);
+		}
+	}
+	else {
+		uint64_t hash = 1469598103934665603ull;
+		for (const uint32_t mesh : meshes) {
+			hash = HashBytes(hash, std::to_string(mesh) + ",");
+		}
+		tag = std::format("{}x{:08x}", meshes.size(), static_cast<uint32_t>(hash));
+	}
+	subset.name = base.name + "~m" + tag;
+	return subset;
+}
+
 BuildPaths GetBuildPaths(const Suite& suite, const SuiteVariant& variant)
 {
 	BuildPaths paths;
@@ -252,13 +367,18 @@ BuildOutcome BuildVariant(const Suite& suite, const SuiteVariant& variant, const
 		outError = std::format("cache tool not found at '{}'", options.cacheTool.string());
 		return BuildOutcome::Failed;
 	}
-	const std::string key = BuildKey(suite, variant, options.cacheTool);
+	const std::string key = BuildKey(suite, variant, &options.cacheTool);
+	const std::string requestKey = BuildKey(suite, variant, nullptr);
 
 	std::error_code error;
 	if (fs::exists(paths.buildRecord, error)) {
 		try {
 			const auto record = nlohmann::json::parse(ReadTextFile(paths.buildRecord));
-			if (!options.force && record.value("build_key", "") == key && fs::exists(paths.manifest, error)) {
+			// Records from before request_key are reused on matching settings alone.
+			const bool sameRequest = record.contains("request_key")
+				? record.value("request_key", "") == requestKey
+				: variant.meshSubset.empty() && record.value("settings", nlohmann::json::object()) == nlohmann::json(variant.settings);
+			if (!options.force && fs::exists(paths.manifest, error) && (record.value("build_key", "") == key || (options.reuseBuilds && sameRequest))) {
 				return BuildOutcome::UpToDate;
 			}
 		}
@@ -297,6 +417,16 @@ BuildOutcome BuildVariant(const Suite& suite, const SuiteVariant& variant, const
 	request.logPath = paths.log;
 	request.arguments.push_back("--cache-root=" + paths.cacheRoot.string());
 	request.arguments.push_back("--manifest=" + paths.manifest.string());
+	if (!suite.textures) {
+		request.arguments.push_back("--no-textures");
+	}
+	if (!variant.meshSubset.empty()) {
+		std::string list;
+		for (const uint32_t mesh : variant.meshSubset) {
+			list += (list.empty() ? "" : ",") + std::to_string(mesh);
+		}
+		request.arguments.push_back("--only-mesh-index=" + list);
+	}
 	for (const SuiteAsset& asset : suite.assets) {
 		request.arguments.push_back(asset.path.string());
 	}
@@ -322,7 +452,9 @@ BuildOutcome BuildVariant(const Suite& suite, const SuiteVariant& variant, const
 
 	std::ofstream(paths.buildRecord) << nlohmann::json{
 		{ "build_key", key },
+		{ "request_key", requestKey },
 		{ "variant", variant.name },
+		{ "mesh_subset", variant.meshSubset },
 		{ "settings", variant.settings },
 		{ "asset_settings", assetSettings.string() },
 		{ "tool", options.cacheTool.string() },
@@ -375,6 +507,21 @@ bool AnalyzeMeshes(
 	};
 	std::vector<Outcome> outcomes(selected.size());
 	MergePartLibrary mergeParts;
+	// Source materials, opened once per source asset when an analyzer needs them (quality.texture), before the workers start.
+	std::map<std::filesystem::path, std::shared_ptr<SourceMaterials>> materials;
+	if (std::any_of(analyzers.begin(), analyzers.end(), [](const IAnalyzer* analyzer) { return analyzer->Info().id == "quality.texture"; })) {
+		for (const MeshToAnalyze* item : selected) {
+			if (item->source.empty() || materials.contains(item->source)) {
+				continue;
+			}
+			std::string materialError;
+			std::shared_ptr<SourceMaterials> opened;
+			if (item->source.extension() == ".glb" || item->source.extension() == ".gltf") {
+				opened = SourceMaterials::Open(item->source, materialError);
+			}
+			materials[item->source] = opened;
+		}
+	}
 	std::atomic<size_t> next{ 0u };
 	std::atomic<bool> failed{ false };
 	const auto work = [&]() {
@@ -402,7 +549,10 @@ bool AnalyzeMeshes(
 				for (const auto& view : branchViews) views.push_back(view.get());
 			}
 			for (const CachedMesh* view : views) {
-				const AnalysisContext context{ *view, item.asset, &mergeParts, options.mergeReachCut };
+				const auto found = materials.find(item.source);
+				const SourceMaterials* sourceMaterials = found != materials.end() ? found->second.get() : nullptr;
+				const AnalysisContext context{ *view, item.asset, &mergeParts, options.mergeReachCut, &options.cutRules, sourceMaterials, &options.textureBakes,
+					options.specularFootprint > 0.0 ? options.specularFootprint : 1.0, options.specularSpreadCap >= 0.0 ? options.specularSpreadCap : 1.0 };
 				for (const IAnalyzer* analyzer : analyzers) {
 					outcome.sink.SetScope({ std::string(analyzer->Info().id), analyzer->Info().version, buildName, item.asset, view->Name() });
 					analyzer->Run(context, outcome.sink);
@@ -453,8 +603,15 @@ bool AnalyzeMeshes(
 
 bool AnalyzeVariant(const Suite& suite, const SuiteVariant& variant, const AnalyzeOptions& options, ResultSet& outResults, std::string& outError)
 {
-	const BuildPaths paths = GetBuildPaths(suite, variant);
+	BuildPaths paths = GetBuildPaths(suite, variant);
 	std::error_code error;
+	if (!fs::exists(paths.manifest, error) && !variant.meshSubset.empty()) {
+		// No subset build: measure those meshes of the full build instead, which needs no build at all.
+		SuiteVariant base = variant;
+		base.name = variant.baseName;
+		base.meshSubset.clear();
+		paths = GetBuildPaths(suite, base);
+	}
 	if (!fs::exists(paths.manifest, error)) {
 		outError = std::format("variant '{}' has not been built; run the build command first", variant.name);
 		return false;
@@ -472,9 +629,30 @@ bool AnalyzeVariant(const Suite& suite, const SuiteVariant& variant, const Analy
 
 	std::vector<MeshToAnalyze> meshes;
 	for (const nlohmann::json& mesh : manifest.at("meshes")) {
-		meshes.push_back({ fs::path(mesh.at("metadata_path").get<std::string>()), AssetForSource(suite, mesh.at("source_identifier").get<std::string>()) });
+		if (!variant.meshSubset.empty()) {
+			const int64_t index = MeshIndexOfName(mesh.value("prim_path", std::string()));
+			if (index < 0 || std::ranges::find(variant.meshSubset, static_cast<uint32_t>(index)) == variant.meshSubset.end()) {
+				continue;
+			}
+		}
+		const std::string asset = AssetForSource(suite, mesh.at("source_identifier").get<std::string>());
+		const auto suiteAsset = std::find_if(suite.assets.begin(), suite.assets.end(), [&](const SuiteAsset& candidate) { return candidate.name == asset; });
+		meshes.push_back({ fs::path(mesh.at("metadata_path").get<std::string>()), asset, suiteAsset != suite.assets.end() ? suiteAsset->path : fs::path() });
 	}
-	if (!AnalyzeMeshes(meshes, variant.name, record.value("build_key", ""), options, outResults, outError)) {
+	AnalyzeOptions variantOptions = options;
+	if (variantOptions.cutRules.empty()) {
+		variantOptions.cutRules = suite.cutRules;
+	}
+	if (variantOptions.textureBakes.empty()) {
+		variantOptions.textureBakes = suite.textureBakes;
+	}
+	if (!(variantOptions.specularFootprint > 0.0)) {
+		variantOptions.specularFootprint = suite.specularFootprint;
+	}
+	if (!(variantOptions.specularSpreadCap >= 0.0)) {
+		variantOptions.specularSpreadCap = suite.specularSpreadCap;
+	}
+	if (!AnalyzeMeshes(meshes, variant.name, record.value("build_key", ""), variantOptions, outResults, outError)) {
 		return false;
 	}
 	outResults.provenance["build"] = record.value("provenance", nlohmann::json::object());
@@ -580,6 +758,10 @@ nlohmann::json DescribeCache(const fs::path& metadataPath, int groupIndex, std::
 		description["fork"] = { { "triangle_only_groups", triangleOnly }, { "voxel_only_groups", voxelOnly }, { "boundary_groups", shadows } };
 	}
 	description["voxel_pages"] = prebuilt.voxelPageCount;
+	// Stage 6 appearance blocks in the triangle pages (zero for most meshes; every mesh stores the counts).
+	description["appearance_blocks"] = {
+		{ "uv_remap_clusters", prebuilt.uvRemapClusters }, { "uv_remap_bytes", prebuilt.uvRemapBytes },
+		{ "normal_spread_clusters", prebuilt.normalSpreadClusters }, { "normal_spread_bytes", prebuilt.normalSpreadBytes } };
 	description["object_sphere"] = {
 		prebuilt.objectBoundingSphere.sphere.x, prebuilt.objectBoundingSphere.sphere.y,
 		prebuilt.objectBoundingSphere.sphere.z, prebuilt.objectBoundingSphere.sphere.w };
@@ -675,6 +857,12 @@ std::string FormatCacheDescription(const nlohmann::json& description)
 		description.at("max_depth").get<uint32_t>(),
 		description.at("triangle_pages").get<uint32_t>(),
 		description.at("voxel_pages").get<uint32_t>());
+	if (const auto blocks = description.find("appearance_blocks"); blocks != description.end() &&
+		(blocks->at("uv_remap_clusters").get<uint32_t>() != 0u || blocks->at("normal_spread_clusters").get<uint32_t>() != 0u)) {
+		text += std::format("  appearance blocks: UV remap on {} clusters ({} bytes), normal spread on {} clusters ({} bytes)\n",
+			blocks->at("uv_remap_clusters").get<uint32_t>(), blocks->at("uv_remap_bytes").get<uint64_t>(),
+			blocks->at("normal_spread_clusters").get<uint32_t>(), blocks->at("normal_spread_bytes").get<uint64_t>());
+	}
 	if (description.contains("fork")) {
 		const nlohmann::json& fork = description.at("fork");
 		text += std::format("  forked: {} triangle-only groups, {} voxel-only groups, {} boundary groups (--branch measures one)\n",

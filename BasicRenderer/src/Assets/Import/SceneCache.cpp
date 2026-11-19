@@ -1,5 +1,6 @@
 #include <BasicRenderer/Assets/Import/SceneCache.h>
 
+#include <cstdio>
 #include <stdexcept>
 
 #include <nlohmann/json.hpp>
@@ -233,6 +234,11 @@ namespace br::import
 				{ "uvSets", primitive.uvSetCount },
 				{ "material", primitive.material },
 			});
+			if (primitive.clodAppearanceHash != 0u) {
+				char hex[17];
+				std::snprintf(hex, sizeof(hex), "%016llx", static_cast<unsigned long long>(primitive.clodAppearanceHash));
+				primitives.back()["clodAppearance"] = hex;
+			}
 		}
 		out["primitives"] = std::move(primitives);
 		json parts = json::array();
@@ -304,6 +310,9 @@ namespace br::import
 				primitive.skinningVertexSize = row.at("skinningVertexSize").get<std::uint32_t>();
 				primitive.uvSetCount = row.at("uvSets").get<std::uint32_t>();
 				primitive.material = row.at("material").get<std::int32_t>();
+				if (const auto appearance = row.find("clodAppearance"); appearance != row.end()) {
+					primitive.clodAppearanceHash = std::stoull(appearance->get<std::string>(), nullptr, 16);
+				}
 				if (primitive.material >= static_cast<std::int32_t>(scene.materials.size())) throw std::runtime_error("primitive material index out of range");
 				scene.primitives.push_back(std::move(primitive));
 			}

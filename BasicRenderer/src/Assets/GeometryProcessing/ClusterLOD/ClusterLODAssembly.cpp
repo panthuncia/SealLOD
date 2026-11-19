@@ -458,6 +458,37 @@ namespace
 			mergedLod.radius * (1.0f + 1e-5f));
 		return node;
 	}
+
+	bool IsAssemblyPartForked(const ClusterLODPrebuiltData& part)
+	{
+		return std::any_of(part.groups.begin(), part.groups.end(), [](const ClusterLODGroup& group) { return (group.flags & CLOD_GROUP_BRANCH_FLAGS) != 0u; });
+	}
+
+	// The groups an assembly copies from a part: all of them but a forked part's shadow records, which AssignForkedParents
+	// appends after every other group.
+	uint32_t GetAssemblyPartCopiedGroupCount(const ClusterLODPrebuiltData& part)
+	{
+		const uint32_t groupCount = static_cast<uint32_t>(part.groups.size());
+		uint32_t copied = groupCount;
+		while (copied != 0u && (part.groups[copied - 1u].flags & CLOD_GROUP_FLAG_BRANCH_SHADOW) != 0u)
+		{
+			--copied;
+		}
+		for (uint32_t groupIndex = 0; groupIndex < copied; ++groupIndex)
+		{
+			const ClusterLODGroup& group = part.groups[groupIndex];
+			if ((group.flags & CLOD_GROUP_FLAG_BRANCH_SHADOW) != 0u)
+			{
+				throw std::runtime_error("ClusterLOD assembly: a forked part has a shadow record before its last group");
+			}
+			if (group.branchGroupId >= 0 &&
+				(static_cast<uint32_t>(group.branchGroupId) < copied || static_cast<uint32_t>(group.branchGroupId) >= groupCount))
+			{
+				throw std::runtime_error("ClusterLOD assembly: a forked part's group names a shadow record outside its shadow tail");
+			}
+		}
+		return copied;
+	}
 }
 
 ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
@@ -478,6 +509,13 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 	}
 
 	preferredNodeWidth = std::max(2u, preferredNodeWidth);
+	if (synthesizeVoxelParents &&
+		std::any_of(parts.begin(), parts.end(), [](const ClusterLODAssemblyPart& part) { return part.artifacts != nullptr && IsAssemblyPartForked(part.artifacts->prebuiltData); }))
+	{
+		// Assembly voxel parents are in no branch and rewrite the instance proxies' boundaries: a triangle view (ray tracing)
+		// would draw them. Forked parts resolve their fork below direct instance roots instead.
+		throw std::runtime_error("ClusterLOD assembly: assembly voxel parents over forked parts are not supported; use direct instance-root traversal");
+	}
 
 	ClusterLODPrebuildArtifacts out{};
 	ClusterLODBuildState state{};
@@ -533,12 +571,12 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 		{
 			throw std::runtime_error("ClusterLOD assembly: part has no CLod hierarchy");
 		}
-		if (std::any_of(part.groups.begin(), part.groups.end(), [](const ClusterLODGroup& group) { return (group.flags & CLOD_GROUP_BRANCH_FLAGS) != 0u; }))
-		{
-			// Copying a part renumbers its groups, and assembly voxel parents pick part roots by parent: neither knows the
-			// branches of a forked DAG yet.
-			throw std::runtime_error("ClusterLOD assembly: a part has a triangle/voxel fork, which assemblies do not support; build its asset with voxelFork off");
-		}
+		// A forked part (triangle/voxel branches, ClusterLODVoxelFallback.cpp AssembleVoxelFork) is copied without its shadow
+		// records: they are the tail of its groups and are rebuilt for the whole assembly by AssignForkedParents
+		// (BuildClusterLODTraversalHierarchy below) from the voxel-branch bounds they carried. Its other groups keep their
+		// branch flags, so every view resolves the part's fork below the instance root as it does for the mesh on its own.
+		// A nested assembly part's shadows are its tail too (its part records end before them).
+		const uint32_t copiedGroupCount = GetAssemblyPartCopiedGroupCount(part);
 		assemblyCoverageParts[partIndex] = VoxelSourceTrianglePart{
 			.vertices = parts[partIndex].coverageVertices,
 			.vertexStrideBytes = parts[partIndex].coverageVertexSize,
@@ -585,10 +623,23 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 			partVoxelMapping.packedAttributeSamples.begin(),
 			partVoxelMapping.packedAttributeSamples.end());
 
-		for (uint32_t localGroupIndex = 0; localGroupIndex < static_cast<uint32_t>(part.groups.size()); ++localGroupIndex)
+		for (uint32_t localGroupIndex = 0; localGroupIndex < copiedGroupCount; ++localGroupIndex)
 		{
 			const ClusterLODGroup& srcGroup = part.groups[localGroupIndex];
 			ClusterLODGroup group = srcGroup;
+			if (srcGroup.branchGroupId >= 0)
+			{
+				const ClusterLODGroup& shadow = part.groups[static_cast<uint32_t>(srcGroup.branchGroupId)];
+				if (std::memcmp(&shadow.bounds, &srcGroup.bounds, sizeof(clodBounds)) != 0)
+				{
+					const size_t globalGroupIndex = state.groups.size();
+					state.forkVoxelBounds.resize(globalGroupIndex + 1u);
+					state.forkHasVoxelBounds.resize(globalGroupIndex + 1u, 0u);
+					state.forkVoxelBounds[globalGroupIndex] = shadow.bounds;
+					state.forkHasVoxelBounds[globalGroupIndex] = 1u;
+				}
+				group.branchGroupId = -1;
+			}
 			group.firstSegment = static_cast<uint32_t>(state.segments.size());
 			group.firstMeshlet += 0u;
 			group.firstGroupVertex += 0u;
@@ -802,7 +853,7 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 		{
 			ClusterLODPartRecord record{};
 			record.groupBase = groupBases[partIndex];
-			record.groupCount = static_cast<uint32_t>(part.groups.size());
+			record.groupCount = GetAssemblyPartCopiedGroupCount(part);
 			record.nodeBase = nodeBases[partIndex];
 			record.nodeCount = static_cast<uint32_t>(part.nodes.size());
 			record.transformBase = transformBases[partIndex];
@@ -1206,8 +1257,10 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 		{
 			proxyTraversalError = std::max(proxyTraversalError, targetNode.traversalMetric.maxQuadricError);
 		}
-		for (const ClusterLODGroup& partGroup : part.groups)
+		const uint32_t partCopiedGroupCount = GetAssemblyPartCopiedGroupCount(part);
+		for (uint32_t localGroupIndex = 0; localGroupIndex < partCopiedGroupCount; ++localGroupIndex)
 		{
+			const ClusterLODGroup& partGroup = part.groups[localGroupIndex];
 			if (IsFiniteContentTraversalError(partGroup.bounds.error))
 			{
 				proxyTraversalError = std::max(proxyTraversalError, partGroup.bounds.error);
@@ -1240,7 +1293,7 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifacts(
 
 		uint32_t selectedSourceGroups = 0u;
 		float selectedMaxWorldVoxelWidth = 0.0f;
-		for (uint32_t localGroupIndex = 0; localGroupIndex < static_cast<uint32_t>(part.groups.size()); ++localGroupIndex)
+		for (uint32_t localGroupIndex = 0; localGroupIndex < partCopiedGroupCount; ++localGroupIndex)
 		{
 			const ClusterLODGroup& localGroup = part.groups[localGroupIndex];
 			if (localGroup.parentGroupId >= 0)
@@ -1601,6 +1654,13 @@ ClusterLODPrebuildArtifacts BuildClusterLODAssemblyArtifactsPreservingTriangleOn
 {
 	// Checked here as well because the try below would treat the error as a reason to retry.
 	CLodCache::ThrowIfCacheOnly("BuildClusterLODAssemblyArtifactsPreservingTriangleOnly");
+	if (std::any_of(parts.begin(), parts.end(), [](const ClusterLODAssemblyPart& part) { return part.artifacts != nullptr && IsAssemblyPartForked(part.artifacts->prebuiltData); }))
+	{
+		// A forked part's triangle branch is a triangle-only part, and its voxel branch is resolved inside the part: direct
+		// instance roots serve both views (no branch-aware assembly voxel parents exist).
+		spdlog::debug("ClusterLOD assembly has forked parts; preserving {} instance(s) with direct instance-root traversal.", instances.size());
+		return BuildClusterLODAssemblyArtifacts(parts, instances, settings, preferredNodeWidth, false);
+	}
 	try
 	{
 		return BuildClusterLODAssemblyArtifacts(parts, instances, settings, preferredNodeWidth, true);
