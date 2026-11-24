@@ -15,6 +15,7 @@
 #include "../shaders/PerPassRootConstants/clodCreateCommandRootConstants.h"
 #include "../shaders/PerPassRootConstants/clodPureComputeCullingRootConstants.h"
 #include "../shaders/PerPassRootConstants/clodWorkGraphRootConstants.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 
 namespace {
 
@@ -104,7 +105,7 @@ private:
     uint32_t UavOrZero(const Token& token) { return Declared(token) ? Uav(token) : 0u; }
     uint32_t UavOrZero(const Token& token, uint32_t variant) { return Declared(token) ? Uav(token, variant) : 0u; }
 
-    void Bind(const org::PipelineState& pipeline) { m_context.BindComputePipeline(pipeline); }
+    void Bind(const br::PipelineState& pipeline) { m_context.BindComputePipeline(pipeline); }
     void Push(const RootConstants& constants) { br::render::PushMiscConstants(m_context, constants); }
     void Dispatch() { m_context.Commands().Dispatch(1u, 1u, 1u); }
     void ExecuteIndirect(const Token& arguments)
@@ -397,7 +398,7 @@ private:
 
     // Expands one frontier (interior nodes or leaves) into the next level's
     // frontiers and the cluster frontier.
-    void ExpandFrontier(const org::PipelineState& program, const Token& frontier, const Token& counter,
+    void ExpandFrontier(const br::PipelineState& program, const Token& frontier, const Token& counter,
         const Token& arguments, const char* stage)
     {
         const auto& frontiers = m_bindings.frontiers;

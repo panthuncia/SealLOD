@@ -13,8 +13,9 @@
 #include "Resources/PixelBuffer.h"
 #include "Resources/Sampler.h"
 #include "Resources/Buffers/Buffer.h"
-#include "Resources/ReadbackRequest.h"
-#include "Render/Runtime/IReadbackService.h"
+#include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
+#include "Runtime/IO/ReadbackCaptureService.h"
+#include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
 #include "Render/Runtime/IUploadService.h"
 #include "ThirdParty/stb/stb_image.h"
 #include "rhi_helpers.h"
@@ -32,10 +33,18 @@
 
 
 namespace {
+    // A BC7 job's readback: the pass records the copy, and the capture service answers it once the copy queue's timeline passes.
+    struct PendingReadback {
+        std::shared_ptr<org::Resource> readbackBuffer;
+        uint64_t totalSize = 0;
+        br::ReadbackCaptureResult result;
+        br::ReadbackCaptureCallback callback;
+    };
+
     std::shared_ptr<TextureSourceData> BuildCompressedSourceDataFromReadback(
         const org::TextureDescription& desc,
         bool hasFullMipChain,
-        const org::ReadbackCaptureResult& readback)
+        const br::ReadbackCaptureResult& readback)
     {
         if (readback.layouts.size() != desc.imageDimensions.size()) {
             throw std::runtime_error("BuildCompressedSourceDataFromReadback: readback layout count does not match texture subresources");
@@ -187,11 +196,11 @@ TextureBC7CompressionBindings TextureFactory::BC7CompressionPass::Declare(org::P
     const bool anyBc7 = std::any_of(bindings.jobs.begin(), bindings.jobs.end(), [](const auto& job) { return !job.bc6h; });
     const bool anyBc6h = std::any_of(bindings.jobs.begin(), bindings.jobs.end(), [](const auto& job) { return job.bc6h; });
     if (anyBc7) {
-        bindings.pipeline = builder.Pipeline(br::render::ComputePipeline(
+        bindings.pipeline = br::render::DeclarePipeline(br::render::ComputePipeline(
             L"shaders/Utilities/bc7_compress_mode6.hlsl", L"BC7CompressMode6CS", "BC7Compression[Mode6]"));
     }
     if (anyBc6h) {
-        bindings.bc6hPipeline = builder.Pipeline(br::render::ComputePipeline(
+        bindings.bc6hPipeline = br::render::DeclarePipeline(br::render::ComputePipeline(
             L"shaders/Utilities/bc6h_compress.hlsl", L"BC6HCompressCS", "BC6HCompression"));
     }
     return bindings;
@@ -374,7 +383,7 @@ void TextureFactory::BC7CompressionCopyPass::Record(const BC7CompressionCopyBind
 }
 
 void TextureFactory::BC7CompressionReadbackPass::SetReadbackService(
-    std::shared_ptr<org::runtime::IReadbackService> readbackService)
+    std::shared_ptr<br::FrameReadbackCaptures> readbackService)
 {
     m_readbackService = std::move(readbackService);
 }
@@ -446,9 +455,9 @@ TextureFactory::BC7CompressionReadbackPass::Prepare(const BC7CompressionReadback
 
     class Reservation final : public org::PreparedLifecycleEffect {
     public:
-        Reservation(std::shared_ptr<org::runtime::IReadbackService> service,
+        Reservation(std::shared_ptr<br::FrameReadbackCaptures> service,
             std::shared_ptr<rhi::TimelinePtr> timeline,
-            std::vector<org::ReadbackCaptureRequest> requests,
+            std::vector<PendingReadback> requests,
             std::vector<std::shared_ptr<BC7CompressionJob>> jobs,
             uint32_t frameIndex)
             : m_service(service), m_timeline(std::move(timeline)),
@@ -460,8 +469,8 @@ TextureFactory::BC7CompressionReadbackPass::Prepare(const BC7CompressionReadback
         void Submitted(org::SubmissionContext) const override {
             if (m_resolved.exchange(true)) return;
             for (auto& request : m_requests) {
-                const auto token = m_service->EnqueueCapture(std::move(request));
-                m_service->FinalizeCapture(token, org::QueueKind::Copy, m_timeline, 1u);
+                m_service->AwaitCopy(m_timeline, 1u, std::move(request.readbackBuffer), request.totalSize,
+                    std::move(request.result), std::move(request.callback));
             }
             for (const auto& job : m_jobs) {
                 job->stageFrameIndex.store(m_frameIndex, std::memory_order_release);
@@ -479,9 +488,9 @@ TextureFactory::BC7CompressionReadbackPass::Prepare(const BC7CompressionReadback
             }
         }
     private:
-        std::shared_ptr<org::runtime::IReadbackService> m_service;
+        std::shared_ptr<br::FrameReadbackCaptures> m_service;
         std::shared_ptr<rhi::TimelinePtr> m_timeline;
-        mutable std::vector<org::ReadbackCaptureRequest> m_requests;
+        mutable std::vector<PendingReadback> m_requests;
         std::vector<std::shared_ptr<BC7CompressionJob>> m_jobs;
         uint32_t m_frameIndex;
         org::ExternalTimelinePoint m_signal{};
@@ -490,7 +499,7 @@ TextureFactory::BC7CompressionReadbackPass::Prepare(const BC7CompressionReadback
 
     auto timeline = std::make_shared<rhi::TimelinePtr>();
     DeviceManager::GetInstance().GetDevice().CreateTimeline(*timeline);
-    std::vector<org::ReadbackCaptureRequest> requests;
+    std::vector<PendingReadback> requests;
     std::vector<std::shared_ptr<BC7CompressionJob>> admitted;
     std::vector<std::shared_ptr<BC7CompressionJob>> waiting;
     for (const auto& job : m_pending) {
@@ -523,17 +532,17 @@ TextureFactory::BC7CompressionReadbackPass::Prepare(const BC7CompressionReadback
             frame.copies.push_back({declared->source, readback,
                 footprints[index], subresource.mip, subresource.slice});
         }
-        org::ReadbackCaptureRequest request{};
-        request.desc.kind = org::ReadbackResourceKind::Texture;
-        request.desc.resourceId = job->compressedTexture->GetGlobalResourceID();
+        PendingReadback request{};
+        request.result.desc.kind = br::ReadbackResourceKind::Texture;
+        request.result.desc.resourceId = job->compressedTexture->GetGlobalResourceID();
         request.readbackBuffer = readback;
-        request.layouts = footprints;
+        request.result.layouts = footprints;
         request.totalSize = info.totalBytes;
-        request.format = job->compressedTexture->GetFormat();
-        request.width = job->compressedTexture->GetWidth();
-        request.height = job->compressedTexture->GetHeight();
-        request.depth = 1;
-        request.callback = [job](org::ReadbackCaptureResult&& result) {
+        request.result.format = job->compressedTexture->GetFormat();
+        request.result.width = job->compressedTexture->GetWidth();
+        request.result.height = job->compressedTexture->GetHeight();
+        request.result.depth = 1;
+        request.callback = [job](br::ReadbackCaptureResult&& result) {
             if (job->done) {
                 std::shared_ptr<TextureSourceData> data;
                 try {

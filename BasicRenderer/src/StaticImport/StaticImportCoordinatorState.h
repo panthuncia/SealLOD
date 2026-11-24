@@ -117,6 +117,8 @@ namespace br::staticimport
 		std::size_t graphOwnedLastSceneGroupCount{ 0 };
 		std::size_t graphOwnedMembershipChangesSinceCheckpoint{ 0 };
 		std::chrono::steady_clock::time_point graphOwnedDirtySince{};
+		// The last event-less drain that retried a scene cut because the draw records need more geometry than the last scene covers.
+		std::chrono::steady_clock::time_point graphOwnedGeometryRetryAt{};
 		std::chrono::steady_clock::time_point graphOwnedLastSceneDiagnostic{};
 		std::chrono::steady_clock::time_point graphOwnedBlockedSuccessorSince{};
 		std::chrono::steady_clock::time_point graphOwnedUnchangedDirtyCutSince{};

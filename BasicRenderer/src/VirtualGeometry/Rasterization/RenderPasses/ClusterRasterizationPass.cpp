@@ -22,6 +22,7 @@
 #include "Runtime/GraphIntegration/Resolvers/ResourceGroupResolver.h"
 #include "../shaders/PerPassRootConstants/clodRasterizationRootConstants.h"
 #include "../shaders/PerPassRootConstants/visUtilRootConstants.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 
 namespace {
 constexpr uint32_t kDeepVisibilityAverageFragmentsPerPixel = 5u;
@@ -127,15 +128,15 @@ ClusterRasterBindings ClusterRasterizationPass::Declare(org::PassBuilder& builde
     builder.IsGeometryPass();
     ClusterRasterBindings bindings;
     {
-        org::CommandSignatureDesc signature;
+        br::CommandSignatureDesc signature;
         signature.args = {
             {.kind = rhi::IndirectArgKind::Constant, .u = {.rootConstants = { IndirectCommandSignatureRootSignatureIndex, 0, 3 } } },
             {.kind = rhi::IndirectArgKind::DispatchMesh }
         };
         signature.byteStride = sizeof(RasterizeClustersCommand);
-        signature.layout = org::PipelineLayoutRef::StandardGraphics();
+        signature.layout = br::PipelineLayoutRef::StandardGraphics();
         signature.name = "CLod.ClusterRasterization.Signature";
-        bindings.commandSignature = builder.CommandSignature(std::move(signature));
+        bindings.commandSignature = br::render::DeclareCommandSignature(std::move(signature));
     }
     bindings.histogram = builder.ShaderResource(m_rasterBucketsHistogramBuffer);
     bindings.visible = builder.ShaderResource(m_compactedVisibleClustersBuffer);
@@ -456,7 +457,7 @@ ClusterRasterFrame ClusterRasterizationPass::Prepare(
     const auto commandLayout = PSOManager::GetInstance().GetRootSignature().GetHandle();
     for (uint32_t i = 0; i < numBuckets; ++i) {
         const auto flags = context->preparedRasterBucketFlags.at(i);
-        const org::PipelineState* pso = m_outputKind == CLodRasterOutputKind::VisibilityBuffer
+        const br::PipelineState* pso = m_outputKind == CLodRasterOutputKind::VisibilityBuffer
             ? PSOManager::GetInstance().TryGetClusterLODRasterPSO(flags, m_wireframe, bindings.singleViewVisibility)
             : m_outputKind == CLodRasterOutputKind::VirtualShadow
                 ? PSOManager::GetInstance().TryGetClusterLODVirtualShadowRasterPSO(flags, m_wireframe)

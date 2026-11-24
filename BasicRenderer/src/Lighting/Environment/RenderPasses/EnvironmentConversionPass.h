@@ -13,10 +13,11 @@
 #include <array>
 #include <span>
 #include <utility>
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 
 struct EnvironmentConversionBindings {
     struct Job { org::DeclaredViewToken source; std::array<org::DeclaredViewToken, 6> faces; uint32_t size = 0; };
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     std::vector<Job> jobs;
     // The work of each job, in the same order. Executions take work only from it (PreparesOnlyDeclaredWork).
     br::render::EnvironmentConversionWorkQueue::Snapshot declared;
@@ -34,7 +35,7 @@ public:
 
     EnvironmentConversionBindings Declare(org::PassBuilder& builder) {
         EnvironmentConversionBindings bindings;
-        bindings.pipeline = builder.Pipeline(PipelineDesc());
+        bindings.pipeline = br::render::DeclarePipeline(PipelineDesc());
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         for (const auto& j : m_pending) {
             if (!j->work.srcTexture || !j->work.dstCubemap) continue;
@@ -103,7 +104,7 @@ private:
     br::render::EnvironmentConversionWorkQueue::Snapshot m_pending;
     bool m_declaredResourcesChanged = true;
 
-    static org::ComputePipelineDesc PipelineDesc() {
+    static br::ComputePipelineDesc PipelineDesc() {
         rhi::StaticSamplerDesc s{};
         s.visibility = rhi::ShaderStage::Compute;
         s.set = 0;   // space0
@@ -122,16 +123,16 @@ private:
         pc.set = 0;    // space0
         pc.binding = 0;    // b0
 
-        org::PipelineLayoutSpec layout;
+        br::PipelineLayoutSpec layout;
         layout.flags = rhi::PipelineLayoutFlags::PF_None;
         layout.pushConstants = {pc};
         layout.staticSamplers = {s};
         layout.name = "EnvConvert.ComputeLayout";
 
-        org::ComputePipelineDesc desc;
+        br::ComputePipelineDesc desc;
         desc.shader = {L"shaders/envToCubemap.hlsl", L"CSMain", L"cs_6_6"};
         desc.name = "EnvConvert.ComputePSO";
-        desc.layout = org::PipelineLayoutRef::Custom(std::move(layout));
+        desc.layout = br::PipelineLayoutRef::Custom(std::move(layout));
         return desc;
     }
 };

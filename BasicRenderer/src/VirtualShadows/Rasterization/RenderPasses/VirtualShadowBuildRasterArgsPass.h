@@ -16,7 +16,7 @@
 namespace org { class Buffer; }
 
 struct VirtualShadowBuildRasterArgsBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken histogram, offsets, arguments;
 };
 struct VirtualShadowBuildRasterArgsFrame {
@@ -41,7 +41,7 @@ public:
     VirtualShadowBuildRasterArgsBindings Declare(org::PassBuilder& declaration) {
         declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         declaration.ConstantBuffer(Builtin::PerFrameBuffer);
-        return {declaration.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/virtualShadowBlockExpansion.hlsl",
+        return {br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/virtualShadowBlockExpansion.hlsl",
                     L"CLodVirtualShadowBuildRasterArgsCSMain", "CLod_VirtualShadowBuildRasterArgsPSO")),
             declaration.ShaderResource(m_histogramBuffer),
             declaration.ShaderResource(m_offsetsBuffer),

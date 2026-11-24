@@ -615,8 +615,9 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
     const CLodMeshMetadata clodMeshMetadata = clodMeshMetadataBuffer[off.clodMeshMetadataIndex];
     const bool forceLodDecision = CLodForcedTraversalDepthRootEnabled(clodMeshMetadata);
     const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDrawRecord(drawRecord);
-    const PerObjectBuffer instanceTransform =
-        LoadInstanceTransformForDrawRecordWithAssemblyTransform(drawRecord, rec.assemblyTransformIndex);
+    // The previous model is composed where the occlusion tests use it (ComposeAssemblyPrevModel): composed here with
+    // the model, it was held across the node's traversal (docs/culling-optimization-experiments.md).
+    const uint instanceTransformIndex = drawRecord.instanceTransformIndex;
     // Mesh upload creates one node-skinning sidecar entry per CLOD node for
     // skinned meshes and none for rigid meshes. Keep the original source for
     // telemetry so live PSO replacement retains the same resource interface.
@@ -635,7 +636,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
 	deformForTraversal = isSkinned &&
 		CLodVirtualShadowClipUsesDynamicSkinnedCasters(shadowClipmapIndex);
 #endif
-    const row_major matrix objectModelMatrix = instanceTransform.model;
+    const row_major matrix objectModelMatrix = ComposeAssemblyModel(instanceTransformIndex, rec.assemblyTransformIndex);
     StructuredBuffer<Camera> cameras =
         ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CameraBuffer)];
     const uint cullViewId = rec.viewId;
@@ -727,7 +728,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
             StructuredBuffer<CLodViewDepthSRVIndex> streamDepthIndices = ResourceDescriptorHeap[CLOD_WG_VIEW_DEPTH_SRV_INDICES_DESCRIPTOR_INDEX];
             const uint streamDepthMap = streamDepthIndices[cullViewId].linearDepthSRVIndex;
             if (streamDepthMap != 0u) {
-                const row_major matrix streamPrevModel = instanceTransform.prevModel;
+                const row_major matrix streamPrevModel = ComposeAssemblyPrevModel(instanceTransformIndex, rec.assemblyTransformIndex);
                 const float3 streamPrevCenter = ToViewSpace(nodeCullCenterObjectSpace, streamPrevModel, cullCamera.prevView);
                 OcclusionCullingPerspectiveTexture2D(
                     streamOccluded, cullCamera, streamPrevCenter, -streamPrevCenter.z,
@@ -1019,7 +1020,7 @@ void PureComputeTraverseFrontierCS(const uint3 dispatchThreadID : SV_DispatchThr
                     nodeRadiusWorld,
                     depthMapDescriptorIndex);
             } else {
-                const row_major matrix prevModelMatrix = instanceTransform.prevModel;
+                const row_major matrix prevModelMatrix = ComposeAssemblyPrevModel(instanceTransformIndex, rec.assemblyTransformIndex);
                 const float prevNodeCullScale = MaxAxisScale_RowVector(prevModelMatrix);
                 const float3 prevNodeCenterViewSpace = ToViewSpace(nodeCullCenterObjectSpace, prevModelMatrix, cullCamera.prevView);
                 const float prevNodeRadiusWorld = nodeCullRadiusObjectSpace * prevNodeCullScale;

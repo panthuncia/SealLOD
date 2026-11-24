@@ -5,12 +5,13 @@
 #include <rhi.h>
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 
 namespace org { class Buffer; }
 
 struct RasterBucketHistogramBindings {
-    org::PipelineState clearPipeline, histogramPipeline;
-    org::CommandSignatureState commandSignature;
+    br::PipelineState clearPipeline, histogramPipeline;
+    br::CommandSignatureState commandSignature;
     org::DeclaredViewToken visibleClusters, visibleCount;
     org::ResourceBindingToken indirectArguments;
     org::DeclaredViewToken histogram, reyesOwnership, telemetry, readBaseCounter, sideBand;

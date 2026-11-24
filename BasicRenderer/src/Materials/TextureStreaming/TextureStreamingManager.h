@@ -40,7 +40,6 @@ namespace br::render { struct TexturePipelineServices; }
 class PublishedStateResourceResolver;
 
 namespace org::runtime {
-class IReadbackService;
 class IUploadService;
 class IDescriptorService;
 }

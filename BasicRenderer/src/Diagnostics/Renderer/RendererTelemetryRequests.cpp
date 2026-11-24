@@ -21,6 +21,8 @@
 #include "BasicRenderer/Diagnostics/TerrainRvtTelemetry.h"
 #include "Terrain/RenderPasses/TerrainRvtPasses.h"
 #include <BasicRenderer/Extensions/ResourceComponent.h>
+#include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
+#include "Runtime/IO/ReadbackCaptureService.h"
 
 namespace {
 constexpr size_t TerrainRvtTelemetryMipBins = 16u;
@@ -161,7 +163,7 @@ void Renderer::MaybeRequestObjectReyesAtlasTelemetry() {
         return;
     }
 
-    auto* readbackService = m_orgRuntime->Readbacks().get();
+    auto* readbackService = m_readbackCaptures.get();
     if (!readbackService) {
         return;
     }
@@ -198,7 +200,7 @@ void Renderer::MaybeRequestObjectReyesAtlasTelemetry() {
     const uint64_t requestedFrame = m_totalFramesRendered;
     m_lastObjectReyesAtlasTelemetryRequestFrame = requestedFrame;
 
-    auto logTelemetry = [requestedFrame](const char* phaseLabel, org::ReadbackCaptureResult&& result) {
+    auto logTelemetry = [requestedFrame](const char* phaseLabel, br::ReadbackCaptureResult&& result) {
         if (result.data.size() < sizeof(CLodReyesTelemetry)) {
             spdlog::warn(
                 "SARP Object Reyes atlas shader telemetry: frame={} phase={} payload too small ({} bytes).",
@@ -298,7 +300,7 @@ void Renderer::MaybeRequestObjectReyesAtlasTelemetry() {
         readbackService->RequestReadbackCaptureAfterGraph(
             phase1Resource.get(),
             org::RangeSpec{},
-            [this, logTelemetry](org::ReadbackCaptureResult&& result) mutable {
+            [this, logTelemetry](br::ReadbackCaptureResult&& result) mutable {
                 m_objectReyesAtlasTelemetryPhase1ReadbackPending = false;
                 logTelemetry("phase1", std::move(result));
             });
@@ -309,7 +311,7 @@ void Renderer::MaybeRequestObjectReyesAtlasTelemetry() {
         readbackService->RequestReadbackCaptureAfterGraph(
             phase2Resource.get(),
             org::RangeSpec{},
-            [this, logTelemetry](org::ReadbackCaptureResult&& result) mutable {
+            [this, logTelemetry](br::ReadbackCaptureResult&& result) mutable {
                 m_objectReyesAtlasTelemetryPhase2ReadbackPending = false;
                 logTelemetry("phase2", std::move(result));
             });
@@ -346,7 +348,7 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
         return;
     }
 
-    auto* readbackService = m_orgRuntime->Readbacks().get();
+    auto* readbackService = m_readbackCaptures.get();
     if (!readbackService) {
         return;
     }
@@ -381,7 +383,7 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
     readbackService->RequestReadbackCaptureAfterGraph(
             statsResource.get(),
         org::RangeSpec{},
-        [this, requestedFrame](org::ReadbackCaptureResult&& result) {
+        [this, requestedFrame](br::ReadbackCaptureResult&& result) {
             m_terrainRvtStatsReadbackPending = false;
 
             if (result.data.size() < sizeof(TerrainRvtTelemetryStatsReadback)) {
@@ -522,7 +524,7 @@ void Renderer::MaybeRequestTerrainRvtTelemetry() {
          maxClipLevels,
          maxGeneratedPagesPerFrame,
          mipCount,
-         forcedFallback](org::ReadbackCaptureResult&& result) {
+         forcedFallback](br::ReadbackCaptureResult&& result) {
             m_terrainRvtCountersReadbackPending = false;
 
             constexpr size_t counterBytes = sizeof(uint32_t) * 4u;

@@ -46,9 +46,8 @@
 #include "PostProcessing/ToneMapping/TonemapTypes.h"
 #include "PostProcessing/Upscaling/UpscalingManager.h"
 #include "DebugUI/ScheduleInspector.h"
-#include "DebugUI/MemoryViewWidget.h"
 #include "DebugUI/MemoryIntrospectionWidget.h"
-#include "Resources/ReadbackRequest.h"
+#include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
 #include <BasicRenderer/Extensions/ResourceComponent.h>
 #include "Render/MemoryIntrospectionAPI.h"
 #include "BasicRenderer/Extensions/ShaderBuffers.h"
@@ -333,14 +332,8 @@ private:
     std::function<void(unsigned int)> setTonemapType;
 	std::function<unsigned int()> getTonemapType;
 
-    bool meshShaderEnabled = false;
     bool indirectDrawsWereEnabled = false;
-    std::function<bool()> getMeshShaderEnabled;
-	std::function<void(bool)> setMeshShaderEnabled;
 
-	bool indirectDrawsEnabled = false;
-	std::function<bool()> getIndirectDrawsEnabled;
-	std::function<void(bool)> setIndirectDrawsEnabled;
 
 	bool occlusionCulling = true;
 	std::function<bool()> getOcclusionCullingEnabled;
@@ -498,9 +491,6 @@ private:
     std::function<float()> getDirectionalShadowDistanceLowerBound;
     std::function<void(float)> setDirectionalShadowDistanceLowerBound;
 
-    bool wireframeEnabled = false;
-	std::function<bool()> getWireframeEnabled;
-	std::function<void(bool)> setWireframeEnabled;
 
     std::function<flecs::entity ()> getSceneRoot;
     std::function<void(uint64_t, DirectX::XMFLOAT3)> queueSceneNodePositionEdit;
@@ -518,9 +508,6 @@ private:
 	std::function<bool()> getClusteredLightingEnabled;
 	std::function<void(bool)> setClusteredLightingEnabled;
 
-	bool m_visibilityRenderingEnabled = true;
-	std::function<bool()> getVisibilityRenderingEnabled;
-	std::function<void(bool)> setVisibilityRenderingEnabled;
     bool m_terrainRegionMaterialEvaluationEnabled = false;
     std::function<bool()> getTerrainRegionMaterialEvaluationEnabled;
     std::function<void(bool)> setTerrainRegionMaterialEvaluationEnabled;
@@ -754,21 +741,12 @@ private:
     std::function<CLodLodHeightMode()> getCLodLodHeightMode;
     std::function<void(CLodLodHeightMode)> setCLodLodHeightMode;
 
-	bool m_useAsyncCompute = true;
-	std::function<bool()> getUseAsyncCompute;
-    std::function<void(bool)> setUseAsyncCompute;
 
-	bool m_heavyDebug = false;
-	std::function<bool()> getHeavyDebug;
-	std::function<void(bool)> setHeavyDebug;
 
     bool m_renderGraphBatchTraceEnabled = false;
     std::function<bool()> getRenderGraphBatchTraceEnabled;
     std::function<void(bool)> setRenderGraphBatchTraceEnabled;
 
-	bool m_renderGraphLightweightCompileSummaryEnabled = false;
-	std::function<bool()> getRenderGraphLightweightCompileSummaryEnabled;
-	std::function<void(bool)> setRenderGraphLightweightCompileSummaryEnabled;
 
     bool m_reshapeTexelAddressing = true;
     std::function<bool()> getReshapeTexelAddressing;
@@ -782,10 +760,6 @@ private:
     std::function<org::AutoAliasPackingStrategy()> getAutoAliasPackingStrategy;
     std::function<void(org::AutoAliasPackingStrategy)> setAutoAliasPackingStrategy;
 
-    bool m_autoAliasLogExclusionReasons = false;
-    std::function<bool()> getAutoAliasLogExclusionReasons;
-    std::function<void(bool)> setAutoAliasLogExclusionReasons;
-    std::function<void(bool)> setAutoAliasBuildDebugData;
 
     uint32_t m_autoAliasPoolRetireIdleFrames = 120;
     std::function<uint32_t()> getAutoAliasPoolRetireIdleFrames;

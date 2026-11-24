@@ -11,6 +11,7 @@
 #include "BasicRenderer/Assets/Geometry/Mesh.h"
 #include "BasicRenderer/Scene/Scene.h"
 #include "Diagnostics/Scene/DebugSceneSnapshotService.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 
 struct DebugSphereFrameData {
     struct Sphere {
@@ -22,7 +23,7 @@ struct DebugSphereFrameData {
 
 struct DebugSphereBindings {
 	// The mesh pipeline, on its small push-constant layout.
-	org::PipelineState pipeline;
+	br::PipelineState pipeline;
 	org::DeclaredViewToken cameraBuffer, objectBuffer;
 };
 
@@ -41,7 +42,7 @@ public:
 		builder->DepthReadWrite(Builtin::PrimaryCamera::DepthTexture);
 		builder->IsGeometryPass();
 		builder->ConstantBuffer(Builtin::PerFrameBuffer);
-		return {builder->Pipeline(PipelineDesc()), builder->ShaderResource(Builtin::CameraBuffer),
+		return {br::render::DeclarePipeline(PipelineDesc()), builder->ShaderResource(Builtin::CameraBuffer),
 			builder->ShaderResource(Builtin::PerObjectBuffer)};
 	}
 
@@ -82,8 +83,8 @@ public:
 private:
 	std::shared_ptr<br::render::DebugSceneSnapshotService> m_snapshots;
 
-	static org::GraphicsPipelineDesc PipelineDesc() {
-		org::PipelineLayoutSpec layout;
+	static br::GraphicsPipelineDesc PipelineDesc() {
+		br::PipelineLayoutSpec layout;
 		layout.flags = rhi::PipelineLayoutFlags::PF_AllowInputAssembler;
 		rhi::LayoutBindingRange binding = {};
 		binding.set = 0;
@@ -95,9 +96,9 @@ private:
 		layout.pushConstants = {rhi::PushConstantRangeDesc{ rhi::ShaderStage::Mesh, 8, 0, 0 }};
 		layout.name = "Debug.Mesh.Wireframe.Layout";
 
-		org::GraphicsPipelineDesc desc;
+		br::GraphicsPipelineDesc desc;
 		desc.name = "Debug.Mesh.Wireframe";
-		desc.layout = org::PipelineLayoutRef::Custom(std::move(layout));
+		desc.layout = br::PipelineLayoutRef::Custom(std::move(layout));
 		desc.mesh = {L"shaders/sphere.hlsl", L"MSMain",        L"ms_6_6"};
 		desc.pixel = {L"shaders/sphere.hlsl", L"SpherePSMain",  L"ps_6_6"};
 

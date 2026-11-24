@@ -16,7 +16,7 @@
 #include "BasicRenderer/Runtime/Detail/MaterialEvaluationBuildInputs.h"
 
 struct MaterialHistogramBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken visibleClusters, reyesDiceQueue, sideBand;
     bool hasSideBand = false;
     bool hasReyesDiceQueue = false;
@@ -38,7 +38,7 @@ public:
             throw std::invalid_argument("MaterialHistogramPass requires the published visible-cluster resource");
     }
     MaterialHistogramBindings Declare(org::PassBuilder& b) {
-        MaterialHistogramBindings bindings{b.Pipeline(br::render::ComputePipeline(L"shaders/VisUtil.hlsl", L"MaterialHistogramCS", "MaterialHistogramPSO")),
+        MaterialHistogramBindings bindings{br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/VisUtil.hlsl", L"MaterialHistogramCS", "MaterialHistogramPSO")),
             b.ShaderResource(m_visibleClusterResource)};
         if (m_reyesDiceQueueResource) {
             bindings.reyesDiceQueue = b.ShaderResource(m_reyesDiceQueueResource);

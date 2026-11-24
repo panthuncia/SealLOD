@@ -31,7 +31,7 @@ namespace TerrainRegionMaterialEval
     }
 
     struct PipelineBindings {
-        org::PipelineState pipeline;
+        br::PipelineState pipeline;
     };
 }
 
@@ -45,7 +45,7 @@ public:
             "Builtin::VisUtil::TerrainRegionPixelCountBuffer",
             "Builtin::VisUtil::TerrainRegionWriteCursorBuffer",
             "Builtin::VisUtil::TerrainRegionActiveCountBuffer");
-        return {builder.Pipeline(br::render::ComputePipeline(L"shaders/VisUtil.hlsl", L"ClearTerrainRegionCountersCS",
+        return {br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/VisUtil.hlsl", L"ClearTerrainRegionCountersCS",
             "VisUtil_ClearTerrainRegionCountersPSO"))};
     }
 
@@ -58,9 +58,9 @@ public:
 };
 
 struct TerrainRegionMaterialRangeBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::ResourceBindingToken arguments;
-    org::CommandSignatureState signature;
+    br::CommandSignatureState signature;
 };
 struct TerrainRegionMaterialRangeFrame {
     std::vector<uint64_t> argumentOffsets;
@@ -108,9 +108,9 @@ public:
 
 protected:
     TerrainRegionMaterialRangeBindings DeclareArguments(org::PassBuilder& builder) {
-        return {builder.Pipeline(br::render::ComputePipeline(L"shaders/VisUtil.hlsl", m_entryPoint, m_debugName)),
+        return {br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/VisUtil.hlsl", m_entryPoint, m_debugName)),
             builder.IndirectArguments("Builtin::IndirectCommandBuffers::MaterialEvaluationCommandBuffer"),
-            builder.CommandSignature(br::render::MaterialEvaluationCommandSignature())};
+            br::render::DeclareCommandSignature(br::render::MaterialEvaluationCommandSignature())};
     }
 
     std::wstring m_entryPoint;
@@ -149,7 +149,7 @@ public:
         b->UnorderedAccess(
                 "Builtin::VisUtil::TerrainRegionOffsetBuffer",
                 "Builtin::VisUtil::TerrainRegionBlockSumsBuffer");
-        return {builder.Pipeline(br::render::ComputePipeline(L"shaders/materialPrefixSum.hlsl", L"TerrainRegionBlockScanCS",
+        return {br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/materialPrefixSum.hlsl", L"TerrainRegionBlockScanCS",
             "VisUtil_TerrainRegionBlockScanPSO"))};
     }
 
@@ -174,7 +174,7 @@ public:
                 "Builtin::VisUtil::TerrainRegionOffsetBuffer",
                 "Builtin::VisUtil::TerrainRegionScannedBlockSumsBuffer",
                 "Builtin::VisUtil::TerrainRegionTotalPixelCountBuffer");
-        return {builder.Pipeline(br::render::ComputePipeline(L"shaders/materialPrefixSum.hlsl", L"TerrainRegionBlockOffsetsCS",
+        return {br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/materialPrefixSum.hlsl", L"TerrainRegionBlockOffsetsCS",
             "VisUtil_TerrainRegionBlockOffsetsPSO"))};
     }
 
@@ -216,7 +216,7 @@ public:
         auto* b = &builder;
         b->ShaderResource("Builtin::VisUtil::TerrainRegionActiveCountBuffer");
         b->UnorderedAccess("Builtin::IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuildDispatchArgsBuffer");
-        return {builder.Pipeline(br::render::ComputePipeline(L"shaders/VisUtil.hlsl", L"BuildTerrainRegionCommandBuildDispatchArgsCS",
+        return {br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/VisUtil.hlsl", L"BuildTerrainRegionCommandBuildDispatchArgsCS",
             "VisUtil_BuildTerrainRegionCommandBuildDispatchArgsPSO"))};
     }
 
@@ -226,9 +226,9 @@ public:
 };
 
 struct BuildTerrainRegionMaterialIndirectCommandBufferBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::ResourceBindingToken dispatchArgs;
-    org::CommandSignatureState signature;
+    br::CommandSignatureState signature;
 };
 
 class BuildTerrainRegionMaterialIndirectCommandBufferPass : public org::TypedRenderGraphPass<BuildTerrainRegionMaterialIndirectCommandBufferPass,
@@ -243,9 +243,9 @@ public:
             "Builtin::VisUtil::TerrainRegionPixelCountBuffer",
             "Builtin::VisUtil::TerrainRegionOffsetBuffer");
         b->UnorderedAccess("Builtin::IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuffer");
-        return {builder.Pipeline(br::render::ComputePipeline(L"shaders/VisUtil.hlsl", L"BuildTerrainRegionEvaluateIndirectArgsCS",
+        return {br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/VisUtil.hlsl", L"BuildTerrainRegionEvaluateIndirectArgsCS",
             "VisUtil_BuildTerrainRegionEvaluateIndirectArgsPSO")), builder.IndirectArguments("Builtin::IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuildDispatchArgsBuffer"),
-            builder.CommandSignature(br::render::RawDispatchCommandSignature())};
+            br::render::DeclareCommandSignature(br::render::RawDispatchCommandSignature())};
     }
 
     static void Record(const BuildTerrainRegionMaterialIndirectCommandBufferBindings& bindings,
@@ -258,11 +258,11 @@ public:
 };
 
 struct EvaluateTerrainRegionMaterialGroupsBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken visibleClusters, reyesDiceQueue;
     org::DeclaredViewToken reyesTessTableConfigs, reyesTessTableVertices, reyesTessTableTriangles;
     org::ResourceBindingToken arguments, activeCount;
-    org::CommandSignatureState signature;
+    br::CommandSignatureState signature;
     bool hasReyesDiceQueue = false, hasReyesTessTables = false;
     uint32_t patchVisibilityIndexBase = 0;
 };
@@ -287,7 +287,7 @@ public:
     }
     EvaluateTerrainRegionMaterialGroupsBindings Declare(org::PassBuilder& builder) {
         EvaluateTerrainRegionMaterialGroupsBindings bindings{};
-        bindings.pipeline = builder.Pipeline(br::render::ComputePipeline(
+        bindings.pipeline = br::render::DeclarePipeline(br::render::ComputePipeline(
             L"shaders/VisUtilEvaluateTerrainRegion.hlsl",
             L"EvaluateTerrainRegionMaterialGroupCS",
             "VisUtil_EvaluateTerrainRegionMaterialGroupPSO",
@@ -377,7 +377,7 @@ public:
         b->ConstantBuffer(Builtin::PerFrameBuffer);
         bindings.arguments = b->IndirectArguments("Builtin::IndirectCommandBuffers::TerrainRegionMaterialEvaluationCommandBuffer");
         bindings.activeCount = b->IndirectArguments("Builtin::VisUtil::TerrainRegionActiveCountBuffer");
-        bindings.signature = b->CommandSignature(br::render::TerrainRegionMaterialEvaluationCommandSignature());
+        bindings.signature = br::render::DeclareCommandSignature(br::render::TerrainRegionMaterialEvaluationCommandSignature());
         return bindings;
     }
 

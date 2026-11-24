@@ -4,12 +4,13 @@
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 
 namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct AVBOITEarlyDepthBuildBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken config, zeroSlice, commands, count;
 };
 struct AVBOITEarlyDepthBuildFrame {

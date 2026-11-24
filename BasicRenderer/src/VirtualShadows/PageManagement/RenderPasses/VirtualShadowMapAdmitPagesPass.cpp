@@ -40,9 +40,9 @@ VirtualShadowMapAdmitPagesBindings VirtualShadowMapAdmitPagesPass::Declare(org::
     declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     declaration.ConstantBuffer(Builtin::PerFrameBuffer);
     VirtualShadowMapAdmitPagesBindings bindings{
-        declaration.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+        br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
             L"CLodVirtualShadowAdmitPagesCSMain", "CLod.VirtualShadow.AdmitPages.PSO")),
-        declaration.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+        br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
             L"CLodVirtualShadowApplyExactUpgradesCSMain", "CLod.VirtualShadow.ApplyUpgrades.PSO")),
         declaration.UnorderedAccess(m_pageTableTexture, {static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)}),
         declaration.UnorderedAccess(m_dirtyPageFlagsBuffer),
@@ -86,7 +86,7 @@ void VirtualShadowMapAdmitPagesPass::Record(const VirtualShadowMapAdmitPagesBind
     const uint32_t stats = recording.Index(bindings.stats);
     const uint32_t pageMetadata = recording.Index(bindings.pageMetadata);
     // A step with zero groups still binds and pushes; only its dispatch is skipped. Every step ends in a UAV barrier.
-    const auto step = [&](const org::PipelineState& pipeline, const br::render::MiscConstants& constants, uint32_t groups) {
+    const auto step = [&](const br::PipelineState& pipeline, const br::render::MiscConstants& constants, uint32_t groups) {
         recording.BindComputePipeline(pipeline);
         br::render::PushMiscConstants(recording, constants);
         if (groups != 0) recording.Commands().Dispatch(groups, 1, 1);

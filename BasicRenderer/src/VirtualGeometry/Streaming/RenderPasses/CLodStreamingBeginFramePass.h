@@ -6,13 +6,14 @@
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 
 namespace org { class Buffer; }
 namespace org { class UploadInstance; }
 struct UpdateContext;
 
 struct CLodStreamingBeginFrameBindings {
-    org::PipelineState clearUint;
+    br::PipelineState clearUint;
     org::DeclaredViewToken loadCounter, loadRequestKeys, usedGroupsCounter, usedGroupsBits, sourceMismatchCounter;
     bool hasSourceMismatchCounter = false;
 };

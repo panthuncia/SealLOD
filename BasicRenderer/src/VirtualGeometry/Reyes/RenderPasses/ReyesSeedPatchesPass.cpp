@@ -40,9 +40,9 @@ ReyesSeedPatchesBindings ReyesSeedPatchesPass::Declare(org::PassBuilder& builder
         builder.ShaderResource(ResourceGroupResolver(m_slabResourceGroup));
     }
     return {
-        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/reyesSeedPatches.hlsl",
+        br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/reyesSeedPatches.hlsl",
             L"ReyesSeedPatchesCS", "CLod.ReyesSeedPatches.PSO")),
-        builder.CommandSignature(br::render::RawDispatchCommandSignature()),
+        br::render::DeclareCommandSignature(br::render::RawDispatchCommandSignature()),
         builder.ShaderResource(m_visibleClustersBuffer), builder.ShaderResource(m_ownedClustersBuffer),
         builder.ShaderResource(m_ownedClustersCounterBuffer), builder.UnorderedAccess(m_splitQueueBuffer),
         builder.UnorderedAccess(m_splitQueueCounterBuffer), builder.UnorderedAccess(m_splitQueueOverflowBuffer),

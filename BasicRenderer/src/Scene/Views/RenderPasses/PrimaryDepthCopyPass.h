@@ -9,7 +9,7 @@
 #include "BasicRenderer/Extensions/RenderContext.h"
 
 struct PrimaryDepthCopyBindings {
-	org::PipelineState pipeline;
+	br::PipelineState pipeline;
 };
 struct PrimaryDepthCopyFrame {
 	uint32_t groupsX = 0, groupsY = 0;
@@ -23,7 +23,7 @@ public:
 		builder->ShaderResource(Builtin::PrimaryCamera::VisibilityTexture);
 		builder->UnorderedAccess(Builtin::PrimaryCamera::LinearDepthMap);
 		builder->ConstantBuffer(Builtin::PerFrameBuffer);
-		return {builder->Pipeline(br::render::ComputePipeline(L"shaders/canonicalSurface.hlsl", L"PrimaryDepthCopyCS",
+		return {br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/canonicalSurface.hlsl", L"PrimaryDepthCopyCS",
 			"PrimaryDepthCopyPSO"))};
 	}
 

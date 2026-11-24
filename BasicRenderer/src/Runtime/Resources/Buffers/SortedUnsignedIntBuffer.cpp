@@ -7,6 +7,7 @@
 #include "Resources/GPUBacking/GpuBufferBacking.h"
 #include "Render/Runtime/UploadPolicyServiceAccess.h"
 #include "Runtime/Device/DeviceManager.h"
+#include <BasicRenderer/Extensions/Buffers/StructuredBackingFlags.h>
 
 SortedUnsignedIntBuffer::~SortedUnsignedIntBuffer() {
     if (!m_graphManaged) UnregisterDeferredBackingResizeClient(this);
@@ -143,6 +144,7 @@ void SortedUnsignedIntBuffer::RequestAsyncReserveCapacity(uint64_t requiredSize)
         .byteSize = newCapacity * stride,
         .unorderedAccess = m_UAV,
         .debugName = GetName(),
+        .extraFlags = BackingResourceFlags() | StructuredBackingFlags(stride),
     });
 }
 
@@ -429,7 +431,7 @@ void SortedUnsignedIntBuffer::CreateBuffer(uint64_t capacity) {
     auto device = DeviceManager::GetInstance().GetDevice();
     m_capacity = capacity;
     const auto stride = ElementStride();
-    auto newDataBuffer = org::GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, capacity * stride, GetGlobalResourceID(), m_UAV);
+    auto newDataBuffer = org::GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, capacity * stride, GetGlobalResourceID(), m_UAV, nullptr, false, BackingResourceFlags() | StructuredBackingFlags(stride));
     SetBacking(std::move(newDataBuffer), capacity * stride);
     EnsureCpuShadowSize(GetBufferSize());
     m_uploadPolicyState.OnBufferResized(GetBufferSize());
@@ -491,7 +493,7 @@ void SortedUnsignedIntBuffer::ApplyResizeBacking(std::unique_ptr<org::GpuBufferB
 
 void SortedUnsignedIntBuffer::GrowBuffer(uint64_t newSize) {
     const auto stride = ElementStride();
-    auto newDataBuffer = org::GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, newSize * stride, GetGlobalResourceID(), m_UAV);
+    auto newDataBuffer = org::GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, newSize * stride, GetGlobalResourceID(), m_UAV, nullptr, false, BackingResourceFlags() | StructuredBackingFlags(stride));
     ApplyResizeBacking(std::move(newDataBuffer), newSize);
 }
 

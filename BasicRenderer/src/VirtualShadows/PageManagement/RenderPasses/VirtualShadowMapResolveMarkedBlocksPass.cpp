@@ -37,7 +37,7 @@ VirtualShadowMapResolveMarkedBlocksPass::VirtualShadowMapResolveMarkedBlocksPass
 VirtualShadowMapResolveMarkedBlocksBindings VirtualShadowMapResolveMarkedBlocksPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    return {builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+    return {br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
                 L"CLodVirtualShadowResolveMarkedBlocksCSMain", "CLod.VirtualShadow.ResolveMarkedBlocks.PSO")),
         builder.ShaderResource(m_markedBlocksMaskBuffer), builder.ShaderResource(m_markedBlocksListBuffer),
         builder.ShaderResource(m_markedBlocksCountBuffer), builder.UnorderedAccess(m_allocationRequestsBuffer),

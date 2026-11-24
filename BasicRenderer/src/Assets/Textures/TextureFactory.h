@@ -14,7 +14,7 @@
 #include "Resources/TextureDescription.h"
 #include "Resources/Buffers/Buffer.h"
 #include "Render/Runtime/IUploadService.h"
-#include "Render/Runtime/IReadbackService.h"
+#include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Render/Runtime/FrameWorkQueue.h"
 
@@ -26,8 +26,9 @@ struct TextureSourceData;
 struct TextureProcessingJobHandle;
 class MaterialTextureTransferService;
 
+namespace br { class FrameReadbackCaptures; }
+
 namespace org::runtime {
-    class IReadbackService;
     class IUploadService;
 }
 
@@ -87,7 +88,7 @@ public:
     std::shared_ptr<org::RenderPass> GetBC7CompressionCopyPass() const { return m_bc7CompressionCopyPass; }
     std::shared_ptr<org::RenderPass> GetBC7CompressionReadbackPass() const { return m_bc7CompressionReadbackPass; }
 
-    void SetReadbackService(std::shared_ptr<org::runtime::IReadbackService> readbackService);
+    void SetReadbackService(std::shared_ptr<br::FrameReadbackCaptures> readbackService);
     // Whether BC7 jobs can run at all (their readback service is attached).
     bool CanRunBC7CompressionJobs() const;
     bool SubmitBC7CompressionJob(

@@ -1,5 +1,6 @@
 ﻿#pragma once
 
+#include <algorithm>
 #include <functional>
 #include <memory>
 #include <string>
@@ -9,6 +10,7 @@
 #include <stdexcept>
 #include <atomic>
 #include <cstdint>
+#include <vector>
 
 #include <BasicRenderer/Extensions/SettingAccess.h>
 
@@ -22,7 +24,19 @@ public:
     // Registers a setting with the given name and initial value
     template<typename T>
     void registerSetting(const std::string& name, T initialValue) {
-        settings[name] = std::make_unique<Setting<T>>(initialValue);
+        auto setting = std::make_unique<Setting<T>>(initialValue);
+        setting->snapshotIndex = m_nextSnapshotIndex++;
+        settings[name] = std::move(setting);
+    }
+
+    // Render thread (where settings are written): a copy of every setting's value. Install it on a thread with
+    // SettingsSnapshotScope to make that thread's getters read it.
+    std::shared_ptr<const SettingsSnapshot> Snapshot() const {
+        auto snapshot = std::make_shared<SettingsSnapshot>();
+        snapshot->m_values.resize(m_nextSnapshotIndex);
+        for (const auto& [name, setting] : settings) snapshot->m_values[setting->snapshotIndex] = setting->copyValue();
+        snapshot->m_revision = Revision();
+        return snapshot;
     }
 
     // Returns a setter callable for the specified setting by name
@@ -36,7 +50,12 @@ public:
         }
 
         auto setter = setting.getSetter();
-        return [this, setter](T newValue) {
+        ISetting* live = &setting;
+        // Change-checked: writing the value a setting already holds runs no observers and bumps no revision, so a
+        // resync (SyncPipelineTopologySettings, the menu) costs nothing. Types with no equality (callbacks) always notify.
+        return [this, setter, live, name](T newValue) {
+            if (br::settings_detail::KnownEqual(*static_cast<const T*>(live->liveValue()), newValue)) return;
+            if (br::settings_detail::t_activeSnapshot || br::settings_detail::t_writeWatch) br::settings_detail::t_writesUnderSnapshot.push_back(name);
             setter(static_cast<void*>(&newValue));
             m_revision.fetch_add(1, std::memory_order_release);
         };
@@ -53,6 +72,27 @@ public:
         return [getter]() -> T {
             return static_cast<T>(*static_cast<typename std::remove_reference<T>::type*>(getter()));
         };
+    }
+
+    // By-name access for control commands and scripts (SettingAccess.h: ListSettingNames, ReadSettingValue, ...).
+    std::vector<std::string> listSettingNames() const {
+        std::vector<std::string> names;
+        names.reserve(settings.size());
+        for (const auto& [name, setting] : settings) names.push_back(name);
+        std::sort(names.begin(), names.end());
+        return names;
+    }
+    ISetting* tryGetSetting(const std::string& name) {
+        const auto it = settings.find(name);
+        return it == settings.end() ? nullptr : it->second.get();
+    }
+    // Writes a setting by name, converting the value; false when it already held it (no observers run then).
+    bool writeSettingValue(const std::string& name, const br::extensions::SettingValue& value) {
+        const bool changed = getSettingByName(name).writeValue(value);
+        if (changed && (br::settings_detail::t_activeSnapshot || br::settings_detail::t_writeWatch))
+            br::settings_detail::t_writesUnderSnapshot.push_back(name);
+        if (changed) m_revision.fetch_add(1, std::memory_order_release);
+        return changed;
     }
 
     // The type a setting was registered with, or null when there is no setting by that name.
@@ -354,6 +394,7 @@ public:
 
 private:
     std::atomic_uint64_t m_revision{1};
+    std::size_t m_nextSnapshotIndex = 0;
     std::unordered_map<std::string, std::unique_ptr<ISetting>> settings;
     std::vector<Subscription> m_dependencySubscriptions;
 

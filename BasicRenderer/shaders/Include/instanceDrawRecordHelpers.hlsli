@@ -144,6 +144,19 @@ row_major float4x4 ComposeAssemblyModel(uint instanceTransformIndex, uint assemb
     return mul(CLodAssemblyTransformToMatrix(assemblyTransforms[assemblyTransformIndex]), model);
 }
 
+// ComposeAssemblyModel for the previous frame's model.
+row_major float4x4 ComposeAssemblyPrevModel(uint instanceTransformIndex, uint assemblyTransformIndex)
+{
+    StructuredBuffer<PerObjectBuffer> instanceTransforms = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerInstanceTransformBuffer)];
+    const row_major float4x4 prevModel = instanceTransforms[instanceTransformIndex].prevModel;
+    if (assemblyTransformIndex == CLOD_ASSEMBLY_TRANSFORM_SENTINEL)
+    {
+        return prevModel;
+    }
+    StructuredBuffer<ClusterLODAssemblyTransform> assemblyTransforms = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::CLod::AssemblyTransforms)];
+    return mul(CLodAssemblyTransformToMatrix(assemblyTransforms[assemblyTransformIndex]), prevModel);
+}
+
 // The part's assembly transform, or the identity for a draw without one.
 ClusterLODAssemblyTransform LoadAssemblyTransformOrIdentity(uint assemblyTransformIndex)
 {

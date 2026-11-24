@@ -11,7 +11,7 @@
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "VirtualGeometry/GraphIntegration/CLodViewTables.h"
 #include "Render/PreparedTablePublisher.h"
-#include "Render/PipelineState.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "Resources/PixelBuffer.h"
@@ -20,8 +20,8 @@ namespace org { class Buffer; }
 namespace org { class ResourceGroup; }
 
 struct ReyesPatchRasterBindings {
-    org::PipelineState pipeline;
-    org::CommandSignatureState commandSignature;
+    br::PipelineState pipeline;
+    br::CommandSignatureState commandSignature;
     org::DeclaredViewToken visible, transforms, diceQueue, diceCounter, work, workCounter;
     org::DeclaredViewToken tessConfigs, tessVertices, tessTriangles;
     org::ResourceBindingToken indirectArgs;

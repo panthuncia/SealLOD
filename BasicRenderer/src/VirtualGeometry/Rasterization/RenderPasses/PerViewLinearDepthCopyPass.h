@@ -6,6 +6,7 @@
 #include <array>
 #include <memory>
 #include <vector>
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 
 namespace org { class PixelBuffer; }
 
@@ -16,7 +17,7 @@ struct PerViewLinearDepthCopyBindingView {
 };
 
 struct PerViewLinearDepthCopyBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     std::vector<PerViewLinearDepthCopyBindingView> views;
     org::DeclaredViewToken projectedDepth, canonicalDeviceDepth;
     bool hasProjectedDepth = false, hasCanonicalDeviceDepth = false;

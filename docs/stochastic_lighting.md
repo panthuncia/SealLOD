@@ -772,6 +772,13 @@ Options that trade quality for time, all off by default:
 | 16 candidates | `STOCHASTIC_CANDIDATE_COUNT` 16u on `Stochastic.Select.PSO` | 0.10-0.15 ms at 256-1024 lights; nothing at 64 or fewer | None measurable at 64 lights; not measured above. |
 | 1 sample per pixel | `stochasticLightingSamplesPerPixel` 1 (`SARP_STOCHASTIC_SAMPLES=1`) | 0.2-0.3 ms at 16-64 lights | A few percent more noise after DLSS (more with more lights); still unbiased. |
 
+The guide's registers (2026-11-21, NVPerf, 2560×1600): 161 a thread at the defaults, 24% occupancy. `STOCHASTIC_GUIDE_CHEAP_BRDF`
+0 (the full BRDF, as exact as 2 with its fallback) or `STOCHASTIC_GUIDE_FAR_FIELD` 0 bring it to 128 (31%). Neither is a speed
+option: with the full BRDF the guide was 9% slower in spite of the occupancy (16 lights 0.93 → 1.03 ms, 256 lights 2.34 → 2.50
+ms, A/B/A/B in one session), so the middle term's cheaper per-light work outweighs the register step, and the far field is a
+feature. Getting the default under 128 would need the peak located (Nsight's per-line live registers): with both the middle
+term's walk and the far field compiled in it is 161, with either alone 128.
+
 ## Shading convention
 
 `shaders/Include/stochasticLighting.hlsli`. A sample of light *i* contributes

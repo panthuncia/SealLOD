@@ -15,8 +15,8 @@ struct AVBOITEarlyDepthFrameData {
 };
 
 struct AVBOITEarlyDepthBindings {
-    org::PipelineState pipeline;
-    org::CommandSignatureState signature;
+    br::PipelineState pipeline;
+    br::CommandSignatureState signature;
     org::DeclaredViewToken config;
     org::ResourceBindingToken arguments, count;
     org::DeclaredViewToken depth;

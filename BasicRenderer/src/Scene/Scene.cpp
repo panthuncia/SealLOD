@@ -253,7 +253,6 @@ Scene::Scene(){
 
     getNumDirectionalLightCascades = SettingsManager::GetInstance().getSettingGetter<uint8_t>("numDirectionalLightCascades");
     setDirectionalLightCascadeSplits = SettingsManager::GetInstance().getSettingSetter<std::vector<float>>("directionalLightCascadeSplits");
-	getMeshShadersEnabled = SettingsManager::GetInstance().getSettingGetter<bool>("enableMeshShader");
 
     //Initialize ECS scene
 	auto& world = GetSceneWorld();
@@ -348,7 +347,7 @@ void Scene::ActivateRenderable(flecs::entity& entity) {
 	auto& globalMeshLibrary = world.get_mut<Components::GlobalMeshLibrary>();
 	auto& drawStats = world.get_mut<Components::DrawStats>();
 
-	bool useMeshletReorderedVertices = getMeshShadersEnabled();
+	const bool useMeshletReorderedVertices = true;
 
 	if (meshInstances) {
 		for (auto& meshInstance : meshInstances->meshInstances) {

@@ -35,6 +35,34 @@ SettingValueType GetSettingValueType(const std::string& name)
     return SettingValueType::Other;
 }
 
+std::vector<std::string> ListSettingNames()
+{
+    return SettingsManager::GetInstance().listSettingNames();
+}
+
+std::string DescribeSettingType(const std::string& name)
+{
+    ISetting* setting = SettingsManager::GetInstance().tryGetSetting(name);
+    return setting ? setting->typeName() : std::string();
+}
+
+SettingValue ReadSettingValue(const std::string& name)
+{
+    ISetting* setting = SettingsManager::GetInstance().tryGetSetting(name);
+    if (!setting) throw std::runtime_error("no setting named '" + name + "'");
+    return setting->readValue();
+}
+
+bool WriteSettingValue(const std::string& name, const SettingValue& value)
+{
+    if (!SettingsManager::GetInstance().tryGetSetting(name)) throw std::runtime_error("no setting named '" + name + "'");
+    try {
+        return SettingsManager::GetInstance().writeSettingValue(name, value);
+    } catch (const std::runtime_error& error) {
+        throw std::runtime_error("setting '" + name + "': " + error.what());
+    }
+}
+
 template <> std::function<bool()> MakeSettingGetter<bool>(const std::string& name)
 {
 	return SettingsManager::GetInstance().getSettingGetter<bool>(name);

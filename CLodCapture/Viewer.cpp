@@ -17,8 +17,8 @@
 #include "Core/Image.h"
 #include <BasicRenderer/Diagnostics/ExternalUi.h>
 #include "Render/RenderGraph/RenderGraph.h"
-#include "Render/Runtime/IReadbackService.h"
-#include "Resources/ReadbackRequest.h"
+#include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
+#include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
 #include "Runtime/Settings/SettingsManager.h"
 
 namespace clodcapture {
@@ -523,8 +523,8 @@ namespace clodcapture {
 					return;
 				}
 				m_recording->outstanding.fetch_add(1u);
-				graph->GetReadbackService()->RequestReadbackCapture(std::string(layer.anchorPass), resource.get(), org::RangeSpec{},
-					[recording = m_recording, handler](org::ReadbackCaptureResult&& result) {
+				br::GetReadbackCaptureService()->RequestReadbackCapture(std::string(layer.anchorPass), resource.get(), org::RangeSpec{},
+					[recording = m_recording, handler](br::ReadbackCaptureResult&& result) {
 						if (!result.layouts.empty()) {
 							std::scoped_lock lock(recording->mutex);
 							handler(*recording, result);
@@ -532,7 +532,7 @@ namespace clodcapture {
 						recording->outstanding.fetch_sub(1u);
 					});
 			};
-			single("base-color-opacity", [](SnapshotRecording& recording, const org::ReadbackCaptureResult& result) {
+			single("base-color-opacity", [](SnapshotRecording& recording, const br::ReadbackCaptureResult& result) {
 				if (result.format != rhi::Format::R8G8B8A8_UNorm) {
 					return;
 				}
@@ -542,7 +542,7 @@ namespace clodcapture {
 					std::memcpy(recording.snapshot.base.data() + static_cast<size_t>(y) * result.width, result.data.data() + layout.offset + layout.rowPitch * y, result.width * 4u);
 				}
 			});
-			single("normal-roughness", [](SnapshotRecording& recording, const org::ReadbackCaptureResult& result) {
+			single("normal-roughness", [](SnapshotRecording& recording, const br::ReadbackCaptureResult& result) {
 				if (result.format != rhi::Format::R16G16B16A16_Float) {
 					return;
 				}
@@ -565,8 +565,8 @@ namespace clodcapture {
 			auto keys = graph->RequestResourcePtr(org::ResourceIdentifier{ std::string(keyLayer.resource) }, true);
 			if (hdr && keys) {
 				m_recording->outstanding.fetch_add(2u);
-				graph->GetReadbackService()->RequestReadbackCapture(std::string(hdrLayer.anchorPass), hdr.get(), org::RangeSpec{},
-					[recording = m_recording](org::ReadbackCaptureResult&& result) {
+				br::GetReadbackCaptureService()->RequestReadbackCapture(std::string(hdrLayer.anchorPass), hdr.get(), org::RangeSpec{},
+					[recording = m_recording](br::ReadbackCaptureResult&& result) {
 						std::scoped_lock lock(recording->mutex);
 						if (result.format == rhi::Format::R16G16B16A16_Float && !result.layouts.empty()) {
 							const size_t pixels = static_cast<size_t>(result.width) * result.height;
@@ -589,8 +589,8 @@ namespace clodcapture {
 						}
 						recording->outstanding.fetch_sub(1u);
 					});
-				graph->GetReadbackService()->RequestReadbackCapture(std::string(keyLayer.anchorPass), keys.get(), org::RangeSpec{},
-					[recording = m_recording](org::ReadbackCaptureResult&& result) {
+				br::GetReadbackCaptureService()->RequestReadbackCapture(std::string(keyLayer.anchorPass), keys.get(), org::RangeSpec{},
+					[recording = m_recording](br::ReadbackCaptureResult&& result) {
 						std::scoped_lock lock(recording->mutex);
 						if (result.format == rhi::Format::R32G32_UInt && !result.layouts.empty()) {
 							const size_t pixels = static_cast<size_t>(result.width) * result.height;

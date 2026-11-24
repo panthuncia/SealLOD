@@ -2,7 +2,7 @@
 
 #include <memory>
 
-#include "Render/PipelineState.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 
@@ -10,7 +10,7 @@ namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct VirtualShadowMapResolveMarkedBlocksBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken mask, list, count, requests, requestCount, clipmapData;
     org::DeclaredViewToken pageTable, dirtyFlags, pageViewInfo, stats;
 };

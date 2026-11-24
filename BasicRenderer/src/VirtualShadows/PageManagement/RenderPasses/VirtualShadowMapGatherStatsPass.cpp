@@ -36,7 +36,7 @@ VirtualShadowMapGatherStatsBindings VirtualShadowMapGatherStatsPass::Declare(org
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    return {builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+    return {br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
                 L"CLodVirtualShadowGatherStatsCSMain", "CLod.VirtualShadow.GatherStats.PSO")),
         builder.ShaderResource(m_pageTableTexture, {static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)}), builder.ShaderResource(m_allocationCountBuffer),
         builder.ShaderResource(m_allocationIndirectArgsBuffer), builder.ShaderResource(m_pageListHeaderBuffer),

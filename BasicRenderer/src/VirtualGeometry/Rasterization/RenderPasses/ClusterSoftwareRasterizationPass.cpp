@@ -76,7 +76,7 @@ void RecordSkinCache(const ClusterSoftwareRasterBindings& bindings, const Cluste
         context.BufferBarriers({token.Resource()},
             rhi::ResourceAccessType::UnorderedAccess, rhi::ResourceAccessType::UnorderedAccess);
     };
-    const auto buckets = [&](const org::PipelineState& pipeline) {
+    const auto buckets = [&](const br::PipelineState& pipeline) {
         context.BindComputePipeline(pipeline);
         for (uint32_t bucket = 0; bucket < frame.bucketCount; ++bucket)
             context.ExecuteIndirect(bindings.rasterSignature, bindings.indirectArgs,
@@ -245,24 +245,24 @@ ClusterSoftwareRasterBindings ClusterSoftwareRasterizationPass::Declare(org::Pas
     builder->UnorderedAccess(Builtin::DebugVisualization);
     // The skin cache pipelines exist only with the cache's buffers.
     const bool skinCache = static_cast<bool>(m_dynamicWindSkinCacheHashBuffer);
-    const std::vector<org::PipelineShaderDefine> skinCacheDefines = {
+    const std::vector<br::PipelineShaderDefine> skinCacheDefines = {
         { L"CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW", L"1" },
         { L"CLOD_VSM_TWO_LAYER_RASTER_VERSION", L"2" }
     };
     const auto skinCachePipeline = [&](const wchar_t* entry, const char* name) {
         return skinCache
-            ? builder->Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/dynamicWindSkinCache.hlsl",
+            ? br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/dynamicWindSkinCache.hlsl",
                 entry, name, skinCacheDefines))
-            : org::PipelineState{};
+            : br::PipelineState{};
     };
     ClusterSoftwareRasterBindings bindings{
-        builder->CommandSignature(br::render::ConstantsDispatchCommandSignature(3, sizeof(RasterizeClustersCommand),
+        br::render::DeclareCommandSignature(br::render::ConstantsDispatchCommandSignature(3, sizeof(RasterizeClustersCommand),
             "CLod_ClusterSoftwareRaster.Signature")),
-        builder->CommandSignature(br::render::RawDispatchCommandSignature()),
+        br::render::DeclareCommandSignature(br::render::RawDispatchCommandSignature()),
         skinCache
-            ? builder->Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+            ? br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
                 L"ClearUintStructuredBufferCSMain", "CLod_DynamicWindSkinCacheClear"))
-            : org::PipelineState{},
+            : br::PipelineState{},
         skinCachePipeline(L"DynamicWindSkinCacheBuildCS", "CLod_DynamicWindSkinCacheBuild"),
         skinCachePipeline(L"DynamicWindSkinCacheFinalizeCS", "CLod_DynamicWindSkinCacheFinalize"),
         skinCachePipeline(L"DynamicWindSkinCacheSkinWorkCS", "CLod_DynamicWindSkinCacheSkinWork"),

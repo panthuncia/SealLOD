@@ -21,8 +21,8 @@
 #include "../../../generated/BuiltinResources.h"
 #include "../shaders/PerPassRootConstants/lightCullingRootConstants.h"
 #include "Render/RenderGraph/RenderGraph.h"
-#include "Render/Runtime/IReadbackService.h"
-#include "Resources/ReadbackRequest.h"
+#include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
+#include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
 #include <cstring>
 
 namespace {
@@ -677,7 +677,7 @@ std::vector<br::render::PublishedLocalShadowLight> LightManager::CaptureLocalSha
 void LightManager::PollCullingStats(org::RenderGraph* graph) {
 	const uint64_t frame = ++m_cullingStatsFrame;
 	if (!graph || frame % kCullingStatsReadbackInterval != 0u) return;
-	auto* readbacks = graph->GetReadbackService();
+	auto* readbacks = br::GetReadbackCaptureService();
 	if (!readbacks) return;
 	// Nothing writes the counters without the pass (no clustered lighting, path tracing).
 	if (const auto* statistics = graph->GetStatisticsService()) {
@@ -692,7 +692,7 @@ void LightManager::PollCullingStats(org::RenderGraph* graph) {
 		m_cullingStats->requestedFrame = frame;
 	}
 	const std::weak_ptr<CullingStatsShared> weak = m_cullingStats;
-	readbacks->RequestReadbackCaptureAfterGraph(m_pCullingStatsBuffer.get(), org::RangeSpec{}, [weak](org::ReadbackCaptureResult&& result) {
+	readbacks->RequestReadbackCaptureAfterGraph(m_pCullingStatsBuffer.get(), org::RangeSpec{}, [weak](br::ReadbackCaptureResult&& result) {
 		const auto shared = weak.lock();
 		if (!shared) return;
 		std::scoped_lock lock(shared->mutex);
@@ -730,7 +730,9 @@ LightCullingStats LightManager::GetCullingStats() const {
 }
 
 std::shared_ptr<org::Resource> LightManager::ProvideResource(org::ResourceIdentifier const& key) {
-	return m_resources[key];
+	// Not operator[]: the graph build calls this, and it must not insert into the map.
+	const auto it = m_resources.find(key);
+	return it != m_resources.end() ? it->second : nullptr;
 }
 
 std::vector<org::ResourceIdentifier> LightManager::GetSupportedKeys() {

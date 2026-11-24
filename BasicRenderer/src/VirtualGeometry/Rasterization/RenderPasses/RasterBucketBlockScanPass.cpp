@@ -23,7 +23,7 @@ RasterBucketBlockScanPass::RasterBucketBlockScanPass(
 
 RasterBucketBlockScanBindings RasterBucketBlockScanPass::Declare(org::PassBuilder& builder) {
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    return {builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+    return {br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
                 L"RasterBucketsBlockScanCS", "CLod_RasterBucketsBlockScanPSO")),
         builder.ShaderResource(m_histogramBuffer), builder.UnorderedAccess(m_offsetsBuffer),
         builder.UnorderedAccess(m_blockSumsBuffer)};

@@ -3,7 +3,7 @@
 #include <memory>
 #include <vector>
 
-#include "Render/PipelineState.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 
@@ -11,7 +11,7 @@ namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct VirtualShadowMapDeduplicatePredictedPagesBindings {
-    org::PipelineState clearStatePipeline, deduplicatePipeline;
+    br::PipelineState clearStatePipeline, deduplicatePipeline;
     org::DeclaredViewToken rawPages, rawCount, scratch, pages, pageCount;
     org::DeclaredViewToken stats, pageTable, pageMetadata, dirtyFlags;
     uint32_t physicalPageCount = 0;

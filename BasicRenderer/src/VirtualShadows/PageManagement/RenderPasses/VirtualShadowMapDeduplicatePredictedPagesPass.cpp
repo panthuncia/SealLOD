@@ -40,9 +40,9 @@ VirtualShadowMapDeduplicatePredictedPagesBindings VirtualShadowMapDeduplicatePre
 {
     declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     declaration.ConstantBuffer(Builtin::PerFrameBuffer);
-    return {declaration.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+    return {br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
                 L"CLodVirtualShadowClearPredictedPageDedupStateCSMain", "CLod.VirtualShadow.ClearPredictedPageDedupState.PSO")),
-        declaration.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+        br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
                 L"CLodVirtualShadowDeduplicatePredictedPagesCSMain", "CLod.VirtualShadow.DeduplicatePredictedPages.PSO")),
         declaration.ShaderResource(m_predictiveRawPagesBuffer),
         declaration.ShaderResource(m_predictiveRawPageCountBuffer),

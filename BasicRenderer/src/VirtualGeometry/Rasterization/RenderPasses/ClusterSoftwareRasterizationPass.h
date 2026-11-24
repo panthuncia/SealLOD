@@ -12,13 +12,14 @@
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "Resources/PixelBuffer.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 
 namespace org { class Buffer; }
 namespace org { class ResourceGroup; }
 
 struct ClusterSoftwareRasterBindings {
-    org::CommandSignatureState rasterSignature, cacheDispatchSignature;
-    org::PipelineState cacheClear, cacheBuild, cacheFinalize, cacheSkin, cacheResolve;
+    br::CommandSignatureState rasterSignature, cacheDispatchSignature;
+    br::PipelineState cacheClear, cacheBuild, cacheFinalize, cacheSkin, cacheResolve;
     org::DeclaredViewToken histogram, visible, transforms, mapping;
     org::ResourceBindingToken indirectArgs;
     org::DeclaredViewToken pageTable, clipmapInfo, physicalPages, dynamicPages, telemetry;
@@ -30,7 +31,7 @@ struct ClusterSoftwareRasterBindings {
 
 // One indirect dispatch per raster bucket with a resolved pipeline.
 struct ClusterSoftwareRasterStep {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     uint64_t argumentsOffset = 0;
 };
 struct ClusterSoftwareRasterFrame {

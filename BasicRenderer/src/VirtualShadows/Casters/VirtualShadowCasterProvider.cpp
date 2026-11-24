@@ -81,8 +81,8 @@ const std::string& VirtualShadowPassBuilder::LastPassName() const
     return m_lastPass;
 }
 
-VirtualShadowCasterRegistry::VirtualShadowCasterRegistry()
-    : m_invalidationQueue(std::make_shared<VirtualShadowInvalidationQueue>())
+VirtualShadowCasterRegistry::VirtualShadowCasterRegistry(std::shared_ptr<VirtualShadowInvalidationQueue> invalidationQueue)
+    : m_invalidationQueue(invalidationQueue ? std::move(invalidationQueue) : std::make_shared<VirtualShadowInvalidationQueue>())
 {}
 
 void VirtualShadowCasterRegistry::Register(IVirtualShadowCasterProvider& provider)

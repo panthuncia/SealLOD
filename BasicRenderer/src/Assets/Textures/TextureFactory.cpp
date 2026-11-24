@@ -14,8 +14,8 @@
 #include "Resources/PixelBuffer.h"
 #include "Resources/Sampler.h"
 #include "Resources/Buffers/Buffer.h"
-#include "Resources/ReadbackRequest.h"
-#include "Render/Runtime/IReadbackService.h"
+#include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
+#include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
 #include "Render/Runtime/IUploadService.h"
 #include "ThirdParty/stb/stb_image.h"
 #include "rhi_helpers.h"
@@ -799,7 +799,7 @@ bool TextureFactory::HasPendingGpuJobs() const {
 }
 
 void TextureFactory::SetReadbackService(
-    std::shared_ptr<org::runtime::IReadbackService> readbackService)
+    std::shared_ptr<br::FrameReadbackCaptures> readbackService)
 {
     std::static_pointer_cast<BC7CompressionReadbackPass>(m_bc7CompressionReadbackPass)
         ->SetReadbackService(std::move(readbackService));

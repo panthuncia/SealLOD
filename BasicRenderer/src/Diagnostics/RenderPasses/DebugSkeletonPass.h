@@ -25,6 +25,7 @@
 #include <BasicRenderer/Extensions/Resources/DynamicStructuredBuffer.h>
 #include "BasicRenderer/Scene/Scene.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 
 struct SkeletonDebugLine {
     DirectX::XMFLOAT4 startWorld;
@@ -39,7 +40,7 @@ struct DebugSkeletonFrameData {
 };
 
 struct DebugSkeletonBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken lines, perFrame, camera, target;
 };
 
@@ -54,7 +55,7 @@ public:
     DebugSkeletonBindings Declare(org::PassBuilder& declaration)
     {
         auto* builder = &declaration;
-        return {builder->Pipeline(PipelineDesc()), builder->ShaderResource(m_lineBuffer),
+        return {br::render::DeclarePipeline(PipelineDesc()), builder->ShaderResource(m_lineBuffer),
             builder->ConstantBuffer(Builtin::PerFrameBuffer),
             builder->ShaderResource(Builtin::CameraBuffer),
             builder->RenderTarget(org::ResourceIdentifier{Builtin::PresentationColor})};
@@ -410,9 +411,9 @@ private:
         }
     }
 
-    static org::GraphicsPipelineDesc PipelineDesc()
+    static br::GraphicsPipelineDesc PipelineDesc()
     {
-        org::GraphicsPipelineDesc desc;
+        br::GraphicsPipelineDesc desc;
         desc.name = "DebugSkeleton.PSO";
         desc.mesh = { L"shaders/debugSkeleton.hlsl", L"MSMain", L"ms_6_6" };
         desc.pixel = { L"shaders/debugSkeleton.hlsl", L"PSMain", L"ps_6_6" };

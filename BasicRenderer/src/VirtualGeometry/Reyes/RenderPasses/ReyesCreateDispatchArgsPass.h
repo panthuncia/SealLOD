@@ -2,14 +2,14 @@
 
 #include <memory>
 
-#include "Render/PipelineState.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 
 struct ReyesCreateDispatchArgsBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken sourceCounter, indirectArgs, sourceBaseCounter;
     uint32_t threadsPerGroup = 0;
     uint32_t maxWorkItemCount = 0;

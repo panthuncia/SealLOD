@@ -25,7 +25,7 @@ ReyesCreateDispatchArgsBindings ReyesCreateDispatchArgsPass::Declare(org::PassBu
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     ReyesCreateDispatchArgsBindings bindings{
-        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+        br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
             L"BuildReyesDispatchArgsCSMain", "CLod.ReyesCreateDispatchArgs.PSO")),
         builder.ShaderResource(m_sourceCounterBuffer),
         builder.UnorderedAccess(m_indirectArgsBuffer)};

@@ -19,6 +19,7 @@ namespace org { class RenderGraph; }
 #include "Render/PreparedTablePublisher.h"
 #include "Render/DeclaredTableLayout.h"
 #include "Resources/PixelBuffer.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 
 namespace org { class Buffer; }
 namespace org { class ResourceGroup; }
@@ -33,7 +34,7 @@ struct ClusterRasterizationPassInputs {
 };
 
 struct ClusterRasterBindings {
-    org::CommandSignatureState commandSignature;
+    br::CommandSignatureState commandSignature;
     org::DeclaredViewToken histogram, visible, transforms, mapping;
     org::ResourceBindingToken indirectArgs;
     org::DeclaredViewToken telemetry, mismatchCounter, mismatchDetails;
@@ -51,7 +52,7 @@ struct ClusterRasterBindings {
 
 // One indirect mesh dispatch per raster bucket with a resolved pipeline.
 struct ClusterRasterStep {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     uint64_t argumentsOffset = 0;
 };
 struct ClusterRasterFrame {

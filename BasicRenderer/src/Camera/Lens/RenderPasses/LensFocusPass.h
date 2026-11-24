@@ -24,7 +24,7 @@ struct LensFocusFrameData {
 };
 
 struct LensFocusBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken focus;
 };
 
@@ -34,7 +34,7 @@ public:
 
     LensFocusBindings Declare(org::PassBuilder& builder) {
         LensFocusBindings bindings{};
-        bindings.pipeline = builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/lensFocus.hlsl", L"LensFocusUpdateCS", "Lens.Focus.PSO"));
+        bindings.pipeline = br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/lensFocus.hlsl", L"LensFocusUpdateCS", "Lens.Focus.PSO"));
         // The camera, for the frame's sensor frames (its projection and the previous one).
         builder.ConstantBuffer(Builtin::PerFrameBuffer);
         builder.ShaderResource(Builtin::CameraBuffer, Builtin::RayTracing::LensData);
@@ -71,7 +71,7 @@ private:
 };
 
 struct LensAutofocusBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken focus, depth;
 };
 
@@ -83,7 +83,7 @@ public:
 
     LensAutofocusBindings Declare(org::PassBuilder& builder) {
         LensAutofocusBindings bindings{};
-        bindings.pipeline = builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/lensFocus.hlsl", L"LensAutofocusCS", "Lens.Autofocus.PSO"));
+        bindings.pipeline = br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/lensFocus.hlsl", L"LensAutofocusCS", "Lens.Autofocus.PSO"));
         builder.ConstantBuffer(Builtin::PerFrameBuffer);
         builder.ShaderResource(Builtin::CameraBuffer, Builtin::RayTracing::LensData);
         bindings.depth = builder.ShaderResource(Builtin::PrimaryCamera::ProjectedDepthTexture);

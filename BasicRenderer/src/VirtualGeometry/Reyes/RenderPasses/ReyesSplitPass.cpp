@@ -82,11 +82,11 @@ ReyesSplitBindings ReyesSplitPass::Declare(org::PassBuilder& declaration)
             Builtin::CameraBuffer);
     builder->UnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer);
     ReyesSplitBindings bindings;
-    bindings.clearCountersPipeline = builder->Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+    bindings.clearCountersPipeline = br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
         L"ClearReyesSplitOutputCountersCSMain", "CLod.ReyesSplit.ClearCounters.PSO"));
-    bindings.pipeline = builder->Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/reyesSplit.hlsl",
+    bindings.pipeline = br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/reyesSplit.hlsl",
         L"ReyesSplitCS", "CLod.ReyesSplit.PSO"));
-    bindings.commandSignature = builder->CommandSignature(br::render::RawDispatchCommandSignature());
+    bindings.commandSignature = br::render::DeclareCommandSignature(br::render::RawDispatchCommandSignature());
     bindings.visible = builder->ShaderResource(m_visibleClustersBuffer).View();
     bindings.inputQueue = builder->ShaderResource(m_inputSplitQueueBuffer).View();
     bindings.inputCounter = builder->ShaderResource(m_inputSplitQueueCounterBuffer).View();

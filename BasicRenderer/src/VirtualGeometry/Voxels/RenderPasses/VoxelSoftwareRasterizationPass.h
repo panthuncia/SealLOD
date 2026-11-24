@@ -13,15 +13,16 @@
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "Resources/PixelBuffer.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 
 namespace org { class Buffer; }
 namespace org { class ResourceGroup; }
 
 struct VoxelRasterBindings {
-    org::PipelineState buildArgs;
+    br::PipelineState buildArgs;
     // Rigid then skinned, without and with telemetry.
-    std::array<org::PipelineState, 2> raster, telemetryRaster;
-    org::CommandSignatureState commandSignature;
+    std::array<br::PipelineState, 2> raster, telemetryRaster;
+    br::CommandSignatureState commandSignature;
     org::DeclaredViewToken visible, transforms, telemetry;
     std::array<org::DeclaredViewToken, 2> workRecords, workCounters, indirectArgs;
     org::DeclaredViewToken pageTable, clipmapInfo, physicalPages, dynamicPages;

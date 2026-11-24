@@ -5,6 +5,7 @@
 #include <stdexcept>
 
 #include <rhi_helpers.h>
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 
 namespace br::render {
 
@@ -17,7 +18,7 @@ uint64_t AlignUp(uint64_t value, uint64_t alignment) {
 } // namespace
 
 std::shared_ptr<const CLodRtShaderTable> CLodRtShaderTable::Create(rhi::Device device, const RayTracingFeatureInfo& features,
-    const org::PipelineState& pipeline, const Layout& layout, const char* debugName) {
+    const br::PipelineState& pipeline, const Layout& layout, const char* debugName) {
     auto payload = pipeline.GetPayload();
     if (!payload || !payload->pso) throw std::invalid_argument("Shader table needs a created pipeline");
     if (!features.pipeline || features.shaderGroupHandleSize == 0) throw std::invalid_argument("Shader table needs ray tracing pipelines");

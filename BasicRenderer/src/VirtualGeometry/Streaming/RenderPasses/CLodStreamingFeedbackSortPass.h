@@ -5,7 +5,7 @@
 
 #include <rhi.h>
 
-#include "Render/PipelineState.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 
@@ -13,8 +13,8 @@ namespace org { class Buffer; }
 
 struct StreamingFeedbackSortBindings {
     // Setup, count, reduce, scan, scan-add, scatter.
-    std::array<org::PipelineState, 6> pipelines;
-    org::CommandSignatureState signature;
+    std::array<br::PipelineState, 6> pipelines;
+    br::CommandSignatureState signature;
     org::DeclaredViewToken requestCounter;
     std::array<org::DeclaredViewToken, 7> uavs;
     org::DeclaredViewToken countScatterUav, reduceScanUav;

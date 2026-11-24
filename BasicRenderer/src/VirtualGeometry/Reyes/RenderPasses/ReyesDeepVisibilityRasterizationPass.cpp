@@ -112,12 +112,12 @@ ReyesDeepVisibilityRasterBindings ReyesDeepVisibilityRasterizationPass::Declare(
     builder->ConstantBuffer(Builtin::PerFrameBuffer);
 
     ReyesDeepVisibilityRasterBindings bindings{
-        builder->Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/reyesPatchDeepVisibilityRaster.hlsl",
+        br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/reyesPatchDeepVisibilityRaster.hlsl",
             L"ReyesPatchDeepVisibilityRasterCS", "CLod.ReyesPatchDeepVisibilityRaster.PSO",
             IsTerrainRvtTelemetryDebugEnabled()
-                ? std::vector<org::PipelineShaderDefine>{{L"TERRAIN_RVT_TELEMETRY", L"1"}}
-                : std::vector<org::PipelineShaderDefine>{})),
-        builder->CommandSignature(br::render::RawDispatchCommandSignature()),
+                ? std::vector<br::PipelineShaderDefine>{{L"TERRAIN_RVT_TELEMETRY", L"1"}}
+                : std::vector<br::PipelineShaderDefine>{})),
+        br::render::DeclareCommandSignature(br::render::RawDispatchCommandSignature()),
         builder->ShaderResource(m_visibleClustersBuffer).View(), builder->ShaderResource(m_visibleClusterTransformIndicesBuffer).View(),
         builder->ShaderResource(m_diceQueueBuffer).View(), builder->ShaderResource(m_diceQueueCounterBuffer).View(),
         builder->ShaderResource(m_rasterWorkBuffer).View(), builder->ShaderResource(m_rasterWorkCounterBuffer).View(),

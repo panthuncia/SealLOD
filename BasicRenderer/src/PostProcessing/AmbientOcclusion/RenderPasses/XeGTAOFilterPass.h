@@ -18,7 +18,7 @@ struct GTAOFilterFrame {
     uint32_t groupsX = 0, groupsY = 0;
 };
 struct GTAOFilterBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     uint32_t samplerIndex = 0;
     org::DeclaredViewToken depth;
     std::array<org::DeclaredViewToken, 5> workingDepths;
@@ -65,10 +65,10 @@ public:
         builder.ConstantBuffer("Builtin::GTAO::ConstantsBuffer");
 		builder.ConstantBuffer(Builtin::PerFrameBuffer);
         GTAOFilterBindings bindings{};
-        bindings.pipeline = builder.Pipeline(org::ComputePipelineDesc{
+        bindings.pipeline = br::render::DeclarePipeline(br::ComputePipelineDesc{
             .shader = {L"shaders/GTAO.hlsl", L"CSPrefilterDepths16x16"},
             .name = "CSPrefilterDepths16x16",
-            .layout = org::PipelineLayoutRef::StandardGraphics()});
+            .layout = br::PipelineLayoutRef::StandardGraphics()});
         bindings.samplerIndex = m_samplerIndex;
         bindings.depth = builder.ShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, org::Mip{ 0, 1 })).View();
         std::array<org::UavView, 5> views{};

@@ -235,7 +235,6 @@ std::shared_ptr<VersionedGpuBufferBackingPool> VersionedBufferRuntime::CreatePoo
     };
     hooks.tag = TagBacking;
     hooks.telemetry = EmitPoolTelemetry;
-    hooks.env = ReadEnvironment;
     // The pool is single-acquirer; BasicRenderer builds versions of one pool on several graph workers.
     hooks.exclusive = [mutex = std::make_shared<std::mutex>()](const std::function<void()>& body) {
         std::lock_guard lock(*mutex);

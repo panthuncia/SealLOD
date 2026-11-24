@@ -42,7 +42,7 @@ struct DebugGridParams
 };
 
 struct DebugGridBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     DebugGridParams params;
 };
 struct DebugGridFrame {
@@ -86,7 +86,7 @@ inline DebugGridBindings DebugGridPass::Declare(org::PassBuilder& declaration) {
     // Needs UAV, since compute will read-modify-write (manual blend)
     builder->UnorderedAccess(Builtin::Color::HDRColorTarget);
     builder->ConstantBuffer(Builtin::PerFrameBuffer);
-    return {builder->Pipeline(br::render::ComputePipeline(L"shaders/DebugGrid.hlsl", L"DebugGridCSMain", "DebugGridComputePSO")), m_params};
+    return {br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/DebugGrid.hlsl", L"DebugGridCSMain", "DebugGridComputePSO")), m_params};
 }
 
 inline DebugGridFrame DebugGridPass::Prepare(const DebugGridBindings&, const org::PassPrepareContext& preparation) const {

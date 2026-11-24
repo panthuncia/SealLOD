@@ -5,9 +5,10 @@
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 
 struct DebugResolveBindings {
-	org::PipelineState pipeline;
+	br::PipelineState pipeline;
 	org::DeclaredViewToken target;
 };
 struct DebugResolveFrame {
@@ -21,7 +22,7 @@ public:
 	DebugResolveBindings Declare(org::PassBuilder& builder) {
 		builder.ShaderResource(Builtin::DebugVisualization, Builtin::CameraBuffer);
 		builder.ConstantBuffer(Builtin::PerFrameBuffer);
-		return {builder.Pipeline(PipelineDesc()), builder.RenderTarget(org::ResourceIdentifier{Builtin::PresentationColor})};
+		return {br::render::DeclarePipeline(PipelineDesc()), builder.RenderTarget(org::ResourceIdentifier{Builtin::PresentationColor})};
 	}
 
 	DebugResolveFrame Prepare(const DebugResolveBindings&,
@@ -37,8 +38,8 @@ public:
 	}
 
 private:
-	static org::GraphicsPipelineDesc PipelineDesc() {
-		org::GraphicsPipelineDesc desc;
+	static br::GraphicsPipelineDesc PipelineDesc() {
+		br::GraphicsPipelineDesc desc;
 		desc.name = "DebugResolve.PSO";
 		desc.vertex = {L"shaders/fullscreenVS.hlsli", L"FullscreenVSNoViewRayMain", L"vs_6_6"};
 		desc.pixel = {L"shaders/PostProcessing/debugResolve.hlsl", L"PSMain", L"ps_6_6"};

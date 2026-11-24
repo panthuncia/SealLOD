@@ -24,9 +24,10 @@ A_STATIC void LpmSetupOut(AU1 i, inAU4 v)
 }
 #include "../shaders/FidelityFX/ffx_lpm.h"
 #include "../shaders/PerPassRootConstants/tonemapRootConstants.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 
 struct TonemappingBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken lpm, bloomMip1, bloomMip2, target;
     bool bloomEnabled = false;
 };
@@ -56,7 +57,7 @@ public:
     TonemappingBindings Declare(org::PassBuilder& builder) {
         builder.ShaderResource(Builtin::PostProcessing::UpscaledHDR, Builtin::CameraBuffer);
         TonemappingBindings bindings{};
-        bindings.pipeline = builder.Pipeline(PipelineDesc());
+        bindings.pipeline = br::render::DeclarePipeline(PipelineDesc());
         bindings.bloomEnabled = m_bloomEnabled;
         bindings.target = builder.RenderTarget(org::ResourceIdentifier{Builtin::PresentationColor}).View();
         bindings.lpm = builder.ShaderResource(m_pLPMConstants).View();
@@ -119,8 +120,8 @@ private:
 		"FFX::LPMConstants"
 	};
 
-    static org::GraphicsPipelineDesc PipelineDesc() {
-        org::GraphicsPipelineDesc desc;
+    static br::GraphicsPipelineDesc PipelineDesc() {
+        br::GraphicsPipelineDesc desc;
         desc.name = "Tonemapping.PSO";
         desc.vertex = {L"shaders/fullscreenVS.hlsli", L"FullscreenVSNoViewRayMain", L"vs_6_6"};
         desc.pixel = {L"shaders/PostProcessing/tonemapping.hlsl", L"PSMain", L"ps_6_6"};

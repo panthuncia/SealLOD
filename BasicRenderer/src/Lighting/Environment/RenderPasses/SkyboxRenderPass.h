@@ -10,7 +10,7 @@ struct SkyboxFrame {
     uint32_t groupsX = 0, groupsY = 0;
 };
 struct SkyboxBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken depth, camera, environment, hdr, motion;
 };
 
@@ -23,7 +23,7 @@ public:
 		builder->ShaderResource(Builtin::Environment::CurrentCubemap);
 		builder->ConstantBuffer(Builtin::PerFrameBuffer);
         return {
-            builder->Pipeline(br::render::ComputePipeline(L"shaders/skybox.hlsl", L"SkyboxCSMain", "SkyboxComputePSO")),
+            br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/skybox.hlsl", L"SkyboxCSMain", "SkyboxComputePSO")),
             builder->ShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, org::Mip{ 0, 1 })),
             builder->ShaderResource(Builtin::CameraBuffer),
             builder->ShaderResource(Builtin::Environment::InfoBuffer),

@@ -10,7 +10,7 @@
 #include "BasicRenderer/Extensions/PipelineDescs.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
-#include "Render/PipelineState.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Runtime/Settings/SettingsManager.h"
 #include "Lighting/Stochastic/StochasticLightingResources.h"
@@ -33,7 +33,7 @@ struct StochasticDenoiseFrame {
 };
 
 struct StochasticDenoiseBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     StochasticDenoiseStage stage = StochasticDenoiseStage::Temporal;
     org::DeclaredViewToken noisyDiffuse, noisySpecular, variance, outputDiffuse, outputSpecular, guide, signature, gradient;
     std::array<org::DeclaredViewToken, 2> historyDiffuse{}, historySpecular{}, historyMoments{}, historyChange{}, surfaceHistory{}, mixtureHistory{};
@@ -60,7 +60,7 @@ public:
         if (temporal) {
             desc.defines.push_back({ L"DENOISE_DOWNSAMPLED", m_resources->downsample > 1u ? L"1" : L"0" });
         }
-        bindings.pipeline = builder.Pipeline(desc);
+        bindings.pipeline = br::render::DeclarePipeline(desc);
         builder.ConstantBuffer(Builtin::PerFrameBuffer);
         builder.ShaderResource(Builtin::CameraBuffer, Builtin::Surface::BaseColorOpacity, Builtin::Surface::NormalRoughness,
             Builtin::Surface::SpecularAo);

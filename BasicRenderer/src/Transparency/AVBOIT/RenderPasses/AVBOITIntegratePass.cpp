@@ -35,7 +35,7 @@ AVBOITIntegrateBindings AVBOITIntegratePass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     AVBOITIntegrateBindings bindings{
-        builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/AVBOITIntegrate.hlsl", L"CLodAVBOITIntegrateCS", "CLod.AVBOITIntegrate.PSO")),
+        br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/AVBOITIntegrate.hlsl", L"CLodAVBOITIntegrateCS", "CLod.AVBOITIntegrate.PSO")),
         builder.ShaderResource(m_configBuffer),
         builder.ShaderResource(m_fitStateBuffer),
         builder.UnorderedAccess(m_occupancyTexture) };

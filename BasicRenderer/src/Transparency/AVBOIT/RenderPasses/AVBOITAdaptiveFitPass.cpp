@@ -19,7 +19,7 @@ AVBOITAdaptiveFitPass::AVBOITAdaptiveFitPass(
 AVBOITAdaptiveFitBindings AVBOITAdaptiveFitPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    return {builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/AVBOITAdaptiveFit.hlsl", L"CLodAVBOITAdaptiveFitCS", "CLod.AVBOITAdaptiveFit.PSO")), builder.UnorderedAccess(m_configBuffer), builder.ShaderResource(m_fitStateBuffer)};
+    return {br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/AVBOITAdaptiveFit.hlsl", L"CLodAVBOITAdaptiveFitCS", "CLod.AVBOITAdaptiveFit.PSO")), builder.UnorderedAccess(m_configBuffer), builder.ShaderResource(m_fitStateBuffer)};
 }
 
 AVBOITAdaptiveFitFrame AVBOITAdaptiveFitPass::Prepare(

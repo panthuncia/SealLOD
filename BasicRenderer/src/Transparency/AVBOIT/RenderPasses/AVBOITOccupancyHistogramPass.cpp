@@ -28,7 +28,7 @@ AVBOITOccupancyHistogramPass::AVBOITOccupancyHistogramPass(
 AVBOITOccupancyHistogramBindings AVBOITOccupancyHistogramPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    return {builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/AVBOITOccupancyHistogram.hlsl", L"CLodAVBOITOccupancyHistogramCS", "CLod.AVBOITOccupancyHistogram.PSO")), 
+    return {br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/AVBOITOccupancyHistogram.hlsl", L"CLodAVBOITOccupancyHistogramCS", "CLod.AVBOITOccupancyHistogram.PSO")), 
         builder.ShaderResource(m_configBuffer),
         builder.UnorderedAccess(m_occupancyTexture),
         builder.UnorderedAccess(m_occupancySliceMaskTexture),

@@ -33,7 +33,7 @@ VirtualShadowMapBuildPageListsBindings VirtualShadowMapBuildPageListsPass::Decla
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    return {builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+    return {br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
                 L"CLodVirtualShadowBuildPageListsCSMain", "CLod.VirtualShadow.BuildPageLists.PSO")),
         builder.ShaderResource(m_pageTableTexture, {static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)}), builder.ShaderResource(m_pageMetadataBuffer),
         builder.ShaderResource(m_allocationCountBuffer), builder.UnorderedAccess(m_freePhysicalPagesBuffer),

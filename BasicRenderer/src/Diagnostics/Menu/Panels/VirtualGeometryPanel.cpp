@@ -290,7 +290,7 @@ void Menu::DrawCLodTelemetryWindow() {
         (reyesTelemetryPhase2Resource != nullptr);
     const bool shadowReyesCaptureResourcesReady =
         (shadowReyesTelemetryPhase1Resource != nullptr);
-    auto* readbackService = m_renderGraph ? m_renderGraph->GetReadbackService() : nullptr;
+    auto* readbackService = m_renderGraph ? br::GetReadbackCaptureService() : nullptr;
     const bool canCapture =
         (clodTelemetryResource != nullptr) &&
         (readbackService != nullptr) &&
@@ -339,7 +339,7 @@ void Menu::DrawCLodTelemetryWindow() {
                 "CLodOpaque::RasterizeClustersPass2",
                 clodTelemetryResource,
                 org::RangeSpec{},
-                [this](org::ReadbackCaptureResult&& result) {
+                [this](br::ReadbackCaptureResult&& result) {
                 m_clodTelemetry.capturePending = false;
 
                 constexpr size_t telemetryBytes = sizeof(uint32_t) * static_cast<size_t>(CLodWorkGraphCounterCount);
@@ -436,7 +436,7 @@ void Menu::DrawCLodTelemetryWindow() {
                     "CLodOpaque::HierarchicalCullingPass2",
                     clodVisibleCounterResource,
                     org::RangeSpec{},
-                    [this, captureId](org::ReadbackCaptureResult&& result) {
+                    [this, captureId](br::ReadbackCaptureResult&& result) {
                     if (!m_clodTelemetry.captureStatsPending || m_clodTelemetry.captureStatsId != captureId) {
                         return;
                     }
@@ -456,7 +456,7 @@ void Menu::DrawCLodTelemetryWindow() {
                     "CLodOpaque::HierarchicalCullingPass2",
                     clodVisibleClustersResource,
                     org::RangeSpec{},
-                    [this, captureId](org::ReadbackCaptureResult&& result) {
+                    [this, captureId](br::ReadbackCaptureResult&& result) {
                     if (!m_clodTelemetry.captureStatsPending || m_clodTelemetry.captureStatsId != captureId) {
                         return;
                     }
@@ -508,7 +508,7 @@ void Menu::DrawCLodTelemetryWindow() {
                 "CLodShadow::RasterizeClustersPass1",
                 shadowClodTelemetryResource,
                 org::RangeSpec{},
-                [this](org::ReadbackCaptureResult&& result) {
+                [this](br::ReadbackCaptureResult&& result) {
                 m_shadowClodTelemetry.capturePending = false;
 
                 constexpr size_t telemetryBytes = sizeof(uint32_t) * static_cast<size_t>(CLodWorkGraphCounterCount);
@@ -605,7 +605,7 @@ void Menu::DrawCLodTelemetryWindow() {
                     "CLodShadow::HierarchicalCullingPass1",
                     shadowClodVisibleCounterResource,
                     org::RangeSpec{},
-                    [this, captureId](org::ReadbackCaptureResult&& result) {
+                    [this, captureId](br::ReadbackCaptureResult&& result) {
                     if (!m_shadowClodTelemetry.captureStatsPending || m_shadowClodTelemetry.captureStatsId != captureId) {
                         return;
                     }
@@ -625,7 +625,7 @@ void Menu::DrawCLodTelemetryWindow() {
                     "CLodShadow::HierarchicalCullingPass1",
                     shadowClodVisibleClustersResource,
                     org::RangeSpec{},
-                    [this, captureId](org::ReadbackCaptureResult&& result) {
+                    [this, captureId](br::ReadbackCaptureResult&& result) {
                     if (!m_shadowClodTelemetry.captureStatsPending || m_shadowClodTelemetry.captureStatsId != captureId) {
                         return;
                     }
@@ -675,7 +675,7 @@ void Menu::DrawCLodTelemetryWindow() {
             "CLodShadow::VirtualShadowClearDirtyBitsPass",
             shadowVirtualShadowStatsResource,
             org::RangeSpec{},
-            [this, captureId](org::ReadbackCaptureResult&& result) {
+            [this, captureId](br::ReadbackCaptureResult&& result) {
                 if (!m_shadowVirtualShadowTelemetry.capturePending || m_shadowVirtualShadowTelemetry.captureId != captureId) {
                     return;
                 }
@@ -695,7 +695,7 @@ void Menu::DrawCLodTelemetryWindow() {
             "CLodShadow::VirtualShadowSetupPass",
             shadowVirtualShadowRuntimeStateResource,
             org::RangeSpec{},
-            [this, captureId](org::ReadbackCaptureResult&& result) {
+            [this, captureId](br::ReadbackCaptureResult&& result) {
                 if (!m_shadowVirtualShadowTelemetry.capturePending || m_shadowVirtualShadowTelemetry.captureId != captureId) {
                     return;
                 }
@@ -739,7 +739,7 @@ void Menu::DrawCLodTelemetryWindow() {
             "CLodOpaque::ReyesPatchRasterPass1",
             reyesTelemetryPhase1Resource,
             org::RangeSpec{},
-            [this, captureId](org::ReadbackCaptureResult&& result) {
+            [this, captureId](br::ReadbackCaptureResult&& result) {
                 if (!m_clodReyesTelemetryCapturePending || m_clodReyesTelemetryCaptureId != captureId) {
                     return;
                 }
@@ -759,7 +759,7 @@ void Menu::DrawCLodTelemetryWindow() {
             "CLodOpaque::ReyesPatchRasterPass2",
             reyesTelemetryPhase2Resource,
             org::RangeSpec{},
-            [this, captureId](org::ReadbackCaptureResult&& result) {
+            [this, captureId](br::ReadbackCaptureResult&& result) {
                 if (!m_clodReyesTelemetryCapturePending || m_clodReyesTelemetryCaptureId != captureId) {
                     return;
                 }
@@ -800,7 +800,7 @@ void Menu::DrawCLodTelemetryWindow() {
             "CLodShadow::VirtualShadowClearDirtyBitsPass",
             shadowReyesTelemetryPhase1Resource,
             org::RangeSpec{},
-            [this, captureId](org::ReadbackCaptureResult&& result) {
+            [this, captureId](br::ReadbackCaptureResult&& result) {
                 if (!m_shadowClodReyesTelemetryCapturePending || m_shadowClodReyesTelemetryCaptureId != captureId) {
                     return;
                 }
@@ -858,7 +858,7 @@ void Menu::DrawCLodTelemetryWindow() {
             "CLodAlpha::DeepVisibilityResolvePass",
             alphaNodeCounterResource,
             org::RangeSpec{},
-            [this, captureId](org::ReadbackCaptureResult&& result) {
+            [this, captureId](br::ReadbackCaptureResult&& result) {
                 if (!m_clodAlphaTelemetryCapturePending || m_clodAlphaTelemetryCaptureId != captureId) {
                     return;
                 }
@@ -878,7 +878,7 @@ void Menu::DrawCLodTelemetryWindow() {
             "CLodAlpha::DeepVisibilityResolvePass",
             alphaOverflowCounterResource,
             org::RangeSpec{},
-            [this, captureId](org::ReadbackCaptureResult&& result) {
+            [this, captureId](br::ReadbackCaptureResult&& result) {
                 if (!m_clodAlphaTelemetryCapturePending || m_clodAlphaTelemetryCaptureId != captureId) {
                     return;
                 }
@@ -898,7 +898,7 @@ void Menu::DrawCLodTelemetryWindow() {
             "CLodAlpha::DeepVisibilityResolvePass",
             alphaStatsResource,
             org::RangeSpec{},
-            [this, captureId](org::ReadbackCaptureResult&& result) {
+            [this, captureId](br::ReadbackCaptureResult&& result) {
                 if (!m_clodAlphaTelemetryCapturePending || m_clodAlphaTelemetryCaptureId != captureId) {
                     return;
                 }

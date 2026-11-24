@@ -11,7 +11,7 @@
 #include "Camera/Lens/LensManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "Render/PassBuilders.h"
-#include "Render/PipelineState.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Resources/Buffers/Buffer.h"
 #include "Resources/PixelBuffer.h"
@@ -63,7 +63,7 @@ struct PathTraceState {
             for (auto& define : br::lens::LensManager::ShaderDefines(*published)) wanted.defines.push_back(std::move(define));
             code = published->polynomialInclude;
         }
-        const org::PipelineState* pipeline = manager.TryGetRayTracingPipeline(wanted);
+        const br::PipelineState* pipeline = manager.TryGetRayTracingPipeline(wanted);
         if (!pipeline && table) {
             frameTable = table;
             return frameTable;
@@ -129,7 +129,7 @@ struct PathTraceArgsFrameData {
 };
 
 struct PathTraceArgsBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken output;
 };
 
@@ -142,7 +142,7 @@ public:
 
     PathTraceArgsBindings Declare(org::PassBuilder& builder) {
         PathTraceArgsBindings bindings{};
-        bindings.pipeline = builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/pathTraceDispatchArgs.hlsl",
+        bindings.pipeline = br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/pathTraceDispatchArgs.hlsl",
             L"PathTraceDispatchArgsCS", "PathTrace.DispatchArgs.PSO"));
         bindings.output = builder.UnorderedAccess(m_state->arguments).View();
         return bindings;
@@ -188,7 +188,7 @@ struct PathTraceFrameData {
 };
 
 struct PathTraceBindings {
-    org::PipelineState clearPipeline; // The pixel watch's.
+    br::PipelineState clearPipeline; // The pixel watch's.
     org::ResourceBindingToken arguments;
     org::DeclaredViewToken output, baseColor, normalRoughness, motion, projectedDepth, accumulation, specularAlbedo, specularHitDistance;
     bool hasAccumulation = false;
@@ -221,7 +221,7 @@ public:
 
     PathTraceBindings Declare(org::PassBuilder& builder) {
         PathTraceBindings bindings{};
-        bindings.clearPipeline = builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/rayTracingSceneBuild.hlsl", L"CLodRtClearCS",
+        bindings.clearPipeline = br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/rayTracingSceneBuild.hlsl", L"CLodRtClearCS",
             "PathTrace.ClearWatch.PSO"));
         builder.ConstantBuffer(Builtin::PerFrameBuffer);
         builder.ShaderResource(Builtin::CameraBuffer, Builtin::PerMeshBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases, Builtin::PerMaterialDataBuffer, Builtin::InstanceDrawRecordBuffer,

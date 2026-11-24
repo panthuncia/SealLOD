@@ -12,7 +12,7 @@
 #include "Pipeline/PipelineState/PSOManager.h"
 #include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "VirtualGeometry/RayTracing/CLodRayTracingSystem.h"
-#include "Render/PipelineState.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Resources/PixelBuffer.h"
@@ -29,7 +29,7 @@ struct RayTracedReflectionsFrameData {
 };
 
 struct RayTracedReflectionsBindings {
-    org::PipelineState tracePipeline, shadePipeline, shadeTerrainPipeline;
+    br::PipelineState tracePipeline, shadePipeline, shadeTerrainPipeline;
     org::DeclaredViewToken outputShader, outputCpu, hits;
     // The RVT is declared only when the pipeline recipe has terrain RVT. Without it the terrain shading's RVT slots bind as
     // absent, as material evaluation's do.
@@ -81,23 +81,23 @@ public:
         bindings.terrainRvt = m_terrainRvt;
         // What every material could need. Unlike primary evaluation there's one program per surface kind rather than one per
         // material combination, because material flags still decide at run time what is sampled.
-        const std::vector<org::PipelineShaderDefine> materialDefines = {
+        const std::vector<br::PipelineShaderDefine> materialDefines = {
             { L"PSO_BASE_COLOR_TEXTURE", L"1" }, { L"PSO_NORMAL_MAP", L"1" }, { L"PSO_ROUGHNESS_TEXTURE", L"1" },
             { L"PSO_METALLIC_TEXTURE", L"1" }, { L"PSO_AO_TEXTURE", L"1" }, { L"PSO_EMISSIVE_TEXTURE", L"1" }, { L"PSO_OPACITY_TEXTURE", L"1" },
             { L"PSO_IMAGE_BASED_LIGHTING", L"1" }, { L"PSO_DEFERRED", L"1" }, { L"VISUTIL_COLOR_ONLY_GBUFFER_EVAL", L"1" },
         };
-        std::vector<org::PipelineShaderDefine> terrainDefines = materialDefines;
+        std::vector<br::PipelineShaderDefine> terrainDefines = materialDefines;
         terrainDefines.push_back({ L"PSO_TERRAIN", L"1" });
         // Ray queries against clusters need shader model 6.10.
-        const auto sm610 = [](org::ComputePipelineDesc desc) {
+        const auto sm610 = [](br::ComputePipelineDesc desc) {
             desc.shader.target = L"cs_6_10";
             return desc;
         };
-        bindings.tracePipeline = builder.Pipeline(sm610(br::render::ComputePipeline(L"Shaders/ClusterLOD/rayTracedReflections.hlsl",
+        bindings.tracePipeline = br::render::DeclarePipeline(sm610(br::render::ComputePipeline(L"Shaders/ClusterLOD/rayTracedReflections.hlsl",
             L"CLodRtReflectionTraceCS", "CLod.RayTracing.ReflectionTrace.PSO")));
-        bindings.shadePipeline = builder.Pipeline(sm610(br::render::ComputePipeline(L"Shaders/ClusterLOD/rayTracedReflectionShade.hlsl",
+        bindings.shadePipeline = br::render::DeclarePipeline(sm610(br::render::ComputePipeline(L"Shaders/ClusterLOD/rayTracedReflectionShade.hlsl",
             L"CLodRtReflectionShadeCS", "CLod.RayTracing.ReflectionShade.PSO", materialDefines)));
-        bindings.shadeTerrainPipeline = builder.Pipeline(sm610(br::render::ComputePipeline(L"Shaders/ClusterLOD/rayTracedReflectionShade.hlsl",
+        bindings.shadeTerrainPipeline = br::render::DeclarePipeline(sm610(br::render::ComputePipeline(L"Shaders/ClusterLOD/rayTracedReflectionShade.hlsl",
             L"CLodRtReflectionShadeCS", "CLod.RayTracing.ReflectionShadeTerrain.PSO", terrainDefines)));
         bindings.hits = builder.UnorderedAccess(m_hits).View();
         br::render::CLodRayTracingSystem::DeclareTracing(builder);

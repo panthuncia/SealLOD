@@ -25,7 +25,7 @@ RasterBucketBlockOffsetsPass::RasterBucketBlockOffsetsPass(
 
 RasterBucketBlockOffsetsBindings RasterBucketBlockOffsetsPass::Declare(org::PassBuilder& builder) {
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    return {builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+    return {br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
                 L"RasterBucketsBlockOffsetsCS", "CLod_RasterBucketsBlockOffsetsPSO")),
         builder.UnorderedAccess(m_offsetsBuffer), builder.ShaderResource(m_blockSumsBuffer),
         builder.UnorderedAccess(m_scannedBlockSumsBuffer), builder.UnorderedAccess(m_totalCountBuffer)};

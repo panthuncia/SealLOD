@@ -313,15 +313,6 @@ void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     queueSceneNodePositionEdit = settingsManager.getSettingGetter<std::function<void(uint64_t, DirectX::XMFLOAT3)>>("queueSceneNodePositionEdit")();
     queueSceneNodeUniformScaleEdit = settingsManager.getSettingGetter<std::function<void(uint64_t, float)>>("queueSceneNodeUniformScaleEdit")();
 
-	setMeshShaderEnabled = settingsManager.getSettingSetter<bool>("enableMeshShader");
-	getMeshShaderEnabled = settingsManager.getSettingGetter<bool>("enableMeshShader");
-	meshShaderEnabled = getMeshShaderEnabled();
-	observerSetting(meshShaderEnabled, "enableMeshShader");
-
-	setIndirectDrawsEnabled = settingsManager.getSettingSetter<bool>("enableIndirectDraws");
-	getIndirectDrawsEnabled = settingsManager.getSettingGetter<bool>("enableIndirectDraws");
-	indirectDrawsEnabled = getIndirectDrawsEnabled();
-	observerSetting(indirectDrawsEnabled, "enableIndirectDraws");
 
 	getOcclusionCullingEnabled = settingsManager.getSettingGetter<bool>("enableOcclusionCulling");
 	setOcclusionCullingEnabled = settingsManager.getSettingSetter<bool>("enableOcclusionCulling");
@@ -525,10 +516,6 @@ void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     m_directionalShadowDistanceLowerBound = getDirectionalShadowDistanceLowerBound();
     observerSetting(m_directionalShadowDistanceLowerBound, "directionalShadowDistanceLowerBound");
 
-	setWireframeEnabled = settingsManager.getSettingSetter<bool>("enableWireframe");
-	getWireframeEnabled = settingsManager.getSettingGetter<bool>("enableWireframe");
-	wireframeEnabled = getWireframeEnabled();
-	observerSetting(wireframeEnabled, "enableWireframe");
 
 	setAllowTearing = settingsManager.getSettingSetter<bool>("allowTearing");
 	getAllowTearing = settingsManager.getSettingGetter<bool>("allowTearing");
@@ -545,10 +532,6 @@ void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
 	clusteredLighting = getClusteredLightingEnabled();
 	observerSetting(clusteredLighting, "enableClusteredLighting");
 
-	setVisibilityRenderingEnabled = settingsManager.getSettingSetter<bool>("enableVisibilityRendering");
-	getVisibilityRenderingEnabled = settingsManager.getSettingGetter<bool>("enableVisibilityRendering");
-	m_visibilityRenderingEnabled = getVisibilityRenderingEnabled();
-	observerSetting(m_visibilityRenderingEnabled, "enableVisibilityRendering");
     setTerrainRegionMaterialEvaluationEnabled = settingsManager.getSettingSetter<bool>("enableTerrainRegionMaterialEvaluation");
     getTerrainRegionMaterialEvaluationEnabled = settingsManager.getSettingGetter<bool>("enableTerrainRegionMaterialEvaluation");
     m_terrainRegionMaterialEvaluationEnabled = getTerrainRegionMaterialEvaluationEnabled();
@@ -853,25 +836,12 @@ void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     m_currentCLodLodHeightMode = getCLodLodHeightMode();
     observerSetting(m_currentCLodLodHeightMode, CLodLodHeightModeSettingName);
 
-	getUseAsyncCompute = settingsManager.getSettingGetter<bool>("useAsyncCompute");
-    setUseAsyncCompute = settingsManager.getSettingSetter<bool>("useAsyncCompute");
-    m_useAsyncCompute = getUseAsyncCompute();
-	observerSetting(m_useAsyncCompute, "useAsyncCompute");
-
-	getHeavyDebug = settingsManager.getSettingGetter<bool>("heavyDebug");
-	setHeavyDebug = settingsManager.getSettingSetter<bool>("heavyDebug");
-	m_heavyDebug = getHeavyDebug();
-	observerSetting(m_heavyDebug, "heavyDebug");
 
     getRenderGraphBatchTraceEnabled = settingsManager.getSettingGetter<bool>("renderGraphBatchTraceEnabled");
     setRenderGraphBatchTraceEnabled = settingsManager.getSettingSetter<bool>("renderGraphBatchTraceEnabled");
     m_renderGraphBatchTraceEnabled = getRenderGraphBatchTraceEnabled();
     observerSetting(m_renderGraphBatchTraceEnabled, "renderGraphBatchTraceEnabled");
 
-	getRenderGraphLightweightCompileSummaryEnabled = settingsManager.getSettingGetter<bool>("renderGraphLightweightCompileSummaryEnabled");
-	setRenderGraphLightweightCompileSummaryEnabled = settingsManager.getSettingSetter<bool>("renderGraphLightweightCompileSummaryEnabled");
-	m_renderGraphLightweightCompileSummaryEnabled = getRenderGraphLightweightCompileSummaryEnabled();
-	observerSetting(m_renderGraphLightweightCompileSummaryEnabled, "renderGraphLightweightCompileSummaryEnabled");
 
     getReshapeTexelAddressing = settingsManager.getSettingGetter<bool>("reshapeTexelAddressing");
     setReshapeTexelAddressing = settingsManager.getSettingSetter<bool>("reshapeTexelAddressing");
@@ -888,12 +858,6 @@ void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
     m_autoAliasPackingStrategy = getAutoAliasPackingStrategy();
     observerSetting(m_autoAliasPackingStrategy, "autoAliasPackingStrategy");
 
-    getAutoAliasLogExclusionReasons = settingsManager.getSettingGetter<bool>("autoAliasLogExclusionReasons");
-    setAutoAliasLogExclusionReasons = settingsManager.getSettingSetter<bool>("autoAliasLogExclusionReasons");
-    m_autoAliasLogExclusionReasons = getAutoAliasLogExclusionReasons();
-    observerSetting(m_autoAliasLogExclusionReasons, "autoAliasLogExclusionReasons");
-
-    setAutoAliasBuildDebugData = settingsManager.getSettingSetter<bool>("autoAliasBuildDebugData");
 
     getAutoAliasPoolRetireIdleFrames = settingsManager.getSettingGetter<uint32_t>("autoAliasPoolRetireIdleFrames");
     setAutoAliasPoolRetireIdleFrames = settingsManager.getSettingSetter<uint32_t>("autoAliasPoolRetireIdleFrames");
@@ -1393,17 +1357,6 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
 
 
         if (ImGui::CollapsingHeader("Geometry and Culling")) {
-        if (m_meshShadersSupported) {
-            if (ImGui::Checkbox("Use Mesh Shaders", &meshShaderEnabled)) {
-                setMeshShaderEnabled(meshShaderEnabled);
-            }
-        }
-        else {
-            ImGui::Text("Your GPU does not support mesh shaders!");
-        }
-        if (ImGui::Checkbox("Use Indirect Draws", &indirectDrawsEnabled)) {
-            setIndirectDrawsEnabled(indirectDrawsEnabled);
-        }
         if (ImGui::Checkbox("Occlusion Culling", &occlusionCulling)) {
             setOcclusionCullingEnabled(occlusionCulling);
         }
@@ -1851,9 +1804,6 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
         if (ImGui::Checkbox("Clustered Lighting", &clusteredLighting)) {
 			setClusteredLightingEnabled(clusteredLighting);
         }
-        if (ImGui::Checkbox("Visibility Rendering", &m_visibilityRenderingEnabled)) {
-            setVisibilityRenderingEnabled(m_visibilityRenderingEnabled);
-        }
         if (ImGui::Checkbox("Terrain Region Material Evaluation", &m_terrainRegionMaterialEvaluationEnabled)) {
             setTerrainRegionMaterialEvaluationEnabled(m_terrainRegionMaterialEvaluationEnabled);
         }
@@ -2169,35 +2119,20 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
         ImGui::Checkbox("CLod telemetry", &showCLodTelemetry);
         ImGui::Checkbox("CPU frame task graph", &showFrameTaskGraph);
         ImGui::Checkbox("Auto Alias Planner", &showAutoAliasPlanner);
-        if (setAutoAliasBuildDebugData) {
-            setAutoAliasBuildDebugData(showAutoAliasPlanner);
-        }
         ImGui::Checkbox("GPU instrumentation", &showGpuInstrumentation);
         ImGui::Checkbox("Material texture streaming", &showMaterialTextureStreaming);
         }
 
         ImGui::Separator();
-		if (ImGui::Checkbox("Wireframe", &wireframeEnabled)) {
-			setWireframeEnabled(wireframeEnabled);
-		}
         if (ImGui::Checkbox("Uncap Framerate", &allowTearing)) {
 			setAllowTearing(allowTearing);
         }
 		if (ImGui::Checkbox("Draw Bounding Spheres", &drawBoundingSpheres)) {
 			setDrawBoundingSpheres(drawBoundingSpheres);
 		}
-		if (ImGui::Checkbox("Use Async Compute", &m_useAsyncCompute)) {
-			setUseAsyncCompute(m_useAsyncCompute);
-		}
-		if (ImGui::Checkbox("Heavy Debug (1 pass/batch + GPU drain)", &m_heavyDebug)) {
-			setHeavyDebug(m_heavyDebug);
-		}
         if (ImGui::Checkbox("Render Graph Batch Trace", &m_renderGraphBatchTraceEnabled)) {
             setRenderGraphBatchTraceEnabled(m_renderGraphBatchTraceEnabled);
         }
-		if (ImGui::Checkbox("Render Graph Compile Summary", &m_renderGraphLightweightCompileSummaryEnabled)) {
-			setRenderGraphLightweightCompileSummaryEnabled(m_renderGraphLightweightCompileSummaryEnabled);
-		}
         if (ImGui::Checkbox("ReShape texel addressing (requires recreate)", &m_reshapeTexelAddressing)) {
             setReshapeTexelAddressing(m_reshapeTexelAddressing);
         }
@@ -2445,37 +2380,15 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
     const bool persistentGraph = m_renderGraph != nullptr;
     if (m_renderGraph && m_renderGraph->ScheduleTraceEnabled() != (showRG && persistentGraph))
         m_renderGraph->SetScheduleTraceEnabled(showRG && persistentGraph);
-    // A resource as a pass left it: the inspector's capture opens the memory view, which the readback fills a frame later.
-    static org::ui::MemoryViewWidget memoryView;
-    static bool showMemoryView = false;
     if (showRG && persistentGraph) {
         static org::debugui::ScheduleInspectorState scheduleInspector;
-        static bool memoryViewReady = false;
-        if (!memoryViewReady && (m_imguiBackend == rhi::Backend::D3D12 || m_imguiBackend == rhi::Backend::Vulkan) && g_pd3dSrvDescHeap) {
-            memoryView.SetImGuiDescriptorCallbacks(
-                [this]() { return AllocateImGuiDescriptor(); },
-                [this](uint32_t index) { FreeImGuiDescriptor(index); },
-                [this](uint32_t index) { return GetImGuiGpuDescriptorHandle(index); },
-                GetImGuiHeapHandle(),
-                []() { return DeviceManager::GetInstance().GetDevice(); },
-                []() { return DeviceManager::GetInstance().GetGraphicsQueue(); });
-            memoryViewReady = true;
-        }
-        const auto readback = m_renderGraph->GetReadbackServiceOwner();
-        const org::debugui::ScheduleCaptureFn capture = [readback](const std::string& pass, uint64_t resourceId, const std::string& name) {
-            memoryView.Open(pass, resourceId, name, {}, [readback, pass, resourceId](org::ReadbackCaptureCallback callback) {
-                if (readback) readback->RequestScheduledReadbackCapture(pass, resourceId, {}, std::move(callback));
-            });
-            showMemoryView = true;
-        };
         ImGui::Begin("Render Graph Inspector", nullptr);
         if (const auto snapshot = m_renderGraph->GetPersistentScheduleSnapshot())
-            org::debugui::ShowScheduleInspector(*snapshot, scheduleInspector, readback ? capture : org::debugui::ScheduleCaptureFn{});
+            org::debugui::ShowScheduleInspector(*snapshot, scheduleInspector);
         else
             ImGui::TextWrapped("No schedule yet: the graph traces its executables from the next frame it prepares.");
         ImGui::End();
     }
-    memoryView.Draw(&showMemoryView);
 
     if (showCLodTelemetry) {
         DrawCLodTelemetryWindow();

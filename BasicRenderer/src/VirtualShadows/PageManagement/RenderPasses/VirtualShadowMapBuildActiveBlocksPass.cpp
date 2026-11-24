@@ -26,7 +26,7 @@ VirtualShadowMapBuildActiveBlocksBindings VirtualShadowMapBuildActiveBlocksPass:
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    return {builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+    return {br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
                 L"CLodVirtualShadowBuildActiveBlocksCSMain", "CLod.VirtualShadow.BuildActiveBlocks.PSO",
                 {{L"CLOD_VSM_TWO_LAYER_ACTIVE_BLOCKS_VERSION", L"2"}})),
         builder.ShaderResource(m_pageTableTexture, {static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)}),

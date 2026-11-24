@@ -4625,7 +4625,6 @@ void ClusterCullBody(
     bool partHasMaterialSlots = false;
     uint activeGroupScanCount = 0;
     float ownGroupErrorOverDistance = 0.0f;
-    PerObjectBuffer instanceTransform = (PerObjectBuffer)0;
     CLodMeshMetadata clodMeshMetadata = (CLodMeshMetadata)0;
     bool reyesDisplacementCandidate = false;
     bool forceLodDecision = false;
@@ -4655,8 +4654,10 @@ void ClusterCullBody(
 
         const InstanceDrawRecordBuffer drawRecord = LoadInstanceDrawRecord(b.instanceIndex);
         const PerMeshInstanceBuffer instanceData = LoadMeshTemplateForDrawRecord(drawRecord);
-        instanceTransform = LoadInstanceTransformForDrawRecordWithAssemblyTransform(drawRecord, b.assemblyTransformIndex);
-        objectModelMatrix = instanceTransform.model;
+        // Only the model here. The previous model is composed at the phase 1 occlusion test, its one use: composed here
+        // with the model, it was held across the meshlet's bounds and cost a register step (152 -> 128, cluster culling
+        // 10% faster; docs/culling-optimization-experiments.md).
+        objectModelMatrix = ComposeAssemblyModel(drawRecord.instanceTransformIndex, b.assemblyTransformIndex);
 #if CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW
         objectInvalidatedThisFrame = CLodVirtualShadowInstanceInvalidatedThisFrame(b.instanceIndex);
 #endif
@@ -5106,7 +5107,8 @@ void ClusterCullBody(
                         {
                             previousMeshletBounds.sphere = clusterCullHeader.bounds;
                         }
-                        const row_major matrix prevModelMatrix = instanceTransform.prevModel;
+                        const row_major matrix prevModelMatrix = ComposeAssemblyPrevModel(
+                            LoadInstanceDrawRecord(b.instanceIndex).instanceTransformIndex, b.assemblyTransformIndex);
                         const float prevMeshletScale = MaxAxisScale_RowVector(prevModelMatrix);
                         const float3 prevMeshletCenterViewSpace = ToViewSpace(previousMeshletBounds.sphere.xyz, prevModelMatrix, occCameras[b.viewId].prevView);
                         const float prevMeshletRadiusWorld = previousMeshletBounds.sphere.w * prevMeshletScale;

@@ -237,16 +237,16 @@ namespace TerrainRvt
         rootConstants[15] = FloatBits(MipOffset());
     }
 
-    inline std::vector<org::PipelineShaderDefine> ShaderDefines()
+    inline std::vector<br::PipelineShaderDefine> ShaderDefines()
     {
-        std::vector<org::PipelineShaderDefine> defines;
+        std::vector<br::PipelineShaderDefine> defines;
         if (IsTerrainRvtTelemetryDebugEnabled()) defines.push_back({ L"TERRAIN_RVT_TELEMETRY", L"1" });
         if (CompressionEnabled()) defines.push_back({ L"TERRAIN_RVT_COMPRESSED", L"1" });
         return defines;
     }
 
     struct PipelineBindings {
-        org::PipelineState pipeline;
+        br::PipelineState pipeline;
     };
 
     // Dispatch sizes derived from the RVT settings of the frame being prepared.
@@ -285,7 +285,7 @@ public:
             Builtin::Terrain::RvtStats);
         b.ShaderResource(Builtin::CameraBuffer, Builtin::Terrain::Sets);
         b.ConstantBuffer(Builtin::PerFrameBuffer);
-        return { b.Pipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtFrameResetCS",
+        return { br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtFrameResetCS",
             "TerrainRvt.FrameReset.PSO", TerrainRvt::ShaderDefines())) };
     }
 
@@ -304,7 +304,7 @@ public:
 };
 
 struct TerrainRvtMarkVisibilityMaterialPagesBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken visibleClusters, visibleCount;
     uint32_t visibleCapacity = 0;
 };
@@ -323,7 +323,7 @@ public:
     {
         b.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         TerrainRvtMarkVisibilityMaterialPagesBindings bindings{
-            b.Pipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtMarkVisibleClusterPagesCS",
+            br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtMarkVisibleClusterPagesCS",
                 "TerrainRvt.MarkVisibleClusterPages.PSO", TerrainRvt::ShaderDefines())),
             b.ShaderResource(m_visibleClustersResource).View(),
             b.ShaderResource(m_visibleClustersCounterResource).View(),
@@ -375,7 +375,7 @@ private:
 };
 
 struct TerrainRvtResolveRequestsBindings {
-    org::PipelineState clear, resolve, refresh;
+    br::PipelineState clear, resolve, refresh;
 };
 
 struct TerrainRvtResolveRequestsFrame {
@@ -406,11 +406,11 @@ public:
                 Builtin::Terrain::RvtStats,
                 Builtin::Material::TextureStreamingFeedbackBuffer);
         b.ConstantBuffer(Builtin::PerFrameBuffer);
-        return { b.Pipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtClearGenerationCounterCS",
+        return { br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtClearGenerationCounterCS",
                      "TerrainRvt.ClearGenerationCounter.PSO", TerrainRvt::ShaderDefines())),
-                 b.Pipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtResolveRequestsCS",
+                 br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtResolveRequestsCS",
                      "TerrainRvt.ResolveRequests.PSO", TerrainRvt::ShaderDefines())),
-                 b.Pipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtRefreshStalePagesCS",
+                 br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtRefreshStalePagesCS",
                      "TerrainRvt.RefreshStalePages.PSO", TerrainRvt::ShaderDefines())) };
     }
 
@@ -444,7 +444,7 @@ public:
         b.UnorderedAccess(
                 Builtin::Terrain::RvtRequestMasks,
                 Builtin::Terrain::RvtCounters);
-        return { b.Pipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtClearFeedbackRequestsCS",
+        return { br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtClearFeedbackRequestsCS",
             "TerrainRvt.ClearFeedbackRequests.PSO", TerrainRvt::ShaderDefines())) };
     }
 
@@ -472,7 +472,7 @@ public:
             Builtin::Terrain::RvtPageKeys);
         b.UnorderedAccess(Builtin::Terrain::RvtHeightResidentCache);
         b.ConstantBuffer(Builtin::PerFrameBuffer);
-        return { b.Pipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtBuildHeightResidentCacheCS",
+        return { br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtBuildHeightResidentCacheCS",
             "TerrainRvt.BuildHeightResidentCache.PSO", TerrainRvt::ShaderDefines())) };
     }
 
@@ -496,7 +496,7 @@ public:
         b.ShaderResource(Builtin::Terrain::RvtInfo, Builtin::Terrain::RvtCounters);
         b.UnorderedAccess(Builtin::Terrain::RvtGenerateDispatchArgs);
         if (TerrainRvt::CompressionEnabled()) b.UnorderedAccess(Builtin::Terrain::RvtEncodeDispatchArgs);
-        return { b.Pipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtBuildGenerateDispatchArgsCS",
+        return { br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtBuildGenerateDispatchArgsCS",
             "TerrainRvt.BuildGenerateDispatchArgs.PSO", TerrainRvt::ShaderDefines())) };
     }
 
@@ -506,9 +506,9 @@ public:
 };
 
 struct TerrainRvtGeneratePagesBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::ResourceBindingToken arguments;
-    org::CommandSignatureState signature;
+    br::CommandSignatureState signature;
 };
 
 class TerrainRvtGeneratePagesPass final : public org::TypedRenderGraphPass<TerrainRvtGeneratePagesPass,
@@ -549,9 +549,9 @@ public:
         }
         const auto arguments = b.IndirectArguments(Builtin::Terrain::RvtGenerateDispatchArgs);
         b.ConstantBuffer(Builtin::PerFrameBuffer);
-        return { b.Pipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtGeneratePagesCS",
+        return { br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtGeneratePagesCS",
             "TerrainRvt.GeneratePages.PSO", TerrainRvt::ShaderDefines())), arguments,
-            b.CommandSignature(br::render::RawDispatchCommandSignature()) };
+            br::render::DeclareCommandSignature(br::render::RawDispatchCommandSignature()) };
     }
 
     static void Record(const TerrainRvtGeneratePagesBindings& bindings, org::PassRecordContext& context) {
@@ -581,9 +581,9 @@ public:
             Builtin::Terrain::RvtNormalAtlas,
             Builtin::Terrain::RvtMaterialAtlas);
         const auto arguments = b.IndirectArguments(Builtin::Terrain::RvtEncodeDispatchArgs);
-        return { b.Pipeline(br::render::ComputePipeline(L"shaders/TerrainRvtEncode.hlsl", L"TerrainRvtEncodePagesCS",
+        return { br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/TerrainRvtEncode.hlsl", L"TerrainRvtEncodePagesCS",
             "TerrainRvt.EncodePages.PSO", TerrainRvt::ShaderDefines())), arguments,
-            b.CommandSignature(br::render::RawDispatchCommandSignature()) };
+            br::render::DeclareCommandSignature(br::render::RawDispatchCommandSignature()) };
     }
 
     static void Record(const TerrainRvtGeneratePagesBindings& bindings, org::PassRecordContext& context) {
@@ -606,7 +606,7 @@ public:
                 Builtin::Terrain::RvtPageTable,
                 Builtin::Terrain::RvtPhysicalPageOwner);
         b.ConstantBuffer(Builtin::PerFrameBuffer);
-        return { b.Pipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtFinalizeGeneratedPagesCS",
+        return { br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtFinalizeGeneratedPagesCS",
             "TerrainRvt.FinalizeGeneratedPages.PSO", TerrainRvt::ShaderDefines())) };
     }
 

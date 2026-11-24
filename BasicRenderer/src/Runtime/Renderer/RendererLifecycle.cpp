@@ -5,6 +5,8 @@
 #include "Assets/Textures/Pipeline/TexturePipelineArtifacts.h"
 #include "Runtime/GraphIntegration/TextureJobGraph.h"
 #include "OpenRenderGraph/GraphInstance.h"
+#include "OpenRenderGraph/GraphHost.h"
+#include "Runtime/Renderer/FrameBuildWorker.h"
 #include "Runtime/GraphIntegration/EnvironmentJobGraph.h"
 #include "../../../generated/BuiltinResources.h"
 #include <BasicRenderer/Renderer.h>
@@ -22,7 +24,9 @@
 #include "Runtime/Device/DescriptorHeapManager.h"
 #include "Pipeline/PipelineState/CommandSignatureManager.h"
 #include "Runtime/IO/ReadbackManager.h"
+#include "Runtime/IO/ReadbackCaptureService.h"
 #include "Pipeline/PipelineState/OrgPipelineCompiler.h"
+#include "Pipeline/PipelineState/PipelineLibrary.h"
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "Animation/Skeletons/SkeletonManager.h"
 #include "Assets/Textures/TextureFactory.h"
@@ -47,6 +51,7 @@
 #include "Materials/TextureStreaming/TextureBindingArtifacts.h"
 #include "Terrain/Residency/TerrainStateArtifacts.h"
 #include "VirtualGeometry/Streaming/Publication/CLodResidencyStorageArtifacts.h"
+#include "VirtualGeometry/Streaming/CLodStreamingSystem.h"
 #include "VirtualGeometry/GeometryStorage/GeometryBufferStateArtifacts.h"
 #include "Runtime/Publication/StaticStateArtifacts.h"
 #include <BasicRenderer/Streaming/StaticSceneArtifacts.h>
@@ -93,6 +98,10 @@ void Renderer::AdvanceFrameIndex() {
 }
 
 void Renderer::StallPipeline() {
+    // A frame build in flight was made from what the caller is about to replace (a resize, an upscaler restart): it is dropped,
+    // and the next build runs on the render thread, so the attached graph renders no frame against the replaced resources.
+    DiscardFrameBuildInFlight("a GPU idle wait");
+    m_nextFrameBuildSynchronous = true;
     for (uint8_t i = 0; i < m_numFramesInFlight; ++i) {
         WaitForFrame(i);
     }
@@ -109,17 +118,17 @@ void Renderer::StallPipeline() {
 
 void Renderer::Cleanup() {
     spdlog::info("In cleanup");
-    auto retiringDescriptors = currentRenderGraph ? m_orgRuntime->Descriptors() : nullptr;
+    auto retiringDescriptors = m_frameHost ? m_orgRuntime->Descriptors() : nullptr;
 	auto retiringIngestionGeneration = m_sceneIngestionServices.execution.generation;
+    // A frame build in flight goes first: it builds against the host and the services torn down below.
+    DiscardFrameBuildInFlight("shutdown");
+    m_frameBuildWorker.reset();
     if (currentRenderGraph) currentRenderGraph->StopFrameProduction();
     // Wait for all GPU frames to complete
 	spdlog::info("Stalling pipeline for cleanup");
 	StallPipeline();
-	// Extensions own graph resources and bridge objects.  Do not let them
-	// release those objects until work on both API devices has completed.
-    if (currentRenderGraph) {
-        currentRenderGraph->ShutdownExtensions();
-    }
+    // The streaming service outlives the graphs' extension instances; it stops here, before the graphs and their buffers go.
+    if (m_producerPersistentState && m_producerPersistentState->clodStreaming) m_producerPersistentState->clodStreaming->DetachGraph();
     // It holds the path tracer's accumulation buffer and dispatch arguments, which must go before the allocator does.
     m_pathTraceState.reset();
     // Its worker posts to the state graph and its published buffer is a graph version: both go before the graph does.
@@ -191,7 +200,7 @@ void Renderer::Cleanup() {
     for (auto& family : m_poseTableFamilies) family.reset();
     // The environment job graph goes before the upload services, while every queue it may have waited on still exists.
     m_environmentJobs.reset();
-    if (currentRenderGraph) {
+    if (m_frameHost) {
         // Publication and texture-streaming producers have now stopped. Cover
         // submissions made after the first wait before cleaning their services.
         StallPipeline();
@@ -201,8 +210,8 @@ void Renderer::Cleanup() {
         if (m_uploadPolicyService) {
             m_uploadPolicyService->Cleanup();
         }
-        if (auto* readbackService = m_orgRuntime->Readbacks().get()) {
-            readbackService->Cleanup();
+        if (m_readbackCaptures) {
+            m_readbackCaptures->Shutdown();
         }
     }
     if (currentRenderGraph) {
@@ -217,14 +226,23 @@ void Renderer::Cleanup() {
     TaskSchedulerManager::GetInstance().Cleanup();
     ::ResourceManager::GetInstance().Cleanup();
     m_coreResourceProvider.Cleanup();
-    m_preparedFrame.reset();
-    m_frameGraph.reset();
+    // The host retires its graphs and waits only for their own work (the device is idle by now).
+    m_frameInstance.reset();
+    if (m_frameHost) m_frameHost->DestroyGraph();
+    m_frameHost.reset();
+    m_frameHostExtensionIds.clear();
+    m_frameIoService.reset();
     currentRenderGraph = nullptr;
+    // These hold flecs queries, which must go before the world does.
+    m_frameBuild.reset();
+    m_vsmTransformChangedQuery.reset();
+    m_debugSceneSnapshots.reset();
+    m_publishedResourceEntities.clear();
     // Cleanup tears down the device. Preserve the state container so a module
     // owner can replay CPU scene metadata, but discard all device-bound state.
     m_producerPersistentState->InvalidateTerrainRvt();
     m_producerPersistentState->directionalVsm.InvalidateGpuState();
-    m_producerPersistentState->virtualShadowCasters.reset();
+    m_producerPersistentState->virtualShadowInvalidations.reset();
     m_producerPersistentState->clodStreaming.reset();
     org::runtime::SetActiveUploadPolicyService(nullptr);
     m_uploadPolicyService.reset();
@@ -251,6 +269,7 @@ void Renderer::Cleanup() {
 	m_pTerrainManager.reset();
 	m_pSkeletonManager.reset();
     m_pReadbackManager.reset();
+    m_readbackCaptures.reset();
     m_textureJobs.reset();  // its passes are the factory's
     m_pTextureFactory.reset();
     m_clodRayTracingSystem.reset();
@@ -325,7 +344,6 @@ void Renderer::Initialize(
         throw std::invalid_argument(message);
     }
     m_pipelineRecipe = std::move(recipe);
-    m_pipelineExtensionsDirty = true;
     m_gtaoEnabled = m_pipelineRecipe.Contains<br::pipeline::GtaoTechnique>();
     m_clusteredLighting = m_pipelineRecipe.Contains<br::pipeline::ClusteredLightingTechnique>();
     m_bloom = m_pipelineRecipe.Contains<br::pipeline::BloomTechnique>();
@@ -353,7 +371,6 @@ void Renderer::Initialize(
         enableStreamline ? UpscalingMode::DLSS : UpscalingMode::None);
     settingsManager.registerSetting<UpscaleQualityMode>("upscalingQualityMode", UpscaleQualityMode::DLAA);
     settingsManager.registerSetting<bool>("enableDilatedMotionVectors", true);
-    settingsManager.registerSetting<bool>("enableVisibilityRendering", m_visibilityRendering);
     settingsManager.registerSetting<bool>("enableStreamline", enableStreamline);
     settingsManager.registerSetting<bool>("enableDirectStorage", enableDirectStorage);
     settingsManager.registerSetting<bool>("enableReShape", br::runtime::renderer_settings::DefaultEnableReShapeForBuild());
@@ -363,7 +380,6 @@ void Renderer::Initialize(
     settingsManager.registerSetting<bool>(
         "renderGraphBatchTraceEnabled",
         br::runtime::renderer_settings::ReadTruthyEnvironmentFlag("BASICRENDERER_RENDER_GRAPH_BATCH_TRACE"));
-    settingsManager.registerSetting<bool>("renderGraphLightweightCompileSummaryEnabled", false);
     LoadPipeline(hwnd, x_res, y_res);
     DirectStorageManager::GetInstance().Initialize();
     ProbeGraphicsCommandListCreation(DeviceManager::GetInstance().GetDevice(), "after LoadPipeline");
@@ -372,10 +388,21 @@ void Renderer::Initialize(
     SyncOpenRenderGraphSettings(m_numFramesInFlight);
     RendererECSManager::GetInstance().Initialize();
     // Before the renderer's tracking hooks: the runtime installs ORG's, which these replace.
-    m_orgRuntime = org::Runtime::Create({.device = DeviceManager::GetInstance().GetDevice(),
-        .backend = DeviceManager::GetInstance().GetBackend(), .slots = m_numFramesInFlight,
-        .tasks = std::make_shared<br::TbbTaskService>(),
-        .pipelineCompiler = CreateOrgPipelineCompiler()});
+    {
+        auto tasks = std::make_shared<br::TbbTaskService>();
+        m_orgRuntime = org::Runtime::Create({.device = DeviceManager::GetInstance().GetDevice(),
+            .backend = DeviceManager::GetInstance().GetBackend(), .slots = m_numFramesInFlight,
+            .tasks = tasks});
+        // ORG builds no pipelines: BasicRenderer's library builds the ones passes declare by description.
+        auto pipelineLibrary = std::make_shared<br::PipelineLibrary>(tasks, CreateOrgPipelineCompiler());
+        pipelineLibrary->RegisterDevice(org::DeviceInstanceId::Primary, DeviceManager::GetInstance().GetBackend(),
+            DeviceManager::GetInstance().GetDevice());
+        if (DeviceManager::GetInstance().IsMultiRHIEnabled()) {
+            pipelineLibrary->RegisterDevice(org::DeviceInstanceId{1}, DeviceManager::GetInstance().GetPeerBackend(),
+                DeviceManager::GetInstance().GetPeerDevice());
+        }
+        PSOManager::GetInstance().SetPipelineLibrary(std::move(pipelineLibrary));
+    }
     org::TrackedEntityToken::Hooks trackedEntityHooks{};
     trackedEntityHooks.createEntity = [](flecs::entity existing) {
             auto& ecsManager = RendererECSManager::GetInstance();
@@ -467,7 +494,8 @@ void Renderer::Initialize(
 			return {};
 		}
 
-		if (!ecsManager.IsMainThread()) {
+		// Under the build check, as if on the build's own thread (RendererECSManager::ScopedBuildWorldAccessCheck).
+		if (!ecsManager.IsMainThread() || RendererECSManager::BuildWorldAccessCheckActive()) {
 			auto handle = org::Resource::ECSEntityHandle::CreateDeferred();
                 auto deferredState = handle.deferredState;
                 ecsManager.EnqueueDeferredWorldOperation([deferredState](flecs::world& world) mutable {
@@ -530,12 +558,39 @@ void Renderer::Initialize(
     };
     org::Resource::SetEntityHooks(std::move(resourceEntityHooks));
 
-    if (!currentRenderGraph) {
-		m_frameGraph = org::GraphInstance::Adopt(m_orgRuntime, std::make_unique<org::RenderGraph>(m_orgRuntime));
-		currentRenderGraph = m_frameGraph->Graph();
-		if (DeviceManager::GetInstance().IsMultiRHIEnabled()) {
-			currentRenderGraph->RegisterBackendDevice(DeviceManager::GetInstance().GetPeerBackend(), DeviceManager::GetInstance().GetPeerDevice());
-		}
+    if (!m_frameHost) {
+        // One host for the frame graph. It builds graphs only when the renderer asks (ConsolidateFrameGraph), never inline in a
+        // frame, and paces its runs against framesInFlight.
+        org::GraphHost::Desc hostDesc{};
+        hostDesc.runtime = m_orgRuntime;
+        hostDesc.framesInFlight = m_numFramesInFlight;
+        hostDesc.epochOrder = {kUploadEpoch, kFrameEpoch};
+        m_frameHost = std::make_unique<org::GraphHost>(std::move(hostDesc));
+        m_frameHost->SetExplicitBuilds(true);
+        m_useGraphInstance = br::runtime::renderer_settings::ReadTruthyEnvironmentFlag("BASICRENDERER_FRAME_GRAPH_INSTANCE");
+        // A failure of the attached graph's preparation, handed over by PollEpochFailures (ConsolidateFrameGraph). A build's own
+        // failure comes back with its graph (BuildEpochGraph), not through here.
+        m_frameHost->SetEpochFailedCallback([this](const org::GraphHost::EpochFailure& failure) {
+            ++m_graphBuildStats.epochFailures;
+            m_graphBuildStats.lastEpochFailure = failure.error;
+            spdlog::error("Renderer: frame graph host epoch {} failed (build {}; {}): {}", failure.epoch, failure.buildGeneration,
+                failure.keptGraph ? "its previous graph is kept" : "it runs nothing until it is built again", failure.error);
+        });
+        // M3 step 9: frame graphs are built on a thread of their own while the attached one keeps rendering.
+        // BASICRENDERER_SYNC_FRAME_BUILD=1 builds them on the render thread, the same way, for debugging.
+        if (!m_useGraphInstance && !br::runtime::renderer_settings::ReadTruthyEnvironmentFlag("BASICRENDERER_SYNC_FRAME_BUILD")) {
+            m_frameBuildWorker = std::make_unique<br::render::FrameBuildWorker>([this](br::render::FrameBuildJob& job) { RunFrameBuild(job); });
+        } else if (!m_useGraphInstance) {
+            spdlog::warn("Renderer: BASICRENDERER_SYNC_FRAME_BUILD: frame graphs are built on the render thread");
+        }
+        if (m_useGraphInstance) {
+            spdlog::warn("Renderer: BASICRENDERER_FRAME_GRAPH_INSTANCE: the frame graph runs on a GraphInstance (diagnostics)");
+            m_frameInstance = org::GraphInstance::Adopt(m_orgRuntime, std::make_unique<org::RenderGraph>(m_orgRuntime));
+            currentRenderGraph = m_frameInstance->Graph();
+        }
+        if (DeviceManager::GetInstance().IsMultiRHIEnabled()) {
+            spdlog::warn("Renderer: the frame graph host builds for the primary device only; peer-device passes run there");
+        }
     }
 
     if (auto* uploadService = m_orgRuntime->Uploads().get()) {
@@ -618,9 +673,7 @@ void Renderer::Initialize(
     spdlog::info("Renderer initialization: initializing menu");
     Menu::GetInstance().Initialize(hwnd, m_swapChain.Get());
     spdlog::info("Renderer initialization: menu initialized");
-    if (auto* readbackService = m_orgRuntime->Readbacks().get()) {
-        readbackService->Initialize(m_readbackFence.Get(), m_copyReadbackFence.Get());
-    }
+    m_readbackCaptures = std::make_shared<br::FrameReadbackCaptures>();
     m_pReadbackManager = std::make_unique<br::ReadbackManager>();
     
     m_pReadbackManager->Initialize(m_legacyReadbackFence.Get());
@@ -642,12 +695,12 @@ void Renderer::Initialize(
     m_pMeshManager = MeshManager::CreateUnique();
 	m_pMeshManager->SetRendererStateServices(
 		m_rendererStateRequests.get(),
-		currentRenderGraph ? m_orgRuntime->Uploads() : nullptr,
+		m_frameHost ? m_orgRuntime->Uploads() : nullptr,
 		m_numFramesInFlight);
 	m_pObjectManager = ObjectManager::CreateUnique();
 	m_pObjectManager->SetRendererStateServices(
 		m_rendererStateRequests.get(),
-		currentRenderGraph ? m_orgRuntime->Uploads() : nullptr,
+		m_frameHost ? m_orgRuntime->Uploads() : nullptr,
 		m_numFramesInFlight);
 	// Static draw-record roots publish only with a Geometry root covering the
 	// mesh templates they reference (see ObjectManager::SetGeometryCoverageSource).
@@ -673,7 +726,7 @@ void Renderer::Initialize(
 	br::render::RegisterMaterialUsageBatchProducer(*m_asyncStateGraph);
     m_pMaterialManager->SetRendererStateServices(
         m_rendererStateRequests.get(),
-        currentRenderGraph ? m_orgRuntime->Uploads() : nullptr);
+        m_frameHost ? m_orgRuntime->Uploads() : nullptr);
     m_pMaterialManager->SetDescriptorService(m_orgRuntime->Descriptors());
     m_pMaterialManager->SetRequestTextureReadbackFn(
         [this](std::shared_ptr<org::PixelBuffer> texture, std::wstring outputFile, std::function<void()> callback) {
@@ -696,8 +749,8 @@ void Renderer::Initialize(
     m_ghostFlareManager = std::make_shared<br::lens::GhostFlareManager>(m_rendererStateRequests.get(), m_orgRuntime->Uploads(), m_lensManager);
 	m_pTerrainManager->SetRendererStateServices(
 		m_rendererStateRequests.get(),
-		currentRenderGraph ? m_orgRuntime->Uploads() : nullptr,
-		currentRenderGraph ? m_orgRuntime->Descriptors() : nullptr);
+		m_frameHost ? m_orgRuntime->Uploads() : nullptr,
+		m_frameHost ? m_orgRuntime->Descriptors() : nullptr);
 	//ResourceManager::GetInstance().SetEnvironmentBufferDescriptorIndex(m_pEnvironmentManager->GetEnvironmentBufferSRVDescriptorIndex());
 	m_pLightManager->SetShadowViewService(m_pViewManager.get());
 	m_pViewManager->SetEvents({
@@ -761,10 +814,10 @@ void Renderer::Initialize(
     });
     // Only after an environment's first launch: later ones load the BC6H cache before the graph is built.
     m_pEnvironmentManager->SetPrefilteredCubemapReplacedFn([this](const Environment* environment) {
-        if (m_currentEnvironment && m_currentEnvironment.get() == environment) rebuildRenderGraph = true;
+        if (m_currentEnvironment && m_currentEnvironment.get() == environment) RequestGraphRebuild("environment prefiltered cubemap replaced");
     });
-    if (currentRenderGraph) {
-        m_pTextureFactory->SetReadbackService(m_orgRuntime->Readbacks());
+    if (m_frameHost) {
+        m_pTextureFactory->SetReadbackService(m_readbackCaptures);
     }
 	if (m_pMaterialManager) {
 		m_pMaterialManager->InitializeTextureStreaming(*m_pTextureFactory, m_numFramesInFlight);
@@ -794,8 +847,8 @@ void Renderer::Initialize(
         .execution = {
             .stateRequests = m_rendererStateRequests.get(),
 			.generation = std::make_shared<br::render::ArtifactExecutionAccess::Generation>(
-				currentRenderGraph ? m_orgRuntime->Uploads() : nullptr,
-				currentRenderGraph ? m_orgRuntime->Descriptors() : nullptr) },
+				m_frameHost ? m_orgRuntime->Uploads() : nullptr,
+				m_frameHost ? m_orgRuntime->Descriptors() : nullptr) },
 		.sceneAssetRequests = std::addressof(m_sceneAssetRequestService),
 		.geometryRequests = std::addressof(m_staticGeometryRequestService),
 		.materialRequests = std::addressof(m_staticMaterialRequestService),
@@ -804,7 +857,7 @@ void Renderer::Initialize(
     };
     m_pIndirectCommandBufferManager->SetRendererStateServices(
         m_rendererStateRequests.get(),
-        currentRenderGraph ? m_orgRuntime->Uploads() : nullptr);
+        m_frameHost ? m_orgRuntime->Uploads() : nullptr);
 
     m_warnedNullScene = false;
     m_warnedMissingPrimaryCamera = false;

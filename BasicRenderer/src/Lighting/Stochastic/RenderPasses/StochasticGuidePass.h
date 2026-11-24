@@ -8,7 +8,7 @@
 #include "BasicRenderer/Extensions/PipelineDescs.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
-#include "Render/PipelineState.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Runtime/Settings/SettingsManager.h"
 #include "VirtualGeometry/RayTracing/CLodRayTracingPasses.h"
@@ -25,7 +25,7 @@ struct StochasticGuideFrame {
 };
 
 struct StochasticGuideBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken guide, signature;
 };
 
@@ -43,7 +43,7 @@ public:
     StochasticGuideBindings Declare(org::PassBuilder& builder) {
         StochasticGuideBindings bindings{};
         // Shader model 6.10 like the reference, whose includes (the shadow ray's) it shares; it traces nothing.
-        bindings.pipeline = builder.Pipeline(CLodRtComputePipeline(L"Shaders/Stochastic/stochasticGuide.hlsl", L"StochasticGuideCS", "Stochastic.Guide.PSO"));
+        bindings.pipeline = br::render::DeclarePipeline(CLodRtComputePipeline(L"Shaders/Stochastic/stochasticGuide.hlsl", L"StochasticGuideCS", "Stochastic.Guide.PSO"));
         builder.ConstantBuffer(Builtin::PerFrameBuffer);
         builder.ShaderResource(Builtin::CameraBuffer, Builtin::Light::InfoBuffer);
         // The primary surface and its shading, and the light grid (as selection declares them).

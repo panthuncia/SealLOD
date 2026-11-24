@@ -14,7 +14,7 @@
 #include "BasicRenderer/Runtime/Detail/MaterialEvaluationBuildInputs.h"
 
 struct BuildPixelListBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken visibleClusters, reyesDiceQueue, sideBand;
     bool hasSideBand = false;
     bool hasReyesDiceQueue = false;
@@ -37,7 +37,7 @@ public:
             throw std::invalid_argument("BuildPixelListPass requires the published visible-cluster resource");
     }
     BuildPixelListBindings Declare(org::PassBuilder& b) {
-        BuildPixelListBindings bindings{b.Pipeline(br::render::ComputePipeline(L"shaders/VisUtil.hlsl", L"BuildPixelListCS", "BuildPixelListPSO")),
+        BuildPixelListBindings bindings{br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/VisUtil.hlsl", L"BuildPixelListCS", "BuildPixelListPSO")),
             b.ShaderResource(m_visibleClusterResource)};
         if (m_reyesDiceQueueResource) {
             bindings.reyesDiceQueue = b.ShaderResource(m_reyesDiceQueueResource);

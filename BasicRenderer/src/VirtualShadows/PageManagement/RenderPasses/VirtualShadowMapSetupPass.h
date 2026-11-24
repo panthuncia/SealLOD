@@ -7,7 +7,7 @@
 #include <DirectXMath.h>
 
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
-#include "Render/PipelineState.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 
@@ -16,7 +16,7 @@ namespace org { class PixelBuffer; }
 class VirtualShadowCasterRegistry;
 
 struct VirtualShadowMapSetupBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken pageTable, pageMetadata, allocationCount, dirtyFlags;
     org::DeclaredViewToken clipmapInfo, markClipmapData, stats, runtimeState, fallbackCandidateCount;
 };

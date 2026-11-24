@@ -1507,7 +1507,33 @@ namespace br::staticimport
 		_bus->staticScenePageReadyEvents.Drain(readyPages, 32);
 		_bus->staticSceneRootPublishedEvents.Drain(publishedScenes, 1);
 		if (acks.empty() && readyTransactions.empty() && readyPages.empty() && publishedScenes.empty()) {
-			return false;
+			// Dirty pages are flushed by the checkpoint below once their cadence passes, and only a drain runs it. When the
+			// events stop (the groups still to come wait for a scene cut covering their geometry), nothing else wakes the
+			// coordinator: fall through to the checkpoint once the deadline passed, and wake for it otherwise.
+			const auto wakeNow = std::chrono::steady_clock::now();
+			const auto* objects = _shared->hasSceneIngestionServices ? _shared->sceneIngestionServices.objects : nullptr;
+			const bool geometryBehind = objects && !_state.graphOwnedSceneInFlight &&
+				objects->RequiredGeometryCoverage() > _state.graphOwnedLastSceneGeometryCoverage;
+			const bool dirtyPending = !_state.graphOwnedDirtyPages.empty() &&
+				_state.graphOwnedDirtySince != std::chrono::steady_clock::time_point{};
+			if (!dirtyPending && !geometryBehind) return false;
+			if (geometryBehind) {
+				// Retry the cut for geometry alone, at most every 50 ms.
+				constexpr auto kGeometryRetry = std::chrono::milliseconds(50);
+				if (wakeNow < _state.graphOwnedGeometryRetryAt) {
+					_drains->ScheduleCoordinatorDrain(_state.graphOwnedGeometryRetryAt - wakeNow);
+					return false;
+				}
+				_state.graphOwnedGeometryRetryAt = wakeNow + kGeometryRetry;
+				_drains->ScheduleCoordinatorDrain(kGeometryRetry);
+			} else {
+				const auto cadence = _state.pendingGroups.size() > 4096 ? std::chrono::milliseconds(250) : std::chrono::milliseconds(50);
+				const auto due = _state.graphOwnedDirtySince + cadence;
+				if (wakeNow < due) {
+					_drains->ScheduleCoordinatorDrain(due - wakeNow);
+					return false;
+				}
+			}
 		}
 		for (auto& event : publishedScenes) {
 			if (!_state.graphOwnedSceneInFlight ||
@@ -1693,6 +1719,12 @@ namespace br::staticimport
 				// scene over a page that was never produced would publish
 				// membership for groups whose page content does not exist.
 				_state.graphOwnedDesiredPages[event.pageIndex] = {};
+				// Its submission cleared the pending delta and the ready base, so the rebuild starts from nothing: give it every
+				// owner the page has. Without this the delta is empty, the page leaves the dirty set unbuilt, and every later
+				// scene cut finds no selectable pages.
+				auto& pendingOwners = _state.graphOwnedPendingPageOwners[event.pageIndex];
+				for (const auto& [groupID, version] : _state.graphOwnedPageOwners[event.pageIndex])
+					pendingOwners.insert_or_assign(groupID, version);
 				_state.graphOwnedDirtyPages.insert(event.pageIndex);
 				basic_telemetry::AddCounter("SARP.StaticImportCoordinator.PageTerminated");
 				continue;

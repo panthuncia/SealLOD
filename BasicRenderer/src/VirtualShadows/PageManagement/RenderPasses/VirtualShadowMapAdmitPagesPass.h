@@ -5,7 +5,7 @@
 #include <vector>
 #include <mutex>
 
-#include "Render/PipelineState.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "VirtualShadows/StreamingIntegration/VirtualShadowUpgradeService.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
@@ -14,7 +14,7 @@ namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct VirtualShadowMapAdmitPagesBindings {
-    org::PipelineState admitPipeline, applyUpgradesPipeline;
+    br::PipelineState admitPipeline, applyUpgradesPipeline;
     org::DeclaredViewToken pageTable, dirtyPageFlags, pageMetadata, clipmapInfo, compactShadowCameras, stats;
     std::vector<org::DeclaredViewToken> upgradeInputs;
 };

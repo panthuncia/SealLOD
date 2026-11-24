@@ -51,11 +51,11 @@ VirtualShadowMapExpandPredictedPagesBindings VirtualShadowMapExpandPredictedPage
             Builtin::CameraBuffer);
 
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    VirtualShadowMapExpandPredictedPagesBindings bindings{builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+    VirtualShadowMapExpandPredictedPagesBindings bindings{br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
                 L"CLodVirtualShadowStampRenderedPageGenerationsCSMain", "CLod.VirtualShadow.StampRenderedPageGenerations.PSO")),
-        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+        br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
                 L"CLodVirtualShadowExpandPredictedPagesCSMain", "CLod.VirtualShadow.ExpandPredictedPages.PSO")),
-        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+        br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
                 L"CLodVirtualShadowResetFallbackCandidateCountCSMain", "CLod.VirtualShadow.ResetFallbackCandidateCount.PSO")),
         builder.UnorderedAccess(m_predictiveCandidatesBuffer),
         builder.UnorderedAccess(m_predictiveCandidateCountBuffer), builder.UnorderedAccess(m_predictiveRawPagesBuffer),

@@ -22,7 +22,7 @@ AVBOITDepthWarpPass::AVBOITDepthWarpPass(
 AVBOITDepthWarpBindings AVBOITDepthWarpPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    return {builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/AVBOITDepthWarp.hlsl", L"CLodAVBOITDepthWarpCS", "CLod.AVBOITDepthWarp.PSO")), builder.ShaderResource(m_configBuffer), builder.ShaderResource(m_occupancyHistogramBuffer), builder.UnorderedAccess(m_depthWarpLUTBuffer)};
+    return {br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/AVBOITDepthWarp.hlsl", L"CLodAVBOITDepthWarpCS", "CLod.AVBOITDepthWarp.PSO")), builder.ShaderResource(m_configBuffer), builder.ShaderResource(m_occupancyHistogramBuffer), builder.UnorderedAccess(m_depthWarpLUTBuffer)};
 }
 
 AVBOITDepthWarpFrame AVBOITDepthWarpPass::Prepare(const AVBOITDepthWarpBindings&, const org::PassPrepareContext&) const {

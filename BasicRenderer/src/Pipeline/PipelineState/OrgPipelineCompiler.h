@@ -2,7 +2,7 @@
 
 #include <memory>
 
-#include <Render/PipelineDesc.h>
+#include "Pipeline/PipelineState/PipelineLibrary.h"
 
-// What lets ORG build pipelines from descriptions in BasicRenderer: its shader compiler, shader cache and layouts.
-std::shared_ptr<org::PipelineCompiler> CreateOrgPipelineCompiler();
+// What lets the pipeline library build pipelines from descriptions: its shader compiler, shader cache and layouts.
+std::shared_ptr<br::PipelineCompiler> CreateOrgPipelineCompiler();

@@ -32,7 +32,7 @@ void Renderer::SetCurrentScene(std::shared_ptr<Scene> newScene) {
             currentScene->Deactivate();
         }
         currentScene.reset();
-        rebuildRenderGraph = true;
+        RequestGraphRebuild("scene cleared");
         IsSceneReadyForFrame(true);
         return;
     }
@@ -59,7 +59,7 @@ void Renderer::SetCurrentScene(std::shared_ptr<Scene> newScene) {
     }
 	m_warnedNullScene = false;
 	m_warnedMissingPrimaryCamera = false;
-	rebuildRenderGraph = true;
+	RequestGraphRebuild("scene changed");
 }
 
 InputManager& Renderer::GetInputManager() {

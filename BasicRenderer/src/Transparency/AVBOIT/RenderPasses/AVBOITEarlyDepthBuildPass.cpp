@@ -26,7 +26,7 @@ AVBOITEarlyDepthBuildPass::AVBOITEarlyDepthBuildPass(
 AVBOITEarlyDepthBuildBindings AVBOITEarlyDepthBuildPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    return {builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/AVBOITEarlyDepthBuild.hlsl", L"CLodAVBOITEarlyDepthBuildCS", "CLod.AVBOITEarlyDepthBuild.PSO")), builder.ShaderResource(m_configBuffer), builder.ShaderResource(m_zeroTransmittanceSliceTexture), builder.UnorderedAccess(m_tileCommandsBuffer), builder.UnorderedAccess(m_tileCountBuffer)};
+    return {br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/AVBOITEarlyDepthBuild.hlsl", L"CLodAVBOITEarlyDepthBuildCS", "CLod.AVBOITEarlyDepthBuild.PSO")), builder.ShaderResource(m_configBuffer), builder.ShaderResource(m_zeroTransmittanceSliceTexture), builder.UnorderedAccess(m_tileCommandsBuffer), builder.UnorderedAccess(m_tileCountBuffer)};
 }
 
 void AVBOITEarlyDepthBuildPass::Update(const org::UpdateExecutionContext& executionContext)

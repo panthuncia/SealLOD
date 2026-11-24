@@ -23,9 +23,9 @@
 #include "../shaders/Include/lens/lensDataLayout.h"
 #include "../shaders/Include/lens/lensGhostLayout.h"
 #include "Render/RenderGraph/RenderGraph.h"
-#include "Render/Runtime/IReadbackService.h"
+#include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
 #include "Resources/Buffers/Buffer.h"
-#include "Resources/ReadbackRequest.h"
+#include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
 #include "Runtime/Settings/SettingsManager.h"
 #include "Utilities/Utilities.h"
 #include <BasicRenderer/Streaming/PublishedRendererState.h>
@@ -757,10 +757,10 @@ void GhostFlareManager::OnFrame(org::RenderGraph* graph) {
     }
 
     if (graph && !m_shared->sourcesReading.load(std::memory_order_acquire) && m_shared->sourcesRequested.exchange(false)) {
-        if (auto* readbacks = graph->GetReadbackService()) {
+        if (auto* readbacks = br::GetReadbackCaptureService()) {
             m_shared->sourcesReading.store(true, std::memory_order_release);
             const std::weak_ptr<Shared> weakShared = m_shared;
-            readbacks->RequestReadbackCaptureAfterGraph(m_sources.get(), org::RangeSpec{}, [weakShared](org::ReadbackCaptureResult&& result) {
+            readbacks->RequestReadbackCaptureAfterGraph(m_sources.get(), org::RangeSpec{}, [weakShared](br::ReadbackCaptureResult&& result) {
                 const auto shared = weakShared.lock();
                 if (!shared) return;
                 std::vector<float> words(result.data.size() / sizeof(float));
@@ -779,14 +779,14 @@ void GhostFlareManager::OnFrame(org::RenderGraph* graph) {
     const uint64_t requested = m_shared->selfTestRequested.load(std::memory_order_acquire);
     const uint64_t sequence = requested != m_shared->selfTestCompleted.load(std::memory_order_acquire) ? requested : 0u;
     if (!sequence || !graph || !m_vertices || m_shared->selfTestReading.load(std::memory_order_acquire)) return;
-    auto* readbacks = graph->GetReadbackService();
+    auto* readbacks = br::GetReadbackCaptureService();
     if (!readbacks) return;
     m_shared->selfTestReading.store(true, std::memory_order_release);
     auto capture = std::make_shared<Shared::Capture>();
     capture->sequence = sequence;
     capture->ghosts = Published();
     const std::weak_ptr<Shared> weak = m_shared;
-    const auto arrive = [weak, capture](bool sources, org::ReadbackCaptureResult&& result) {
+    const auto arrive = [weak, capture](bool sources, br::ReadbackCaptureResult&& result) {
         const auto shared = weak.lock();
         if (!shared) return;
         std::vector<float> words(result.data.size() / sizeof(float));
@@ -804,9 +804,9 @@ void GhostFlareManager::OnFrame(org::RenderGraph* graph) {
         shared->wake.notify_one();
     };
     readbacks->RequestReadbackCaptureAfterGraph(m_sources.get(), org::RangeSpec{},
-        [arrive](org::ReadbackCaptureResult&& result) { arrive(true, std::move(result)); });
+        [arrive](br::ReadbackCaptureResult&& result) { arrive(true, std::move(result)); });
     readbacks->RequestReadbackCaptureAfterGraph(m_vertices.get(), org::RangeSpec{},
-        [arrive](org::ReadbackCaptureResult&& result) { arrive(false, std::move(result)); });
+        [arrive](br::ReadbackCaptureResult&& result) { arrive(false, std::move(result)); });
 }
 
 std::string GhostFlareManager::HandleControl(const std::string& command, const std::string& requestJson) {

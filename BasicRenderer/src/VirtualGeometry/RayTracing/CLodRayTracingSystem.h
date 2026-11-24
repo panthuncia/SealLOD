@@ -15,7 +15,7 @@
 
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "Render/ResourceUseDeclaration.h"
-#include "Render/PipelineState.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include <BasicRenderer/Streaming/TaskScheduler.h>
 #include <rhi.h>
 
@@ -194,10 +194,10 @@ public:
     };
 
     struct ScenePipelines {
-        org::PipelineState clear, resetDraws, count, allocate, addCoarseConsumers, allocateFinish, place, writeInstances;
-        org::PipelineState cacheInit, cacheCollect, cacheOmmRetire, cacheEvict, cacheAdmit, cacheAssign, cacheArgs, cachePack, cacheEnd;
-        org::PipelineState ptlasInit, ptlasClaimCells, ptlasAssignCells, ptlasRetire, ptlasFinish; // Partitioned TLAS only.
-        org::PipelineState bcInit, bcBegin, bcIndex, bcLookup, bcFinish, bcScatter; // The BLAS cache.
+        br::PipelineState clear, resetDraws, count, allocate, addCoarseConsumers, allocateFinish, place, writeInstances;
+        br::PipelineState cacheInit, cacheCollect, cacheOmmRetire, cacheEvict, cacheAdmit, cacheAssign, cacheArgs, cachePack, cacheEnd;
+        br::PipelineState ptlasInit, ptlasClaimCells, ptlasAssignCells, ptlasRetire, ptlasFinish; // Partitioned TLAS only.
+        br::PipelineState bcInit, bcBegin, bcIndex, bcLookup, bcFinish, bcScatter; // The BLAS cache.
     };
 
     struct VisibilityDescriptors {
@@ -264,13 +264,13 @@ public:
     void RecordSceneBlas(org::RecordingContext& recording, const ScenePipelines& pipelines, const SceneInputs& inputs);
     // Writes the instance rows, builds the TLAS, and copies out what the CPU reads back.
     void RecordSceneTlas(org::RecordingContext& recording, const ScenePipelines& pipelines, const SceneInputs& inputs);
-    void RecordVisibilityBegin(org::RecordingContext& recording, const org::PipelineState& clearPipeline, bool clearStats);
+    void RecordVisibilityBegin(org::RecordingContext& recording, const br::PipelineState& clearPipeline, bool clearStats);
     void RecordVisibilityEnd(org::RecordingContext& recording, bool readStats);
     // Pixel watch (SARP_RT_PIXEL_WATCH=<luminance>): the path trace pass clears it before tracing and reads it back after.
     // GetPixelWatchUav is CLOD_RT_PT_NO_DESCRIPTOR when it's off.
     uint32_t GetPixelWatchUav() const noexcept;
     float GetPixelWatchBright() const noexcept { return m_watchBright; }
-    void RecordPixelWatchBegin(org::RecordingContext& recording, const org::PipelineState& clearPipeline);
+    void RecordPixelWatchBegin(org::RecordingContext& recording, const br::PipelineState& clearPipeline);
     void RecordPixelWatchEnd(org::RecordingContext& recording);
     // At the start of each frame, before BeginFrame.
     void AdvanceFrame() noexcept;
@@ -286,12 +286,6 @@ public:
     // What hits read at InstanceIndex(): the rows by slot with a partitioned TLAS, by row with a classic one.
     uint32_t GetInstanceRowsSrv() const noexcept { return m_partitionedTlas ? m_ptlasSlotRows.srv : m_instanceRows.srv; }
     bool UsesPartitionedTlas() const noexcept { return m_partitionedTlas; }
-
-    // Where raytraced primary visibility writes its visible cluster records.
-    void SetPrimaryVisibleClusters(std::shared_ptr<org::Buffer> clusters, std::shared_ptr<org::Buffer> transformIndices, uint32_t capacity);
-    std::shared_ptr<org::Buffer> GetPrimaryVisibleClusters() const { return m_primaryVisibleClusters; }
-    std::shared_ptr<org::Buffer> GetPrimaryTransformIndices() const { return m_primaryTransformIndices; }
-    uint32_t GetPrimaryVisibleClusterCapacity() const noexcept { return m_primaryVisibleClusterCapacity; }
 
 private:
     // A persistent render graph buffer, with what the recording needs of it: its views' descriptor indices, its address,
@@ -526,10 +520,6 @@ private:
     // SARP_RT_FRAME_CSV: one row of cache statistics per frame read back, for analysis. Off unless set.
     std::unique_ptr<std::FILE, int (*)(std::FILE*)> m_frameCsv{ nullptr, &std::fclose };
     uint64_t m_frameCsvStartTicks = 0;
-
-    std::shared_ptr<org::Buffer> m_primaryVisibleClusters;
-    std::shared_ptr<org::Buffer> m_primaryTransformIndices;
-    uint32_t m_primaryVisibleClusterCapacity = 0;
 };
 
 } // namespace br::render

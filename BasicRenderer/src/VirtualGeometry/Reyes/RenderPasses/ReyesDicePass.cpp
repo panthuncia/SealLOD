@@ -32,9 +32,9 @@ ReyesDiceBindings ReyesDicePass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     ReyesDiceBindings bindings{
-        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/reyesDice.hlsl",
+        br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/reyesDice.hlsl",
             L"ReyesDiceCS", "CLod.ReyesDice.PSO")),
-        builder.CommandSignature(br::render::RawDispatchCommandSignature()),
+        br::render::DeclareCommandSignature(br::render::RawDispatchCommandSignature()),
         builder.ShaderResource(m_diceQueueBuffer),
         builder.ShaderResource(m_diceQueueCounterBuffer)};
     if (m_diceQueueReadOffsetBuffer) {

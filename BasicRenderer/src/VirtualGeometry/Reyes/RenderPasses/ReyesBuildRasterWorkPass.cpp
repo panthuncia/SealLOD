@@ -75,9 +75,9 @@ ReyesBuildRasterWorkBindings ReyesBuildRasterWorkPass::Declare(org::PassBuilder&
             Builtin::SkeletonResources::SkinningInstanceInfo);
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
     ReyesBuildRasterWorkBindings bindings{
-        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/reyesBuildRasterWork.hlsl",
+        br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/reyesBuildRasterWork.hlsl",
             L"BuildReyesRasterWorkCS", "CLod.ReyesBuildRasterWork.PSO")),
-        builder.CommandSignature(br::render::RawDispatchCommandSignature()),
+        br::render::DeclareCommandSignature(br::render::RawDispatchCommandSignature()),
         builder.ShaderResource(m_diceQueueBuffer).View(),
         builder.ShaderResource(m_diceQueueCounterBuffer).View()};
     if (m_diceQueueReadOffsetBuffer) {

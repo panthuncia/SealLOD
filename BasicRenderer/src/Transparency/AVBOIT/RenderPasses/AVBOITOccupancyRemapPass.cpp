@@ -25,7 +25,7 @@ AVBOITOccupancyRemapBindings AVBOITOccupancyRemapPass::Declare(org::PassBuilder&
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.UnorderedAccess(m_occupancySliceMaskTexture);
-    return {builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/AVBOITOccupancyRemap.hlsl", L"CLodAVBOITOccupancyRemapCS", "CLod.AVBOITOccupancyRemap.PSO")), builder.ShaderResource(m_configBuffer), builder.ShaderResource(m_depthWarpLUTBuffer), builder.UnorderedAccess(m_occupancyTexture)};
+    return {br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/AVBOITOccupancyRemap.hlsl", L"CLodAVBOITOccupancyRemapCS", "CLod.AVBOITOccupancyRemap.PSO")), builder.ShaderResource(m_configBuffer), builder.ShaderResource(m_depthWarpLUTBuffer), builder.UnorderedAccess(m_occupancyTexture)};
 }
 
 AVBOITOccupancyRemapFrame AVBOITOccupancyRemapPass::Prepare(const AVBOITOccupancyRemapBindings& bindings, const org::PassPrepareContext& preparation) const {

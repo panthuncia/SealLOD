@@ -113,7 +113,7 @@ void ComputeCullingPass::CreateFrontiers()
 ComputeCullingPrograms ComputeCullingPass::DeclarePrograms(org::PassBuilder& builder) const
 {
     const std::wstring voxelTableDefine = m_voxelQueueTable.ShaderDefine();
-    std::vector<org::PipelineShaderDefine> defines = {
+    std::vector<br::PipelineShaderDefine> defines = {
         { L"CLOD_WG_ENABLE_SW_CLASSIFICATION", m_config.UsesSWClassification() ? L"1" : L"0" },
         { L"CLOD_WG_ENABLE_SW_NODE_OUTPUT", L"0" },
         { L"CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW", m_config.UsesVirtualShadowOutput() ? L"1" : L"0" },
@@ -131,13 +131,13 @@ ComputeCullingPrograms ComputeCullingPass::DeclarePrograms(org::PassBuilder& bui
     auto leafDefines = defines;
     leafDefines.push_back({ L"CLOD_PC_LEAF_ONLY", L"1" });
 
-    const auto culling = [&](const wchar_t* entry, const std::vector<org::PipelineShaderDefine>& programDefines, const char* name) {
-        return builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/computeCulling.hlsl", entry, name, programDefines));
+    const auto culling = [&](const wchar_t* entry, const std::vector<br::PipelineShaderDefine>& programDefines, const char* name) {
+        return br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/computeCulling.hlsl", entry, name, programDefines));
     };
     ComputeCullingPrograms p;
-    p.clearCounter = builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/clodUtil.hlsl",
+    p.clearCounter = br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/clodUtil.hlsl",
         L"ClearUintStructuredBufferCSMain", "HierarchicalDispatchCulling.ClearUint"));
-    p.createRasterBucketCommand = builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/clodUtil.hlsl",
+    p.createRasterBucketCommand = br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/clodUtil.hlsl",
         L"CreateRasterBucketsHistogramCommandCSMain", "HierarchicalDispatchCulling.CreateRasterBucketsHistogramCommand"));
     p.buildDispatchArgs = culling(L"BuildPureComputeDispatchArgsCS", defines, "CLod.PureCompute.BuildDispatchArgs");
     p.buildDualDispatchArgs = culling(L"BuildPureComputeDualDispatchArgsCS", defines, "CLod.PureCompute.BuildDualDispatchArgs");
@@ -158,7 +158,7 @@ void ComputeCullingPass::ValidatePrograms(const ComputeCullingPrograms& p, org::
 {
     const auto* identity = p.objectCull.GetPayload(device).get();
     if (m_validatedPrograms.load(std::memory_order_acquire) == identity) return;
-    const auto slots = [&](const org::PipelineState& pipeline) -> const org::PipelineResources& {
+    const auto slots = [&](const br::PipelineState& pipeline) -> const org::PipelineResources& {
         const auto payload = pipeline.GetPayload(device);
         if (!payload || !payload->pso) throw std::logic_error("Compute culling prepared before its pipelines were built");
         return payload->pipelineResources;
@@ -224,7 +224,7 @@ ComputeCullingBindings ComputeCullingPass::Declare(org::PassBuilder& builder)
 
     ComputeCullingBindings bindings{};
     bindings.programs = DeclarePrograms(builder);
-    bindings.programs.dispatchSignature = builder.CommandSignature(br::render::RawDispatchCommandSignature());
+    bindings.programs.dispatchSignature = br::render::DeclareCommandSignature(br::render::RawDispatchCommandSignature());
     bindings.maxVisibleClusters = m_config.maxVisibleClusters;
     bindings.isFirstPass = m_config.isFirstPass;
     bindings.perViewDepthOcclusion = m_config.UsesPerViewDepthOcclusion();

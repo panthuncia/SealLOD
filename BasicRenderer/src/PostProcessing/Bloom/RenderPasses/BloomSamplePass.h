@@ -9,6 +9,7 @@
 #include "Utilities/Utilities.h"
 #include "../shaders/PerPassRootConstants/bloomSampleRootConstants.h"
 #include <array>
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 
 struct BloomSamplePassInputs {
     unsigned int mipIndex;
@@ -18,7 +19,7 @@ struct BloomSamplePassInputs {
 };
 
 struct BloomSampleBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken source, target;
     uint32_t sourceMip = 0, targetMip = 0;
     bool upsample = false;
@@ -43,11 +44,11 @@ public:
             const auto source = inputs.mipIndex == 0
                 ? Subresources(Builtin::PostProcessing::UpscaledHDR, org::Mip{ 0, 1 })
                 : Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{ inputs.mipIndex, 1 });
-            return {builder.Pipeline(PipelineDesc(false)), builder.ShaderResource(source, {UINT32_MAX, sourceMip}),
+            return {br::render::DeclarePipeline(PipelineDesc(false)), builder.ShaderResource(source, {UINT32_MAX, sourceMip}),
                 builder.RenderTarget(Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{targetMip, 1}), {UINT32_MAX, targetMip}),
                 sourceMip, targetMip, false};
         }
-        return {builder.Pipeline(PipelineDesc(true)), builder.ShaderResource(Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{sourceMip, 1}), {UINT32_MAX, sourceMip}),
+        return {br::render::DeclarePipeline(PipelineDesc(true)), builder.ShaderResource(Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{sourceMip, 1}), {UINT32_MAX, sourceMip}),
             builder.RenderTarget(Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{targetMip, 1}), {UINT32_MAX, targetMip}),
             sourceMip, targetMip, true};
     }
@@ -86,13 +87,13 @@ public:
     }
 
 private:
-    static org::GraphicsPipelineDesc PipelineDesc(bool upsample) {
-        org::GraphicsPipelineDesc desc;
+    static br::GraphicsPipelineDesc PipelineDesc(bool upsample) {
+        br::GraphicsPipelineDesc desc;
         desc.name = upsample ? "Bloom.Upsample" : "Bloom.Downsample";
         desc.vertex = {L"shaders/fullscreenVS.hlsli", L"FullscreenVSNoViewRayMain", L"vs_6_6"};
         desc.pixel = upsample
-            ? org::PipelineShaderSource{L"shaders/PostProcessing/bloomUpsample.hlsl", L"upsample", L"ps_6_6"}
-            : org::PipelineShaderSource{L"shaders/PostProcessing/bloomDownsample.hlsl", L"downsample", L"ps_6_6"};
+            ? br::PipelineShaderSource{L"shaders/PostProcessing/bloomUpsample.hlsl", L"upsample", L"ps_6_6"}
+            : br::PipelineShaderSource{L"shaders/PostProcessing/bloomDownsample.hlsl", L"downsample", L"ps_6_6"};
 
         rhi::RasterState raster{};
         raster.fill = rhi::FillMode::Solid;

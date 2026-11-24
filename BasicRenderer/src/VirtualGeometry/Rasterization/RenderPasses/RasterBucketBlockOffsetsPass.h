@@ -4,11 +4,12 @@
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 
 namespace org { class Buffer; }
 
 struct RasterBucketBlockOffsetsBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken offsets, blockSums, scannedBlockSums, totalCount;
 };
 struct RasterBucketBlockOffsetsFrame {

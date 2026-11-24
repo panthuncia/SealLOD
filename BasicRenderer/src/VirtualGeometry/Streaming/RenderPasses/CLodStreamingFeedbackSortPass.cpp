@@ -40,7 +40,7 @@ StreamingFeedbackSortBindings CLodStreamingFeedbackSortPass::Declare(org::PassBu
     StreamingFeedbackSortBindings bindings;
     constexpr const wchar_t* shaderPath = L"Shaders/FidelityFX/ParallelSort/clodStreamingFeedbackSort.hlsl";
     const auto pipeline = [&](const wchar_t* entry, const char* name) {
-        return declaration.Pipeline(br::render::ComputePipeline(shaderPath, entry, name));
+        return br::render::DeclarePipeline(br::render::ComputePipeline(shaderPath, entry, name));
     };
     bindings.pipelines = {
         pipeline(L"CLodStreamingFeedbackSortSetupCS", "CLod.StreamingFeedbackSort.Setup.PSO"),
@@ -49,7 +49,7 @@ StreamingFeedbackSortBindings CLodStreamingFeedbackSortPass::Declare(org::PassBu
         pipeline(L"CLodStreamingFeedbackSortScanCS", "CLod.StreamingFeedbackSort.Scan.PSO"),
         pipeline(L"CLodStreamingFeedbackSortScanAddCS", "CLod.StreamingFeedbackSort.ScanAdd.PSO"),
         pipeline(L"CLodStreamingFeedbackSortScatterCS", "CLod.StreamingFeedbackSort.Scatter.PSO")};
-    bindings.signature = declaration.CommandSignature(br::render::RawDispatchCommandSignature());
+    bindings.signature = br::render::DeclareCommandSignature(br::render::RawDispatchCommandSignature());
     bindings.requestCounter = declaration.ShaderResource(m_requestCounter);
     const std::shared_ptr<org::Buffer> uavs[] = {m_requestKeys, m_requests, m_keyScratch, m_payloadScratch,
         m_sumTable, m_reduceTable, m_constants};

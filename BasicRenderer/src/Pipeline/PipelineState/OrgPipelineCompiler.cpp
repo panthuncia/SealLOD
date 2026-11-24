@@ -18,9 +18,9 @@ Microsoft::WRL::ComPtr<ID3DBlob>& StageBlob(ShaderBundle& bundle, rhi::ShaderSta
 	}
 }
 
-class OrgPipelineCompiler final : public org::PipelineCompiler {
+class OrgPipelineCompiler final : public br::PipelineCompiler {
 public:
-	void Compile(const org::PipelineCompileRequest& request, Completion completion) override {
+	void Compile(const br::PipelineCompileRequest& request, Completion completion) override {
 		std::vector<DxcDefine> defines;
 		defines.reserve(request.defines.size());
 		for (const auto& define : request.defines) defines.push_back({define.name.c_str(), define.value.c_str()});
@@ -41,7 +41,7 @@ public:
 
 		auto bundle = std::make_shared<ShaderBundle>(
 			PSOManager::GetInstance().CompileShadersForPipelineLibrary(info, request.device, request.bypassCache));
-		org::CompiledPipeline compiled;
+		br::CompiledPipeline compiled;
 		compiled.stages.reserve(request.stages.size());
 		for (const auto& stage : request.stages) compiled.stages.push_back(rhi::DXIL(StageBlob(*bundle, stage.stage).Get()));
 		compiled.resources = bundle->resourceDescriptorSlots;
@@ -50,9 +50,9 @@ public:
 		completion(std::move(compiled));
 	}
 
-	org::PipelineLayoutBinding StandardLayout(org::PipelineLayoutKind kind, org::DeviceInstanceId device) override {
+	br::PipelineLayoutBinding StandardLayout(br::PipelineLayoutKind kind, org::DeviceInstanceId device) override {
 		auto& manager = PSOManager::GetInstance();
-		const auto& layout = kind == org::PipelineLayoutKind::StandardGraphics
+		const auto& layout = kind == br::PipelineLayoutKind::StandardGraphics
 			? manager.GetRootSignature(device) : manager.GetComputeRootSignature(device);
 		const auto handle = layout.GetHandle();
 		return {handle, manager.CaptureLayoutOwner(handle)};
@@ -61,6 +61,6 @@ public:
 
 } // namespace
 
-std::shared_ptr<org::PipelineCompiler> CreateOrgPipelineCompiler() {
+std::shared_ptr<br::PipelineCompiler> CreateOrgPipelineCompiler() {
 	return std::make_shared<OrgPipelineCompiler>();
 }

@@ -27,6 +27,11 @@ br::pipeline::PipelineRecipe Renderer::GetPipelineRecipeForMutation() const {
 }
 
 void Renderer::ApplyPendingPipelineReplacement() {
+    // A frame build in flight carries the last replacement, and m_pipelineRollbackRecipe is that build's way back. The next
+    // replacement waits for its attach (ConsolidateFrameGraph).
+    if (FrameBuildInFlight()) {
+        return;
+    }
     std::optional<br::pipeline::PipelineRecipe> pending;
     {
         std::scoped_lock lock(m_pipelineRecipeMutex);
@@ -38,9 +43,14 @@ void Renderer::ApplyPendingPipelineReplacement() {
 
     m_pipelineRollbackRecipe = m_pipelineRecipe;
     m_pipelineRecipe = std::move(*pending);
-    m_pipelineExtensionsDirty = true;
-    rebuildRenderGraph = true;
+    RequestGraphRebuild("pipeline recipe replaced");
 
+    SyncPipelineTopologySettings();
+}
+
+void Renderer::SyncPipelineTopologySettings() {
+    // The recipe is the truth for these settings; the observers skip their own recipe edits while this writes them.
+    // Setters are change-checked, so a setting that already matches runs nothing.
     m_syncingPipelineTopologySettings = true;
     auto& settings = SettingsManager::GetInstance();
     settings.getSettingSetter<bool>("enableTerrainRvt")(
@@ -63,6 +73,10 @@ void Renderer::ApplyPendingPipelineReplacement() {
     }
     settings.getSettingSetter<bool>("rayReconstructionGuidesAvailable")(
         m_pipelineRecipe.Contains<br::pipeline::PathTracingTechnique>());
+    // The observers keep these mirrors, but are not registered yet when SetSettings calls this.
+    m_gtaoEnabled = m_pipelineRecipe.Contains<br::pipeline::GtaoTechnique>();
+    m_clusteredLighting = m_pipelineRecipe.Contains<br::pipeline::ClusteredLightingTechnique>();
+    m_bloom = m_pipelineRecipe.Contains<br::pipeline::BloomTechnique>();
     m_syncingPipelineTopologySettings = false;
 }
 
@@ -84,39 +98,19 @@ void Renderer::HandlePipelineReplacementFailure(const std::exception& error) {
 
     m_pipelineRecipe = std::move(*m_pipelineRollbackRecipe);
     m_pipelineRollbackRecipe.reset();
-    m_pipelineExtensionsDirty = true;
-    rebuildRenderGraph = true;
-    m_syncingPipelineTopologySettings = true;
-    auto& settings = SettingsManager::GetInstance();
-    settings.getSettingSetter<bool>("enableTerrainRvt")(
-        m_pipelineRecipe.Contains<br::pipeline::TerrainRvtTechnique>());
-    settings.getSettingSetter<bool>(CLodDisableReyesRasterizationSettingName)(
-        m_pipelineRecipe.Options<br::pipeline::ClusterLodTechnique>().reyes == br::pipeline::ReyesMode::Disabled);
-    settings.getSettingSetter<bool>("enableGTAO")(
-        m_pipelineRecipe.Contains<br::pipeline::GtaoTechnique>());
-    settings.getSettingSetter<bool>("enableClusteredLighting")(
-        m_pipelineRecipe.Contains<br::pipeline::ClusteredLightingTechnique>());
-    settings.getSettingSetter<bool>("enableBloom")(
-        m_pipelineRecipe.Contains<br::pipeline::BloomTechnique>());
-    settings.getSettingSetter<bool>("enableTerrainRegionMaterialEvaluation")(
-        m_pipelineRecipe.Contains<br::pipeline::TerrainRegionMaterialEvaluationTechnique>());
-    settings.getSettingSetter<bool>("enableShadows")(
-        m_pipelineRecipe.Contains<br::pipeline::ClusterLodShadowTechnique>());
-    if (!m_pipelineRecipe.Contains<br::pipeline::PathTracingTechnique>()) {
-        settings.getSettingSetter<bool>("enableStochasticLighting")(
-            m_pipelineRecipe.Contains<br::pipeline::StochasticDirectLightingTechnique>());
-    }
+    RequestGraphRebuild("pipeline recipe rolled back");
+    SyncPipelineTopologySettings();
     // Switching path tracing on or off is what failed: go back to the mode the restored recipe is in.
     const bool pathTraced = m_pipelineRecipe.Contains<br::pipeline::PathTracingTechnique>();
     if (pathTraced != m_pathTracing) {
+        m_syncingPipelineTopologySettings = true;
         m_pathTracing = pathTraced;
         if (!pathTraced) {
             m_rasterRecipeBeforePathTracing.reset();
         }
-        settings.getSettingSetter<bool>("enablePathTracing")(pathTraced);
-        settings.getSettingSetter<bool>("rayReconstructionGuidesAvailable")(pathTraced);
+        SettingsManager::GetInstance().getSettingSetter<bool>("enablePathTracing")(pathTraced);
         SelectPathTracingUpscaler(pathTraced);
+        m_syncingPipelineTopologySettings = false;
     }
-    m_syncingPipelineTopologySettings = false;
 }
 

@@ -108,7 +108,7 @@ void Renderer::RegisterExternalSnapshotMeshes(const br::render::SceneFrameSnapsh
         return;
     }
 
-    const bool useMeshletReorderedVertices = getMeshShadersEnabled ? getMeshShadersEnabled() : m_useMeshShaders;
+    const bool useMeshletReorderedVertices = true;
 
     for (const auto& renderable : snapshot.changedRenderables) {
         for (const auto& meshInstance : renderable.meshInstances.meshInstances) {

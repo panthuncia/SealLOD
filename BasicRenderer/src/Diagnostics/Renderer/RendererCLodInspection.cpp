@@ -20,6 +20,8 @@
 #include "Runtime/Frame/RendererFrameInputs.h"
 #include "Scene/Objects/ObjectManager.h"
 #include "VirtualGeometry/GeometryStorage/GeometryBufferStateArtifacts.h"
+#include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
+#include "Runtime/IO/ReadbackCaptureService.h"
 
 namespace {
 	// Both resources are read inside the pass that resolves pixels, so the keys and the clusters they index are one frame's.
@@ -81,7 +83,7 @@ std::shared_ptr<Renderer::CLodInspectionRequest> Renderer::StartCLodInspectionFr
 	if (currentRenderGraph == nullptr || !m_materialEvaluationInputs.visibleClusters || !m_context.publishedRendererState) {
 		return nullptr;
 	}
-	auto* readback = currentRenderGraph->GetReadbackService();
+	auto* readback = br::GetReadbackCaptureService();
 	auto visibility = currentRenderGraph->RequestResourcePtr(org::ResourceIdentifier{ std::string(Builtin::PrimaryCamera::VisibilityTexture) }, true);
 	if (readback == nullptr || !visibility) {
 		return nullptr;
@@ -157,7 +159,7 @@ std::shared_ptr<Renderer::CLodInspectionRequest> Renderer::StartCLodInspectionFr
 	auto records = currentRenderGraph->RequestResourcePtr(org::ResourceIdentifier{ std::string(Builtin::Surface::Records) }, true);
 	// identity.x per pixel names its record (several pixels can share one), and the target's size is the frame's.
 	const auto readIdentity = [&, anchor](org::Resource* identity) {
-		readback->RequestReadbackCapture(anchor, identity, org::RangeSpec{}, [pending](org::ReadbackCaptureResult&& result) {
+		readback->RequestReadbackCapture(anchor, identity, org::RangeSpec{}, [pending](br::ReadbackCaptureResult&& result) {
 			std::scoped_lock lock(pending->mutex);
 			if (result.format == rhi::Format::R32G32_UInt && !result.layouts.empty() && result.width != 0u && result.height != 0u) {
 				const auto& layout = result.layouts.front();
@@ -193,7 +195,7 @@ std::shared_ptr<Renderer::CLodInspectionRequest> Renderer::StartCLodInspectionFr
 			return nullptr;
 		}
 		pending->waiting = pending->required = { "surface records", "surface identity" };
-		readback->RequestReadbackCapture(anchor, records.get(), org::RangeSpec{}, [pending](org::ReadbackCaptureResult&& result) {
+		readback->RequestReadbackCapture(anchor, records.get(), org::RangeSpec{}, [pending](br::ReadbackCaptureResult&& result) {
 			std::scoped_lock lock(pending->mutex);
 			pending->frame.surfaceRecords = std::move(result.data);
 			pending->Arrived("surface records");
@@ -210,7 +212,7 @@ std::shared_ptr<Renderer::CLodInspectionRequest> Renderer::StartCLodInspectionFr
 	if (identity) pending->waiting.push_back("surface identity");
 
 	readback->RequestReadbackCapture(anchor, visibility.get(), org::RangeSpec{},
-		[pending](org::ReadbackCaptureResult&& result) {
+		[pending](br::ReadbackCaptureResult&& result) {
 			std::scoped_lock lock(pending->mutex);
 			if (result.format == rhi::Format::R32G32_UInt && !result.layouts.empty() && result.width != 0u && result.height != 0u) {
 				const auto& layout = result.layouts.front();
@@ -230,7 +232,7 @@ std::shared_ptr<Renderer::CLodInspectionRequest> Renderer::StartCLodInspectionFr
 		});
 	const auto readBuffer = [&, anchor](org::Resource* resource, std::vector<std::byte> Renderer::CLodInspectionFrame::*target, std::string name) {
 		readback->RequestReadbackCapture(anchor, resource, org::RangeSpec{},
-			[pending, target, name = std::move(name)](org::ReadbackCaptureResult&& result) {
+			[pending, target, name = std::move(name)](br::ReadbackCaptureResult&& result) {
 				std::scoped_lock lock(pending->mutex);
 				pending->frame.*target = std::move(result.data);
 				pending->Arrived(name);

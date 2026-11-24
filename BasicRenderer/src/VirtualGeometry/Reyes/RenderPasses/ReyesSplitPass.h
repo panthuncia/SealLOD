@@ -8,7 +8,7 @@
 #include "Interfaces/IDynamicDeclaredResources.h"
 #include "VirtualGeometry/GraphIntegration/CLodViewTables.h"
 #include "Render/PreparedTablePublisher.h"
-#include "Render/PipelineState.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "Render/ShaderAPI.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
@@ -21,9 +21,9 @@ struct ReyesSplitFrameData {
 };
 
 struct ReyesSplitBindings {
-    org::PipelineState clearCountersPipeline;
-    org::PipelineState pipeline;
-    org::CommandSignatureState commandSignature;
+    br::PipelineState clearCountersPipeline;
+    br::PipelineState pipeline;
+    br::CommandSignatureState commandSignature;
     org::DeclaredViewToken visible, inputQueue, inputCounter, outputQueue, outputCounter, outputOverflow;
     org::DeclaredViewToken diceQueue, diceCounter, diceOverflow, tessConfigs, tessVertices, tessTriangles;
     org::DeclaredViewToken shadowClipmap, shadowDirty, telemetry;

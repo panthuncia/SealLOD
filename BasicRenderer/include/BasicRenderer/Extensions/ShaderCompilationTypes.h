@@ -6,7 +6,7 @@
 #include <optional>
 #include <string>
 #include <vector>
-#include "Render/PipelineState.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 
 #pragma warning(push, 0)
 #include "ThirdParty/DirectX/dxcapi.h"

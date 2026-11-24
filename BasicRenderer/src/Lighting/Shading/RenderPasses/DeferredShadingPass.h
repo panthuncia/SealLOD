@@ -16,7 +16,7 @@
 
 // The deferred pipeline follows the global PSO flags, so it is chosen per frame.
 struct DeferredShadingFrame {
-	org::PipelineState pipeline;
+	br::PipelineState pipeline;
 	ShadowingMode shadowingMode = ShadowingMode::None;
 	bool punctualLights = true;
 	ScreenSpaceAOMode screenSpaceAO = ScreenSpaceAOMode::Off;
@@ -122,7 +122,6 @@ public:
 		const auto resolution = update ? update->renderResolution : render->renderResolution;
 		const auto& lighting = update ? update->lighting : render->lighting;
 		DeferredShadingFrame frame{};
-		frame.pipeline = DeferredPipeline(globalFlags);
 		// The shadow map's resources are declared only when it was on at graph build, and stochastic lighting's only when its
 		// passes were built.
 		if (lighting.shadowingMode == ShadowingMode::StochasticRayTraced && m_stochasticLighting) {
@@ -132,6 +131,7 @@ public:
 		} else {
 			frame.shadowingMode = ShadowingMode::None;
 		}
+		frame.pipeline = DeferredPipeline(globalFlags, static_cast<uint32_t>(frame.shadowingMode));
 		frame.punctualLights = lighting.punctualLightingEnabled;
 		// Until the graph is rebuilt for a changed setting, only what was declared is read.
 		frame.screenSpaceAO = lighting.screenSpaceAOMode == m_screenSpaceAOMode ? m_screenSpaceAOMode : ScreenSpaceAOMode::Off;
@@ -155,18 +155,22 @@ public:
 	}
 
 private:
-	const org::PipelineState& DeferredPipeline(UINT globalFlags) const {
+	// The variant compiled for the frame's shadowing mode (PSOManager::GetDeferredPSO).
+	const br::PipelineState& DeferredPipeline(UINT globalFlags, uint32_t shadowingMode) const {
 		auto& manager = PSOManager::GetInstance();
 		const auto generation = manager.PipelineCacheGeneration();
-		if (m_cachedPipeline && m_cachedPipelineFlags == globalFlags && m_cachedPipelineGeneration == generation)
+		if (m_cachedPipeline && m_cachedPipelineFlags == globalFlags && m_cachedPipelineShadowingMode == shadowingMode &&
+			m_cachedPipelineGeneration == generation)
 			return *m_cachedPipeline;
-		m_cachedPipeline = &manager.GetDeferredPSO(globalFlags);
+		m_cachedPipeline = &manager.GetDeferredPSO(globalFlags, shadowingMode);
 		m_cachedPipelineFlags = globalFlags;
+		m_cachedPipelineShadowingMode = shadowingMode;
 		m_cachedPipelineGeneration = generation;
 		return *m_cachedPipeline;
 	}
-	mutable const org::PipelineState* m_cachedPipeline = nullptr;
+	mutable const br::PipelineState* m_cachedPipeline = nullptr;
 	mutable UINT m_cachedPipelineFlags = 0;
+	mutable uint32_t m_cachedPipelineShadowingMode = 0;
 	mutable uint64_t m_cachedPipelineGeneration = 0;
 
 	bool m_imageBasedLightingEnabled = true;

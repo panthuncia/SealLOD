@@ -42,7 +42,7 @@ struct DownsampleMapBindings {
 };
 
 struct DownsampleBindings {
-    org::PipelineState standardPipeline, arrayPipeline;
+    br::PipelineState standardPipeline, arrayPipeline;
     std::vector<DownsampleMapBindings> maps;
 };
 
@@ -63,13 +63,13 @@ public:
             (void)resourceID;
             // Only the variants some map binds.
             if (map.isArrayLike && !declaredArray) {
-                bindings.arrayPipeline = declaration.Pipeline(br::render::ComputePipeline(
+                bindings.arrayPipeline = br::render::DeclarePipeline(br::render::ComputePipeline(
                     L"shaders/downsample.hlsl", L"DownsampleCSMain", "DownsampleCS[Array]",
                     {{L"DOWNSAMPLE_ARRAY", L"1"}}));
                 declaredArray = true;
             }
             else if (!map.isArrayLike && !declaredStandard) {
-                bindings.standardPipeline = declaration.Pipeline(br::render::ComputePipeline(
+                bindings.standardPipeline = br::render::DeclarePipeline(br::render::ComputePipeline(
                     L"shaders/downsample.hlsl", L"DownsampleCSMain", "DownsampleCS"));
                 declaredStandard = true;
             }

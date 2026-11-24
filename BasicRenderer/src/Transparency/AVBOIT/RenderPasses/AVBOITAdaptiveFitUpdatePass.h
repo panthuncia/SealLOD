@@ -4,11 +4,12 @@
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 
 namespace org { class Buffer; }
 
 struct AVBOITAdaptiveFitUpdateBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken config, histogram, state;
 };
 struct AVBOITAdaptiveFitUpdateFrame {

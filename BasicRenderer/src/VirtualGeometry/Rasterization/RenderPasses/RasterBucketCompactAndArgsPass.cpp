@@ -40,7 +40,8 @@ RasterBucketCompactAndArgsPass::RasterBucketCompactAndArgsPass(
     bool appendToExisting,
     bool readReverse,
     bool buildSoftwareRasterDispatch,
-    bool runWhenComputeSWRasterEnabledOnly)
+    bool runWhenComputeSWRasterEnabledOnly,
+    uint32_t softwareRasterClustersPerGroup)
     : m_visibleClustersBuffer(std::move(visibleClustersBuffer))
     , m_visibleClusterTransformIndicesBuffer(std::move(visibleClusterTransformIndicesBuffer))
     , m_visibleClustersCounterBuffer(std::move(visibleClustersCounterBuffer))
@@ -60,17 +61,18 @@ RasterBucketCompactAndArgsPass::RasterBucketCompactAndArgsPass(
     , m_appendToExisting(appendToExisting)
     , m_readReverse(readReverse)
     , m_buildSoftwareRasterDispatch(buildSoftwareRasterDispatch)
+    , m_softwareRasterClustersPerGroup(softwareRasterClustersPerGroup)
     , m_runWhenComputeSWRasterEnabledOnly(runWhenComputeSWRasterEnabledOnly)
 {
 }
 
 RasterBucketCompactAndArgsBindings RasterBucketCompactAndArgsPass::Declare(org::PassBuilder& builder) {
     RasterBucketCompactAndArgsBindings bindings{
-        builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/clodUtil.hlsl",
+        br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/clodUtil.hlsl",
             L"ClearUintStructuredBufferCSMain", "CLod_RasterBucketsClearUintPSO")),
-        builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/clodUtil.hlsl",
+        br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/clodUtil.hlsl",
             L"CompactClustersAndBuildIndirectArgsCS", "CLod_RasterBucketsCompactAndArgsPSO")),
-        builder.CommandSignature(br::render::ConstantsDispatchCommandSignature(2,
+        br::render::DeclareCommandSignature(br::render::ConstantsDispatchCommandSignature(2,
             sizeof(RasterBucketsHistogramIndirectCommand), "CLod_RasterBucketsCompactAndArgs.Signature")),
         builder.ShaderResource(m_visibleClustersBuffer),
         builder.ShaderResource(m_visibleClusterTransformIndicesBuffer),
@@ -108,6 +110,7 @@ RasterBucketCompactAndArgsBindings RasterBucketCompactAndArgsPass::Declare(org::
     bindings.appendToExisting = m_appendToExisting;
     bindings.readReverse = m_readReverse;
     bindings.buildSoftwareRasterDispatch = m_buildSoftwareRasterDispatch;
+    bindings.softwareRasterClustersPerGroup = m_softwareRasterClustersPerGroup;
     bindings.hasReadBaseCount = static_cast<bool>(m_readBaseCounterBuffer);
     bindings.hasReyesOwnership = static_cast<bool>(m_reyesOwnershipBitsetBuffer);
     bindings.hasTelemetry = static_cast<bool>(m_telemetryBuffer);
@@ -174,7 +177,9 @@ void RasterBucketCompactAndArgsPass::Record(const RasterBucketCompactAndArgsBind
         bindings.hasTelemetry && frame.telemetryEnabled ? context.Index(bindings.telemetry) : 0xFFFFFFFFu;
     c[CLOD_COMPACTION_NUM_RASTER_BUCKETS] = frame.numBuckets | (bindings.appendToExisting ? 0x80000000u : 0u);
     c[CLOD_COMPACTION_READ_MODE_FLAGS] = (bindings.readReverse ? CLOD_COMPACTION_READ_FLAG_REVERSED : 0u)
-        | (bindings.buildSoftwareRasterDispatch ? CLOD_COMPACTION_READ_FLAG_BUILD_SW_DISPATCH : 0u)
+        | (bindings.buildSoftwareRasterDispatch ? CLOD_COMPACTION_READ_FLAG_BUILD_SW_DISPATCH |
+            ((bindings.softwareRasterClustersPerGroup & CLOD_COMPACTION_READ_SW_CLUSTERS_PER_GROUP_MASK) <<
+                CLOD_COMPACTION_READ_SW_CLUSTERS_PER_GROUP_SHIFT) : 0u)
         | (bindings.hasReyesOwnership ? CLOD_COMPACTION_READ_FLAG_SKIP_REYES_OWNED : 0u);
     c[CLOD_COMPACTION_READ_CAPACITY] = bindings.maxVisibleClusters;
     br::render::DispatchComputeIndirect(context, bindings.compactPipeline, c, bindings.commandSignature,

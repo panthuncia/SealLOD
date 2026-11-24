@@ -13,8 +13,8 @@
 #include "Resources/PixelBuffer.h"
 #include "Resources/Sampler.h"
 #include "Resources/Buffers/Buffer.h"
-#include "Resources/ReadbackRequest.h"
-#include "Render/Runtime/IReadbackService.h"
+#include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
+#include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
 #include "Render/Runtime/IUploadService.h"
 #include "ThirdParty/stb/stb_image.h"
 #include "rhi_helpers.h"
@@ -71,18 +71,18 @@ bool TextureFactory::MipmappingPass::TryGetValueType(const org::PixelBuffer& tex
     }
 }
 
-org::ComputePipelineDesc TextureFactory::MipmappingPass::PipelineDesc(MipmapValueType valueType, bool isArray)
+br::ComputePipelineDesc TextureFactory::MipmappingPass::PipelineDesc(MipmapValueType valueType, bool isArray)
 {
-    std::vector<org::PipelineShaderDefine> defines;
+    std::vector<br::PipelineShaderDefine> defines;
     if (valueType == MipmapValueType::Float1) {
-        defines.push_back(org::PipelineShaderDefine{ L"MIPMAP_FLOAT1", L"1" });
+        defines.push_back(br::PipelineShaderDefine{ L"MIPMAP_FLOAT1", L"1" });
     }
     else if (valueType == MipmapValueType::Float2) {
-        defines.push_back(org::PipelineShaderDefine{ L"MIPMAP_FLOAT2", L"1" });
+        defines.push_back(br::PipelineShaderDefine{ L"MIPMAP_FLOAT2", L"1" });
     }
 
     if (isArray) {
-        defines.push_back(org::PipelineShaderDefine{ L"MIPMAP_ARRAY", L"1" });
+        defines.push_back(br::PipelineShaderDefine{ L"MIPMAP_ARRAY", L"1" });
     }
 
     const char* debugName = nullptr;
@@ -106,7 +106,7 @@ org::ComputePipelineDesc TextureFactory::MipmappingPass::PipelineDesc(MipmapValu
         std::move(defines));
 }
 
-org::ComputePipelineDesc TextureFactory::MipmappingPass::AlphaPipelineDesc(const wchar_t* entryPoint, const char* debugName)
+br::ComputePipelineDesc TextureFactory::MipmappingPass::AlphaPipelineDesc(const wchar_t* entryPoint, const char* debugName)
 {
     return br::render::ComputePipeline(
         L"shaders/Utilities/alphaCoverageMipmapping.hlsl",
@@ -262,15 +262,15 @@ TextureMipmappingBindings TextureFactory::MipmappingPass::Declare(org::PassBuild
             auto use = builder->ShaderResource(Subresources(tex, org::Mip{ 0, j.mipsToGenerate }),
                 std::span<const org::SrvView>(requests));
             views.alphaSources = std::move(use.views);
-            bindings.alphaReset = builder->Pipeline(AlphaPipelineDesc(L"AlphaMipResetStatsCS", "AlphaMip[ResetStats]"));
-            bindings.alphaDownsample = builder->Pipeline(AlphaPipelineDesc(L"AlphaMipDownsampleCS", "AlphaMip[Downsample]"));
-            bindings.alphaResolveScale = builder->Pipeline(AlphaPipelineDesc(L"AlphaMipResolveScaleCS", "AlphaMip[ResolveScale]"));
-            bindings.alphaApplyScale = builder->Pipeline(AlphaPipelineDesc(L"AlphaMipApplyScaleCS", "AlphaMip[ApplyScale]"));
+            bindings.alphaReset = br::render::DeclarePipeline(AlphaPipelineDesc(L"AlphaMipResetStatsCS", "AlphaMip[ResetStats]"));
+            bindings.alphaDownsample = br::render::DeclarePipeline(AlphaPipelineDesc(L"AlphaMipDownsampleCS", "AlphaMip[Downsample]"));
+            bindings.alphaResolveScale = br::render::DeclarePipeline(AlphaPipelineDesc(L"AlphaMipResolveScaleCS", "AlphaMip[ResolveScale]"));
+            bindings.alphaApplyScale = br::render::DeclarePipeline(AlphaPipelineDesc(L"AlphaMipApplyScaleCS", "AlphaMip[ApplyScale]"));
         }
         else {
             views.source = builder->ShaderResource(Subresources(tex, org::Mip{ 0, 1 }),
                 org::SrvView{j.isArray ? static_cast<uint32_t>(org::SRVViewType::Texture2DArray) : UINT32_MAX}).View();
-            views.pipeline = builder->Pipeline(PipelineDesc(j.valueType, j.isArray));
+            views.pipeline = br::render::DeclarePipeline(PipelineDesc(j.valueType, j.isArray));
         }
         if (j.mipsToGenerate > 0) {
             std::vector<org::UavView> requests;
@@ -336,7 +336,7 @@ void TextureFactory::MipmappingPass::Record(const TextureMipmappingBindings& bin
             const uint32_t statsUav = context.Index(views.alphaStats);
             const uint32_t scalesUav = context.Index(views.alphaScales);
             const uint32_t flags = views.isSrgb ? 1u : 0u;
-            const auto dispatch = [&](const org::PipelineState& pipeline, const br::render::MiscConstants& root,
+            const auto dispatch = [&](const br::PipelineState& pipeline, const br::render::MiscConstants& root,
                 uint32_t x, uint32_t y) {
                 br::render::DispatchCompute(context, pipeline, root, x, y);
                 context.UavBarrier();

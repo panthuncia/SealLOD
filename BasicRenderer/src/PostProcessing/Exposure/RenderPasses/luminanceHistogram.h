@@ -6,9 +6,10 @@
 #include "Utilities/Utilities.h"
 #include "../shaders/PerPassRootConstants/luminanceHistogramRootConstants.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 
 struct LuminanceHistogramBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
 };
 struct LuminanceHistogramFrame {
     uint32_t groupsX = 0, groupsY = 0;
@@ -20,7 +21,7 @@ public:
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         builder.ShaderResource(Builtin::Color::HDRColorTarget);
         builder.UnorderedAccess(Builtin::PostProcessing::LuminanceHistogram);
-        return {builder.Pipeline(org::ComputePipelineDesc{
+        return {br::render::DeclarePipeline(br::ComputePipelineDesc{
             .shader = {L"shaders/PostProcessing/LuminanceHistogram.hlsl", L"CSMain"},
             .name = "LuminanceHistogramPassCS"})};
     }

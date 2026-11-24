@@ -14,7 +14,7 @@
 
 struct LensSelfTestFrameData {
     uint64_t sequence = 0; // 0: nothing asked for, no dispatch
-    const org::PipelineState* pipeline = nullptr;
+    const br::PipelineState* pipeline = nullptr;
 };
 
 struct LensSelfTestBindings {

@@ -8,7 +8,7 @@
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 
 struct BuildMaterialIndirectCommandBufferBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
 };
 struct BuildMaterialIndirectCommandBufferFrame {
     uint32_t slotsUsed = 0;
@@ -27,7 +27,7 @@ public:
         b.UnorderedAccess("Builtin::IndirectCommandBuffers::MaterialEvaluationCommandBuffer");
 		b.ConstantBuffer(Builtin::PerFrameBuffer);
         b.PreferQueue(org::QueueKind::Compute);
-        return {b.Pipeline(br::render::ComputePipeline(L"shaders/VisUtil.hlsl", L"BuildEvaluateIndirectArgsCS",
+        return {br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/VisUtil.hlsl", L"BuildEvaluateIndirectArgsCS",
             "VisUtil_BuildEvaluateIndirectArgsPSO"))};
     }
 

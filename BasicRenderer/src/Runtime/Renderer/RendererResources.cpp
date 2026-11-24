@@ -266,8 +266,7 @@ void Renderer::OnResize(UINT newWidth, UINT newHeight) {
         ingestionConfiguration.renderResolution.x, ingestionConfiguration.renderResolution.y,
         PrimaryCameraLodHeight(ingestionConfiguration));
 
-	//Rebuild the render graph
-	rebuildRenderGraph = true;
+	RequestGraphRebuild("resize");
 }
 
 void Renderer::ApplyWindowResolutionPreset(WindowResolutionPreset preset)
@@ -327,7 +326,7 @@ void Renderer::SetEnvironmentInternal(std::wstring name) {
     else {
         m_currentEnvironment.reset();
         ::ResourceManager::GetInstance().SetActiveEnvironmentIndex(0);
-        rebuildRenderGraph = true;
+        RequestGraphRebuild("environment missing, using the blank one");
         if (!m_warnedUsingFallbackEnvironment) {
             spdlog::warn("Environment file not found: {}. Falling back to blank environment resources.", envpath.string());
             m_warnedUsingFallbackEnvironment = true;

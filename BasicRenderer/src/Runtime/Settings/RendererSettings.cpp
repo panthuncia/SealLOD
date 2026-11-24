@@ -15,6 +15,8 @@
 #include "Runtime/Device/DeviceManager.h"
 #include "Runtime/Resources/ResourceManager.h"
 #include "Runtime/Settings/SettingsManager.h"
+#include "Pipeline/PipelineState/PSOManager.h"
+#include "Pipeline/PipelineState/PipelineLibrary.h"
 #include "PostProcessing/FidelityFX/FFXManager.h"
 #include "PostProcessing/Upscaling/UpscalingManager.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
@@ -126,6 +128,47 @@ void Renderer::SimulateUpscalerFailures(uint32_t outOfMemoryFrames, uint32_t set
     UpscalingManager::GetInstance().SimulateFailures(outOfMemoryFrames, settingsFailures);
 }
 
+std::string Renderer::DescribeGraphRevisions() const {
+    const auto pending = m_frameRevisions.Peek();
+    nlohmann::json reply = {
+        { "builds", m_graphBuilds },
+        { "last_build_frame", m_lastGraphBuildFrame },
+        { "last_build_ms", m_lastGraphBuildMs },
+        { "last_build_reasons", m_lastGraphBuildReasons },
+        { "pending", pending.Describe() },
+        { "pending_topology_epochs", pending.topologyEpochs },
+        { "topology_requests", m_frameRevisions.TopologyRequests() },
+        { "frames", m_totalFramesRendered },
+    };
+    // M3 step 9: builds run on the build thread and are attached at the consolidation point.
+    const auto& stats = m_graphBuildStats;
+    const bool inFlight = FrameBuildInFlight();
+    reply["async"] = {
+        { "enabled", m_frameBuildWorker != nullptr },
+        { "in_flight", inFlight },
+        { "in_flight_frames", inFlight ? m_totalFramesRendered - stats.inFlightSinceFrame : 0 },
+        { "started", stats.started },
+        { "on_render_thread", stats.onRenderThread },
+        { "failed", stats.failed },
+        { "discarded", stats.discarded },
+        { "superseded", stats.superseded },
+        { "epoch_failures", stats.epochFailures },
+        { "last_prepare_ms", stats.lastPrepareMs },
+        { "last_attach_ms", stats.lastAttachMs },
+        { "last_pipeline_wait_ms", stats.lastPipelineWaitMs },
+        { "last_pipelines_declared", stats.lastPipelinesDeclared },
+        { "last_latency_ms", stats.lastLatencyMs },
+        { "last_frames_during_build", stats.lastFrames },
+        { "max_render_thread_ms", stats.maxRenderThreadMs },
+        { "last_error", stats.lastError },
+        { "last_epoch_failure", stats.lastEpochFailure },
+        // Pipelines a running graph declared outside any build (its recordings may wait for them on the render thread).
+        { "pipelines_declared_outside_builds", PSOManager::GetInstance().GetPipelineLibrary()
+            ? PSOManager::GetInstance().GetPipelineLibrary()->DeclaredOutsideScopes() : 0 },
+    };
+    return reply.dump();
+}
+
 void Renderer::ReconfigureUpscalerIfRequested() {
     if (!UpscalingManager::GetInstance().TakeReconfigureRequest()) {
         return;
@@ -143,7 +186,7 @@ void Renderer::ReconfigureUpscalerIfRequested() {
         m_sceneRenderBridge.ResyncPrimaryCameraDepth(m_sceneIngestionServices,
             ingestionConfiguration.renderResolution.x, ingestionConfiguration.renderResolution.y,
             PrimaryCameraLodHeight(ingestionConfiguration));
-        rebuildRenderGraph = true;
+        RequestGraphRebuild("upscaler reconfiguration");
     });
 }
 
@@ -211,7 +254,6 @@ void Renderer::SetSettings() {
 	}
 	std::free(forcedSkeletonLodValue);
 	settingsManager.registerSetting<int32_t>(ProceduralWindForcedSkeletonLodSettingName, forcedSkeletonLod);
-	settingsManager.registerSetting<bool>("enableWireframe", false);
     settingsManager.registerSetting<bool>(
         "enableShadows",
         m_pipelineRecipe.Contains<br::pipeline::ClusterLodShadowTechnique>());
@@ -269,7 +311,6 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<uint32_t>("terrainRvtMipCount", 14u);
     settingsManager.registerSetting<float>("terrainRvtMipOffset", -0.5f);
     settingsManager.registerSetting<float>("terrainRvtSourceTexelsPerWorld", 24.0f);
-    settingsManager.registerSetting<float>("terrainRvtBasePageWorldSize", 128.0f / 24.0f);
     settingsManager.registerSetting<bool>("enableTerrainReyesDisplacement", false);
     settingsManager.registerSetting<float>("terrainReyesDisplacementScale", 8.0f);
     settingsManager.registerSetting<float>("terrainReyesDisplacementGlobalScale", 1.0f);
@@ -309,9 +350,6 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<std::function<void(uint64_t, float)>>("queueSceneNodeUniformScaleEdit", [this](uint64_t stableSceneID, float uniformScale) {
         QueueSceneNodeUniformScaleEdit(stableSceneID, uniformScale);
         });
-    bool meshShaderSupported = DeviceManager::GetInstance().GetMeshShadersSupported();
-	settingsManager.registerSetting<bool>("enableMeshShader", meshShaderSupported && m_useMeshShaders);
-	settingsManager.registerSetting<bool>("enableIndirectDraws", meshShaderSupported);
 	settingsManager.registerSetting<bool>("enableGTAO", m_gtaoEnabled);
 	{
 		namespace ao = br::ambient_occlusion;
@@ -335,7 +373,6 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>(
         CLodDisableNonVoxelVisibilitySettingName,
         ReadTruthyEnvironmentFlag("SARP_CLOD_DISABLE_NON_VOXEL_VISIBILITY"));
-    settingsManager.registerSetting<bool>(CLodReyesUseNormalMapsSettingName, false);
     settingsManager.registerSetting<bool>(CLodReyesGeometricNormalSettingName, true);
     settingsManager.registerSetting<float>(CLodReyesObjectNormalMapBlendSettingName, CLodReyesObjectNormalMapBlendDefault);
     settingsManager.registerSetting<float>(CLodReyesTerrainNormalBlendSettingName, CLodReyesTerrainNormalBlendDefault);
@@ -535,8 +572,6 @@ void Renderer::SetSettings() {
     // 1 by default: 14.5 ms against 22.7 exact on SaveLab, with no visible difference in an accumulated image.
     settingsManager.registerSetting<uint32_t>("pathTracingOpacityMicromapTwoState", pathTracingEnvironmentNumber("SARP_RT_OMM_2STATE", 1u));
     if (m_pathTracing) {
-        // Directly as well: the setting's observer isn't registered until later in this function.
-        settingsManager.getSettingSetter<bool>("rayReconstructionGuidesAvailable")(true);
         UpscalingManager::GetInstance().SetRayReconstructionGuidesAvailable(true);
         SelectPathTracingUpscaler(true);
     }
@@ -546,36 +581,17 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<bool>("enableRayTracedShadows", m_rayTracedShadows);
     settingsManager.registerSetting<float>("rayTracedReflectionMaxDistance", 16384.0f); // World units: four exterior cells.
     settingsManager.registerSetting<float>("rayTracedReflectionRoughnessCutoff", 1.0f);
-    settingsManager.registerSetting<float>("rayTracedReflectionLodBias", 0.0f);
-    settingsManager.registerSetting<bool>("useAsyncCompute", false);
     settingsManager.registerSetting<bool>("enableSceneRenderOverlap", m_sceneRenderOverlapEnabled);
 	settingsManager.registerSetting<bool>(MaterialTextureStreamingSettingName, true);
 	settingsManager.registerSetting<bool>("renderGraphCompileDumpEnabled", false);
     settingsManager.registerSetting<bool>(
         "renderGraphVramDumpEnabled",
         ReadTruthyEnvironmentFlag("BASICRENDERER_RENDER_GRAPH_VRAM_DUMP"));
-    settingsManager.registerSetting<bool>("renderGraphQueueSyncTraceEnabled", false);
 	settingsManager.registerSetting<org::AutoAliasMode>("autoAliasMode", org::AutoAliasMode::Balanced);
     settingsManager.registerSetting<org::AutoAliasPackingStrategy>("autoAliasPackingStrategy", org::AutoAliasPackingStrategy::GreedySweepLine);
     settingsManager.registerSetting<bool>("autoAliasEnableLogging", ReadTruthyEnvironmentFlag("BASICRENDERER_AUTO_ALIAS_LOG"));
-    settingsManager.registerSetting<bool>("autoAliasLogExclusionReasons", false);
-    settingsManager.registerSetting<bool>("autoAliasBuildDebugData", false);
-    settingsManager.registerSetting<bool>("queueSchedulingEnableLogging", false);
-    settingsManager.registerSetting<uint8_t>("queueSchedulingSelectionPolicy", static_cast<uint8_t>(org::runtime::QueueSchedulingSelectionPolicy::FirstFit));
-    settingsManager.registerSetting<float>("queueSchedulingWidthScale", 0.0f); // Disable multi-queue scheduling
-    settingsManager.registerSetting<float>("queueSchedulingPenaltyBias", 0.0f);
-    settingsManager.registerSetting<float>("queueSchedulingMinPenalty", 1.0f);
-    settingsManager.registerSetting<float>("queueSchedulingResourcePressureWeight", 1.0f);
-    settingsManager.registerSetting<float>("queueSchedulingUavPressureWeight", 0.5f);
-    settingsManager.registerSetting<float>("queueSchedulingAutoGraphicsBias", 2.5f);
-    settingsManager.registerSetting<float>("queueSchedulingAsyncOverlapBonus", 3.0f);
-    settingsManager.registerSetting<float>("queueSchedulingCrossQueueHandoffPenalty", 2.0f);
 	settingsManager.registerSetting<uint32_t>("autoAliasPoolRetireIdleFrames", 120u);
 	settingsManager.registerSetting<float>("autoAliasPoolGrowthHeadroom", 1.5f);
-    settingsManager.registerSetting<uint8_t>("transitionPlacementMode", static_cast<uint8_t>(org::runtime::TransitionPlacementMode::CanonicalThenOptimize));
-    settingsManager.registerSetting<bool>(
-        "heavyDebug",
-        ReadTruthyEnvironmentFlag("BASICRENDERER_RENDER_GRAPH_HEAVY_DEBUG"));
     settingsManager.registerSetting<bool>(CLodVisibilityTelemetryDebugSettingName, false);
     settingsManager.registerSetting<bool>(CLodVirtualShadowTelemetryDebugSettingName, false);
     settingsManager.registerSetting<bool>(ObjectReyesAtlasTelemetryDebugSettingName, false);
@@ -611,9 +627,6 @@ void Renderer::SetSettings() {
         CLodVirtualShadowDebugLightSettingName, ReadUintEnvironmentValue("SARP_CLOD_VSM_DEBUG_LIGHT", 0xFFFFFFFFu));
     settingsManager.registerSetting<std::vector<uint32_t>>(CLodVirtualShadowDebugLightIndicesSettingName, {});
     settingsManager.registerSetting<std::vector<std::string>>(CLodVirtualShadowDebugLightLabelsSettingName, {});
-    settingsManager.registerSetting<bool>(
-        CLodDirectionalVirtualShadowReceiverSubpageMaskSettingName,
-        false);
     settingsManager.registerSetting<uint32_t>(
         CLodDirectionalVirtualShadowReceiverSubpageModeSettingName,
         CLodVirtualShadowReceiverSubpageModeOff);
@@ -641,22 +654,20 @@ void Renderer::SetSettings() {
     settingsManager.registerSetting<float>(CLodDirectionalVirtualShadowReceiverTraceUncertaintyScaleSettingName, CLodVirtualShadowDefaultReceiverTraceUncertaintyScale);
     settingsManager.registerSetting<float>(CLodDirectionalVirtualShadowReceiverTraceDepthSafetyScaleSettingName, CLodVirtualShadowDefaultReceiverTraceDepthSafetyScale);
 	settingsManager.registerSetting<uint32_t>(CLodReyesResourceBudgetBytesSettingName, 512u*1024u*1024u*1u); // 1GB for reyes
-	settingsManager.registerSetting<uint32_t>("usdPointInstancerMaxInstances", 10000u);
     getShadowResolution = settingsManager.getSettingGetter<uint16_t>("shadowResolution");
     setCameraSpeed = settingsManager.getSettingSetter<float>("cameraSpeed");
 	getCameraSpeed = settingsManager.getSettingGetter<float>("cameraSpeed");
-	setWireframeEnabled = settingsManager.getSettingSetter<bool>("enableWireframe");
-	getWireframeEnabled = settingsManager.getSettingGetter<bool>("enableWireframe");
 	setShadowsEnabled = settingsManager.getSettingSetter<bool>("enableShadows");
 	getShadowsEnabled = settingsManager.getSettingGetter<bool>("enableShadows");
 	getSkyboxResolution = settingsManager.getSettingGetter<uint16_t>("skyboxResolution");
 	setImageBasedLightingEnabled = settingsManager.getSettingSetter<bool>("enableImageBasedLighting");
 	setEnvironment = settingsManager.getSettingSetter<std::string>("environmentName");
-	getMeshShadersEnabled = settingsManager.getSettingGetter<bool>("enableMeshShader");
-	getIndirectDrawsEnabled = settingsManager.getSettingGetter<bool>("enableIndirectDraws");
 	getDrawBoundingSpheres = settingsManager.getSettingGetter<bool>("drawBoundingSpheres");
 	getImageBasedLightingEnabled = settingsManager.getSettingGetter<bool>("enableImageBasedLighting");
-    
+
+    // The recipe-backed settings were registered from the recipe Initialize was given, which path tracing may have
+    // replaced since. Before their observers exist, so this edits no recipe.
+    SyncPipelineTopologySettings();
 
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableShadows", [this](const bool& newValue) {
         if (m_syncingPipelineTopologySettings) {
@@ -689,28 +700,24 @@ void Renderer::SetSettings() {
         else recipe.Remove<br::pipeline::StochasticDirectLightingTechnique>();
         RequestPipelineReplacement(std::move(recipe));
         }));
-    // These choose stochastic lighting's passes, which its graph extension makes; extensions are registered again only when
-    // marked dirty, so a graph rebuild alone would keep the old passes.
+    // These choose stochastic lighting's passes, which its graph extension makes from the build's settings.
     for (const char* name : { "stochasticLightingReference", "stochasticLightingAccumulate", "stochasticLightingDenoise" }) {
-        m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>(name, [this](const bool&) {
-            m_pipelineExtensionsDirty = true;
-            rebuildRenderGraph = true;
+        m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>(name, [this, name](const bool&) {
+            RequestGraphRebuild(std::string("setting ") + std::string(name));
         }));
     }
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("stochasticLightingDownsample", [this](const uint32_t&) {
-        m_pipelineExtensionsDirty = true;
-        rebuildRenderGraph = true;
+        RequestGraphRebuild(std::string("setting ") + "stochasticLightingDownsample");
     }));
     // At full resolution the estimator's buffers hold the setting's samples per pixel (docs/stochastic_lighting.md "Kernel split"), so a change rebuilds them.
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("stochasticLightingSamplesPerPixel", [this](const uint32_t&) {
         if (SettingsManager::GetInstance().getSettingGetter<uint32_t>("stochasticLightingDownsample")() == 1u) {
-            m_pipelineExtensionsDirty = true;
-            rebuildRenderGraph = true;
+            RequestGraphRebuild(std::string("setting ") + "stochasticLightingSamplesPerPixel");
         }
     }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<std::string>("environmentName", [this](const std::string& newValue) {
 		SetEnvironmentInternal(s2ws(newValue));
-		rebuildRenderGraph = true;
+		RequestGraphRebuild(std::string("setting ") + "environmentName");
 		}));
     bool outputTypeRequiresRenderGraphRebuild =
         OutputTypeRequiresRenderGraphRebuild(settingsManager.getSettingGetter<unsigned int>("outputType")());
@@ -718,29 +725,19 @@ void Renderer::SetSettings() {
         ::ResourceManager::GetInstance().SetOutputType(newValue);
         const bool newOutputTypeRequiresRenderGraphRebuild = OutputTypeRequiresRenderGraphRebuild(newValue);
         if (newOutputTypeRequiresRenderGraphRebuild != outputTypeRequiresRenderGraphRebuild) {
-            rebuildRenderGraph = true;
+            RequestGraphRebuild(std::string("setting ") + "outputType");
         }
         outputTypeRequiresRenderGraphRebuild = newOutputTypeRequiresRenderGraphRebuild;
         }));
-    m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableMeshShader", [this](const bool& newValue) {
-		ToggleMeshShaders(newValue);
-		rebuildRenderGraph = true;
-		}));
-    m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableWireframe", [this](const bool& newValue) {
-		rebuildRenderGraph = true;
-		}));
-    m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableIndirectDraws", [this](const bool& newValue) {
-		rebuildRenderGraph = true;
-		}));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("allowTearing", [this](const bool& newValue) {
 		m_allowTearing = newValue;
 		}));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("drawBoundingSpheres", [this](const bool& newValue) {
-		rebuildRenderGraph = true;
+		RequestGraphRebuild(std::string("setting ") + "drawBoundingSpheres");
 		}));
     for (const char* name : { LightGridTileSizeSettingName, LightGridSlicesSettingName }) {
-        m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(name, [this](const uint32_t&) {
-            rebuildRenderGraph = true;
+        m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(name, [this, name](const uint32_t&) {
+            RequestGraphRebuild(std::string("setting ") + std::string(name));
             }));
     }
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableClusteredLighting", [this](const bool& newValue) {
@@ -764,14 +761,10 @@ void Renderer::SetSettings() {
 		}));
     // Which technique fills the screen-space AO slot, and CORTAO's sample count (a pipeline define): both rebuild the graph.
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(br::ambient_occlusion::TechniqueSettingName, [this](const uint32_t&) {
-		rebuildRenderGraph = true;
+		RequestGraphRebuild(std::string("setting ") + std::string(br::ambient_occlusion::TechniqueSettingName));
 		}));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(br::ambient_occlusion::CortaoSampleCountSettingName, [this](const uint32_t&) {
-		rebuildRenderGraph = true;
-		}));
-	m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableVisibilityRendering", [this](const bool& newValue) {
-		m_visibilityRendering = newValue;
-		rebuildRenderGraph = true;
+		RequestGraphRebuild(std::string("setting ") + std::string(br::ambient_occlusion::CortaoSampleCountSettingName));
 		}));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableTerrainRegionMaterialEvaluation", [this](const bool& newValue) {
         if (m_syncingPipelineTopologySettings) return;
@@ -797,102 +790,102 @@ void Renderer::SetSettings() {
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("terrainRvtCompression", [this](const bool& newValue) {
         (void)newValue;
         m_producerPersistentState->InvalidateTerrainRvt();
-        rebuildRenderGraph = true;
+        RequestGraphRebuild(std::string("setting ") + "terrainRvtCompression");
         }));
     // Sizes the compression scratch.
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("terrainRvtMaxGeneratedPagesPerFrame", [this](const uint32_t& newValue) {
         (void)newValue;
-        rebuildRenderGraph = true;
+        RequestGraphRebuild(std::string("setting ") + "terrainRvtMaxGeneratedPagesPerFrame");
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("terrainRvtPageSize", [this](const uint32_t& newValue) {
         (void)newValue;
         m_producerPersistentState->InvalidateTerrainRvt();
-        rebuildRenderGraph = true;
+        RequestGraphRebuild(std::string("setting ") + "terrainRvtPageSize");
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("terrainRvtBorderTexels", [this](const uint32_t& newValue) {
         (void)newValue;
         m_producerPersistentState->InvalidateTerrainRvt();
-        rebuildRenderGraph = true;
+        RequestGraphRebuild(std::string("setting ") + "terrainRvtBorderTexels");
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("terrainRvtPhysicalAtlasPagesWide", [this](const uint32_t& newValue) {
         (void)newValue;
         m_producerPersistentState->InvalidateTerrainRvt();
-        rebuildRenderGraph = true;
+        RequestGraphRebuild(std::string("setting ") + "terrainRvtPhysicalAtlasPagesWide");
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("terrainRvtPhysicalAtlasPagesHigh", [this](const uint32_t& newValue) {
         (void)newValue;
         m_producerPersistentState->InvalidateTerrainRvt();
-        rebuildRenderGraph = true;
+        RequestGraphRebuild(std::string("setting ") + "terrainRvtPhysicalAtlasPagesHigh");
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("terrainRvtPhysicalAtlasPoolCount", [this](const uint32_t& newValue) {
         (void)newValue;
         m_producerPersistentState->InvalidateTerrainRvt();
-        rebuildRenderGraph = true;
+        RequestGraphRebuild(std::string("setting ") + "terrainRvtPhysicalAtlasPoolCount");
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("terrainRvtClipPageTableResolution", [this](const uint32_t& newValue) {
         (void)newValue;
         m_producerPersistentState->InvalidateTerrainRvt();
-        rebuildRenderGraph = true;
+        RequestGraphRebuild(std::string("setting ") + "terrainRvtClipPageTableResolution");
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("terrainRvtMaxTerrainSets", [this](const uint32_t& newValue) {
         (void)newValue;
         m_producerPersistentState->InvalidateTerrainRvt();
-        rebuildRenderGraph = true;
+        RequestGraphRebuild(std::string("setting ") + "terrainRvtMaxTerrainSets");
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("terrainRvtMaxClipLevels", [this](const uint32_t& newValue) {
         (void)newValue;
         m_producerPersistentState->InvalidateTerrainRvt();
-        rebuildRenderGraph = true;
+        RequestGraphRebuild(std::string("setting ") + "terrainRvtMaxClipLevels");
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableOcclusionCulling", [this](const bool& newValue) {
 		m_occlusionCulling = newValue;
-		rebuildRenderGraph = true;
+		RequestGraphRebuild(std::string("setting ") + "enableOcclusionCulling");
 		}));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<CLodCullingBackend>(CLodCullingBackendSettingName, [this](const CLodCullingBackend& newValue) {
         (void)newValue;
-        rebuildRenderGraph = true;
+        RequestGraphRebuild(std::string("setting ") + std::string(CLodCullingBackendSettingName));
         }));
         m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableSceneRenderOverlap", [this](const bool& newValue) {
                 SetSceneRenderOverlapEnabled(newValue);
                 }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName, [this](const CLodSoftwareRasterMode& newValue) {
         (void)newValue;
-        rebuildRenderGraph = true;
+        RequestGraphRebuild(std::string("setting ") + std::string(CLodSoftwareRasterModeSettingName));
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<CLodVSMRasterMode>(CLodVSMRasterModeSettingName, [this](const CLodVSMRasterMode& newValue) {
         (void)newValue;
-        rebuildRenderGraph = true;
+        RequestGraphRebuild(std::string("setting ") + std::string(CLodVSMRasterModeSettingName));
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<CLodTransparencyMode>(CLodTransparencyModeSettingName, [this](const CLodTransparencyMode& newValue) {
         (void)newValue;
-        rebuildRenderGraph = true;
+        RequestGraphRebuild(std::string("setting ") + std::string(CLodTransparencyModeSettingName));
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>(CLodDynamicWindBoundsCacheEnabledSettingName, [this](const bool&) {
-        rebuildRenderGraph = true;
+        RequestGraphRebuild(std::string("setting ") + std::string(CLodDynamicWindBoundsCacheEnabledSettingName));
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(CLodDynamicWindBoundsCacheMiBSettingName, [this](const uint32_t&) {
-        rebuildRenderGraph = true;
+        RequestGraphRebuild(std::string("setting ") + std::string(CLodDynamicWindBoundsCacheMiBSettingName));
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>(CLodDynamicWindVertexCacheEnabledSettingName, [this](const bool&) {
-        rebuildRenderGraph = true;
+        RequestGraphRebuild(std::string("setting ") + std::string(CLodDynamicWindVertexCacheEnabledSettingName));
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(CLodDynamicWindVertexCacheMiBSettingName, [this](const uint32_t&) {
-        rebuildRenderGraph = true;
+        RequestGraphRebuild(std::string("setting ") + std::string(CLodDynamicWindVertexCacheMiBSettingName));
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(CLodDirectionalVirtualShadowReceiverSubpageModeSettingName, [this](const uint32_t&) {
-        rebuildRenderGraph = true;
+        RequestGraphRebuild(std::string("setting ") + std::string(CLodDirectionalVirtualShadowReceiverSubpageModeSettingName));
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(CLodVisibleClusterCapacitySettingName, [this](const uint32_t& newValue) {
         (void)newValue;
-        rebuildRenderGraph = true;
+        RequestGraphRebuild(std::string("setting ") + std::string(CLodVisibleClusterCapacitySettingName));
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>(CLodWorkGraphReyesVisibilitySettingName, [this](const bool& newValue) {
         (void)newValue;
-        rebuildRenderGraph = true;
+        RequestGraphRebuild(std::string("setting ") + std::string(CLodWorkGraphReyesVisibilitySettingName));
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>(CLodWorkGraphRigidOnlySettingName, [this](const bool& newValue) {
         (void)newValue;
-        rebuildRenderGraph = true;
+        RequestGraphRebuild(std::string("setting ") + std::string(CLodWorkGraphRigidOnlySettingName));
         }));
         m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>(CLodDisableReyesRasterizationSettingName, [this](const bool& newValue) {
             if (m_syncingPipelineTopologySettings) {
@@ -912,11 +905,11 @@ void Renderer::SetSettings() {
             }));
         m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(CLodDirectionalVirtualShadowMaxBackingResolutionSettingName, [this](const uint32_t& newValue) {
             (void)newValue;
-            rebuildRenderGraph = true;
+            RequestGraphRebuild(std::string("setting ") + std::string(CLodDirectionalVirtualShadowMaxBackingResolutionSettingName));
             }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(CLodReyesResourceBudgetBytesSettingName, [this](const uint32_t& newValue) {
         (void)newValue;
-        rebuildRenderGraph = true;
+        RequestGraphRebuild(std::string("setting ") + std::string(CLodReyesResourceBudgetBytesSettingName));
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableBloom", [this](const bool& newValue) {
         m_bloom = newValue;
@@ -989,7 +982,7 @@ void Renderer::SetSettings() {
             m_sceneRenderBridge.ResyncPrimaryCameraDepth(m_sceneIngestionServices,
                 ingestionConfiguration.renderResolution.x, ingestionConfiguration.renderResolution.y,
                 PrimaryCameraLodHeight(ingestionConfiguration));
-            rebuildRenderGraph = true;
+            RequestGraphRebuild(std::string("setting ") + "upscalingMode");
             });
 		}));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("rayReconstructionGuidesAvailable", [this](const bool& newValue) {
@@ -1012,7 +1005,7 @@ void Renderer::SetSettings() {
             m_sceneRenderBridge.ResyncPrimaryCameraDepth(m_sceneIngestionServices,
                 ingestionConfiguration.renderResolution.x, ingestionConfiguration.renderResolution.y,
                 PrimaryCameraLodHeight(ingestionConfiguration));
-            rebuildRenderGraph = true;
+            RequestGraphRebuild(std::string("setting ") + "rayReconstructionGuidesAvailable");
             });
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<UpscaleQualityMode>("upscalingQualityMode", [this](const UpscaleQualityMode& newValue) {
@@ -1030,13 +1023,13 @@ void Renderer::SetSettings() {
             m_sceneRenderBridge.ResyncPrimaryCameraDepth(m_sceneIngestionServices,
                 ingestionConfiguration.renderResolution.x, ingestionConfiguration.renderResolution.y,
                 PrimaryCameraLodHeight(ingestionConfiguration));
-            rebuildRenderGraph = true;
+            RequestGraphRebuild(std::string("setting ") + "upscalingQualityMode");
             });
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableDilatedMotionVectors", [this](const bool&) {
         m_preFrameDeferredFunctions.defer([this]() {
             UpscalingManager::GetInstance().RequestHistoryReset();
-            rebuildRenderGraph = true;
+            RequestGraphRebuild(std::string("setting ") + "enableDilatedMotionVectors");
         });
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<WindowResolutionPreset>(
@@ -1048,7 +1041,7 @@ void Renderer::SetSettings() {
         }));
 	m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableScreenSpaceReflections", [this](const bool& newValue) {
 		m_screenSpaceReflections = newValue;
-		rebuildRenderGraph = true;
+		RequestGraphRebuild(std::string("setting ") + "enableScreenSpaceReflections");
 		}));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enablePathTracing", [this](const bool& newValue) {
         if (newValue == m_pathTracing) {
@@ -1078,23 +1071,23 @@ void Renderer::SetSettings() {
     // Accumulating averages samples itself, so it doesn't want Ray Reconstruction's denoising. The path trace pass makes its
     // accumulation buffer when the graph is built.
     // The ghost flares' passes and buffer sizes (LensFlarePasses.h) are fixed when the graph is built.
-    m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("lensFlareEnabled", [this](const bool&) { rebuildRenderGraph = true; }));
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("lensFlareEnabled", [this](const bool&) { RequestGraphRebuild(std::string("setting ") + "lensFlareEnabled"); }));
     for (const char* name : { "lensFlareMaxGhosts", "lensFlareGridResolution", "lensFlareWavelengths", "lensFlareMaxLights" }) {
-        m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(name, [this](const uint32_t&) { rebuildRenderGraph = true; }));
+        m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(name, [this, name](const uint32_t&) { RequestGraphRebuild(std::string("setting ") + std::string(name)); }));
     }
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("pathTracingAccumulate", [this](const bool&) {
         if (m_pathTracing) {
             SelectPathTracingUpscaler(true);
-            rebuildRenderGraph = true;
+            RequestGraphRebuild(std::string("setting ") + "pathTracingAccumulate");
         }
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("rayTracedPrimaryVisibilityMode", [this](const uint32_t& newValue) {
         m_rayTracedPrimaryVisibilityMode = newValue;
-        rebuildRenderGraph = true;
+        RequestGraphRebuild(std::string("setting ") + "rayTracedPrimaryVisibilityMode");
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableRayTracedShadows", [this](const bool& newValue) {
         m_rayTracedShadows = newValue;
-        rebuildRenderGraph = true;
+        RequestGraphRebuild(std::string("setting ") + "enableRayTracedShadows");
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableRayTracedReflections", [this](const bool& newValue) {
         m_rayTracedReflections = newValue;
@@ -1102,16 +1095,8 @@ void Renderer::SetSettings() {
             m_warnedRayTracedReflectionsUnsupported = true;
             spdlog::warn("Ray traced reflections requested, but clustered ray tracing is not supported by the active RHI backend/device.");
         }
-        rebuildRenderGraph = true;
+        RequestGraphRebuild(std::string("setting ") + "enableRayTracedReflections");
         }));
 
 
-	// Indirect draws require mesh shaders (due to not having implemented indirect draws with traditional pipelines)
-	settingsManager.addImplicationConstraint("enableIndirectDraws", "enableMeshShader");
-
-	// Visibility rendering requires mesh shaders (due to not having implemented visibility VS)
-    settingsManager.addImplicationConstraint("enableVisibilityRendering", "enableMeshShader");
-
-    //Visibility rendering requires indirect draws (because of a bug) TODO: fix
-	settingsManager.addImplicationConstraint("enableVisibilityRendering", "enableIndirectDraws");
 }

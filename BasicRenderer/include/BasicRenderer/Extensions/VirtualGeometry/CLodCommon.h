@@ -18,7 +18,6 @@ inline constexpr const char* CLodStreamingCpuUploadBudgetSettingName = "clodStre
 inline constexpr const char* CLodStreamingEnableDirectStorageSettingName = "clodStreamingEnableDirectStorage";
 inline constexpr const char* CLodDisableReyesRasterizationSettingName = "clodDisableReyesRasterization";
 inline constexpr const char* CLodDisableNonVoxelVisibilitySettingName = "clodDisableNonVoxelVisibility";
-inline constexpr const char* CLodReyesUseNormalMapsSettingName = "clodReyesUseNormalMaps";
 inline constexpr const char* CLodReyesGeometricNormalSettingName = "clodReyesGeometricNormal";
 inline constexpr const char* CLodReyesObjectNormalMapBlendSettingName = "clodReyesObjectNormalMapBlend";
 inline constexpr const char* CLodReyesTerrainNormalBlendSettingName = "clodReyesTerrainNormalBlend";
@@ -136,7 +135,6 @@ inline constexpr const char* CLodVirtualShadowDebugLightSettingName = "clodVirtu
 // the same order. Published by the renderer when they change.
 inline constexpr const char* CLodVirtualShadowDebugLightIndicesSettingName = "clodVirtualShadowDebugLightIndices";
 inline constexpr const char* CLodVirtualShadowDebugLightLabelsSettingName = "clodVirtualShadowDebugLightLabels";
-inline constexpr const char* CLodDirectionalVirtualShadowReceiverSubpageMaskSettingName = "clodDirectionalVirtualShadowReceiverSubpageMask";
 inline constexpr const char* CLodDirectionalVirtualShadowReceiverSubpageModeSettingName = "clodDirectionalVirtualShadowReceiverSubpageMode";
 inline constexpr uint32_t CLodVirtualShadowReceiverSubpageModeOff = 0u;
 inline constexpr uint32_t CLodVirtualShadowReceiverSubpageMode4x4 = 4u;

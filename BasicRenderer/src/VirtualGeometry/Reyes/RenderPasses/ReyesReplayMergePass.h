@@ -4,7 +4,7 @@
 
 #include <rhi.h>
 
-#include "Render/PipelineState.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 
@@ -17,8 +17,8 @@ enum class ReyesReplayMergeKind
 };
 
 struct ReyesReplayMergeBindings {
-    org::PipelineState pipeline;
-    org::CommandSignatureState commandSignature;
+    br::PipelineState pipeline;
+    br::CommandSignatureState commandSignature;
     org::DeclaredViewToken source;
     org::DeclaredViewToken sourceCounter;
     org::DeclaredViewToken dest;

@@ -4168,7 +4168,9 @@ void ObjectManager::EndNormalMatrixBulkWrite(size_t dirtyOffset, size_t dirtySiz
 }
 
 std::shared_ptr<org::Resource> ObjectManager::ProvideResource(org::ResourceIdentifier const& key) {
-	return m_resources[key];
+	// Not operator[]: the graph build calls this, and it must not insert into the map.
+	const auto it = m_resources.find(key);
+	return it != m_resources.end() ? it->second : nullptr;
 }
 
 std::vector<org::ResourceIdentifier> ObjectManager::GetSupportedKeys() {

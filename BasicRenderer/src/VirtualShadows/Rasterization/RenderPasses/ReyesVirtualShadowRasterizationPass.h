@@ -7,8 +7,8 @@
 
 #include "Interfaces/IDynamicDeclaredResources.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
-#include "Render/PipelineState.h"
-#include "Render/PipelineDesc.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "Resources/PixelBuffer.h"
@@ -17,8 +17,8 @@ namespace org { class Buffer; }
 namespace org { class ResourceGroup; }
 
 struct ReyesVirtualShadowRasterBindings {
-    org::PipelineState pipeline;
-    org::CommandSignatureState commandSignature;
+    br::PipelineState pipeline;
+    br::CommandSignatureState commandSignature;
     org::DeclaredViewToken visible, transforms, diceQueue, diceCounter, work, workCounter;
     org::DeclaredViewToken tessConfigs, tessVertices, tessTriangles;
     org::ResourceBindingToken indirectArgs;

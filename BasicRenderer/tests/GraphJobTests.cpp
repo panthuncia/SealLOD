@@ -18,6 +18,32 @@
 #include <cstdlib>
 #include <deque>
 #include <thread>
+#include <Render/Runtime/ITaskService.h>
+
+namespace {
+// ORG requires the host's task service. The test's runs every task on the calling thread: nothing here needs parallelism.
+class InlineTaskService final : public org::runtime::ITaskService {
+    struct Scope final : org::runtime::ITaskScope {
+        void Cancel() noexcept override {}
+        void Wait() override {}
+        void CancelAndWait() override {}
+    };
+public:
+    void ParallelFor(std::string_view, size_t count, std::function<void(size_t)> func) override { for (size_t i = 0; i < count; ++i) func(i); }
+    void ParallelForLimited(std::string_view, size_t count, size_t, std::function<void(size_t)> func) override { for (size_t i = 0; i < count; ++i) func(i); }
+    std::shared_ptr<org::runtime::ITaskScope> CreateScope(std::string_view) override { return std::make_shared<Scope>(); }
+    bool Submit(const std::shared_ptr<org::runtime::ITaskScope>&, org::runtime::TaskPriority, std::string_view, std::function<void()>&& func) override {
+        func();
+        return true;
+    }
+    bool ScheduleAfter(const std::shared_ptr<org::runtime::ITaskScope>&, std::chrono::steady_clock::duration delay, org::runtime::TaskPriority,
+        std::string_view, std::function<void()>&& func) override {
+        std::this_thread::sleep_for(delay);
+        func();
+        return true;
+    }
+};
+} // namespace
 
 namespace {
 
@@ -213,7 +239,8 @@ int main() {
     CHECK(!rhi::Failed(rhi::CreateD3D12Device(create, device)) && device);
     int failure = 0;
     {
-        auto runtime = org::Runtime::Create({.device = device.Get(), .backend = rhi::Backend::D3D12});
+        auto runtime = org::Runtime::Create({.device = device.Get(), .backend = rhi::Backend::D3D12,
+            .tasks = std::make_shared<InlineTaskService>()});
         failure = RunChain(device.Get(), runtime);
     }
     if (!failure) std::puts("GraphJobTests passed");

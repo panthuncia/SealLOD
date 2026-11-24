@@ -7,7 +7,7 @@
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 
 struct DilateMotionVectorsBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken source, depth, destination;
 };
 struct DilateMotionVectorsFrame {
@@ -20,7 +20,7 @@ public:
     DilateMotionVectorsBindings Declare(org::PassBuilder& builder) {
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         return {
-            builder.Pipeline(br::render::ComputePipeline(
+            br::render::DeclarePipeline(br::render::ComputePipeline(
                 L"shaders/PostProcessing/dilateMotionVectors.hlsl", L"DilateMotionVectorsCS", "DilateMotionVectorsCS")),
             builder.ShaderResource(Builtin::Surface::Motion),
             builder.ShaderResource(Builtin::PrimaryCamera::ProjectedDepthTexture),

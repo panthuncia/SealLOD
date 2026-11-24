@@ -1,6 +1,6 @@
 #include "Pipeline/PipelineState/PSOManager.h"
 #include <OpenRenderGraph/Runtime.h>
-#include <Render/PipelineLibrary.h>
+#include "Pipeline/PipelineState/PipelineLibrary.h"
 #include <format>
 #include <variant>
 #include "Runtime/Settings/RendererSettingsHelpers.h"
@@ -22,6 +22,7 @@
 #include "Utilities/HashMix.h"
 #include "Runtime/Device/DeviceManager.h"
 #include "BasicRenderer/Assets/TechniqueDescriptor.h"
+#include "BasicRenderer/Extensions/RenderContext.h"
 #include "Pipeline/ShaderCompilation/brslHelpers.h"
 #include "Render/ShaderAPI.h"
 #include "BasicRenderer/Pipeline/ShaderVariantRequestService.h"
@@ -249,7 +250,7 @@ std::vector<std::byte> CopyBlobBytes(ID3DBlob* blob)
 }
 
 template <typename TCache, typename TKey, typename TFactory>
-const org::PipelineState& GetOrCreatePipelineState(
+const br::PipelineState& GetOrCreatePipelineState(
     TCache& cache,
     const TKey& key,
     TFactory&& factory)
@@ -264,7 +265,7 @@ const org::PipelineState& GetOrCreatePipelineState(
 // Per-frame lookups take the shared lock; only a miss creates under the
 // exclusive lock. Node-based caches keep element references stable.
 template <typename TCache, typename TKey, typename TFactory>
-const org::PipelineState& FindOrCreatePipelineState(
+const br::PipelineState& FindOrCreatePipelineState(
     std::shared_mutex& mutex,
     TCache& cache,
     const TKey& key,
@@ -772,6 +773,8 @@ void PSOManager::initializeShaderCompiler() {
 }
 
 void PSOManager::Cleanup() {
+    // Joins its builds; the pipelines go with it.
+    m_pipelineLibrary.reset();
     std::scoped_lock lock(m_cacheMutex, m_livePipelineMutex);
     m_asyncPSOGeneration.fetch_add(1, std::memory_order_acq_rel);
     m_deferredPSOCache.clear();
@@ -809,7 +812,7 @@ void PSOManager::Cleanup() {
     pCompiler.Reset();
 }
 
-const org::PipelineState& PSOManager::GetClusterLODRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
+const br::PipelineState& PSOManager::GetClusterLODRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
     RasterPSOKey key(materialRasterFlags, wireframe);
     return FindOrCreatePipelineState(m_cacheMutex, m_clusterLODRasterPSOCache, key, [&]() {
         return RegisterPipeline(
@@ -823,7 +826,7 @@ const org::PipelineState& PSOManager::GetClusterLODRasterPSO(MaterialRasterFlags
     });
 }
 
-const org::PipelineState& PSOManager::GetClusterLODVirtualShadowRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
+const br::PipelineState& PSOManager::GetClusterLODVirtualShadowRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
     RasterPSOKey key(materialRasterFlags, wireframe);
     return FindOrCreatePipelineState(m_cacheMutex, m_clusterLODVirtualShadowRasterPSOCache, key, [&]() {
         return RegisterPipeline(
@@ -837,7 +840,7 @@ const org::PipelineState& PSOManager::GetClusterLODVirtualShadowRasterPSO(Materi
     });
 }
 
-const org::PipelineState& PSOManager::GetClusterLODDeepVisibilityRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
+const br::PipelineState& PSOManager::GetClusterLODDeepVisibilityRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
     RasterPSOKey key(materialRasterFlags, wireframe);
     return FindOrCreatePipelineState(m_cacheMutex, m_clusterLODDeepVisibilityRasterPSOCache, key, [&]() {
         return RegisterPipeline(
@@ -851,7 +854,7 @@ const org::PipelineState& PSOManager::GetClusterLODDeepVisibilityRasterPSO(Mater
     });
 }
 
-const org::PipelineState& PSOManager::GetClusterLODAVBOITOccupancyPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
+const br::PipelineState& PSOManager::GetClusterLODAVBOITOccupancyPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
     RasterPSOKey key(materialRasterFlags, wireframe);
     return FindOrCreatePipelineState(m_cacheMutex, m_clusterLODAVBOITOccupancyPSOCache, key, [&]() {
         return RegisterPipeline(
@@ -865,7 +868,7 @@ const org::PipelineState& PSOManager::GetClusterLODAVBOITOccupancyPSO(MaterialRa
     });
 }
 
-const org::PipelineState& PSOManager::GetClusterLODAVBOITRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
+const br::PipelineState& PSOManager::GetClusterLODAVBOITRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
     RasterPSOKey key(materialRasterFlags, wireframe);
     return FindOrCreatePipelineState(m_cacheMutex, m_clusterLODAVBOITRasterPSOCache, key, [&]() {
         return RegisterPipeline(
@@ -879,7 +882,7 @@ const org::PipelineState& PSOManager::GetClusterLODAVBOITRasterPSO(MaterialRaste
     });
 }
 
-const org::PipelineState& PSOManager::GetClusterLODAVBOITShadePSO(MaterialRasterFlags materialRasterFlags, bool wireframe, UINT psoFlags) {
+const br::PipelineState& PSOManager::GetClusterLODAVBOITShadePSO(MaterialRasterFlags materialRasterFlags, bool wireframe, UINT psoFlags) {
     RasterPSOKey key(materialRasterFlags, wireframe, false, psoFlags);
     return FindOrCreatePipelineState(m_cacheMutex, m_clusterLODAVBOITShadePSOCache, key, [&]() {
         return RegisterPipeline(
@@ -893,7 +896,7 @@ const org::PipelineState& PSOManager::GetClusterLODAVBOITShadePSO(MaterialRaster
     });
 }
 
-const org::PipelineState& PSOManager::GetClusterLODSoftwareRasterPSO(MaterialRasterFlags materialRasterFlags, CLodRasterOutputKind outputKind) {
+const br::PipelineState& PSOManager::GetClusterLODSoftwareRasterPSO(MaterialRasterFlags materialRasterFlags, CLodRasterOutputKind outputKind) {
     const uint64_t key = static_cast<uint64_t>(materialRasterFlags) |
         (static_cast<uint64_t>(outputKind) << 32u);
     return FindOrCreatePipelineState(m_cacheMutex, m_clusterLODSoftwareRasterPSOCache, key, [&]() {
@@ -901,26 +904,27 @@ const org::PipelineState& PSOManager::GetClusterLODSoftwareRasterPSO(MaterialRas
     });
 }
 
-const org::PipelineState& PSOManager::GetDeferredPSO(UINT psoFlags) {
-    return FindOrCreatePipelineState(m_cacheMutex, m_deferredPSOCache, psoFlags, [&]() {
+const br::PipelineState& PSOManager::GetDeferredPSO(UINT psoFlags, uint32_t shadowingMode) {
+    const uint64_t key = static_cast<uint64_t>(psoFlags) | (static_cast<uint64_t>(shadowingMode) << 32u);
+    return FindOrCreatePipelineState(m_cacheMutex, m_deferredPSOCache, key, [&]() {
         return RegisterPipeline(
-            CreateDeferredPSO(psoFlags),
-            "Material.Deferred.flags=" + std::to_string(psoFlags),
+            CreateDeferredPSO(psoFlags, shadowingMode),
+            "Material.Deferred.flags=" + std::to_string(psoFlags) + ".shadowing=" + std::to_string(shadowingMode),
             "Material.Deferred",
             br::extensions::PipelineKind::Graphics,
-            [this, psoFlags] {
-                return CreateDeferredPSO(psoFlags);
+            [this, psoFlags, shadowingMode] {
+                return CreateDeferredPSO(psoFlags, shadowingMode);
             });
     });
 }
 
-const org::PipelineState& PSOManager::GetClusterLODDeepVisibilityResolvePSO(UINT psoFlags) {
+const br::PipelineState& PSOManager::GetClusterLODDeepVisibilityResolvePSO(UINT psoFlags) {
     return FindOrCreatePipelineState(m_cacheMutex, m_clusterLODDeepVisibilityResolvePSOCache, psoFlags, [&]() {
         return CreateClusterLODDeepVisibilityResolvePSO(psoFlags);
     });
 }
 
-const org::PipelineState* PSOManager::TryGetClusterLODRasterPSO(
+const br::PipelineState* PSOManager::TryGetClusterLODRasterPSO(
     MaterialRasterFlags materialRasterFlags,
     bool wireframe,
     bool singleView) {
@@ -935,7 +939,7 @@ const org::PipelineState* PSOManager::TryGetClusterLODRasterPSO(
         });
 }
 
-const org::PipelineState* PSOManager::TryGetClusterLODVirtualShadowRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
+const br::PipelineState* PSOManager::TryGetClusterLODVirtualShadowRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
     RasterPSOKey key(materialRasterFlags, wireframe);
     return TryGetOrRequestPipelineState(
         &PSOManager::m_clusterLODVirtualShadowRasterPSOCache,
@@ -947,7 +951,7 @@ const org::PipelineState* PSOManager::TryGetClusterLODVirtualShadowRasterPSO(Mat
         });
 }
 
-const org::PipelineState* PSOManager::TryGetClusterLODDeepVisibilityRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
+const br::PipelineState* PSOManager::TryGetClusterLODDeepVisibilityRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
     RasterPSOKey key(materialRasterFlags, wireframe);
     return TryGetOrRequestPipelineState(
         &PSOManager::m_clusterLODDeepVisibilityRasterPSOCache,
@@ -959,7 +963,7 @@ const org::PipelineState* PSOManager::TryGetClusterLODDeepVisibilityRasterPSO(Ma
         });
 }
 
-const org::PipelineState* PSOManager::TryGetClusterLODAVBOITOccupancyPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
+const br::PipelineState* PSOManager::TryGetClusterLODAVBOITOccupancyPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
     RasterPSOKey key(materialRasterFlags, wireframe);
     return TryGetOrRequestPipelineState(
         &PSOManager::m_clusterLODAVBOITOccupancyPSOCache,
@@ -971,7 +975,7 @@ const org::PipelineState* PSOManager::TryGetClusterLODAVBOITOccupancyPSO(Materia
         });
 }
 
-const org::PipelineState* PSOManager::TryGetClusterLODAVBOITRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
+const br::PipelineState* PSOManager::TryGetClusterLODAVBOITRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe) {
     RasterPSOKey key(materialRasterFlags, wireframe);
     return TryGetOrRequestPipelineState(
         &PSOManager::m_clusterLODAVBOITRasterPSOCache,
@@ -983,7 +987,7 @@ const org::PipelineState* PSOManager::TryGetClusterLODAVBOITRasterPSO(MaterialRa
         });
 }
 
-const org::PipelineState* PSOManager::TryGetClusterLODAVBOITShadePSO(MaterialRasterFlags materialRasterFlags, bool wireframe, UINT psoFlags) {
+const br::PipelineState* PSOManager::TryGetClusterLODAVBOITShadePSO(MaterialRasterFlags materialRasterFlags, bool wireframe, UINT psoFlags) {
     RasterPSOKey key(materialRasterFlags, wireframe, false, psoFlags);
     return TryGetOrRequestPipelineState(
         &PSOManager::m_clusterLODAVBOITShadePSOCache,
@@ -995,7 +999,7 @@ const org::PipelineState* PSOManager::TryGetClusterLODAVBOITShadePSO(MaterialRas
         });
 }
 
-const org::PipelineState* PSOManager::TryGetClusterLODSoftwareRasterPSO(MaterialRasterFlags materialRasterFlags, CLodRasterOutputKind outputKind) {
+const br::PipelineState* PSOManager::TryGetClusterLODSoftwareRasterPSO(MaterialRasterFlags materialRasterFlags, CLodRasterOutputKind outputKind) {
     const uint64_t key = static_cast<uint64_t>(materialRasterFlags) |
         (static_cast<uint64_t>(outputKind) << 32u);
     return TryGetOrRequestPipelineState(
@@ -1008,7 +1012,7 @@ const org::PipelineState* PSOManager::TryGetClusterLODSoftwareRasterPSO(Material
         });
 }
 
-const org::PipelineState* PSOManager::TryGetMaterialEvalPSO(MaterialCompileFlags materialCompileFlags) {
+const br::PipelineState* PSOManager::TryGetMaterialEvalPSO(MaterialCompileFlags materialCompileFlags) {
     return TryGetOrRequestPipelineState(
         &PSOManager::m_materialEvalPSOCache,
         &PSOManager::m_pendingMaterialEvalPSOs,
@@ -1019,7 +1023,7 @@ const org::PipelineState* PSOManager::TryGetMaterialEvalPSO(MaterialCompileFlags
         });
 }
 
-org::PipelineState PSOManager::CreateClusterLODRasterPSO(
+br::PipelineState PSOManager::CreateClusterLODRasterPSO(
     MaterialRasterFlags materialRasterFlags, bool wireframe, bool singleView) {
     auto defines = GetRasterShaderDefines(materialRasterFlags);
     if (singleView) {
@@ -1067,7 +1071,7 @@ org::PipelineState PSOManager::CreateClusterLODRasterPSO(
     return { std::move(pso), compiledBundle.resourceIDsHash, compiledBundle.resourceDescriptorSlots, CaptureLayoutOwner(soLayout.layout), soLayout.layout };
 }
 
-org::PipelineState PSOManager::CreateClusterLODVirtualShadowRasterPSO(
+br::PipelineState PSOManager::CreateClusterLODVirtualShadowRasterPSO(
     MaterialRasterFlags materialRasterFlags, bool wireframe) {
     auto defines = GetRasterShaderDefines(materialRasterFlags);
     defines.push_back({ L"CLOD_RASTER_OUTPUT_VIRTUAL_SHADOW", L"1" });
@@ -1114,7 +1118,7 @@ org::PipelineState PSOManager::CreateClusterLODVirtualShadowRasterPSO(
     return { std::move(pso), compiledBundle.resourceIDsHash, compiledBundle.resourceDescriptorSlots, CaptureLayoutOwner(soLayout.layout), soLayout.layout };
 }
 
-org::PipelineState PSOManager::CreateClusterLODDeepVisibilityRasterPSO(
+br::PipelineState PSOManager::CreateClusterLODDeepVisibilityRasterPSO(
     MaterialRasterFlags materialRasterFlags, bool wireframe) {
     auto defines = GetRasterShaderDefines(materialRasterFlags);
 
@@ -1159,7 +1163,7 @@ org::PipelineState PSOManager::CreateClusterLODDeepVisibilityRasterPSO(
     return { std::move(pso), compiledBundle.resourceIDsHash, compiledBundle.resourceDescriptorSlots, CaptureLayoutOwner(soLayout.layout), soLayout.layout };
 }
 
-org::PipelineState PSOManager::CreateClusterLODAVBOITRasterPSO(
+br::PipelineState PSOManager::CreateClusterLODAVBOITRasterPSO(
     MaterialRasterFlags materialRasterFlags, bool wireframe) {
     auto defines = GetRasterShaderDefines(materialRasterFlags);
     DxcDefine forwardTransparentMacro;
@@ -1214,7 +1218,7 @@ org::PipelineState PSOManager::CreateClusterLODAVBOITRasterPSO(
     return { std::move(pso), compiledBundle.resourceIDsHash, compiledBundle.resourceDescriptorSlots, CaptureLayoutOwner(soLayout.layout), soLayout.layout };
 }
 
-org::PipelineState PSOManager::CreateClusterLODAVBOITOccupancyPSO(
+br::PipelineState PSOManager::CreateClusterLODAVBOITOccupancyPSO(
     MaterialRasterFlags materialRasterFlags, bool wireframe) {
     auto defines = GetRasterShaderDefines(materialRasterFlags);
     DxcDefine forwardTransparentMacro;
@@ -1271,7 +1275,7 @@ org::PipelineState PSOManager::CreateClusterLODAVBOITOccupancyPSO(
     return { std::move(pso), compiledBundle.resourceIDsHash, compiledBundle.resourceDescriptorSlots, CaptureLayoutOwner(soLayout.layout), soLayout.layout };
 }
 
-org::PipelineState PSOManager::CreateClusterLODAVBOITShadePSO(
+br::PipelineState PSOManager::CreateClusterLODAVBOITShadePSO(
     MaterialRasterFlags materialRasterFlags, bool wireframe, UINT psoFlags) {
     auto defines = GetRasterShaderDefines(materialRasterFlags);
     auto lightingDefines = GetShaderDefines(psoFlags, MaterialCompileNone);
@@ -1362,8 +1366,13 @@ org::PipelineState PSOManager::CreateClusterLODAVBOITShadePSO(
     return { std::move(pso), compiledBundle.resourceIDsHash, compiledBundle.resourceDescriptorSlots, CaptureLayoutOwner(soLayout.layout), soLayout.layout };
 }
 
-org::PipelineState PSOManager::CreateClusterLODSoftwareRasterPSO(MaterialRasterFlags materialRasterFlags, CLodRasterOutputKind outputKind) {
+br::PipelineState PSOManager::CreateClusterLODSoftwareRasterPSO(MaterialRasterFlags materialRasterFlags, CLodRasterOutputKind outputKind) {
     auto defines = GetRasterShaderDefines(materialRasterFlags);
+    // The raster-bucket arguments pass is given the same count (RasterBucketCompactAndArgsPass).
+    const uint32_t clustersPerGroup = CLodSoftwareRasterClustersPerGroup(outputKind);
+    static_assert(CLodSoftwareRasterClustersPerGroup(CLodRasterOutputKind::VirtualShadow) == 4u &&
+        CLodSoftwareRasterClustersPerGroup(CLodRasterOutputKind::VisibilityBuffer) == 8u, "update the define strings below");
+    defines.push_back({ L"SW_RASTER_CLUSTERS_PER_GROUP", clustersPerGroup == 4u ? L"4" : L"8" });
     if (outputKind == CLodRasterOutputKind::VirtualShadow) {
         defines.push_back({ L"CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW", L"1" });
         defines.push_back({ L"CLOD_VSM_TWO_LAYER_RASTER_VERSION", L"2" });
@@ -1376,15 +1385,25 @@ org::PipelineState PSOManager::CreateClusterLODSoftwareRasterPSO(MaterialRasterF
         "CLod_SoftwareRasterIndirectPSO");
 }
 
-org::PipelineState PSOManager::CreateDeferredPSO(UINT psoFlags)
+br::PipelineState PSOManager::CreateDeferredPSO(UINT psoFlags, uint32_t shadowingMode)
 {
     auto defines = GetShaderDefines(psoFlags, MaterialCompileFlags::MaterialCompileNone);
-    defines.push_back({ L"CLOD_VSM_ADAPTIVE_RECEIVER_SCREEN_TRACE", L"1" });
-    // The receiver telemetry reads a history texture the graph only has with frame telemetry on.
-    if (!br::runtime::renderer_settings::CLodVirtualShadowFrameTelemetryPath().empty()) {
-        defines.push_back({ L"CLOD_VSM_RECEIVER_TELEMETRY", L"1" });
+    // Each variant is compiled for one shadowing mode, which folds the others out. A shader with every mode compiled in
+    // ran at 255 registers in stochastic mode, where the light loop and shadow map lookups are dead code; the stochastic
+    // variant is at ~73 (docs/deferred-shading-optimization-experiments.md).
+    static constexpr const wchar_t* shadowingModeValues[] = { L"0", L"1", L"2" };
+    defines.push_back({ L"DEFERRED_SHADOWING_MODE", shadowingModeValues[std::min<uint32_t>(shadowingMode, 2u)] });
+    const bool virtualShadowMaps = shadowingMode == static_cast<uint32_t>(ShadowingMode::VirtualShadowMaps);
+    if (!virtualShadowMaps) {
+        defines.push_back({ L"LIGHTING_NO_VIRTUAL_SHADOW_MAPS", L"1" });
+    } else {
+        defines.push_back({ L"CLOD_VSM_ADAPTIVE_RECEIVER_SCREEN_TRACE", L"1" });
+        // The receiver telemetry reads a history texture the graph only has with frame telemetry on.
+        if (!br::runtime::renderer_settings::CLodVirtualShadowFrameTelemetryPath().empty()) {
+            defines.push_back({ L"CLOD_VSM_RECEIVER_TELEMETRY", L"1" });
+        }
     }
-    org::PipelineState pso = MakeComputePipeline(
+    br::PipelineState pso = MakeComputePipeline(
         GetComputeRootSignature().GetHandle(),
         L"shaders/deferred.hlsl",
         L"DeferredCSMain",
@@ -1394,10 +1413,10 @@ org::PipelineState PSOManager::CreateDeferredPSO(UINT psoFlags)
     return pso;
 }
 
-org::PipelineState PSOManager::CreateClusterLODDeepVisibilityResolvePSO(UINT psoFlags)
+br::PipelineState PSOManager::CreateClusterLODDeepVisibilityResolvePSO(UINT psoFlags)
 {
     auto defines = GetShaderDefines(psoFlags, MaterialCompileFlags::MaterialCompileNone);
-    org::PipelineState pso = MakeComputePipeline(
+    br::PipelineState pso = MakeComputePipeline(
         GetComputeRootSignature().GetHandle(),
         L"shaders/ClusterLOD/DeepVisibilityResolve.hlsl",
         L"CLodDeepVisibilityResolveCS",
@@ -1406,7 +1425,7 @@ org::PipelineState PSOManager::CreateClusterLODDeepVisibilityResolvePSO(UINT pso
     return pso;
 }
 
-org::PipelineState PSOManager::CreateMaterialEvalPSO(MaterialCompileFlags materialCompileFlags)
+br::PipelineState PSOManager::CreateMaterialEvalPSO(MaterialCompileFlags materialCompileFlags)
 {
     auto shaderDefines = GetShaderDefines(0, materialCompileFlags);
     shaderDefines.push_back({ L"VISUTIL_SPECIALIZED_MATERIAL_EVAL", L"1" });
@@ -1526,7 +1545,7 @@ void PSOManager::PrecompileShaderBundleArtifact(const ShaderInfoBundle& shaderIn
     CompileShadersForBackend(shaderInfoBundle, rhi::Backend::D3D12);
 }
 
-org::PipelineState PSOManager::MakeComputePipeline(rhi::PipelineLayoutHandle layout,
+br::PipelineState PSOManager::MakeComputePipeline(rhi::PipelineLayoutHandle layout,
     const wchar_t* shaderPath,
     const wchar_t* entryPoint,
     std::vector<DxcDefine> defines,
@@ -1546,11 +1565,11 @@ org::PipelineState PSOManager::MakeComputePipeline(rhi::PipelineLayoutHandle lay
             define.Value ? define.Value : L""
         });
     }
-    org::PipelineState pipeline = BuildComputePipeline(recipe);
+    br::PipelineState pipeline = BuildComputePipeline(recipe);
     return RegisterComputePipeline(std::move(pipeline), std::move(recipe));
 }
 
-org::PipelineState PSOManager::BuildComputePipeline(const ComputeRecipe& recipe, const br::diagnostics::RecompileOptions* options)
+br::PipelineState PSOManager::BuildComputePipeline(const ComputeRecipe& recipe, const br::diagnostics::RecompileOptions* options)
 {
     std::vector<OwnedDefine> ownedDefines = recipe.defines;
     if (options) {
@@ -1602,7 +1621,7 @@ org::PipelineState PSOManager::BuildComputePipeline(const ComputeRecipe& recipe,
         pso->SetName(recipe.debugName.c_str());
     }
 
-    org::PipelineState out{
+    br::PipelineState out{
         std::move(pso),
         compiled.resourceIDsHash,
         compiled.resourceDescriptorSlots, recipe.layoutOwner, recipe.layout
@@ -1664,7 +1683,7 @@ std::vector<std::string> RayTracingPipelineRecipe::GroupNames() const {
     return names;
 }
 
-org::PipelineState PSOManager::BuildRayTracingPipeline(const RayTracingPipelineRecipe& recipe)
+br::PipelineState PSOManager::BuildRayTracingPipeline(const RayTracingPipelineRecipe& recipe)
 {
     if (DeviceManager::GetInstance().GetBackend() != rhi::Backend::D3D12) {
         throw std::runtime_error("Ray tracing pipeline '" + recipe.debugName + "' needs the D3D12 backend");
@@ -1723,7 +1742,7 @@ org::PipelineState PSOManager::BuildRayTracingPipeline(const RayTracingPipelineR
     }
     if (!recipe.debugName.empty()) pso->SetName(recipe.debugName.c_str());
 
-    org::PipelineState out{ std::move(pso), library.resourceIDsHash, library.resourceDescriptorSlots, CaptureLayoutOwner(layout), layout };
+    br::PipelineState out{ std::move(pso), library.resourceIDsHash, library.resourceDescriptorSlots, CaptureLayoutOwner(layout), layout };
     const auto payload = out.GetPayload();
     payload->bytecodeHash = HashBytesStable(library.libraryBlob->GetBufferPointer(), library.libraryBlob->GetBufferSize());
     payload->sourceHash = HashRayTracingRecipe(recipe);
@@ -1731,7 +1750,7 @@ org::PipelineState PSOManager::BuildRayTracingPipeline(const RayTracingPipelineR
     return out;
 }
 
-org::PipelineState PSOManager::MakeRayTracingPipeline(RayTracingPipelineRecipe recipe)
+br::PipelineState PSOManager::MakeRayTracingPipeline(RayTracingPipelineRecipe recipe)
 {
     const uint64_t recipeHash = HashRayTracingRecipe(recipe);
     const auto findExisting = [&]() -> const LivePipelineEntry* {
@@ -1745,7 +1764,7 @@ org::PipelineState PSOManager::MakeRayTracingPipeline(RayTracingPipelineRecipe r
         if (const LivePipelineEntry* existing = findExisting()) return existing->state;
     }
 
-    org::PipelineState pipeline = BuildRayTracingPipeline(recipe);
+    br::PipelineState pipeline = BuildRayTracingPipeline(recipe);
 
     std::scoped_lock lock(m_livePipelineMutex);
     if (const LivePipelineEntry* existing = findExisting()) return existing->state;
@@ -1774,7 +1793,7 @@ org::PipelineState PSOManager::MakeRayTracingPipeline(RayTracingPipelineRecipe r
     return pipeline;
 }
 
-const org::PipelineState* PSOManager::TryGetComputePipeline(const std::wstring& shaderPath, const std::wstring& entryPoint,
+const br::PipelineState* PSOManager::TryGetComputePipeline(const std::wstring& shaderPath, const std::wstring& entryPoint,
     const std::vector<std::pair<std::wstring, std::wstring>>& defines, const std::string& debugName)
 {
     uint64_t key = 14695981039346656037ull;
@@ -1800,7 +1819,7 @@ const org::PipelineState* PSOManager::TryGetComputePipeline(const std::wstring& 
         });
 }
 
-const org::PipelineState* PSOManager::TryGetRayTracingPipeline(const RayTracingPipelineRecipe& recipe)
+const br::PipelineState* PSOManager::TryGetRayTracingPipeline(const RayTracingPipelineRecipe& recipe)
 {
     return TryGetOrRequestPipelineState(
         &PSOManager::m_rayTracingPSOCache,
@@ -1810,7 +1829,7 @@ const org::PipelineState* PSOManager::TryGetRayTracingPipeline(const RayTracingP
         [this, recipe]() { return MakeRayTracingPipeline(recipe); });
 }
 
-org::PipelineState PSOManager::RegisterComputePipeline(org::PipelineState state, ComputeRecipe recipe)
+br::PipelineState PSOManager::RegisterComputePipeline(br::PipelineState state, ComputeRecipe recipe)
 {
     std::scoped_lock lock(m_livePipelineMutex);
     std::string id = recipe.debugName.empty() ? ws2s(recipe.entryPoint) : recipe.debugName;
@@ -1856,12 +1875,12 @@ org::PipelineState PSOManager::RegisterComputePipeline(org::PipelineState state,
     return state;
 }
 
-org::PipelineState PSOManager::RegisterPipeline(
-    org::PipelineState state,
+br::PipelineState PSOManager::RegisterPipeline(
+    br::PipelineState state,
     std::string id,
     std::string displayName,
     br::extensions::PipelineKind kind,
-    std::function<org::PipelineState()> rebuild)
+    std::function<br::PipelineState()> rebuild)
 {
     std::scoped_lock lock(m_livePipelineMutex);
     const auto slot = state.GetSlot();
@@ -2997,16 +3016,16 @@ const rhi::PipelineLayout& PSOManager::GetComputeRootSignature(org::BackendInsta
 namespace {
 struct LibraryPipeline {
     std::string id;
-    org::PipelineLibraryEntryPtr entry;
+    br::PipelineLibraryEntryPtr entry;
 };
 
 // The library's live pipelines under stable ids: the pipeline's name, and its content key when several share the name.
 std::vector<LibraryPipeline> ListLibraryPipelines() {
     std::vector<LibraryPipeline> result;
-    const auto* runtime = org::Runtime::Current();
-    if (!runtime || !runtime->Pipelines()) return result;
+    auto* library = PSOManager::GetInstance().GetPipelineLibrary();
+    if (!library) return result;
     std::map<std::string, uint32_t> nameCounts;
-    auto entries = runtime->Pipelines()->LiveEntries();
+    auto entries = library->LiveEntries();
     for (const auto& entry : entries) ++nameCounts[entry->Name()];
     result.reserve(entries.size());
     for (auto& entry : entries) {
@@ -3022,11 +3041,11 @@ std::optional<LibraryPipeline> FindLibraryPipeline(const std::string& id) {
     return std::nullopt;
 }
 
-std::vector<std::string> LibraryPipelineShaderPaths(const org::PipelineDesc& desc) {
+std::vector<std::string> LibraryPipelineShaderPaths(const br::PipelineDesc& desc) {
     std::vector<std::string> paths;
     std::visit([&](const auto& value) {
         using T = std::decay_t<decltype(value)>;
-        if constexpr (std::is_same_v<T, org::ComputePipelineDesc>) {
+        if constexpr (std::is_same_v<T, br::ComputePipelineDesc>) {
             paths.push_back(ws2s(value.shader.path));
         } else {
             for (const auto* shader : {&value.vertex, &value.amplification, &value.mesh, &value.pixel})
@@ -3041,7 +3060,7 @@ bool PSOManager::RebuildAllPipelines(std::string& error) {
     struct RebuildTarget {
         std::string id;
         ComputeRecipe computeRecipe;
-        std::function<org::PipelineState()> rebuild;
+        std::function<br::PipelineState()> rebuild;
         bool isComputeRecipe = false;
     };
 
@@ -3090,7 +3109,7 @@ bool PSOManager::RebuildAllPipelines(std::string& error) {
     candidates.reserve(targets.size());
     try {
         for (const RebuildTarget& target : targets) {
-            org::PipelineState candidate = target.isComputeRecipe
+            br::PipelineState candidate = target.isComputeRecipe
                 ? BuildComputePipeline(target.computeRecipe)
                 : target.rebuild();
             auto payload = candidate.GetPayload();
@@ -3106,8 +3125,7 @@ bool PSOManager::RebuildAllPipelines(std::string& error) {
     }
 
     // The library's pipelines, on every device they were built for. The caller stalled the GPU and rebuilds the graph after.
-    org::PipelineLibrary* library = nullptr;
-    if (const auto* runtime = org::Runtime::Current()) library = runtime->Pipelines().get();
+    br::PipelineLibrary* library = GetPipelineLibrary();
     size_t libraryRebuilt = 0;
     if (error.empty() && library) {
         auto pipelines = ListLibraryPipelines();
@@ -3115,7 +3133,7 @@ bool PSOManager::RebuildAllPipelines(std::string& error) {
         auto failureMutex = std::make_shared<std::mutex>();
         auto failure = std::make_shared<std::string>();
         for (const auto& pipeline : pipelines) {
-            org::PipelineRebuildOptions rebuild;
+            br::PipelineRebuildOptions rebuild;
             rebuild.bypassCache = false;
             rebuild.allowInterfaceChange = true;
             rebuild.completed = [remaining, failureMutex, failure, id = pipeline.id](const std::string& buildError) {
@@ -3202,7 +3220,7 @@ std::vector<br::diagnostics::LivePipelineInfo> PSOManager::ListPipelines() const
         br::diagnostics::LivePipelineInfo info;
         info.id = pipeline.id;
         info.displayName = pipeline.entry->Name();
-        info.kind = std::holds_alternative<org::ComputePipelineDesc>(pipeline.entry->Desc())
+        info.kind = std::holds_alternative<br::ComputePipelineDesc>(pipeline.entry->Desc())
             ? br::extensions::PipelineKind::Compute : br::extensions::PipelineKind::Graphics;
         info.shaderPaths = LibraryPipelineShaderPaths(pipeline.entry->Desc());
         info.activeGeneration = payload ? payload->generation : 0;
@@ -3251,7 +3269,7 @@ std::optional<br::diagnostics::LiveJobInfo> PSOManager::GetLiveJob(uint64_t jobI
 uint64_t PSOManager::RequestRecompile(const std::string& pipelineId, br::diagnostics::RecompileOptions options)
 {
     ComputeRecipe recipe;
-    std::function<org::PipelineState()> rebuild;
+    std::function<br::PipelineState()> rebuild;
     bool supportsDefineOverrides = false;
     const uint64_t jobId = m_nextLiveJobId.fetch_add(1, std::memory_order_relaxed);
     {
@@ -3267,7 +3285,7 @@ uint64_t PSOManager::RequestRecompile(const std::string& pipelineId, br::diagnos
                 .pipelineId = pipelineId,
                 .state = br::diagnostics::LiveJobState::Compiling
             });
-            org::PipelineRebuildOptions rebuild;
+            br::PipelineRebuildOptions rebuild;
             rebuild.label = options.label;
             std::map<std::string, std::string> defineOverrides;
             for (const auto& [name, value] : options.defineOverrides) {
@@ -3290,7 +3308,7 @@ uint64_t PSOManager::RequestRecompile(const std::string& pipelineId, br::diagnos
                         }
                     });
             };
-            const auto generation = org::Runtime::Current()->Pipelines()->Rebuild(library->entry, std::move(rebuild));
+            const auto generation = GetPipelineLibrary()->Rebuild(library->entry, std::move(rebuild));
             m_liveJobs.at(jobId).generation = generation;
             m_libraryJobs.defineOverrides[pipelineId][generation] = std::move(defineOverrides);
             return jobId;
@@ -3337,7 +3355,7 @@ uint64_t PSOManager::RequestRecompile(const std::string& pipelineId, br::diagnos
                 // The candidate reads the source files again. What it builds is stored under what it read, so an
                 // edited candidate can never stand in for the unedited shader on a later launch.
                 ScopedShaderReload reload;
-                org::PipelineState candidate = supportsDefineOverrides
+                br::PipelineState candidate = supportsDefineOverrides
                     ? BuildComputePipeline(recipe, &options)
                     : rebuild();
                 auto payload = candidate.GetPayload();
@@ -3397,7 +3415,7 @@ uint64_t PSOManager::RequestActivation(const std::string& pipelineId, uint64_t g
         if (!library) throw std::runtime_error("Unknown live pipeline '" + pipelineId + "'");
         if (m_libraryJobs.compiling.contains(pipelineId))
             throw std::runtime_error("Pipeline '" + pipelineId + "' has a live compile in progress");
-        if (!org::Runtime::Current()->Pipelines()->Activate(library->entry, generation))
+        if (!GetPipelineLibrary()->Activate(library->entry, generation))
             throw std::runtime_error("Pipeline '" + pipelineId + "' has no retained generation " + std::to_string(generation));
         m_liveJobs.emplace(jobId, br::diagnostics::LiveJobInfo{
             .id = jobId,
@@ -3440,7 +3458,7 @@ void PSOManager::PublishPendingLivePipelines(std::vector<PipelineRetirementPoint
 {
     std::scoped_lock lock(m_livePipelineMutex);
     // The library published a job's result before reporting it, or does so here.
-    if (const auto* runtime = org::Runtime::Current(); runtime && runtime->Pipelines()) runtime->Pipelines()->PublishRebuilt();
+    if (auto* library = GetPipelineLibrary()) library->PublishRebuilt();
     for (const auto jobId : m_libraryJobs.awaitingPublish) {
         auto& job = m_liveJobs.at(jobId);
         job.state = br::diagnostics::LiveJobState::Published;

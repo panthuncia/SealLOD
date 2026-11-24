@@ -130,7 +130,6 @@ private:
     std::function<void(std::vector<float>)> setDirectionalLightCascadeSplits;
     std::function<uint8_t()> getNumDirectionalLightCascades;
     std::function<float()> getMaxShadowDistance;
-    std::function<bool()> getMeshShadersEnabled;
 
     br::extensions::SettingSubscription m_renderResSubscription;
 

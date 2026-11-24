@@ -2,7 +2,7 @@
 
 #include <memory>
 
-#include "Render/PipelineState.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "BasicRenderer/Scene/RendererComponents.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
@@ -13,7 +13,7 @@ namespace org { class DynamicBuffer; }
 class VirtualShadowInvalidationQueue;
 
 struct VirtualShadowMapInvalidatePagesBindings {
-    org::PipelineState pipeline, boundsPipeline;
+    br::PipelineState pipeline, boundsPipeline;
     org::DeclaredViewToken inputs, inputCount, clipmapInfo, bounds;
     org::DeclaredViewToken pageTable, dirtyFlags, pageMetadata, pageViewInfo, stats;
 };
@@ -36,6 +36,9 @@ public:
         std::shared_ptr<org::Buffer> pageMetadataBuffer,
         std::shared_ptr<org::Buffer> directionalPageViewInfoBuffer,
         std::shared_ptr<org::Buffer> statsBuffer,
+        // Made once on the render thread (FrameBuildInputs::vsmTransformChangedQuery). Null makes one here, which needs the
+        // render thread.
+        std::shared_ptr<flecs::query<const Components::ObjectDrawInfo>> transformChangedQuery,
         std::shared_ptr<VirtualShadowInvalidationQueue> extensionInvalidations = nullptr);
 
     VirtualShadowMapInvalidatePagesBindings Declare(org::PassBuilder& builder);
@@ -60,5 +63,5 @@ private:
     uint32_t m_pendingInputCount = 0u;
     uint32_t m_pendingBoundsCount = 0u;
     bool m_invalidateAllActiveClipmaps = false;
-    flecs::query<const Components::ObjectDrawInfo> m_transformChangedQuery;
+    std::shared_ptr<flecs::query<const Components::ObjectDrawInfo>> m_transformChangedQuery;
 };

@@ -19,8 +19,9 @@
 #include <boost/container_hash/hash.hpp>
 
 #include <rhi.h>
-#include "Render/PipelineState.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "Render/QueueKind.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 
 #pragma warning(push, 0)   // Disable all warnings for dxc header
 #include "ThirdParty/DirectX/dxcapi.h"
@@ -97,6 +98,7 @@ struct RayTracingPipelineRecipe {
 };
 
 namespace org::services { class ShaderIncludeTracker; }
+namespace br { class PipelineLibrary; }
 class PSOManagerShaderBuild;
 
 class PSOManager {
@@ -109,29 +111,30 @@ public:
     void initializeShaderCompiler();
     void Cleanup();
 
-    const org::PipelineState& GetClusterLODRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
-    const org::PipelineState& GetClusterLODVirtualShadowRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
-    const org::PipelineState& GetClusterLODDeepVisibilityRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
-    const org::PipelineState& GetClusterLODAVBOITOccupancyPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
-    const org::PipelineState& GetClusterLODAVBOITRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
-    const org::PipelineState& GetClusterLODAVBOITShadePSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false, UINT psoFlags = 0);
-    const org::PipelineState& GetClusterLODSoftwareRasterPSO(MaterialRasterFlags materialRasterFlags, CLodRasterOutputKind outputKind);
-    const org::PipelineState& GetClusterLODDeepVisibilityResolvePSO(UINT psoFlags);
+    const br::PipelineState& GetClusterLODRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
+    const br::PipelineState& GetClusterLODVirtualShadowRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
+    const br::PipelineState& GetClusterLODDeepVisibilityRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
+    const br::PipelineState& GetClusterLODAVBOITOccupancyPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
+    const br::PipelineState& GetClusterLODAVBOITRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
+    const br::PipelineState& GetClusterLODAVBOITShadePSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false, UINT psoFlags = 0);
+    const br::PipelineState& GetClusterLODSoftwareRasterPSO(MaterialRasterFlags materialRasterFlags, CLodRasterOutputKind outputKind);
+    const br::PipelineState& GetClusterLODDeepVisibilityResolvePSO(UINT psoFlags);
 
-    const org::PipelineState* TryGetClusterLODRasterPSO(
+    const br::PipelineState* TryGetClusterLODRasterPSO(
         MaterialRasterFlags materialRasterFlags,
         bool wireframe = false,
         bool singleView = false);
-    const org::PipelineState* TryGetClusterLODVirtualShadowRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
-    const org::PipelineState* TryGetClusterLODDeepVisibilityRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
-    const org::PipelineState* TryGetClusterLODAVBOITOccupancyPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
-    const org::PipelineState* TryGetClusterLODAVBOITRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
-    const org::PipelineState* TryGetClusterLODAVBOITShadePSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false, UINT psoFlags = 0);
-    const org::PipelineState* TryGetClusterLODSoftwareRasterPSO(MaterialRasterFlags materialRasterFlags, CLodRasterOutputKind outputKind);
-    const org::PipelineState* TryGetMaterialEvalPSO(MaterialCompileFlags materialCompileFlags);
+    const br::PipelineState* TryGetClusterLODVirtualShadowRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
+    const br::PipelineState* TryGetClusterLODDeepVisibilityRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
+    const br::PipelineState* TryGetClusterLODAVBOITOccupancyPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
+    const br::PipelineState* TryGetClusterLODAVBOITRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
+    const br::PipelineState* TryGetClusterLODAVBOITShadePSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false, UINT psoFlags = 0);
+    const br::PipelineState* TryGetClusterLODSoftwareRasterPSO(MaterialRasterFlags materialRasterFlags, CLodRasterOutputKind outputKind);
+    const br::PipelineState* TryGetMaterialEvalPSO(MaterialCompileFlags materialCompileFlags);
 
 
-    const org::PipelineState& GetDeferredPSO(UINT psoFlags);
+    // shadowingMode is the ShadowingMode the variant is compiled for; the pass passes the mode it sets in the root constants.
+    const br::PipelineState& GetDeferredPSO(UINT psoFlags, uint32_t shadowingMode);
     // Pipeline cache entries live until Cleanup(); passes may cache references
     // to them keyed on this generation.
     uint64_t PipelineCacheGeneration() const noexcept { return m_asyncPSOGeneration.load(std::memory_order_acquire); }
@@ -145,15 +148,19 @@ public:
     // Compiles and creates the state object on the calling thread, unless the same recipe was made before. Throws when the
     // primary backend isn't D3D12. It has no peer-backend build: ResolvePipeline leaves it absent, so its pass must stay on
     // the primary device.
-    org::PipelineState MakeRayTracingPipeline(RayTracingPipelineRecipe recipe);
+    br::PipelineState MakeRayTracingPipeline(RayTracingPipelineRecipe recipe);
     // The same, on a shader-compile worker: returns null until the state object exists. Creating one can stall for long
     // enough that a frame must not wait on it.
-    const org::PipelineState* TryGetRayTracingPipeline(const RayTracingPipelineRecipe& recipe);
+    const br::PipelineState* TryGetRayTracingPipeline(const RayTracingPipelineRecipe& recipe);
     // A compute pipeline on the compute root signature, compiled on a shader-compile worker on first request: null until it
     // exists. For a pass whose defines follow runtime state (the lens self-test's generated polynomial include).
-    const org::PipelineState* TryGetComputePipeline(const std::wstring& shaderPath, const std::wstring& entryPoint,
+    const br::PipelineState* TryGetComputePipeline(const std::wstring& shaderPath, const std::wstring& entryPoint,
         const std::vector<std::pair<std::wstring, std::wstring>>& defines, const std::string& debugName);
 
+    // The library that builds the pipelines passes declare by description (br::render::DeclarePipeline). The renderer
+    // creates it with the task service and the device, before any graph is built.
+    void SetPipelineLibrary(std::shared_ptr<br::PipelineLibrary> library) { m_pipelineLibrary = std::move(library); }
+    br::PipelineLibrary* GetPipelineLibrary() const noexcept { return m_pipelineLibrary.get(); }
     std::shared_ptr<const void> CaptureLayoutOwner(rhi::PipelineLayoutHandle layout) const;
     const rhi::PipelineLayout& GetRootSignature();
     const rhi::PipelineLayout& GetComputeRootSignature();
@@ -191,7 +198,7 @@ public:
 private:
     // The permutation caches' compute pipelines (deferred shading, software raster, ...), primary device only. Passes declare
     // theirs through org::RenderPassBuilder::Pipeline instead.
-    org::PipelineState MakeComputePipeline(rhi::PipelineLayoutHandle layout,
+    br::PipelineState MakeComputePipeline(rhi::PipelineLayoutHandle layout,
         const wchar_t* shaderPath,
         const wchar_t* entryPoint,
         std::vector<DxcDefine> defines = {},
@@ -217,11 +224,11 @@ private:
         std::string id;
         std::string displayName;
         br::extensions::PipelineKind kind = br::extensions::PipelineKind::Compute;
-        org::PipelineState state;
+        br::PipelineState state;
         ComputeRecipe computeRecipe;
-        std::function<org::PipelineState()> rebuild;
+        std::function<br::PipelineState()> rebuild;
         // Ray tracing pipelines: the recipe rebuilt with define overrides (added, or replacing a define of the same name).
-        std::function<org::PipelineState(const std::map<std::wstring, std::wstring>&)> rebuildWithDefines;
+        std::function<br::PipelineState(const std::map<std::wstring, std::wstring>&)> rebuildWithDefines;
         std::vector<std::string> shaderPaths;
         uint64_t rayTracingRecipeHash = 0;
         bool supportsDefineOverrides = false;
@@ -272,6 +279,7 @@ private:
         Microsoft::WRL::ComPtr<IDxcBlobEncoding> blob;
     };
 
+    std::shared_ptr<br::PipelineLibrary> m_pipelineLibrary;
     PSOManager() = default;
     struct LayoutGeneration {
         rhi::PipelineLayoutPtr rootSignature, peerRootSignature;
@@ -280,17 +288,17 @@ private:
     };
     std::shared_ptr<LayoutGeneration> m_layoutGeneration = std::make_shared<LayoutGeneration>();
 
-    std::unordered_map<RasterPSOKey, org::PipelineState> m_clusterLODRasterPSOCache;
-    std::unordered_map<RasterPSOKey, org::PipelineState> m_clusterLODVirtualShadowRasterPSOCache;
-    std::unordered_map<RasterPSOKey, org::PipelineState> m_clusterLODDeepVisibilityRasterPSOCache;
-    std::unordered_map<RasterPSOKey, org::PipelineState> m_clusterLODAVBOITOccupancyPSOCache;
-    std::unordered_map<RasterPSOKey, org::PipelineState> m_clusterLODAVBOITRasterPSOCache;
-    std::unordered_map<RasterPSOKey, org::PipelineState> m_clusterLODAVBOITShadePSOCache;
-    std::unordered_map<uint64_t, org::PipelineState> m_clusterLODSoftwareRasterPSOCache;
-    std::unordered_map<unsigned int, org::PipelineState> m_clusterLODDeepVisibilityResolvePSOCache;
-    std::unordered_map<MaterialCompileFlags, org::PipelineState> m_materialEvalPSOCache;
-    std::unordered_map<uint64_t, org::PipelineState> m_rayTracingPSOCache;
-    std::unordered_map<uint64_t, org::PipelineState> m_onDemandComputePSOCache;
+    std::unordered_map<RasterPSOKey, br::PipelineState> m_clusterLODRasterPSOCache;
+    std::unordered_map<RasterPSOKey, br::PipelineState> m_clusterLODVirtualShadowRasterPSOCache;
+    std::unordered_map<RasterPSOKey, br::PipelineState> m_clusterLODDeepVisibilityRasterPSOCache;
+    std::unordered_map<RasterPSOKey, br::PipelineState> m_clusterLODAVBOITOccupancyPSOCache;
+    std::unordered_map<RasterPSOKey, br::PipelineState> m_clusterLODAVBOITRasterPSOCache;
+    std::unordered_map<RasterPSOKey, br::PipelineState> m_clusterLODAVBOITShadePSOCache;
+    std::unordered_map<uint64_t, br::PipelineState> m_clusterLODSoftwareRasterPSOCache;
+    std::unordered_map<unsigned int, br::PipelineState> m_clusterLODDeepVisibilityResolvePSOCache;
+    std::unordered_map<MaterialCompileFlags, br::PipelineState> m_materialEvalPSOCache;
+    std::unordered_map<uint64_t, br::PipelineState> m_rayTracingPSOCache;
+    std::unordered_map<uint64_t, br::PipelineState> m_onDemandComputePSOCache;
 
     std::unordered_set<RasterPSOKey> m_pendingClusterLODRasterPSOs;
     std::unordered_set<RasterPSOKey> m_pendingClusterLODVirtualShadowRasterPSOs;
@@ -303,7 +311,7 @@ private:
     std::unordered_set<uint64_t> m_pendingRayTracingPSOs;
     std::unordered_set<uint64_t> m_pendingOnDemandComputePSOs;
 
-	std::unordered_map<unsigned int, org::PipelineState> m_deferredPSOCache;
+	std::unordered_map<uint64_t, br::PipelineState> m_deferredPSOCache;
 
     ComPtr<IDxcUtils> pUtils;
     ComPtr<IDxcCompiler3> pCompiler;
@@ -321,32 +329,32 @@ private:
     std::atomic<uint64_t> m_nextLiveJobId = 1;
     std::atomic<uint64_t> m_pipelineEpoch = 1;
 
-    org::PipelineState CreateClusterLODRasterPSO(
+    br::PipelineState CreateClusterLODRasterPSO(
         MaterialRasterFlags materialRasterFlags,
         bool wireframe = false,
         bool singleView = false);
-    org::PipelineState CreateClusterLODVirtualShadowRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
-    org::PipelineState CreateClusterLODDeepVisibilityRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
-    org::PipelineState CreateClusterLODAVBOITOccupancyPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
-    org::PipelineState CreateClusterLODAVBOITRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
-    org::PipelineState CreateClusterLODAVBOITShadePSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false, UINT psoFlags = 0);
-    org::PipelineState CreateClusterLODSoftwareRasterPSO(MaterialRasterFlags materialRasterFlags, CLodRasterOutputKind outputKind);
-    org::PipelineState CreateClusterLODDeepVisibilityResolvePSO(UINT psoFlags);
-    org::PipelineState CreateMaterialEvalPSO(MaterialCompileFlags materialCompileFlags);
+    br::PipelineState CreateClusterLODVirtualShadowRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
+    br::PipelineState CreateClusterLODDeepVisibilityRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
+    br::PipelineState CreateClusterLODAVBOITOccupancyPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
+    br::PipelineState CreateClusterLODAVBOITRasterPSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false);
+    br::PipelineState CreateClusterLODAVBOITShadePSO(MaterialRasterFlags materialRasterFlags, bool wireframe = false, UINT psoFlags = 0);
+    br::PipelineState CreateClusterLODSoftwareRasterPSO(MaterialRasterFlags materialRasterFlags, CLodRasterOutputKind outputKind);
+    br::PipelineState CreateClusterLODDeepVisibilityResolvePSO(UINT psoFlags);
+    br::PipelineState CreateMaterialEvalPSO(MaterialCompileFlags materialCompileFlags);
 
-    org::PipelineState CreateDeferredPSO(UINT psoFlags);
-    org::PipelineState BuildComputePipeline(const ComputeRecipe& recipe, const br::diagnostics::RecompileOptions* options = nullptr);
-    org::PipelineState RegisterComputePipeline(org::PipelineState state, ComputeRecipe recipe);
-    org::PipelineState BuildRayTracingPipeline(const RayTracingPipelineRecipe& recipe);
-    org::PipelineState RegisterPipeline(
-        org::PipelineState state,
+    br::PipelineState CreateDeferredPSO(UINT psoFlags, uint32_t shadowingMode);
+    br::PipelineState BuildComputePipeline(const ComputeRecipe& recipe, const br::diagnostics::RecompileOptions* options = nullptr);
+    br::PipelineState RegisterComputePipeline(br::PipelineState state, ComputeRecipe recipe);
+    br::PipelineState BuildRayTracingPipeline(const RayTracingPipelineRecipe& recipe);
+    br::PipelineState RegisterPipeline(
+        br::PipelineState state,
         std::string id,
         std::string displayName,
         br::extensions::PipelineKind kind,
-        std::function<org::PipelineState()> rebuild);
+        std::function<br::PipelineState()> rebuild);
 
     template <typename TCache, typename TPending, typename TKey, typename TFactory>
-    const org::PipelineState* TryGetOrRequestPipelineState(
+    const br::PipelineState* TryGetOrRequestPipelineState(
         TCache PSOManager::* cacheMember,
         TPending PSOManager::* pendingMember,
         const TKey& key,
@@ -398,7 +406,7 @@ private:
                     ~PendingRelease() { pending.fetch_sub(1, std::memory_order_acq_rel); }
                 } pendingRelease{ m_asyncPSOsPending };
                 try {
-                    org::PipelineState pipelineState = factory();
+                    br::PipelineState pipelineState = factory();
                     pipelineState = RegisterPipeline(
                         std::move(pipelineState),
                         taskName + ".key=" + std::to_string(std::hash<TKey>{}(key)),

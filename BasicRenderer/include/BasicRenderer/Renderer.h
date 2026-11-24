@@ -40,6 +40,7 @@
 #include <BasicRenderer/Extensions/BuiltinResources.h>
 #include <BasicRenderer/Extensions/RenderGraphExtensionRegistration.h>
 #include "BasicRenderer/Runtime/Detail/FrameTimer.h"
+#include "BasicRenderer/Runtime/Detail/FrameRevisions.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "BasicRenderer/Runtime/Detail/OpenPBRLookupResources.h"
 #include <BasicRenderer/Pipeline/RendererSettings.h>
@@ -68,11 +69,19 @@ class DynamicResource;
 class ExternalTextureResource;
 class PixelBuffer;
 class RenderGraph;
+class GraphHost;
 class GraphInstance;
-class Execution;
 class Runtime;
+struct IRenderGraphExtension;
+struct UpdateExecutionContext;
 }
+class SettingsSnapshot;
 namespace br::render {
+struct FrameBuild;
+struct FrameBuildJob;
+struct FrameBuildOutputs;
+class FrameBuildWorker;
+class DebugSceneSnapshotService;
 class RendererFrameInputs;
 class TextureJobGraph;
 class EnvironmentJobGraph;
@@ -81,10 +90,10 @@ class RendererStateRequestService;
 class AsyncStateGraph;
 class VersionedBufferFamily;
 class VersionedBufferRuntime;
+class RenderGraphIOService;
 }
 namespace br::telemetry { enum class CpuTaskDomain : uint8_t; }
 class CLodStreamingSystem;
-class VirtualShadowCasterRegistry;
 class ObjectManager;
 class LightManager;
 class Environment;
@@ -96,7 +105,7 @@ class ViewManager;
 class MaterialManager;
 class TerrainManager;
 class MeshManager;
-namespace br { class ReadbackManager; }
+namespace br { class ReadbackManager; class FrameReadbackCaptures; }
 namespace br::render { class CLodRayTracingSystem; }
 
 namespace org::runtime {
@@ -216,6 +225,9 @@ public:
     std::string HandleLensControl(const std::string& command, const std::string& requestJson);
     // upscaler.get: the upscaling mode requested, the one the current graph runs and what its last evaluation ran, as JSON.
     std::string DescribeUpscaler() const;
+    // renderer.revisions: graph builds so far, the last build's reasons, what is pending, and the frame count, as JSON
+    // ({"builds", "last_build_frame", "last_build_reasons", "pending", "topology_requests", "frames"}).
+    std::string DescribeGraphRevisions() const;
     // upscaler.simulate_failure: see UpscalingManager::SimulateFailures.
     void SimulateUpscalerFailures(uint32_t outOfMemoryFrames, uint32_t settingsFailures);
     // Reads the primary view's visibility and visible clusters from one frame, so a tool can say what
@@ -319,19 +331,80 @@ private:
     // GPU mip generation and BC7 compression, in a graph of their own next to the frame graph.
     std::unique_ptr<br::render::TextureJobGraph> m_textureJobs;
     std::unique_ptr<br::render::EnvironmentJobGraph> m_environmentJobs;
-    // The frame graph, adopted by an instance that BR declares (Rebuild) and drives (Prepare, then Execution::Submit).
-    std::unique_ptr<org::GraphInstance> m_frameGraph;
-    org::RenderGraph* currentRenderGraph = nullptr;  // m_frameGraph's
-    std::unique_ptr<org::Execution> m_preparedFrame;  // prepared by Update, submitted by Render
+    // The frame graphs' host. It builds the graph from extension factories (the renderer's declarations and its pipeline
+    // extensions, FrameGraphExtensions.h), and prepares and submits each frame (ExecuteFrame).
+    std::unique_ptr<org::GraphHost> m_frameHost;
+    // Diagnostics (BASICRENDERER_FRAME_GRAPH_INSTANCE=1): the frame graph adopted by a GraphInstance instead, as before GraphHost.
+    std::unique_ptr<org::GraphInstance> m_frameInstance;
+    bool m_useGraphInstance = false;
+    // The host's epochs: one that holds only the host's upload pass, run on frames the renderer holds back (publication
+    // backpressure) so staged uploads still reach the GPU; and the frame itself.
+    static constexpr uint32_t kUploadEpoch = 0;
+    static constexpr uint32_t kFrameEpoch = 1;
+    // The host's graph. A build replaces it, so it is read again after each attach (FinishFrameBuild).
+    org::RenderGraph* currentRenderGraph = nullptr;
+    // The extension ids registered on the host, in build order, so a change of extensions removes the old ones. Each id's
+    // factory makes what the build in progress decided for it (FrameBuildInputs::extensionMakers): every graph gets its
+    // own extension instances, which live and die with it.
+    std::vector<std::string> m_frameHostExtensionIds;
+    // The graph IO service: it persists, each graph gets its own extension over it.
+    std::shared_ptr<br::render::RenderGraphIOService> m_frameIoService;
+    // Set by ExecuteFrameGraph (in Update) once the frame graph was submitted; Render presents that frame.
+    bool m_frameExecuted = false;
+    uint8_t m_executedPresentationSlot = 0;  // the renderer's slot: presentation color and frame fence
+    uint8_t m_executedFrameIndex = 0;        // the swapchain image acquired for it
     bool m_renderGraphRuntimeInitialized = false;
     br::pipeline::PipelineRecipe m_pipelineRecipe;
     std::optional<br::pipeline::PipelineRecipe> m_pendingPipelineRecipe;
     std::optional<br::pipeline::PipelineRecipe> m_pipelineRollbackRecipe;
     mutable std::mutex m_pipelineRecipeMutex;
-    bool m_pipelineExtensionsDirty = true;
     bool m_syncingPipelineTopologySettings = false;
     std::function<void()> m_pipelineReplacementDebugBreakHandler;
-    bool rebuildRenderGraph = true;
+    // Every request for graph work goes through here (RequestGraphRebuild); Update consumes them at one point per frame.
+    br::render::FrameRevisions m_frameRevisions;
+    // The build of the attached graph: its inputs (taken on the render thread before the build) and outputs (published after
+    // it). See MakeFrameBuild and PublishFrameBuild.
+    std::shared_ptr<br::render::FrameBuild> m_frameBuild;
+    // Frame-graph builds run on this thread while the attached graph keeps rendering (M3 step 9); the render thread attaches a
+    // finished one at its consolidation point (ConsolidateFrameGraph). Null with BASICRENDERER_SYNC_FRAME_BUILD=1 and for the
+    // in-place graph (BASICRENDERER_FRAME_GRAPH_INSTANCE): those build on the render thread.
+    std::unique_ptr<br::render::FrameBuildWorker> m_frameBuildWorker;
+    // The next build runs on the render thread: after a GPU idle wait (resize, upscaler restart), the attached graph's
+    // resources are gone and it must not render another frame.
+    bool m_nextFrameBuildSynchronous = false;
+    uint64_t m_frameBuildSerial = 0;
+    // Made once: its ECS queries write the world, which a build on another thread must not.
+    std::shared_ptr<br::render::DebugSceneSnapshotService> m_debugSceneSnapshots;
+    // Made once, for the same reason: virtual shadow page invalidation's changed-transform query (FrameBuildInputs).
+    std::shared_ptr<flecs::query<const Components::ObjectDrawInfo>> m_vsmTransformChangedQuery;
+    // The resources builds published in the ECS directory, by name (FrameBuild.h, ResourceEntityWrite::directoryKey).
+    std::unordered_map<std::string, std::weak_ptr<org::Resource>> m_publishedResourceEntities;
+    // The settings the last graph build read (SettingsManager::Snapshot). Opaque here: the type is private to the renderer.
+    std::shared_ptr<const SettingsSnapshot> m_graphBuildSettings;
+    // What renderer.revisions reports: attached builds, and the last one's frame and reasons.
+    uint64_t m_graphBuilds = 0;
+    uint64_t m_lastGraphBuildFrame = 0;
+    double m_lastGraphBuildMs = 0.0;  // the build itself, on whichever thread ran it, its pipeline waits included
+    std::string m_lastGraphBuildReasons;
+    struct GraphBuildStatistics {
+        uint64_t started = 0;
+        uint64_t onRenderThread = 0;   // built on the render thread (the first, synchronous ones, the in-place graph)
+        uint64_t failed = 0;           // failed or refused at the attach: the old graph kept
+        uint64_t discarded = 0;        // dropped before the attach (a GPU idle wait, shutdown)
+        uint64_t superseded = 0;       // attached while newer requests waited (a follow-up build answers them)
+        uint64_t epochFailures = 0;    // GraphHost::PollEpochFailures
+        uint64_t inFlightSinceFrame = 0;
+        double lastPrepareMs = 0.0;    // render thread: the inputs before the build
+        double lastAttachMs = 0.0;     // render thread: the attach and the publication
+        double lastPipelineWaitMs = 0.0;
+        double lastLatencyMs = 0.0;    // from the build's start to its attach
+        double maxRenderThreadMs = 0.0;  // the most render-thread time one build took (prepare + attach; all of it when built there)
+        uint64_t lastPipelinesDeclared = 0;
+        uint64_t lastFrames = 0;       // frames rendered while the last build ran
+        std::string lastError;
+        std::string lastEpochFailure;
+    } m_graphBuildStats;
+    void RequestGraphRebuild(std::string_view reason) { m_frameRevisions.RequestTopology(reason); }
     bool m_shaderReloadRequested = false;
 
     RenderContext m_context;
@@ -371,6 +444,8 @@ private:
 	std::shared_ptr<SkeletonManager> m_pSkeletonManager = nullptr;
     std::unique_ptr<TerrainManager> m_pTerrainManager;
     std::unique_ptr<br::ReadbackManager> m_pReadbackManager;
+    // Diagnostic and telemetry captures (br::GetReadbackCaptureService). ORG has no capture service any more.
+    std::shared_ptr<br::FrameReadbackCaptures> m_readbackCaptures;
     std::unique_ptr<TextureFactory> m_pTextureFactory;
     std::shared_ptr<br::render::CLodRayTracingSystem> m_clodRayTracingSystem = nullptr;
     // 0 raster, 1 raytraced, 2 raster with agreement against rays counted. See "rayTracedPrimaryVisibilityMode".
@@ -415,16 +490,52 @@ private:
     void CreateDefaultEnvironmentResources();
     // The BRDF integration LUT, rendered on first use by a one-shot job graph.
     std::shared_ptr<org::PixelBuffer> EnsureBrdfLut();
-    void CreateRenderGraph();
+    // The consolidation point's graph work (Update): attaches a finished build, then starts one for the requests made so far
+    // if none is running. A build runs on m_frameBuildWorker, or on the render thread when it must (the first one, after a
+    // GPU idle wait, BASICRENDERER_SYNC_FRAME_BUILD=1).
+    void ConsolidateFrameGraph();
+    // Starts a build for the requests made so far unless one runs, on the build thread or (when it must) here.
+    void StartAndRunFrameBuild();
+    // Render thread: the build's inputs, the host's extensions. Null when the build cannot start yet (its requests are put
+    // back).
+    std::shared_ptr<br::render::FrameBuildJob> StartFrameBuild(br::render::FrameRevisions::Pending requests);
+    // Any thread: the build itself (GraphHost::BuildEpochGraph) and its own pipelines' wait.
+    void RunFrameBuild(br::render::FrameBuildJob& job);
+    // Render thread: attaches a finished build and publishes it, or keeps the old graph if it failed.
+    void FinishFrameBuild(std::shared_ptr<br::render::FrameBuildJob> job);
+    // Render thread: waits for the build in flight and drops it; its requests are asked again.
+    void DiscardFrameBuildInFlight(std::string_view why);
+    bool FrameBuildInFlight() const;
     void ApplyPendingPipelineReplacement();
+    // Render thread, before a graph build: what the build reads (M3, docs/frame_graph_composition_plan.md).
+    void MakeFrameBuild(br::render::FrameBuild& build, flecs::entity primaryCamera);
+    // Render thread, after a successful build: hands its outputs to the renderer.
+    void PublishFrameBuild(br::render::FrameBuild& build);
+    // Render thread: makes the ECS writes a build recorded, in order (FrameBuildOutputs::resourceEntityWrites).
+    void PublishResourceEntityWrites(br::render::FrameBuildOutputs& outputs);
+    // Writes the recipe-backed settings (enableGTAO, enableBloom, enableShadows, ...) from m_pipelineRecipe.
+    void SyncPipelineTopologySettings();
     br::pipeline::PipelineRecipe GetPipelineRecipeForMutation() const;
-    void RegisterPipelineExtensions();
+    // Render thread, before the settings snapshot: makes the BVH when anything traces it (it decides
+    // StochasticLightingActive). Whether ray tracing is ready for the build.
+    bool PrepareFrameRayTracing();
+    // Render thread, from MakeFrameBuild: the build's extensions, in build order, and what each makes (which CLod variants
+    // and their options, stochastic lighting's options, the recipe's extensions, the caster set and the VSM atlas).
+    void MakeFrameExtensions(br::render::FrameBuild& build);
+    // Registers the declarations and the build's extension ids on the host, in build order, unless they already are.
+    void RegisterFrameHostExtensions(const std::vector<std::string>& extensionIds);
+    // The renderer's part of a graph build, run by the host (DeclarationGraphExtension): first its providers, last its passes.
+    void DeclareFrameProviders(org::RenderGraph& graph);
+    void DeclareFramePasses(org::RenderGraph& graph);
+    // Submits the frame graph for this frame: everything Render did before the graph's execution, then ExecuteFrame.
+    void ExecuteFrameGraph(const org::UpdateExecutionContext& context);
+    // A frame the renderer holds back still submits the uploads producers staged (the upload epoch).
+    void SubmitUploadsWithoutFrame();
     void HandlePipelineReplacementFailure(const std::exception& error);
     // After a graph built with the current recipe: drops what only a failed replacement could have needed.
     void ConfirmPipelineReplacement();
     void SetSettings();
     void SetEnvironmentInternal(std::wstring name);
-	void ToggleMeshShaders(bool useMeshShaders);
     bool IsSceneReadyForFrame(bool logWarnings = true);
     flecs::entity GetValidatedPrimaryRenderCamera(bool attemptResync = true);
     void BootstrapCommittedSceneSnapshot();
@@ -482,7 +593,6 @@ private:
 	bool m_clusteredLighting = true;
     bool m_imageBasedLighting = true;
 	bool m_gtaoEnabled = true;
-	bool m_visibilityRendering = true;
 	bool m_occlusionCulling = true;
     bool m_bloom = false;
     bool m_jitter = true;
@@ -500,20 +610,15 @@ private:
     // it's accumulating; leaving it restores the upscaler from before.
     void SelectPathTracingUpscaler(bool pathTracing);
     bool m_warnedRayTracedReflectionsUnsupported = false;
-	bool m_useMeshShaders = true;
 
     std::function<uint16_t()> getShadowResolution;
 	std::function<void(float)> setCameraSpeed;
 	std::function<float()> getCameraSpeed;
-	std::function<void(bool)> setWireframeEnabled;
-	std::function<bool()> getWireframeEnabled;
 	std::function<void(bool)> setShadowsEnabled;
 	std::function<bool()> getShadowsEnabled;
     std::function<uint16_t()> getSkyboxResolution;
 	std::function<void(bool)> setImageBasedLightingEnabled;
 	std::function<void(std::string)> setEnvironment;
-	std::function<bool()> getMeshShadersEnabled;
-    std::function<bool()> getIndirectDrawsEnabled;
 	std::function<uint8_t()> getNumFramesInFlight;
     std::function<bool()> getDrawBoundingSpheres;
 	std::function<bool()> getImageBasedLightingEnabled;

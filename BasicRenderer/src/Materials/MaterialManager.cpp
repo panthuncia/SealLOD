@@ -16,7 +16,7 @@
 #include <BasicRenderer/Streaming/VersionedGpuBuffer.h>
 #include "Materials/TextureStreaming/TextureBindingArtifacts.h"
 #include "BasicRenderer/Pipeline/RasterBucketFlags.h"
-#include "Render/Runtime/IReadbackService.h"
+#include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
 #include "Render/Runtime/IUploadService.h"
 #include "Render/Runtime/IDescriptorService.h"
 
@@ -482,9 +482,9 @@ MaterialManager::MaterialManager() {
 	m_resources["Builtin::VisUtil::ScannedBlockSumsBuffer"] = m_scannedBlockSumsBuffer;
 	m_resources["Builtin::IndirectCommandBuffers::MaterialEvaluationCommandBuffer"] = m_materialEvaluationCommandBuffer;
 	m_materialStartupFallbacks = {
-		std::make_shared<org::DynamicGloballyIndexedResource>(startupBase),
-		std::make_shared<org::DynamicGloballyIndexedResource>(startupEval),
-		std::make_shared<org::DynamicGloballyIndexedResource>(startupOpenPbr)
+		std::shared_ptr<org::Resource>(startupBase),
+		std::shared_ptr<org::Resource>(startupEval),
+		std::shared_ptr<org::Resource>(startupOpenPbr)
 	};
 	m_materialStartupFallbacks[0]->SetName("StartupFallback::PerMaterialDataBuffer");
 	m_materialStartupFallbacks[1]->SetName("StartupFallback::PerMaterialEvalDataBuffer");

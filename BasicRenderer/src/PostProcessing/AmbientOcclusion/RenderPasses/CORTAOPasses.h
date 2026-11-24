@@ -29,6 +29,7 @@
 #include "PostProcessing/AmbientOcclusion/CORTAOLookupTables.h"
 #include "Utilities/Utilities.h"
 #include "ThirdParty/CORTAO/CORTAOParameters.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 
 namespace br::ambient_occlusion {
 
@@ -86,13 +87,13 @@ inline uint32_t CreateCortaoPointSampler(org::runtime::IDescriptorService& descr
     return descriptors.CreateIndexedSampler(desc);
 }
 
-inline org::ComputePipelineDesc CortaoPipeline(const wchar_t* path, const wchar_t* entry, std::string name,
-    std::vector<org::PipelineShaderDefine> defines = {}) {
-    org::ComputePipelineDesc desc;
+inline br::ComputePipelineDesc CortaoPipeline(const wchar_t* path, const wchar_t* entry, std::string name,
+    std::vector<br::PipelineShaderDefine> defines = {}) {
+    br::ComputePipelineDesc desc;
     desc.shader = { path, entry, L"cs_6_7" }; // Integer texture sampling and gathers.
     desc.name = std::move(name);
     desc.defines = std::move(defines);
-    desc.layout = org::PipelineLayoutRef::StandardGraphics();
+    desc.layout = br::PipelineLayoutRef::StandardGraphics();
     return desc;
 }
 
@@ -103,7 +104,7 @@ struct CORTAOPrepassFrame {
     uint32_t groupsX = 0, groupsY = 0;
 };
 struct CORTAOPrepassBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken depth, normals;
     std::array<org::DeclaredViewToken, 8> packedMips;
     uint32_t mipCount = 1;
@@ -166,7 +167,7 @@ public:
         builder.ConstantBuffer(Builtin::CORTAO::ConstantsBuffer);
         builder.ConstantBuffer(Builtin::PerFrameBuffer);
         CORTAOPrepassBindings bindings{};
-        bindings.pipeline = builder.Pipeline(CortaoPipeline(L"shaders/CORTAOPrepass.hlsl", L"CSCortaoPrepass", "CORTAO Prepass"));
+        bindings.pipeline = br::render::DeclarePipeline(CortaoPipeline(L"shaders/CORTAOPrepass.hlsl", L"CSCortaoPrepass", "CORTAO Prepass"));
         bindings.depth = builder.ShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, org::Mip{ 0, 1 })).View();
         bindings.normals = builder.ShaderResource(Builtin::Surface::NormalRoughness).View();
         bindings.mipCount = CortaoMipCount(CortaoRenderResolution());
@@ -205,7 +206,7 @@ struct CORTAOMainFrame {
     uint32_t groupsX = 0, groupsY = 0;
 };
 struct CORTAOMainBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     uint32_t borderSampler = 0;
     org::DeclaredViewToken packed, normals, occluderTable, bentNormalTable, output;
 };
@@ -239,7 +240,7 @@ public:
         const uint32_t sampleCount = ClampCortaoSampleCount(
             SettingsManager::GetInstance().getSettingGetter<uint32_t>(CortaoSampleCountSettingName)());
         CORTAOMainBindings bindings{};
-        bindings.pipeline = builder.Pipeline(CortaoPipeline(L"shaders/CORTAOMain.hlsl", L"CSCortaoMain",
+        bindings.pipeline = br::render::DeclarePipeline(CortaoPipeline(L"shaders/CORTAOMain.hlsl", L"CSCortaoMain",
             "CORTAO Main (" + std::to_string(sampleCount) + " samples)",
             { { L"CORTAO_SAMPLE_COUNT", std::to_wstring(sampleCount) } }));
         bindings.borderSampler = m_borderSampler;
@@ -283,7 +284,7 @@ struct CORTAOFilterFrame {
     uint32_t groupsX = 0, groupsY = 0;
 };
 struct CORTAOFilterBindings {
-    org::PipelineState smallPipeline, largePipeline;
+    br::PipelineState smallPipeline, largePipeline;
     uint32_t borderSampler = 0;
     org::DeclaredViewToken packed, working, output;
 };
@@ -300,9 +301,9 @@ public:
         builder.ConstantBuffer(Builtin::CORTAO::ConstantsBuffer);
         builder.ConstantBuffer(Builtin::PerFrameBuffer);
         CORTAOFilterBindings bindings{};
-        bindings.smallPipeline = builder.Pipeline(CortaoPipeline(L"shaders/CORTAOFilter.hlsl", L"CSCortaoFilter", "CORTAO Filter",
+        bindings.smallPipeline = br::render::DeclarePipeline(CortaoPipeline(L"shaders/CORTAOFilter.hlsl", L"CSCortaoFilter", "CORTAO Filter",
             { { L"CORTAO_LARGE_FILTER", L"0" } }));
-        bindings.largePipeline = builder.Pipeline(CortaoPipeline(L"shaders/CORTAOFilter.hlsl", L"CSCortaoFilter", "CORTAO Filter (large)",
+        bindings.largePipeline = br::render::DeclarePipeline(CortaoPipeline(L"shaders/CORTAOFilter.hlsl", L"CSCortaoFilter", "CORTAO Filter (large)",
             { { L"CORTAO_LARGE_FILTER", L"1" } }));
         bindings.borderSampler = m_borderSampler;
         bindings.packed = builder.ShaderResource(Builtin::CORTAO::PackedData).View();

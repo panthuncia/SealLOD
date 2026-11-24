@@ -251,7 +251,7 @@ public:
         const auto* buffer = dynamic_cast<org::BufferBase*>(m_materialEvalCmds);
         VisitCommands(*materialState,terrainEvaluation,outputType,buffer ? buffer->GetBufferSize() : UINT64_MAX,
             [&](MaterialCompileFlags, MaterialCompileFlags shaderKey, uint32_t, uint64_t argOffset) {
-            const org::PipelineState* pso = m_inputs.pipelines->TryGetMaterialEvalPSO(shaderKey);
+            const br::PipelineState* pso = m_inputs.pipelines->TryGetMaterialEvalPSO(shaderKey);
             if (!pso) return;
             frame.steps.push_back({pso->GetPayload(), argOffset});
         });

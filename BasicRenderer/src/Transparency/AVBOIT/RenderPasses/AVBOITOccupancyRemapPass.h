@@ -4,12 +4,13 @@
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 
 namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct AVBOITOccupancyRemapBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken config, lut, occupancy;
 };
 struct AVBOITOccupancyRemapFrame {

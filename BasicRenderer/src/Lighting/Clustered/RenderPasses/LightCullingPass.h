@@ -33,7 +33,7 @@ inline DirectX::XMUINT2 RenderResolution(const org::PassPrepareContext& preparat
 }
 
 struct LightGridComputeBindings {
-	org::PipelineState pipeline;
+	br::PipelineState pipeline;
 };
 struct LightGridDispatchFrame {
 	uint32_t groupsX = 0, groupsY = 0, groupsZ = 0;
@@ -51,7 +51,7 @@ public:
 		builder.UnorderedAccess(Builtin::Light::CullingRecords, Builtin::Light::GridDepthBounds, Builtin::Light::CullingStats);
 		builder.ConstantBuffer(Builtin::PerFrameBuffer);
 		builder.PreferQueue(org::QueueKind::Compute);
-		return {builder.Pipeline(br::render::ComputePipeline(L"shaders/lightCulling.hlsl", L"LightGridPrepareCS", "Light Grid Prepare CS"))};
+		return {br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/lightCulling.hlsl", L"LightGridPrepareCS", "Light Grid Prepare CS"))};
 	}
 
 	void Initialize() {
@@ -94,7 +94,7 @@ public:
 		builder.UnorderedAccess(Builtin::Light::GridDepthBounds);
 		builder.ConstantBuffer(Builtin::PerFrameBuffer);
 		builder.PreferQueue(org::QueueKind::Compute);
-		return {builder.Pipeline(br::render::ComputePipeline(L"shaders/lightCulling.hlsl", L"LightGridDepthBoundsCS", "Light Grid Depth Bounds CS"))};
+		return {br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/lightCulling.hlsl", L"LightGridDepthBoundsCS", "Light Grid Depth Bounds CS"))};
 	}
 
 	LightGridDispatchFrame Prepare(const LightGridComputeBindings&, const org::PassPrepareContext& preparation) const {
@@ -120,7 +120,7 @@ public:
 		builder.UnorderedAccess(Builtin::Light::GridCells, Builtin::Light::GridIndices, Builtin::Light::CullingStats);
 		builder.ConstantBuffer(Builtin::PerFrameBuffer);
 		builder.PreferQueue(org::QueueKind::Compute);
-		return {builder.Pipeline(br::render::ComputePipeline(L"shaders/lightCulling.hlsl", L"LightCullingCS", "Light Culling CS"))};
+		return {br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/lightCulling.hlsl", L"LightCullingCS", "Light Culling CS"))};
 	}
 
 	LightGridDispatchFrame Prepare(const LightGridComputeBindings&, const org::PassPrepareContext& preparation) const {

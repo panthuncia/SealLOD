@@ -49,12 +49,12 @@ ReyesQueueResetBindings ReyesQueueResetPass::Declare(org::PassBuilder& declarati
     declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     auto* builder = &declaration;
     ReyesQueueResetBindings bindings{
-        builder->Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+        br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
             L"ClearReyesQueueCountersCSMain", "CLod.ReyesQueueReset.ClearCounters.PSO")),
         m_ownershipBitsetBuffer
-            ? builder->Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+            ? br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
                 L"ClearReyesOwnershipBitsetCSMain", "CLod.ReyesQueueReset.ClearOwnershipBitset.PSO"))
-            : org::PipelineState{},
+            : br::PipelineState{},
         builder->UnorderedAccess(m_fullClusterCounter),
         builder->UnorderedAccess(m_ownedClusterCounter),
         {}, {},

@@ -34,8 +34,8 @@ struct VirtualShadowBlockFrameData {
 };
 
 struct VirtualShadowBlockBindings {
-    org::PipelineState rigidPipeline, skinnedPipeline, clearPipeline;
-    org::CommandSignatureState commandSignature;
+    br::PipelineState rigidPipeline, skinnedPipeline, clearPipeline;
+    br::CommandSignatureState commandSignature;
     VirtualShadowBlockExpandMode mode = VirtualShadowBlockExpandMode::Histogram;
     uint32_t expandedRecordCapacity = 0;
     org::DeclaredViewToken sourceVisible, sourceTransforms, sourceHistogram;
@@ -120,13 +120,13 @@ public:
             ? "CLod_VirtualShadowBlockHistogramSkinnedPSO"
             : "CLod_VirtualShadowBlockEmitSkinnedPSO";
         VirtualShadowBlockBindings bindings{
-            builder->Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/virtualShadowBlockExpansion.hlsl",
+            br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/virtualShadowBlockExpansion.hlsl",
                 entryPoint, rigidName)),
-            builder->Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/virtualShadowBlockExpansion.hlsl",
+            br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/virtualShadowBlockExpansion.hlsl",
                 entryPoint, skinnedName, {{L"PSO_SKINNED", L"1"}})),
-            builder->Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+            br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
                 L"ClearUintStructuredBufferCSMain", "CLod_VirtualShadowBlockExpandClearUintPSO")),
-            builder->CommandSignature(br::render::ConstantsDispatchCommandSignature(
+            br::render::DeclareCommandSignature(br::render::ConstantsDispatchCommandSignature(
                 3, sizeof(RasterizeClustersCommand), "CLod.VirtualShadowBlockExpand.Signature")),
             m_mode, m_expandedRecordCapacity,
             builder->ShaderResource(m_sourceVisibleClustersBuffer),

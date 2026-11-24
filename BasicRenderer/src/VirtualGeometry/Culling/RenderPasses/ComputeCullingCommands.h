@@ -17,7 +17,7 @@
 #include "BasicRenderer/Extensions/ShaderBuffers.h"
 #include "Render/DeclaredTableLayout.h"
 #include "VirtualGeometry/GraphIntegration/CLodViewTables.h"
-#include "Render/PipelineState.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "VirtualGeometry/Culling/PreparedCullingWorkloads.h"
 #include "VirtualGeometry/Culling/RenderPasses/CullingPassCommon.h"
@@ -26,19 +26,19 @@ inline constexpr uint32_t kComputeCullingMaxTraversalLevels = 64u;
 inline constexpr uint32_t kComputeCullingObjectThreadsPerGroup = 64u;
 
 struct ComputeCullingPrograms {
-    org::PipelineState clearCounter;
-    org::PipelineState createRasterBucketCommand;
-    org::PipelineState buildDispatchArgs;
-    org::PipelineState buildDualDispatchArgs;
-    org::PipelineState buildReplayDispatchArgs;
-    org::PipelineState clearTraversalCounters;
-    org::PipelineState objectCull;
-    org::PipelineState seedReplayNodes;
-    org::PipelineState seedReplayClusters;
-    org::PipelineState traverseNodes;
-    org::PipelineState traverseLeaves;
-    org::PipelineState cullClusters;
-    org::CommandSignatureState dispatchSignature;
+    br::PipelineState clearCounter;
+    br::PipelineState createRasterBucketCommand;
+    br::PipelineState buildDispatchArgs;
+    br::PipelineState buildDualDispatchArgs;
+    br::PipelineState buildReplayDispatchArgs;
+    br::PipelineState clearTraversalCounters;
+    br::PipelineState objectCull;
+    br::PipelineState seedReplayNodes;
+    br::PipelineState seedReplayClusters;
+    br::PipelineState traverseNodes;
+    br::PipelineState traverseLeaves;
+    br::PipelineState cullClusters;
+    br::CommandSignatureState dispatchSignature;
 };
 
 // Traversal working set. Node and leaf frontiers ping-pong between levels;

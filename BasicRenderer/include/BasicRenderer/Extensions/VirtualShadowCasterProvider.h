@@ -114,9 +114,13 @@ public:
         VirtualShadowPassBuilder& builder) = 0;
 };
 
+// The virtual shadow casters of one frame graph build. Each build makes its own over the renderer's persistent invalidation
+// queue: the casters are extension instances of that build's graph, so the set must be used only by that graph (its
+// passes and extensions), never after it.
 class VirtualShadowCasterRegistry {
 public:
-    VirtualShadowCasterRegistry();
+    // Without a queue the set makes its own.
+    explicit VirtualShadowCasterRegistry(std::shared_ptr<VirtualShadowInvalidationQueue> invalidationQueue = {});
     void Register(IVirtualShadowCasterProvider& provider);
     bool Empty() const noexcept;
     size_t Size() const noexcept;

@@ -161,20 +161,13 @@ StructuralSchedulingPolicy BuildStructuralSchedulingPolicy(
 }
 
 template<typename... Tags>
-void SyncTaggedBufferEntity(const std::shared_ptr<org::Buffer>& buffer, const flecs::entity& typeEntity, bool enabled)
+void SyncTaggedBufferEntity(const CLodVariantTraits& traits, const std::shared_ptr<org::Buffer>& buffer, bool enabled)
 {
-    if (!buffer) {
-        return;
-    }
-
-    auto entity = buffer->GetECSEntity();
     if (enabled) {
-        entity.set<Components::Resource>({ buffer });
-        entity.add<CLodExtensionTypeTag>(typeEntity);
-        (entity.add<Tags>(), ...);
+        PublishCLodResource<Tags...>(traits, buffer);
     }
-    else if (entity.has<Components::Resource>()) {
-        entity.remove<Components::Resource>();
+    else {
+        UnpublishCLodResource(buffer);
     }
 }
 
@@ -645,63 +638,9 @@ bool CLodExtension::IsReyesTessellationDisabled() const
     return !m_options.enableReyes;
 }
 
-void CLodExtension::RefreshShadowConfiguredSettings()
-{
-    CLodShadowVariant::RefreshConfiguredSettings(*this);
-}
-
 uint32_t CLodExtension::GetVisibleClusterCapacity() const
 {
     return CLodShadowVariant::GetVisibleClusterCapacity(*this);
-}
-
-void CLodExtension::RefreshCoreVisibleClusterCapacity()
-{
-    const uint32_t desiredVisibleClusterCapacity = GetVisibleClusterCapacity();
-    if (m_visibleClusterCapacity == desiredVisibleClusterCapacity) {
-        return;
-    }
-
-    m_visibleClusterCapacity = desiredVisibleClusterCapacity;
-
-    if (m_visibleClustersBuffer) {
-        m_visibleClustersBuffer->ResizeBytes(static_cast<uint64_t>(m_visibleClusterCapacity) * PackedVisibleClusterStrideBytes);
-        m_visibleClustersBuffer->GetECSEntity().set<CLodVisibleClusterCapacity>({ m_visibleClusterCapacity });
-    }
-    if (m_visibleClusterTransformIndicesBuffer) {
-        m_visibleClusterTransformIndicesBuffer->ResizeStructured(m_visibleClusterCapacity);
-        m_visibleClusterTransformIndicesBuffer->GetECSEntity().set<CLodVisibleClusterCapacity>({ m_visibleClusterCapacity });
-    }
-
-    if (m_compactedVisibleClustersBuffer) {
-        m_compactedVisibleClustersBuffer->ResizeBytes(static_cast<uint64_t>(m_visibleClusterCapacity) * PackedVisibleClusterStrideBytes);
-    }
-    if (m_compactedVisibleClusterTransformIndicesBuffer) {
-        m_compactedVisibleClusterTransformIndicesBuffer->ResizeStructured(m_visibleClusterCapacity);
-    }
-
-    if (m_compactedVisibleClustersBufferSw) {
-        m_compactedVisibleClustersBufferSw->ResizeBytes(static_cast<uint64_t>(m_visibleClusterCapacity) * PackedVisibleClusterStrideBytes);
-    }
-    if (m_compactedVisibleClusterTransformIndicesBufferSw) {
-        m_compactedVisibleClusterTransformIndicesBufferSw->ResizeStructured(m_visibleClusterCapacity);
-    }
-
-    if (m_sortedToUnsortedMappingBuffer) {
-        m_sortedToUnsortedMappingBuffer->ResizeStructured(m_visibleClusterCapacity);
-    }
-
-    if (m_sortedToUnsortedMappingBufferSw) {
-        m_sortedToUnsortedMappingBufferSw->ResizeStructured(m_visibleClusterCapacity);
-    }
-
-    for (const auto& buffer : { m_compactedVisibleClustersBufferPhase2, m_compactedVisibleClustersBufferPhase2Sw }) {
-        if (buffer) buffer->ResizeBytes(static_cast<uint64_t>(m_visibleClusterCapacity) * PackedVisibleClusterStrideBytes);
-    }
-    for (const auto& buffer : { m_compactedVisibleClusterTransformIndicesBufferPhase2, m_compactedVisibleClusterTransformIndicesBufferPhase2Sw,
-             m_sortedToUnsortedMappingBufferPhase2, m_sortedToUnsortedMappingBufferPhase2Sw }) {
-        if (buffer) buffer->ResizeStructured(m_visibleClusterCapacity);
-    }
 }
 
 void CLodExtension::AppendRayTracingPasses(const CLodVariantTraits& traits, std::vector<org::ExternalPassDesc>& outPasses)
@@ -726,9 +665,14 @@ void CLodExtension::AppendRayTracingPasses(const CLodVariantTraits& traits, std:
         previous = passName;
     }
 
-    if (m_options.scheduleRayTracedVisibility && m_options.rayTracingSystem->GetPrimaryVisibleClusters()) {
+    // Ray traced primary visibility writes into the opaque variant's list, which that variant put in the build's outputs in
+    // its PrepareForBuild (it runs before any gather).
+    const auto* build = br::render::CurrentFrameBuild();
+    if (m_options.scheduleRayTracedVisibility && build && build->outputs.clodPrimary.visibleClusters) {
+        const auto& primary = build->outputs.clodPrimary;
         auto visibilityDesc = org::ExternalPassDesc::Compute(MakeVariantPassName(traits, "VisibilityPass"), std::make_shared<RayTracedVisibilityPass>(
-            m_options.rayTracingSystem, m_options.slabResourceGroup, m_options.rayTracedVisibilityMode));
+            m_options.rayTracingSystem, m_options.slabResourceGroup, m_options.rayTracedVisibilityMode, primary.visibleClusters,
+            primary.visibleClusterTransformIndices, primary.visibleClusterCapacity));
         visibilityDesc.At(org::ExternalInsertPoint::Before("MaterialHistogramPass"));
         outPasses.push_back(std::move(visibilityDesc));
     }
@@ -757,8 +701,6 @@ void CLodExtension::AppendRayTracingPasses(const CLodVariantTraits& traits, std:
 void CLodExtension::InitializeCoreResources()
 {
     const auto& traits = GetVariantTraits(m_type);
-    auto& ecsWorld = RendererECSManager::GetInstance().GetWorld();
-    const flecs::entity typeEntity = traits.ensureTypeEntity(ecsWorld);
 
     m_visibleClustersBuffer = CreateAliasedUnmaterializedRawBuffer(static_cast<uint64_t>(m_visibleClusterCapacity) * PackedVisibleClusterStrideBytes, true, false, true);
     m_visibleClustersBuffer->SetName(MakeVariantResourceName(traits, "Visible Clusters Buffer (uncompacted)"));
@@ -778,10 +720,7 @@ void CLodExtension::InitializeCoreResources()
     m_rasterBucketsHistogramBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false, false);
     m_rasterBucketsHistogramBuffer->SetName(MakeVariantResourceName(traits, "Raster bucket histogram"));
     if (traits.rasterOutputKind == CLodRasterOutputKind::VisibilityBuffer) {
-        m_rasterBucketsHistogramBuffer->GetECSEntity()
-            .set<Components::Resource>({ m_rasterBucketsHistogramBuffer })
-            .add<CLodPrimaryPhase1RasterHistogramTag>()
-            .add<CLodExtensionTypeTag>(typeEntity);
+        PublishCLodResource<CLodPrimaryPhase1RasterHistogramTag>(traits, m_rasterBucketsHistogramBuffer);
     }
 
     m_visibleClustersCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(unsigned int), true, false, false, false);
@@ -795,17 +734,11 @@ void CLodExtension::InitializeCoreResources()
         m_rtVisibleClustersCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(unsigned int), true, false, false, false);
         m_rtVisibleClustersCounterBuffer->SetName(MakeVariantResourceName(traits, "Ray Tracing Visible Clusters Counter Buffer"));
     }
-    m_visibleClustersCounterBuffer->GetECSEntity()
-        .set<Components::Resource>({ m_visibleClustersCounterBuffer })
-        .add<VisibleClustersCounterTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<VisibleClustersCounterTag>(traits, m_visibleClustersCounterBuffer);
 
     m_workGraphTelemetryBuffer = CreateAliasedUnmaterializedStructuredBuffer(CLodWorkGraphTelemetryBufferCount, sizeof(uint32_t), true, false, false, false);
     m_workGraphTelemetryBuffer->SetName(MakeVariantResourceName(traits, "Work Graph Telemetry Buffer"));
-    m_workGraphTelemetryBuffer->GetECSEntity()
-        .set<Components::Resource>({ m_workGraphTelemetryBuffer })
-        .add<CLodWorkGraphTelemetryBufferTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodWorkGraphTelemetryBufferTag>(traits, m_workGraphTelemetryBuffer);
 
     // HLSL binds this as RWByteAddressBuffer; publish a raw UAV so Store/Load offsets are byte offsets.
     m_occlusionReplayBuffer = CreateAliasedUnmaterializedRawBuffer(
@@ -817,10 +750,7 @@ void CLodExtension::InitializeCoreResources()
 
     m_occlusionReplayStateBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodReplayBufferState), true, false, false, false);
     m_occlusionReplayStateBuffer->SetName(MakeVariantResourceName(traits, "Occlusion Replay State Buffer"));
-    m_occlusionReplayStateBuffer->GetECSEntity()
-        .set<Components::Resource>({ m_occlusionReplayStateBuffer })
-        .add<CLodOcclusionReplayStateBufferTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodOcclusionReplayStateBufferTag>(traits, m_occlusionReplayStateBuffer);
 
     m_occlusionNodeGpuInputsBuffer = CreateAliasedUnmaterializedStructuredBuffer(
         5,
@@ -871,21 +801,9 @@ void CLodExtension::InitializeCoreResources()
         m_compactedVisibleClusterTransformIndicesBufferPhase2Sw->SetName(MakeVariantResourceName(traits, "Compacted Visible Cluster Transform Indices Buffer Phase2 SW"));
     }
 
-    if (traits.type == CLodExtensionType::VisiblityBuffer && m_options.rayTracingSystem) {
-        m_options.rayTracingSystem->SetPrimaryVisibleClusters(m_visibleClustersBuffer, m_visibleClusterTransformIndicesBuffer, m_visibleClusterCapacity);
-    }
+    PublishCLodResource<VisibleClustersBufferTag>(traits, m_visibleClustersBuffer, [capacity = m_visibleClusterCapacity](flecs::entity entity) { entity.set<CLodVisibleClusterCapacity>({ capacity }); });
 
-    m_visibleClustersBuffer->GetECSEntity()
-        .set<Components::Resource>({ m_visibleClustersBuffer })
-        .set<CLodVisibleClusterCapacity>({ m_visibleClusterCapacity })
-        .add<VisibleClustersBufferTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
-
-    m_visibleClusterTransformIndicesBuffer->GetECSEntity()
-        .set<Components::Resource>({ m_visibleClusterTransformIndicesBuffer })
-        .set<CLodVisibleClusterCapacity>({ m_visibleClusterCapacity })
-        .add<VisibleClusterTransformIndicesBufferTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<VisibleClusterTransformIndicesBufferTag>(traits, m_visibleClusterTransformIndicesBuffer, [capacity = m_visibleClusterCapacity](flecs::entity entity) { entity.set<CLodVisibleClusterCapacity>({ capacity }); });
 
     m_rasterBucketsWriteCursorBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false, false);
     m_rasterBucketsWriteCursorBuffer->SetName(MakeVariantResourceName(traits, "Raster bucket write cursor"));
@@ -893,10 +811,7 @@ void CLodExtension::InitializeCoreResources()
     m_rasterBucketsIndirectArgsBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(RasterizeClustersCommand), true, false, false, true);
     m_rasterBucketsIndirectArgsBuffer->SetName(MakeVariantResourceName(traits, "Raster bucket indirect args HW phase1"));
     if (traits.rasterOutputKind == CLodRasterOutputKind::VisibilityBuffer) {
-        m_rasterBucketsIndirectArgsBuffer->GetECSEntity()
-            .set<Components::Resource>({ m_rasterBucketsIndirectArgsBuffer })
-            .add<CLodPrimaryPhase1RasterIndirectArgsTag>()
-            .add<CLodExtensionTypeTag>(typeEntity);
+        PublishCLodResource<CLodPrimaryPhase1RasterIndirectArgsTag>(traits, m_rasterBucketsIndirectArgsBuffer);
     }
 
     m_rasterBucketsIndirectArgsBufferPhase2 = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(RasterizeClustersCommand), true, false, false, true);
@@ -905,10 +820,7 @@ void CLodExtension::InitializeCoreResources()
     m_rasterBucketsIndirectArgsBufferSw = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(RasterizeClustersCommand), true, false, false, true);
     m_rasterBucketsIndirectArgsBufferSw->SetName(MakeVariantResourceName(traits, "Raster bucket indirect args SW phase1"));
     if (traits.rasterOutputKind == CLodRasterOutputKind::VisibilityBuffer) {
-        m_rasterBucketsIndirectArgsBufferSw->GetECSEntity()
-            .set<Components::Resource>({ m_rasterBucketsIndirectArgsBufferSw })
-            .add<CLodPrimaryPhase1SwRasterIndirectArgsTag>()
-            .add<CLodExtensionTypeTag>(typeEntity);
+        PublishCLodResource<CLodPrimaryPhase1SwRasterIndirectArgsTag>(traits, m_rasterBucketsIndirectArgsBufferSw);
     }
 
     m_rasterBucketsIndirectArgsBufferPhase2Sw = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(RasterizeClustersCommand), true, false, false, true);
@@ -925,10 +837,7 @@ void CLodExtension::InitializeCoreResources()
     m_rasterBucketsHistogramBufferSw = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, true, false);
     m_rasterBucketsHistogramBufferSw->SetName(MakeVariantResourceName(traits, "Raster bucket histogram SW phase1"));
     if (traits.rasterOutputKind == CLodRasterOutputKind::VisibilityBuffer) {
-        m_rasterBucketsHistogramBufferSw->GetECSEntity()
-            .set<Components::Resource>({ m_rasterBucketsHistogramBufferSw })
-            .add<CLodPrimaryPhase1SwRasterHistogramTag>()
-            .add<CLodExtensionTypeTag>(typeEntity);
+        PublishCLodResource<CLodPrimaryPhase1SwRasterHistogramTag>(traits, m_rasterBucketsHistogramBufferSw);
     }
 
     m_rasterBucketsHistogramBufferPhase2Sw = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, true, false);
@@ -946,10 +855,7 @@ void CLodExtension::InitializeCoreResources()
     m_swVisibleClustersCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(unsigned int), true, false, false, false);
     m_swVisibleClustersCounterBuffer->SetName(MakeVariantResourceName(traits, "SW Visible Clusters Counter Buffer Phase1"));
     if (traits.rasterOutputKind == CLodRasterOutputKind::VisibilityBuffer) {
-        m_swVisibleClustersCounterBuffer->GetECSEntity()
-            .set<Components::Resource>({ m_swVisibleClustersCounterBuffer })
-            .add<CLodPrimaryPhase1SwVisibleClustersCounterTag>()
-            .add<CLodExtensionTypeTag>(typeEntity);
+        PublishCLodResource<CLodPrimaryPhase1SwVisibleClustersCounterTag>(traits, m_swVisibleClustersCounterBuffer);
     }
 
     m_swVisibleClustersCounterBufferPhase2 = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(unsigned int), true, false, false, false);
@@ -1093,160 +999,6 @@ void CLodExtension::TagTransparencyResourceUsages()
     CLodAlphaVariant::TagResourceUsages(*this);
 }
 
-void CLodExtension::ReleaseBufferBackings()
-{
-    std::unordered_set<org::Buffer*> releasedBuffers;
-    auto releaseBufferBacking = [&releasedBuffers](const std::shared_ptr<org::Buffer>& buffer) {
-        if (buffer && releasedBuffers.insert(buffer.get()).second) {
-            buffer->Dematerialize();
-        }
-    };
-
-    releaseBufferBacking(m_visibleClustersBuffer);
-    releaseBufferBacking(m_visibleClusterTransformIndicesBuffer);
-    releaseBufferBacking(m_visibleClustersCounterBuffer);
-    releaseBufferBacking(m_workGraphTelemetryBuffer);
-    releaseBufferBacking(m_occlusionReplayBuffer);
-    releaseBufferBacking(m_occlusionReplayStateBuffer);
-    releaseBufferBacking(m_occlusionNodeGpuInputsBuffer);
-    releaseBufferBacking(m_histogramIndirectCommand);
-    releaseBufferBacking(m_histogramIndirectCommandPhase2);
-    releaseBufferBacking(m_histogramIndirectCommandSw);
-    releaseBufferBacking(m_histogramIndirectCommandPhase2Sw);
-    releaseBufferBacking(m_rasterBucketsHistogramBuffer);
-    releaseBufferBacking(m_rasterBucketsOffsetsBuffer);
-    releaseBufferBacking(m_rasterBucketsBlockSumsBuffer);
-    releaseBufferBacking(m_rasterBucketsScannedBlockSumsBuffer);
-    releaseBufferBacking(m_rasterBucketsTotalCountBuffer);
-    releaseBufferBacking(m_rasterBucketsTotalCountBufferPhase1);
-    releaseBufferBacking(m_rasterBucketsTotalCountBufferPhase1Sw);
-    releaseBufferBacking(m_visibleClustersCounterBufferPhase2);
-    releaseBufferBacking(m_rasterBucketsHistogramBufferPhase2);
-    releaseBufferBacking(m_rasterBucketsWriteCursorBufferPhase2);
-    releaseBufferBacking(m_rasterBucketsHistogramBufferSw);
-    releaseBufferBacking(m_rasterBucketsHistogramBufferPhase2Sw);
-    releaseBufferBacking(m_rasterBucketsWriteCursorBufferSw);
-    releaseBufferBacking(m_rasterBucketsWriteCursorBufferPhase2Sw);
-    releaseBufferBacking(m_compactedVisibleClustersBuffer);
-    releaseBufferBacking(m_compactedVisibleClustersBufferSw);
-    releaseBufferBacking(m_compactedVisibleClusterTransformIndicesBuffer);
-    releaseBufferBacking(m_compactedVisibleClusterTransformIndicesBufferSw);
-    releaseBufferBacking(m_rasterBucketsWriteCursorBuffer);
-    releaseBufferBacking(m_rasterBucketsIndirectArgsBuffer);
-    releaseBufferBacking(m_rasterBucketsIndirectArgsBufferPhase2);
-    releaseBufferBacking(m_rasterBucketsIndirectArgsBufferSw);
-    releaseBufferBacking(m_rasterBucketsIndirectArgsBufferPhase2Sw);
-    releaseBufferBacking(m_reyesFullClusterOutputsBuffer);
-    releaseBufferBacking(m_reyesFullClusterOutputsCounterBuffer);
-    releaseBufferBacking(m_reyesOwnedClustersBuffer);
-    releaseBufferBacking(m_reyesOwnedClustersCounterBuffer);
-    releaseBufferBacking(m_reyesOwnershipBitsetBuffer);
-    releaseBufferBacking(m_reyesOwnershipBitsetBufferPhase2);
-    releaseBufferBacking(m_reyesClassifyIndirectArgsBuffer);
-    releaseBufferBacking(m_reyesClassifyIndirectArgsBufferPhase2);
-    releaseBufferBacking(m_reyesSplitIndirectArgsBuffer);
-    releaseBufferBacking(m_reyesSplitIndirectArgsBufferPhase2);
-    releaseBufferBacking(m_reyesSplitQueueBufferA);
-    releaseBufferBacking(m_reyesSplitQueueCounterBufferA);
-    releaseBufferBacking(m_reyesSplitQueueOverflowBufferA);
-    releaseBufferBacking(m_reyesSplitQueueBufferB);
-    releaseBufferBacking(m_reyesSplitQueueCounterBufferB);
-    releaseBufferBacking(m_reyesSplitQueueOverflowBufferB);
-    releaseBufferBacking(m_reyesReplaySplitQueueBuffer);
-    releaseBufferBacking(m_reyesReplaySplitQueueCounterBuffer);
-    releaseBufferBacking(m_reyesReplaySplitQueueOverflowBuffer);
-    releaseBufferBacking(m_reyesDiceQueueBuffer);
-    releaseBufferBacking(m_reyesDiceQueueCounterBuffer);
-    releaseBufferBacking(m_reyesDiceQueuePhase1CountBuffer);
-    releaseBufferBacking(m_reyesDiceQueueOverflowBuffer);
-    releaseBufferBacking(m_reyesReplayDiceQueueBuffer);
-    releaseBufferBacking(m_reyesReplayDiceQueueCounterBuffer);
-    releaseBufferBacking(m_reyesReplayDiceQueueOverflowBuffer);
-    releaseBufferBacking(m_reyesRasterWorkBuffer);
-    releaseBufferBacking(m_reyesRasterWorkCounterBuffer);
-    releaseBufferBacking(m_reyesRasterWorkIndirectArgsBuffer);
-    releaseBufferBacking(m_reyesTessTableConfigsBuffer);
-    releaseBufferBacking(m_reyesTessTableVerticesBuffer);
-    releaseBufferBacking(m_reyesTessTableTrianglesBuffer);
-    releaseBufferBacking(m_reyesDiceIndirectArgsBuffer);
-    releaseBufferBacking(m_reyesDiceIndirectArgsBufferPhase2);
-    releaseBufferBacking(m_reyesRasterWorkBufferPhase2);
-    releaseBufferBacking(m_reyesRasterWorkCounterBufferPhase2);
-    releaseBufferBacking(m_reyesRasterWorkIndirectArgsBufferPhase2);
-    releaseBufferBacking(m_reyesTelemetryBufferPhase1);
-    releaseBufferBacking(m_reyesTelemetryBufferPhase2);
-    releaseBufferBacking(m_swVisibleClustersCounterBuffer);
-    releaseBufferBacking(m_swVisibleClustersCounterBufferPhase2);
-    releaseBufferBacking(m_voxelRasterWorkBuffer);
-    releaseBufferBacking(m_voxelRasterWorkCounterBuffer);
-    releaseBufferBacking(m_skinnedVoxelRasterWorkBuffer);
-    releaseBufferBacking(m_skinnedVoxelRasterWorkCounterBuffer);
-    releaseBufferBacking(m_voxelRasterIndirectArgsBuffer);
-    releaseBufferBacking(m_skinnedVoxelRasterIndirectArgsBuffer);
-    releaseBufferBacking(m_sortedToUnsortedMappingBuffer);
-    releaseBufferBacking(m_sortedToUnsortedMappingBufferSw);
-    releaseBufferBacking(m_compactedVisibleClustersBufferPhase2);
-    releaseBufferBacking(m_compactedVisibleClustersBufferPhase2Sw);
-    releaseBufferBacking(m_compactedVisibleClusterTransformIndicesBufferPhase2);
-    releaseBufferBacking(m_compactedVisibleClusterTransformIndicesBufferPhase2Sw);
-    releaseBufferBacking(m_sortedToUnsortedMappingBufferPhase2);
-    releaseBufferBacking(m_sortedToUnsortedMappingBufferPhase2Sw);
-    releaseBufferBacking(m_voxelRasterWorkBufferPhase2);
-    releaseBufferBacking(m_skinnedVoxelRasterWorkBufferPhase2);
-    releaseBufferBacking(m_reyesSplitQueueBufferAPhase2);
-    releaseBufferBacking(m_reyesSplitQueueBufferBPhase2);
-    releaseBufferBacking(m_shadowPageMetadataBuffer);
-    releaseBufferBacking(m_shadowInvalidationInputsBuffer);
-    releaseBufferBacking(m_shadowInvalidationCountBuffer);
-    for (const auto& buffer : m_shadowUpgradeInvalidationUploadBuffers) {
-        releaseBufferBacking(buffer);
-    }
-    releaseBufferBacking(m_shadowInvalidatedInstancesBitsetBuffer);
-    releaseBufferBacking(m_shadowPredictiveInvalidationCandidatesBuffer);
-    releaseBufferBacking(m_shadowPredictiveInvalidationCandidateCountBuffer);
-    releaseBufferBacking(m_shadowPredictiveRawPagesBuffer);
-    releaseBufferBacking(m_shadowPredictiveRawPageCountBuffer);
-    releaseBufferBacking(m_shadowPredictedInvalidationScratchBitsetBuffer);
-    releaseBufferBacking(m_shadowPredictedInvalidationPagesBufferA);
-    releaseBufferBacking(m_shadowPredictedInvalidationPageCountBufferA);
-    releaseBufferBacking(m_shadowAllocationRequestsBuffer);
-    releaseBufferBacking(m_shadowAllocationCountBuffer);
-    releaseBufferBacking(m_shadowAllocationIndirectArgsBuffer);
-    releaseBufferBacking(m_shadowMarkTileWorkBuffer);
-    releaseBufferBacking(m_shadowMarkTileCountBuffer);
-    releaseBufferBacking(m_shadowMarkTileIndirectArgsBuffer);
-    releaseBufferBacking(m_shadowMarkedBlocksMaskBuffer);
-    releaseBufferBacking(m_shadowMarkedBlocksListBuffer);
-    releaseBufferBacking(m_shadowMarkedBlocksCountBuffer);
-    releaseBufferBacking(m_shadowReceiverSubpageMaskBuffer);
-    releaseBufferBacking(m_shadowActiveBlockMetadataBuffer);
-    releaseBufferBacking(m_shadowBlockClusterCoverageBuffer);
-    releaseBufferBacking(m_shadowFreePhysicalPagesBuffer);
-    releaseBufferBacking(m_shadowReusablePhysicalPagesBuffer);
-    releaseBufferBacking(m_shadowPageListHeaderBuffer);
-    releaseBufferBacking(m_shadowDirtyPageFlagsBuffer);
-    releaseBufferBacking(m_shadowClipmapInfoBuffer);
-    releaseBufferBacking(m_shadowMarkClipmapDataBuffer);
-    releaseBufferBacking(m_shadowCompactMainCameraBuffer);
-    releaseBufferBacking(m_shadowCompactShadowCameraBuffer);
-    releaseBufferBacking(m_shadowDirectionalPageViewInfoBuffer);
-    releaseBufferBacking(m_shadowRuntimeStateBuffer);
-    releaseBufferBacking(m_shadowStatsBuffer);
-    releaseBufferBacking(m_vsmExpandedVisibleClustersBuffer);
-    releaseBufferBacking(m_vsmExpandedVisibleClustersBufferSw);
-    releaseBufferBacking(m_vsmExpandedVisibleClusterTransformIndicesBufferSw);
-}
-
-void CLodExtension::ReleaseTransparencyResourceBackings()
-{
-    CLodAlphaVariant::ReleaseResourceBackings(*this);
-}
-
-void CLodExtension::ReleaseShadowResourceBackings()
-{
-    CLodShadowVariant::ReleaseResourceBackings(*this);
-}
-
 void CLodExtension::SyncReyesResourceEntities(bool enabled)
 {
     if (!m_reyesFullClusterOutputsBuffer) {
@@ -1254,31 +1006,25 @@ void CLodExtension::SyncReyesResourceEntities(bool enabled)
     }
 
     const auto& traits = GetVariantTraits(m_type);
-    auto& ecsWorld = RendererECSManager::GetInstance().GetWorld();
-    const flecs::entity typeEntity = traits.ensureTypeEntity(ecsWorld);
 
-    SyncTaggedBufferEntity<CLodReyesFullClustersCounterTag>(m_reyesFullClusterOutputsCounterBuffer, typeEntity, enabled);
-    SyncTaggedBufferEntity<CLodReyesSplitQueueCounterATag>(m_reyesSplitQueueCounterBufferA, typeEntity, enabled);
-    SyncTaggedBufferEntity<CLodReyesSplitQueueOverflowATag>(m_reyesSplitQueueOverflowBufferA, typeEntity, enabled);
-    SyncTaggedBufferEntity<CLodReyesSplitQueueCounterBTag>(m_reyesSplitQueueCounterBufferB, typeEntity, enabled);
-    SyncTaggedBufferEntity<CLodReyesSplitQueueOverflowBTag>(m_reyesSplitQueueOverflowBufferB, typeEntity, enabled);
-    SyncTaggedBufferEntity<CLodReyesDiceQueueTag>(m_reyesDiceQueueBuffer, typeEntity, enabled);
-    SyncTaggedBufferEntity<CLodReyesTessTableConfigsTag>(m_reyesTessTableConfigsBuffer, typeEntity, enabled);
-    SyncTaggedBufferEntity<CLodReyesTessTableVerticesTag>(m_reyesTessTableVerticesBuffer, typeEntity, enabled);
-    SyncTaggedBufferEntity<CLodReyesTessTableTrianglesTag>(m_reyesTessTableTrianglesBuffer, typeEntity, enabled);
-    SyncTaggedBufferEntity<CLodReyesDiceQueueCounterTag>(m_reyesDiceQueueCounterBuffer, typeEntity, enabled);
-    SyncTaggedBufferEntity<CLodReyesDiceQueueOverflowTag>(m_reyesDiceQueueOverflowBuffer, typeEntity, enabled);
-    SyncTaggedBufferEntity<CLodReyesTelemetryBufferPhase1Tag>(m_reyesTelemetryBufferPhase1, typeEntity, enabled);
-    SyncTaggedBufferEntity<CLodReyesTelemetryBufferPhase2Tag>(m_reyesTelemetryBufferPhase2, typeEntity, enabled);
+    SyncTaggedBufferEntity<CLodReyesFullClustersCounterTag>(traits, m_reyesFullClusterOutputsCounterBuffer, enabled);
+    SyncTaggedBufferEntity<CLodReyesSplitQueueCounterATag>(traits, m_reyesSplitQueueCounterBufferA, enabled);
+    SyncTaggedBufferEntity<CLodReyesSplitQueueOverflowATag>(traits, m_reyesSplitQueueOverflowBufferA, enabled);
+    SyncTaggedBufferEntity<CLodReyesSplitQueueCounterBTag>(traits, m_reyesSplitQueueCounterBufferB, enabled);
+    SyncTaggedBufferEntity<CLodReyesSplitQueueOverflowBTag>(traits, m_reyesSplitQueueOverflowBufferB, enabled);
+    SyncTaggedBufferEntity<CLodReyesDiceQueueTag>(traits, m_reyesDiceQueueBuffer, enabled);
+    SyncTaggedBufferEntity<CLodReyesTessTableConfigsTag>(traits, m_reyesTessTableConfigsBuffer, enabled);
+    SyncTaggedBufferEntity<CLodReyesTessTableVerticesTag>(traits, m_reyesTessTableVerticesBuffer, enabled);
+    SyncTaggedBufferEntity<CLodReyesTessTableTrianglesTag>(traits, m_reyesTessTableTrianglesBuffer, enabled);
+    SyncTaggedBufferEntity<CLodReyesDiceQueueCounterTag>(traits, m_reyesDiceQueueCounterBuffer, enabled);
+    SyncTaggedBufferEntity<CLodReyesDiceQueueOverflowTag>(traits, m_reyesDiceQueueOverflowBuffer, enabled);
+    SyncTaggedBufferEntity<CLodReyesTelemetryBufferPhase1Tag>(traits, m_reyesTelemetryBufferPhase1, enabled);
+    SyncTaggedBufferEntity<CLodReyesTelemetryBufferPhase2Tag>(traits, m_reyesTelemetryBufferPhase2, enabled);
+    m_reyesResourcesPublished = enabled;
 }
 
-void CLodExtension::EnsureReyesResourcesInitialized()
+void CLodExtension::InitializeReyesResources()
 {
-    if (m_reyesFullClusterOutputsBuffer) {
-        SyncReyesResourceEntities(true);
-        return;
-    }
-
     auto tagBufferUsage = [](const std::shared_ptr<org::Buffer>& buffer, std::string_view usage) {
         if (buffer) {
             org::memory::SetResourceUsageHint(*buffer, std::string(usage));
@@ -1286,8 +1032,6 @@ void CLodExtension::EnsureReyesResourcesInitialized()
     };
 
     const auto& traits = GetVariantTraits(m_type);
-    auto& ecsWorld = RendererECSManager::GetInstance().GetWorld();
-    const flecs::entity typeEntity = traits.ensureTypeEntity(ecsWorld);
     const ReyesResourceSizing reyesResourceSizing = BuildReyesResourceSizing(traits, m_visibleClusterCapacity);
     const bool usesPhase2ReyesResources = traits.usesPhase2OcclusionReplay;
     m_reyesFullClusterOutputCapacity = reyesResourceSizing.fullClusterOutputCapacity;
@@ -1328,10 +1072,7 @@ void CLodExtension::EnsureReyesResourcesInitialized()
 
     m_reyesFullClusterOutputsCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false);
     m_reyesFullClusterOutputsCounterBuffer->SetName(MakeVariantResourceName(traits, "Reyes Full Cluster Outputs Counter Buffer"));
-    m_reyesFullClusterOutputsCounterBuffer->GetECSEntity()
-        .set<Components::Resource>({ m_reyesFullClusterOutputsCounterBuffer })
-        .add<CLodReyesFullClustersCounterTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodReyesFullClustersCounterTag>(traits, m_reyesFullClusterOutputsCounterBuffer);
 
     m_reyesOwnedClustersBuffer = CreateAliasedUnmaterializedStructuredBuffer(m_reyesOwnedClusterCapacity, sizeof(CLodReyesOwnedClusterEntry), true, false, false, true);
     m_reyesOwnedClustersBuffer->SetName(MakeVariantResourceName(traits, "Reyes Owned Clusters Buffer"));
@@ -1368,17 +1109,11 @@ void CLodExtension::EnsureReyesResourcesInitialized()
 
     m_reyesSplitQueueCounterBufferA = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false);
     m_reyesSplitQueueCounterBufferA->SetName(MakeVariantResourceName(traits, "Reyes Split Queue Counter Buffer A"));
-    m_reyesSplitQueueCounterBufferA->GetECSEntity()
-        .set<Components::Resource>({ m_reyesSplitQueueCounterBufferA })
-        .add<CLodReyesSplitQueueCounterATag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodReyesSplitQueueCounterATag>(traits, m_reyesSplitQueueCounterBufferA);
 
     m_reyesSplitQueueOverflowBufferA = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false);
     m_reyesSplitQueueOverflowBufferA->SetName(MakeVariantResourceName(traits, "Reyes Split Queue Overflow Buffer A"));
-    m_reyesSplitQueueOverflowBufferA->GetECSEntity()
-        .set<Components::Resource>({ m_reyesSplitQueueOverflowBufferA })
-        .add<CLodReyesSplitQueueOverflowATag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodReyesSplitQueueOverflowATag>(traits, m_reyesSplitQueueOverflowBufferA);
 
     m_reyesSplitQueueBufferB = CreateAliasedUnmaterializedStructuredBuffer(m_reyesSplitQueueCapacity, sizeof(CLodReyesSplitQueueEntry), true, false, true);
     m_reyesSplitQueueBufferB->SetName(MakeVariantResourceName(traits, "Reyes Split Queue Buffer B"));
@@ -1391,17 +1126,11 @@ void CLodExtension::EnsureReyesResourcesInitialized()
 
     m_reyesSplitQueueCounterBufferB = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false);
     m_reyesSplitQueueCounterBufferB->SetName(MakeVariantResourceName(traits, "Reyes Split Queue Counter Buffer B"));
-    m_reyesSplitQueueCounterBufferB->GetECSEntity()
-        .set<Components::Resource>({ m_reyesSplitQueueCounterBufferB })
-        .add<CLodReyesSplitQueueCounterBTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodReyesSplitQueueCounterBTag>(traits, m_reyesSplitQueueCounterBufferB);
 
     m_reyesSplitQueueOverflowBufferB = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false);
     m_reyesSplitQueueOverflowBufferB->SetName(MakeVariantResourceName(traits, "Reyes Split Queue Overflow Buffer B"));
-    m_reyesSplitQueueOverflowBufferB->GetECSEntity()
-        .set<Components::Resource>({ m_reyesSplitQueueOverflowBufferB })
-        .add<CLodReyesSplitQueueOverflowBTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodReyesSplitQueueOverflowBTag>(traits, m_reyesSplitQueueOverflowBufferB);
 
     m_reyesReplaySplitQueueBuffer = CreateAliasedUnmaterializedStructuredBuffer(m_reyesSplitQueueCapacity, sizeof(CLodReyesSplitQueueEntry), true, false, true);
     m_reyesReplaySplitQueueBuffer->SetName(MakeVariantResourceName(traits, "Reyes Replay Split Queue Buffer"));
@@ -1414,10 +1143,7 @@ void CLodExtension::EnsureReyesResourcesInitialized()
 
     m_reyesDiceQueueBuffer = CreateAliasedUnmaterializedStructuredBuffer(m_reyesDiceQueuePhysicalCapacity, sizeof(CLodReyesDiceQueueEntry), true, false, true);
     m_reyesDiceQueueBuffer->SetName(MakeVariantResourceName(traits, "Reyes Dice Queue Buffer"));
-    m_reyesDiceQueueBuffer->GetECSEntity()
-        .set<Components::Resource>({ m_reyesDiceQueueBuffer })
-        .add<CLodReyesDiceQueueTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodReyesDiceQueueTag>(traits, m_reyesDiceQueueBuffer);
 
     const ReyesTessellationTableData& reyesTessellationTableData = GetReyesTessellationTableData();
     m_reyesTessTableConfigsBuffer = CreateAliasedUnmaterializedStructuredBuffer(
@@ -1428,10 +1154,7 @@ void CLodExtension::EnsureReyesResourcesInitialized()
         false,
         false);
     m_reyesTessTableConfigsBuffer->SetName(MakeVariantResourceName(traits, "Reyes Tess Table Configs Buffer"));
-    m_reyesTessTableConfigsBuffer->GetECSEntity()
-        .set<Components::Resource>({ m_reyesTessTableConfigsBuffer })
-        .add<CLodReyesTessTableConfigsTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodReyesTessTableConfigsTag>(traits, m_reyesTessTableConfigsBuffer);
 
     m_reyesTessTableVerticesBuffer = CreateAliasedUnmaterializedStructuredBuffer(
         static_cast<uint32_t>(reyesTessellationTableData.vertices.size()),
@@ -1441,10 +1164,7 @@ void CLodExtension::EnsureReyesResourcesInitialized()
         false,
         false);
     m_reyesTessTableVerticesBuffer->SetName(MakeVariantResourceName(traits, "Reyes Tess Table Vertices Buffer"));
-    m_reyesTessTableVerticesBuffer->GetECSEntity()
-        .set<Components::Resource>({ m_reyesTessTableVerticesBuffer })
-        .add<CLodReyesTessTableVerticesTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodReyesTessTableVerticesTag>(traits, m_reyesTessTableVerticesBuffer);
 
     m_reyesTessTableTrianglesBuffer = CreateAliasedUnmaterializedStructuredBuffer(
         static_cast<uint32_t>(reyesTessellationTableData.triangles.size()),
@@ -1454,17 +1174,11 @@ void CLodExtension::EnsureReyesResourcesInitialized()
         false,
         false);
     m_reyesTessTableTrianglesBuffer->SetName(MakeVariantResourceName(traits, "Reyes Tess Table Triangles Buffer"));
-    m_reyesTessTableTrianglesBuffer->GetECSEntity()
-        .set<Components::Resource>({ m_reyesTessTableTrianglesBuffer })
-        .add<CLodReyesTessTableTrianglesTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodReyesTessTableTrianglesTag>(traits, m_reyesTessTableTrianglesBuffer);
 
     m_reyesDiceQueueCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false);
     m_reyesDiceQueueCounterBuffer->SetName(MakeVariantResourceName(traits, "Reyes Dice Queue Counter Buffer"));
-    m_reyesDiceQueueCounterBuffer->GetECSEntity()
-        .set<Components::Resource>({ m_reyesDiceQueueCounterBuffer })
-        .add<CLodReyesDiceQueueCounterTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodReyesDiceQueueCounterTag>(traits, m_reyesDiceQueueCounterBuffer);
 
     if (usesPhase2ReyesResources) {
         m_reyesDiceQueuePhase1CountBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), false, false, false);
@@ -1473,10 +1187,7 @@ void CLodExtension::EnsureReyesResourcesInitialized()
 
     m_reyesDiceQueueOverflowBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false);
     m_reyesDiceQueueOverflowBuffer->SetName(MakeVariantResourceName(traits, "Reyes Dice Queue Overflow Buffer"));
-    m_reyesDiceQueueOverflowBuffer->GetECSEntity()
-        .set<Components::Resource>({ m_reyesDiceQueueOverflowBuffer })
-        .add<CLodReyesDiceQueueOverflowTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodReyesDiceQueueOverflowTag>(traits, m_reyesDiceQueueOverflowBuffer);
 
     m_reyesReplayDiceQueueBuffer = CreateAliasedUnmaterializedStructuredBuffer(m_reyesDiceQueueCapacity, sizeof(CLodReyesDiceQueueEntry), true, false, true);
     m_reyesReplayDiceQueueBuffer->SetName(MakeVariantResourceName(traits, "Reyes Replay Dice Queue Buffer"));
@@ -1521,19 +1232,14 @@ void CLodExtension::EnsureReyesResourcesInitialized()
 
     m_reyesTelemetryBufferPhase1 = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodReyesTelemetry), true, false, false, false);
     m_reyesTelemetryBufferPhase1->SetName(MakeVariantResourceName(traits, "Reyes Telemetry Buffer Phase1"));
-    m_reyesTelemetryBufferPhase1->GetECSEntity()
-        .set<Components::Resource>({ m_reyesTelemetryBufferPhase1 })
-        .add<CLodReyesTelemetryBufferPhase1Tag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodReyesTelemetryBufferPhase1Tag>(traits, m_reyesTelemetryBufferPhase1);
 
     if (usesPhase2ReyesResources) {
         m_reyesTelemetryBufferPhase2 = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodReyesTelemetry), true, false, false, false);
         m_reyesTelemetryBufferPhase2->SetName(MakeVariantResourceName(traits, "Reyes Telemetry Buffer Phase2"));
-        m_reyesTelemetryBufferPhase2->GetECSEntity()
-            .set<Components::Resource>({ m_reyesTelemetryBufferPhase2 })
-            .add<CLodReyesTelemetryBufferPhase2Tag>()
-            .add<CLodExtensionTypeTag>(typeEntity);
+        PublishCLodResource<CLodReyesTelemetryBufferPhase2Tag>(traits, m_reyesTelemetryBufferPhase2);
     }
+    m_reyesResourcesPublished = true;
 
     tagBufferUsage(m_reyesFullClusterOutputsBuffer, "Cluster LOD Reyes");
     tagBufferUsage(m_reyesFullClusterOutputsCounterBuffer, "Cluster LOD Reyes");
@@ -1585,22 +1291,18 @@ CLodExtension::CLodExtension(
     : m_type(type)
     , m_options(options)
     , m_maxVisibleClusters(maxVisibleClusters) {
-    const auto& traits = GetVariantTraits(type);
-
+    // Always the renderer's service: an instance never makes its own.
     m_streamingSystem = std::move(m_options.streamingSystem);
-    if (traits.ownsStreaming && !m_streamingSystem) {
-        m_streamingSystem = std::make_shared<CLodStreamingSystem>();
-    }
 
     if (m_type == CLodExtensionType::Shadow) {
-        RefreshShadowConfiguredSettings();
+        CLodShadowVariant::ConfigureSettings(*this);
     }
     m_visibleClusterCapacity = GetVisibleClusterCapacity();
 
     InitializeCoreResources();
 
     if (!IsReyesTessellationDisabled()) {
-        EnsureReyesResourcesInitialized();
+        InitializeReyesResources();
     }
 
     InitializeDeepVisibilityResources();
@@ -1611,62 +1313,90 @@ CLodExtension::CLodExtension(
     TagShadowResourceUsages();
 }
 
-void CLodExtension::RefreshTransparencyResourcesForCurrentSettings()
+void CLodExtension::PublishPrimaryBuffersToFrameBuild() const
 {
-    CLodAlphaVariant::RefreshResourcesForCurrentSettings(*this);
+    auto* build = br::render::CurrentFrameBuild();
+    if (m_type != CLodExtensionType::VisiblityBuffer || !build) {
+        return;
+    }
+    // The same buffers the directory lists under the visibility buffer type, which the renderer's pass declarations
+    // used to query: the Reyes ones only while they are listed.
+    auto& primary = build->outputs.clodPrimary;
+    primary = {};
+    primary.visibleClusters = m_visibleClustersBuffer;
+    primary.visibleClusterCounter = m_visibleClustersCounterBuffer;
+    primary.visibleClusterTransformIndices = m_visibleClusterTransformIndicesBuffer;
+    primary.visibleClusterCapacity = m_visibleClusterCapacity;
+    if (m_reyesResourcesPublished) {
+        primary.reyesDiceQueue = m_reyesDiceQueueBuffer;
+        primary.reyesTessTableConfigs = m_reyesTessTableConfigsBuffer;
+        primary.reyesTessTableVertices = m_reyesTessTableVerticesBuffer;
+        primary.reyesTessTableTriangles = m_reyesTessTableTrianglesBuffer;
+    }
 }
 
-void CLodExtension::RefreshShadowResourcesForCurrentSettings()
+CLodStreamingGraphBinding* CLodExtension::BuildStreamingBinding()
 {
-    CLodShadowVariant::RefreshResourcesForCurrentSettings(*this);
+    // Graphs are built only inside a frame build (Renderer::RunFrameBuild); without one there is no binding.
+    auto* build = br::render::CurrentFrameBuild();
+    if (!build) {
+        return nullptr;
+    }
+    auto& binding = build->outputs.clodStreaming;
+    if (!binding) {
+        binding = CLodStreamingGraphBinding::Create();
+    }
+    return binding.get();
+}
+
+void CLodExtension::RecordShadowStreamingResources()
+{
+    if (m_type != CLodExtensionType::Shadow || !m_streamingSystem) {
+        return;
+    }
+    auto* binding = BuildStreamingBinding();
+    if (!binding) {
+        return;
+    }
+    binding->virtualShadowUpgradeUploadBuffers = m_shadowUpgradeInvalidationUploadBuffers;
+    binding->virtualShadowFallbackDependencies = m_shadowPredictedInvalidationPagesBufferA;
+    binding->virtualShadowFallbackDependencyCount = m_shadowPredictedInvalidationPageCountBufferA;
 }
 
 void CLodExtension::PrepareForBuild(org::RenderGraph& rg)
 {
-    RefreshTransparencyResourcesForCurrentSettings();
-    RefreshShadowResourcesForCurrentSettings();
+    // Runs once: the instance belongs to this graph alone.
+    PublishPrimaryBuffersToFrameBuild();
+    // Before any gather: the streaming readback (the opaque variant's tail gather) copies the shadow variant's list.
+    RecordShadowStreamingResources();
 
-    if (m_type == CLodExtensionType::Shadow && !m_providerRegisteredForCurrentRegistry) {
+    if (m_type == CLodExtensionType::Shadow) {
         rg.RegisterProvider(this);
-        m_providerRegisteredForCurrentRegistry = true;
     }
 }
 
 void CLodExtension::Initialize(org::RenderGraph& rg)
 {
-    PrepareForBuild(rg);
-
     if (GetVariantTraits(m_type).ownsStreaming && m_streamingSystem) {
-        m_streamingSystem->Initialize(rg);
+        // The graph's queue registry has its primary queues now. The binding is attached after the build.
+        if (auto* binding = BuildStreamingBinding()) {
+            binding->uploadQueueSlot = rg.CreateQueue(
+                org::QueueKind::Copy,
+                "CLodAsyncUpload",
+                org::QueueAutoAssignmentPolicy::ManualOnly);
+            binding->activeBranches = m_options.streamingActiveBranches;
+            m_streamingBinding = br::render::CurrentFrameBuild()->outputs.clodStreaming;
+        }
     }
 }
 
 void CLodExtension::Shutdown(org::RenderGraph& rg)
 {
+    // The streaming service is the renderer's and outlives this graph. Stop it only if it still runs with this graph's
+    // binding (the graph went without a successor); a retired graph's binding is no longer the attached one.
     (void)rg;
-    if (GetVariantTraits(m_type).ownsStreaming && m_streamingSystem) {
-        m_streamingSystem->ShutdownGraphResources();
-    }
-}
-
-void CLodExtension::OnRegistryReset(org::ResourceRegistry* reg)
-{
-    m_providerRegisteredForCurrentRegistry = false;
-    // Extension backings are released below, including upload buffers that the
-    // streaming service maps persistently. Quiesce the shared service first so
-    // no worker can retain or write through a backing that is being destroyed.
-    if (m_streamingSystem) {
-        m_streamingSystem->QuiesceGraphResourceAccess();
-    }
-    ReleaseBufferBackings();
-    ReleaseTransparencyResourceBackings();
-    ReleaseShadowResourceBackings();
-    m_shadowVirtualResourcesNeedReset = true;
-
-    SyncReyesResourceEntities(!IsReyesTessellationDisabled());
-
-    if (GetVariantTraits(m_type).ownsStreaming && m_streamingSystem) {
-        m_streamingSystem->OnRegistryReset(reg);
+    if (m_streamingSystem && m_streamingBinding) {
+        m_streamingSystem->DetachGraph(m_streamingBinding.get());
     }
 }
 
@@ -1682,20 +1412,26 @@ std::vector<org::ResourceIdentifier> CLodExtension::GetSupportedKeys()
 
 void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& outPasses)
 {
-    PrepareForBuild(rg);
-
     const auto& traits = GetVariantTraits(m_type);
-    if (traits.ownsStreaming && m_streamingSystem) {
-        m_streamingSystem->GatherStructuralPasses(rg, outPasses);
+    CLodStreamingGraphBinding* streamingBinding =
+        traits.ownsStreaming && m_streamingSystem ? BuildStreamingBinding() : nullptr;
+    if (streamingBinding) {
+        m_streamingSystem->GatherStructuralPasses(rg, *streamingBinding, outPasses);
     }
+    // Every variant's raster passes report source group mismatches into the build's streaming binding.
+    CLodStreamingGraphBinding* mismatchBinding = m_streamingSystem ? BuildStreamingBinding() : nullptr;
+    const std::shared_ptr<org::Buffer> streamingMismatchCounter =
+        mismatchBinding ? mismatchBinding->sourceGroupMismatchCounter : nullptr;
+    const std::shared_ptr<org::Buffer> streamingMismatchDetails =
+        mismatchBinding ? mismatchBinding->sourceGroupMismatchDetails : nullptr;
 
     bool streamingTailAppended = false;
     const auto appendStreamingTailPasses = [&]() {
-        if (traits.ownsStreaming && m_streamingSystem && !streamingTailAppended) {
+        if (streamingBinding && !streamingTailAppended) {
             // Keep after-present streaming passes at the extension tail. If they
             // are emitted before CLod raster passes, extension-local chaining can
             // create Present -> streaming tail -> CLod raster -> Present cycles.
-            m_streamingSystem->GatherStructuralTailPasses(rg, outPasses);
+            m_streamingSystem->GatherStructuralTailPasses(rg, *streamingBinding, outPasses);
             streamingTailAppended = true;
         }
     };
@@ -1724,9 +1460,7 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
         appendStreamingTailPasses();
         return;
     }
-    if (!schedulingPolicy.disableReyesTessellation) {
-        EnsureReyesResourcesInitialized();
-    }
+    // The constructor made the Reyes buffers when the variant has Reyes; the directory lists them only where it runs.
     SyncReyesResourceEntities(schedulingPolicy.useReyesForThisVariant);
     const uint32_t reyesSplitQueueCapacity = m_reyesSplitQueueCapacity;
     const uint32_t reyesDiceQueueCapacity = m_reyesDiceQueueCapacity;
@@ -1977,8 +1711,8 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
                 nullptr,
                 nullptr,
                 m_workGraphTelemetryBuffer,
-                m_streamingSystem ? m_streamingSystem->GetSourceGroupMismatchCounterBuffer() : nullptr,
-                m_streamingSystem ? m_streamingSystem->GetSourceGroupMismatchDetailsBuffer() : nullptr,
+                streamingMismatchCounter,
+                streamingMismatchDetails,
                 shadowDynamicPhysicalPages));
         if (phaseFeedsPrimaryVisibility(phaseIndex)) {
             rasterizePassDesc.At(org::ExternalInsertPoint::Before("MaterialHistogramPass"));
@@ -2090,7 +1824,8 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
                     !isPhase1,
                     true,
                     true,
-                    true)));
+                    true,
+                    CLodSoftwareRasterClustersPerGroup(traits.rasterOutputKind))));
 
         std::shared_ptr<org::Buffer> swRasterClustersBuffer = swCompactedClustersBuffer;
         std::shared_ptr<org::Buffer> swRasterClusterTransformIndicesBuffer = swCompactedTransformIndicesBuffer;
@@ -2136,7 +1871,7 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
                         m_shadowDynamicActiveBlockMetadataBuffer,
                         m_shadowBlockClusterCoverageBuffer,
                         m_shadowStatsBuffer,
-                        m_shadowConfiguredExpandedRecordCapacity,
+                        m_shadowExpandedRecordCapacity,
                         slabGroup,
                         true)));
 
@@ -2178,7 +1913,7 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
                         m_shadowDynamicActiveBlockMetadataBuffer,
                         m_shadowBlockClusterCoverageBuffer,
                         m_shadowStatsBuffer,
-                        m_shadowConfiguredExpandedRecordCapacity,
+                        m_shadowExpandedRecordCapacity,
                         slabGroup,
                         true)));
 
@@ -2456,7 +2191,7 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
 void CLodExtension::AfterExecute(org::RenderGraph& rg)
 {
     if (GetVariantTraits(m_type).ownsStreaming && m_streamingSystem) {
-        m_streamingSystem->SubmitExternalWork(rg.GetExternalClient());
+        m_streamingSystem->SubmitExternalWork(rg.GetExternalClient(), m_streamingBinding.get());
     }
 }
 

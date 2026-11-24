@@ -257,6 +257,7 @@ set(SOURCES
     "src/Runtime/Renderer/RendererSceneSync.cpp"
     "src/Runtime/Renderer/RendererSceneIngestion.cpp"
     "src/Runtime/Renderer/RendererSceneApi.cpp"
+    "src/Runtime/Renderer/FrameBuildWorker.cpp"
     # src/Camera
     "src/Camera/Lens/LensManager.cpp"
     "src/Camera/Lens/GhostFlareManager.cpp"
@@ -344,6 +345,7 @@ set(SOURCES
     "src/Scene/Objects/IndirectCommandBufferManager.cpp"
     "src/Runtime/IO/DirectStorageManager.cpp"
     "src/Runtime/IO/ReadbackManager.cpp"
+    "src/Runtime/IO/ReadbackCaptureService.cpp"
     "src/Runtime/Device/RenderDeviceAccess.cpp"
     "src/Pipeline/PipelineState/CommandSignatureManager.cpp"
     "src/Runtime/Settings/SettingAccess.cpp"
@@ -359,6 +361,7 @@ set(SOURCES
     # src/Runtime / src/Assets
     "src/Runtime/Device/DeviceManager.cpp"
     "src/Pipeline/PipelineState/OrgPipelineCompiler.cpp"
+    "src/Pipeline/PipelineState/PipelineLibrary.cpp"
     "src/Pipeline/PipelineState/PSOManager.cpp"
     "src/Runtime/Resources/ResourceManager.cpp"
     "src/Pipeline/ShaderCompilation/RendererShaderStore.h"
@@ -395,6 +398,7 @@ set(SOURCES
     "src/Animation/Pose/PoseStateArtifacts.cpp"
     "src/Runtime/Publication/PublishedRendererState.cpp"
     "src/Runtime/GraphIntegration/RenderGraphIOService.cpp"
+    "src/Runtime/GraphIntegration/FrameBuild.cpp"
     "src/Runtime/GraphIntegration/TextureJobGraph.cpp"
     "src/Runtime/GraphIntegration/EnvironmentJobGraph.cpp"
     "src/Runtime/Publication/RendererStateRequestService.cpp"
@@ -481,6 +485,7 @@ set(SOURCES
     # src/Telemetry
     "src/Diagnostics/Telemetry/NvPerfIntegration.cpp"
     "src/Diagnostics/Telemetry/SamplingControlServer.cpp"
+    "src/Diagnostics/SettingsCommands.cpp"
     "src/Diagnostics/Telemetry/StatisticalSampler.cpp"
     # src/Transparency
     "src/Transparency/AVBOIT/RenderPasses/AVBOITAdaptiveFitPass.cpp"
@@ -610,7 +615,7 @@ if(BASICRENDERER_VCPKG_TBB12_LIBRARY)
     target_link_libraries(${PROJECT_NAME} PUBLIC "${BASICRENDERER_VCPKG_TBB12_LIBRARY}")
 endif()
 # The menu draws ORG's memory and schedule inspectors.
-foreach(_br_org_ui OpenRenderGraph::DebugUI OpenRenderGraph::ScheduleUI)
+foreach(_br_org_ui OpenRenderGraph::MemoryUI OpenRenderGraph::ScheduleUI)
     if(TARGET ${_br_org_ui})
         target_link_libraries(${PROJECT_NAME} PUBLIC ${_br_org_ui})
     endif()
@@ -708,6 +713,11 @@ add_library(BasicRendererPublicHeaderSmoke OBJECT
     "tests/PublicHeaders/Diagnostics_StatisticalSampler.cpp"
     "tests/PublicHeaders/Diagnostics_SamplingControlServer.cpp"
     "tests/PublicHeaders/Diagnostics_ControlCommandRegistry.cpp"
+    "tests/PublicHeaders/Diagnostics_SettingsCommands.cpp"
+    "tests/PublicHeaders/Runtime_Detail_FrameRevisions.cpp"
+    "tests/PublicHeaders/Diagnostics_ReadbackCaptures.cpp"
+    "tests/PublicHeaders/Pipeline_PipelineDesc.cpp"
+    "tests/PublicHeaders/Extensions_Buffers_StructuredBackingFlags.cpp"
     "tests/PublicHeaders/Extensions_RenderGraphExtensionRegistration.cpp"
     "tests/PublicHeaders/Extensions_RenderDeviceAccess.cpp"
     "tests/PublicHeaders/Extensions_PipelineDescs.cpp"

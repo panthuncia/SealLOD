@@ -30,9 +30,9 @@
 #include "../shaders/Include/lens/lensDataLayout.h"
 #include "Pipeline/ShaderCompilation/RendererShaderStore.h"
 #include "Render/RenderGraph/RenderGraph.h"
-#include "Render/Runtime/IReadbackService.h"
+#include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
 #include "Resources/Buffers/Buffer.h"
-#include "Resources/ReadbackRequest.h"
+#include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
 #include "Runtime/Settings/SettingsManager.h"
 #include "Utilities/Utilities.h"
 #include <BasicRenderer/Streaming/PublishedRendererState.h>
@@ -1407,11 +1407,11 @@ void LensManager::OnFrame(org::RenderGraph* graph) {
     m_focusPassSeen = focusPrepares;
     if (published->Active() && focusLive && graph && ++m_focusReadbackFrame % kFocusReadbackInterval == 0u
         && !m_shared->focusReading.load(std::memory_order_acquire)) {
-        if (auto* readbacks = graph->GetReadbackService()) {
+        if (auto* readbacks = br::GetReadbackCaptureService()) {
             m_shared->focusReading.store(true, std::memory_order_release);
             const std::weak_ptr<Shared> weak = m_shared;
             const uint32_t mode = SettingsManager::GetInstance().getSettingGetter<uint32_t>("lensFocusMode")();
-            readbacks->RequestReadbackCaptureAfterGraph(m_focusBuffer.get(), org::RangeSpec{}, [weak, published, mode](org::ReadbackCaptureResult&& result) {
+            readbacks->RequestReadbackCaptureAfterGraph(m_focusBuffer.get(), org::RangeSpec{}, [weak, published, mode](br::ReadbackCaptureResult&& result) {
                 const auto shared = weak.lock();
                 if (!shared) return;
                 std::vector<float> words(result.data.size() / sizeof(float));
@@ -1463,11 +1463,11 @@ void LensManager::OnFrame(org::RenderGraph* graph) {
 
     const uint64_t sequence = PendingSelfTest();
     if (!sequence || !graph || m_shared->selfTestReading.load(std::memory_order_acquire)) return;
-    auto* readbacks = graph->GetReadbackService();
+    auto* readbacks = br::GetReadbackCaptureService();
     if (!readbacks) return;
     m_shared->selfTestReading.store(true, std::memory_order_release);
     const std::weak_ptr<Shared> weak = m_shared;
-    readbacks->RequestReadbackCaptureAfterGraph(m_selfTestOutput.get(), org::RangeSpec{}, [weak, sequence](org::ReadbackCaptureResult&& result) {
+    readbacks->RequestReadbackCaptureAfterGraph(m_selfTestOutput.get(), org::RangeSpec{}, [weak, sequence](br::ReadbackCaptureResult&& result) {
         const auto shared = weak.lock();
         if (!shared) return;
         std::vector<float> words(result.data.size() / sizeof(float));

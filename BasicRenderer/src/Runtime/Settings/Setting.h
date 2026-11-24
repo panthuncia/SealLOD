@@ -1,9 +1,13 @@
 #pragma once
 
 #include <typeinfo>
+#include <algorithm>
 #include <functional>
+#include <memory>
+#include <vector>
 
 #include "Runtime/Settings/ISetting.h"
+#include "Runtime/Settings/SettingValueCodec.h"
 
 template<typename T>
 class Setting : public ISetting {
@@ -24,11 +28,39 @@ public:
 		};
 	}
 
-	// Getter callable returns a void pointer to the current value
+	// Getter callable returns a void pointer to the current value, or to the copy in this thread's settings snapshot.
 	std::function<void* (void)> getGetter() override {
 		return [this]() -> void* {
+			if (const SettingsSnapshot* snapshot = br::settings_detail::t_activeSnapshot) {
+				if (void* copied = snapshot->Find(snapshotIndex)) return copied;
+			}
 			return &value;
 		};
+	}
+
+	void* liveValue() noexcept override { return &value; }
+
+	std::unique_ptr<SettingsSnapshot::Value> copyValue() const override {
+		struct Copy final : SettingsSnapshot::Value {
+			explicit Copy(const T& v) : copy(v) {}
+			void* Get() noexcept override { return &copy; }
+			T copy;
+		};
+		return std::make_unique<Copy>(value);
+	}
+
+	br::extensions::SettingValue readValue() const override {
+		return br::settings_detail::ToValue(value);
+	}
+	bool writeValue(const br::extensions::SettingValue& newValue) override {
+		T converted = br::settings_detail::FromValue<T>(newValue, value);
+		if (br::settings_detail::KnownEqual(converted, value)) return false;
+		value = std::move(converted);
+		notifyObservers();
+		return true;
+	}
+	std::string typeName() const override {
+		return br::settings_detail::TypeName<T>();
 	}
 
 	size_t addObserver(ObserverFn obs) {

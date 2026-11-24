@@ -30,6 +30,7 @@
 #include <atomic>
 #endif
 #include <BasicRenderer/Diagnostics/ControlCommandRegistry.h>
+#include <BasicRenderer/Diagnostics/SettingsCommands.h>
 
 #include "BasicRenderer/Assets/Geometry/Mesh.h"
 #include <BasicRenderer/Renderer.h>
@@ -62,9 +63,9 @@
 #include <limits>
 #include <mutex>
 #include <DirectXPackedVector.h>
-#include "Render/Runtime/IReadbackService.h"
+#include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
 #include "Render/Runtime/IStatisticsService.h"
-#include "Resources/ReadbackRequest.h"
+#include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
 
 class spdlog_streambuf : public std::streambuf {
 public:
@@ -1079,7 +1080,7 @@ private:
     {
         auto* graph = renderer.GetRenderGraph();
         if (!graph) return; // Between graphs; try next frame.
-        auto* readbacks = graph->GetReadbackService();
+        auto* readbacks = br::GetReadbackCaptureService();
         if (!readbacks) throw std::runtime_error("the render graph has no readback service");
         const auto accumulation = renderer.GetPathTracingAccumulation();
         job->framesSinceRestart = accumulation.framesSinceRestart;
@@ -1089,7 +1090,7 @@ private:
         }
         ++job->reads;
         if (job->accumulation) {
-            auto callback = [job](org::ReadbackCaptureResult&& result) { OnRead(job, std::move(result)); };
+            auto callback = [job](br::ReadbackCaptureResult&& result) { OnRead(job, std::move(result)); };
             job->state = State::Reading;
             // Not aliased (it is the history), so it can be read after the whole graph without interrupting it.
             readbacks->RequestReadbackCaptureAfterGraph(accumulation.buffer.get(), org::RangeSpec{}, std::move(callback));
@@ -1132,7 +1133,7 @@ private:
             ++job->outstanding;
             auto path = FilePath(*job, read.target, frame);
             readbacks->RequestReadbackCapture(read.anchor, read.resource.get(), org::RangeSpec{},
-                [job, path = std::move(path)](org::ReadbackCaptureResult&& result) { OnFrameRead(job, path, std::move(result)); });
+                [job, path = std::move(path)](br::ReadbackCaptureResult&& result) { OnFrameRead(job, path, std::move(result)); });
         }
         // Waiting until the last frame's readbacks are requested, so Pump calls this again next frame.
         if (job->issuedFrames == job->frames) job->state = State::Reading;
@@ -1149,7 +1150,7 @@ private:
         return path;
     }
 
-    static void OnFrameRead(const std::shared_ptr<Job>& job, const std::filesystem::path& path, org::ReadbackCaptureResult&& result)
+    static void OnFrameRead(const std::shared_ptr<Job>& job, const std::filesystem::path& path, br::ReadbackCaptureResult&& result)
     {
         std::scoped_lock lock(job->mutex);
         if (job->state == State::Failed || job->state == State::Published) return;
@@ -1179,7 +1180,7 @@ private:
         }
     }
 
-    static void OnRead(const std::shared_ptr<Job>& job, org::ReadbackCaptureResult&& result)
+    static void OnRead(const std::shared_ptr<Job>& job, br::ReadbackCaptureResult&& result)
     {
         std::scoped_lock lock(job->mutex);
         if (job->state != State::Reading) return;
@@ -1217,7 +1218,7 @@ private:
         return { pixels.empty() ? 0.0f : minimum, maximum };
     }
 
-    static std::vector<float> ToRgba32F(const org::ReadbackCaptureResult& result)
+    static std::vector<float> ToRgba32F(const br::ReadbackCaptureResult& result)
     {
         if (result.layouts.empty()) throw std::runtime_error("texture readback has no footprint");
         std::size_t bytesPerPixel = 0;
@@ -2618,39 +2619,11 @@ void DemoStatisticalSamplingRun::RegisterControlCommands(Renderer& renderer, HWN
             response["upscaler"] = nlohmann::json::parse(renderer.DescribeUpscaler());
             return response;
         });
-        m_commands.Register("settings.set", [this, &renderer, hwnd](const br::diagnostics::ControlRequest& request) {
-            // Any bool, float or unsigned/signed integer setting by name, for A/B within one run: {"name": ..., "value": ...}.
-            // The response has the value read back. Settings that rebuild the graph or pipeline do so before a coming frame.
-            const auto name = request.args.at("name").get<std::string>();
-            const auto& value = request.args.at("value");
-            nlohmann::json response = nlohmann::json::object();
-            switch (br::extensions::GetSettingValueType(name)) {
-            case br::extensions::SettingValueType::Bool:
-                br::extensions::MakeSettingSetter<bool>(name)(value.get<bool>());
-                response["value"] = br::extensions::MakeSettingGetter<bool>(name)();
-                break;
-            case br::extensions::SettingValueType::Float:
-                br::extensions::MakeSettingSetter<float>(name)(value.get<float>());
-                response["value"] = br::extensions::MakeSettingGetter<float>(name)();
-                break;
-            case br::extensions::SettingValueType::UInt32:
-                br::extensions::MakeSettingSetter<std::uint32_t>(name)(value.get<std::uint32_t>());
-                response["value"] = br::extensions::MakeSettingGetter<std::uint32_t>(name)();
-                break;
-            case br::extensions::SettingValueType::Int32:
-                br::extensions::MakeSettingSetter<std::int32_t>(name)(value.get<std::int32_t>());
-                response["value"] = br::extensions::MakeSettingGetter<std::int32_t>(name)();
-                break;
-            case br::extensions::SettingValueType::UInt8:
-                br::extensions::MakeSettingSetter<std::uint8_t>(name)(value.get<std::uint8_t>());
-                response["value"] = br::extensions::MakeSettingGetter<std::uint8_t>(name)();
-                break;
-            case br::extensions::SettingValueType::Missing:
-                throw std::runtime_error("no setting named '" + name + "'");
-            default:
-                throw std::runtime_error("setting '" + name + "' has a type settings.set cannot write");
-            }
-            return response;
+        // settings.list, settings.get, settings.set: any setting by name (SettingsCommands.h).
+        br::diagnostics::RegisterSettingsCommands(m_commands);
+        m_commands.Register("renderer.revisions", [&renderer](const br::diagnostics::ControlRequest&) {
+            // Graph builds and the revisions behind them: for checking what a settings.set cost.
+            return nlohmann::json::parse(renderer.DescribeGraphRevisions());
         });
         m_commands.Register("upscaler.simulate_failure", [this, &renderer, hwnd](const br::diagnostics::ControlRequest& request) {
             nlohmann::json response = nlohmann::json::object();

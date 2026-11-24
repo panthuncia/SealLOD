@@ -36,6 +36,8 @@
 #include "Runtime/Settings/RendererSettingsHelpers.h"
 #include <filesystem>
 #include <fstream>
+#include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
+#include "Runtime/IO/ReadbackCaptureService.h"
 
 namespace {
 constexpr const char* CLodVisibilityTelemetryDebugSettingName = "clodVisibilityTelemetryDebug";
@@ -339,7 +341,7 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
         return;
     }
 
-    auto* readbackService = m_orgRuntime->Readbacks().get();
+    auto* readbackService = m_readbackCaptures.get();
     if (!readbackService) {
         return;
     }
@@ -605,7 +607,7 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
         "CLodOpaque::RasterizeClustersPass2",
         telemetryResource.get(),
         org::RangeSpec{},
-        [this, requestedFrame, primaryActiveSetWorkloads, primaryActiveSetMembers](org::ReadbackCaptureResult&& result) {
+        [this, requestedFrame, primaryActiveSetWorkloads, primaryActiveSetMembers](br::ReadbackCaptureResult&& result) {
             m_clodTelemetryReadbackPending = false;
 
             constexpr size_t telemetryBytes = sizeof(uint32_t) * static_cast<size_t>(CLodWorkGraphCounterCount);
@@ -932,7 +934,7 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
             "CLodOpaque::RasterizeClustersPass1",
             hwHistogramResource.get(),
             org::RangeSpec{},
-            [hwRasterBuckets](org::ReadbackCaptureResult&& result) {
+            [hwRasterBuckets](br::ReadbackCaptureResult&& result) {
                 hwRasterBuckets->SetHistogram(std::move(result.data));
             });
     }
@@ -954,14 +956,14 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
             "CLodOpaque::RasterBucketsCompactAndArgsPassSW1",
             swHistogramResource.get(),
             org::RangeSpec{},
-            [swRasterBuckets](org::ReadbackCaptureResult&& result) {
+            [swRasterBuckets](br::ReadbackCaptureResult&& result) {
                 swRasterBuckets->SetHistogram(std::move(result.data));
             });
         readbackService->RequestReadbackCapture(
             "CLodOpaque::RasterBucketsCompactAndArgsPassSW1",
             swArgsResource.get(),
             org::RangeSpec{},
-            [swRasterBuckets](org::ReadbackCaptureResult&& result) {
+            [swRasterBuckets](br::ReadbackCaptureResult&& result) {
                 swRasterBuckets->SetArgs(std::move(result.data));
             });
     }
@@ -970,7 +972,7 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
         "CLodOpaque::RasterizeClustersPass1",
         rasterArgsResource.get(),
         org::RangeSpec{},
-        [this, requestedFrame, hwRasterBuckets](org::ReadbackCaptureResult&& result) {
+        [this, requestedFrame, hwRasterBuckets](br::ReadbackCaptureResult&& result) {
             m_clodRasterArgsReadbackPending = false;
 
             const size_t commandCount = result.data.size() / sizeof(RasterizeClustersCommand);
@@ -1033,7 +1035,7 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
             "CLodOpaque::HierarchicalCullingPass2",
             swVisibleCounterResource.get(),
             org::RangeSpec{},
-            [requestedFrame, visibleTransformAudit](org::ReadbackCaptureResult&& result) {
+            [requestedFrame, visibleTransformAudit](br::ReadbackCaptureResult&& result) {
                 std::uint32_t swVisibleClusters = 0;
                 if (result.data.size() >= sizeof(swVisibleClusters)) {
                     std::memcpy(&swVisibleClusters, result.data.data(), sizeof(swVisibleClusters));
@@ -1052,7 +1054,7 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
         "CLodOpaque::HierarchicalCullingPass2",
         visibleCounterResource.get(),
         org::RangeSpec{},
-        [this, requestedFrame, visibleTransformAudit](org::ReadbackCaptureResult&& result) {
+        [this, requestedFrame, visibleTransformAudit](br::ReadbackCaptureResult&& result) {
             m_clodVisibleCounterReadbackPending = false;
 
             if (result.data.size() < sizeof(uint32_t)) {
@@ -1080,7 +1082,7 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
         "CLodOpaque::HierarchicalCullingPass2",
         visibleRecordsResource.get(),
         org::RangeSpec{},
-        [this, requestedFrame, visibleTransformAudit](org::ReadbackCaptureResult&& result) {
+        [this, requestedFrame, visibleTransformAudit](br::ReadbackCaptureResult&& result) {
             m_clodVisibleRecordsReadbackPending = false;
             {
                 std::lock_guard lock(visibleTransformAudit->mutex);
@@ -1093,7 +1095,7 @@ void Renderer::MaybeRequestCLodVisibilityTelemetry() {
         "CLodOpaque::HierarchicalCullingPass2",
         replayStateResource.get(),
         org::RangeSpec{},
-        [this, requestedFrame](org::ReadbackCaptureResult&& result) {
+        [this, requestedFrame](br::ReadbackCaptureResult&& result) {
             m_clodReplayStateReadbackPending = false;
 
             if (result.data.size() < sizeof(CLodReplayBufferState)) {
@@ -1158,7 +1160,7 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
         return;
     }
 
-    auto* readbackService = m_orgRuntime->Readbacks().get();
+    auto* readbackService = m_readbackCaptures.get();
     if (!readbackService) {
         return;
     }
@@ -1195,7 +1197,7 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
         "DeferredShadingPass",
         statsResource.get(),
         org::RangeSpec{},
-        [this, requestedFrame](org::ReadbackCaptureResult&& result) {
+        [this, requestedFrame](br::ReadbackCaptureResult&& result) {
             m_clodVirtualShadowTelemetryReadbackPending = false;
             if (result.data.size() < sizeof(CLodVirtualShadowStats)) {
                 spdlog::error(
@@ -1354,7 +1356,7 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
             "CLodShadow::RasterizeClustersPass1",
             workTelemetryResource.get(),
             org::RangeSpec{},
-            [requestedFrame](org::ReadbackCaptureResult&& result) {
+            [requestedFrame](br::ReadbackCaptureResult&& result) {
                 constexpr size_t telemetryBytes =
                     sizeof(uint32_t) * static_cast<size_t>(CLodWorkGraphCounterCount);
                 if (result.data.size() < telemetryBytes) {
@@ -1379,7 +1381,7 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
             "CLodShadow::VirtualShadowComposePagesPass",
             workTelemetryResource.get(),
             org::RangeSpec{},
-            [this, requestedFrame](org::ReadbackCaptureResult&& result) {
+            [this, requestedFrame](br::ReadbackCaptureResult&& result) {
                 m_clodVirtualShadowWorkTelemetryReadbackPending = false;
                 constexpr size_t telemetryBytes =
                     sizeof(uint32_t) *
@@ -1494,7 +1496,7 @@ void Renderer::MaybeRequestCLodVirtualShadowTelemetry()
             telemetry.completionPassName,
             telemetry.resource.get(),
             org::RangeSpec{},
-            [this, requestedFrame, providerId = telemetry.providerId](org::ReadbackCaptureResult&& result) {
+            [this, requestedFrame, providerId = telemetry.providerId](br::ReadbackCaptureResult&& result) {
                 if (m_virtualShadowCasterTelemetryReadbacksPending != 0u) {
                     --m_virtualShadowCasterTelemetryReadbacksPending;
                 }
@@ -1533,7 +1535,7 @@ void Renderer::MaybeRequestCLodVirtualShadowFrameTelemetry()
     if (path.empty() || !currentRenderGraph || !m_orgRuntime) {
         return;
     }
-    auto* readbackService = m_orgRuntime->Readbacks().get();
+    auto* readbackService = m_readbackCaptures.get();
     if (!readbackService) {
         return;
     }
@@ -1614,7 +1616,7 @@ void Renderer::MaybeRequestCLodVirtualShadowFrameTelemetry()
         "DeferredShadingPass",
         statsResource.get(),
         org::RangeSpec{},
-        [state, release, requestedFrame, camera](org::ReadbackCaptureResult&& result) {
+        [state, release, requestedFrame, camera](br::ReadbackCaptureResult&& result) {
             if (result.data.size() < sizeof(CLodVirtualShadowStats)) {
                 return;
             }

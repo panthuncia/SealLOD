@@ -15,7 +15,7 @@
 #include <vector>
 
 struct EnvironmentSHBindings {
-	org::PipelineState pipeline;
+	br::PipelineState pipeline;
 	uint32_t samplerIndex = 0;
 	// The jobs this declaration declares, and each one's source cubemap view, in the same order. Executions take work
 	// only from them (PreparesOnlyDeclaredWork).
@@ -56,7 +56,7 @@ public:
 
 	EnvironmentSHBindings Declare(org::PassBuilder& builder) {
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-		EnvironmentSHBindings bindings{builder.Pipeline(br::render::ComputePipeline(
+		EnvironmentSHBindings bindings{br::render::DeclarePipeline(br::render::ComputePipeline(
 			L"shaders/SphericalHarmonics.hlsl", L"CSMain", "Environment Spherical Harmonics CS")), m_samplerIndex};
 		br::render::EnvironmentSHWorkQueue::Snapshot declared;
 		for (const auto& j : m_pending) {

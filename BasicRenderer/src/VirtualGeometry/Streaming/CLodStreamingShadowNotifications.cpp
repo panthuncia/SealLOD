@@ -526,13 +526,6 @@ void CLodStreamingSystem::InvalidateVirtualShadowUpgradeUploadMappings() {
     }
 }
 
-void CLodStreamingSystem::SetVirtualShadowFallbackFeedbackResources(
-    std::shared_ptr<org::Buffer> dependencies,
-    std::shared_ptr<org::Buffer> dependencyCount) {
-    m_virtualShadowFallbackDependenciesBuffer = std::move(dependencies);
-    m_virtualShadowFallbackDependencyCountBuffer = std::move(dependencyCount);
-}
-
 void CLodStreamingSystem::ClearVirtualShadowUpgradeState() {
     ZoneScopedN("CLodStreamingSystem::ClearVirtualShadowUpgradeState");
     uint64_t cleared = 0u;

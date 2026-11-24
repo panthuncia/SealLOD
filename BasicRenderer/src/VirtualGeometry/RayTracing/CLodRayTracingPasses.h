@@ -9,7 +9,7 @@
 #include "BasicRenderer/Extensions/PipelineDescs.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
-#include "Render/PipelineState.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Resources/Buffers/Buffer.h"
 #include "Resources/PixelBuffer.h"
@@ -18,8 +18,8 @@
 #include "../shaders/PerPassRootConstants/clodRayTracingSetupRootConstants.h"
 
 // A compute pipeline with ray queries against clusters, which need shader model 6.10.
-inline org::ComputePipelineDesc CLodRtComputePipeline(std::wstring path, std::wstring entry, std::string name) {
-    org::ComputePipelineDesc desc = br::render::ComputePipeline(std::move(path), std::move(entry), std::move(name));
+inline br::ComputePipelineDesc CLodRtComputePipeline(std::wstring path, std::wstring entry, std::string name) {
+    br::ComputePipelineDesc desc = br::render::ComputePipeline(std::move(path), std::move(entry), std::move(name));
     desc.shader.target = L"cs_6_10";
     return desc;
 }
@@ -54,7 +54,7 @@ public:
         CLodRayTracingSceneBindings bindings{};
         bindings.stage = m_stage;
         const auto make = [&](const wchar_t* entry, const char* name) {
-            return builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/rayTracingSceneBuild.hlsl", entry, name));
+            return br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/rayTracingSceneBuild.hlsl", entry, name));
         };
         auto& pipelines = bindings.pipelines;
         if (m_stage != Stage::Blas) pipelines.clear = make(L"CLodRtClearCS", "CLod.RayTracing.Clear.PSO");
@@ -165,7 +165,7 @@ struct RayTracedVisibilityFrame {
 };
 
 struct RayTracedVisibilityBindings {
-    org::PipelineState pipeline, clearPipeline;
+    br::PipelineState pipeline, clearPipeline;
     org::DeclaredViewToken visibility, visibleClusters, transformIndices;
     uint32_t mode = CLOD_RT_VIS_MODE_WRITE;
     uint32_t recordBase = 0u;
@@ -175,21 +175,25 @@ struct RayTracedVisibilityBindings {
 class RayTracedVisibilityPass
     : public org::TypedRenderGraphPass<RayTracedVisibilityPass, RayTracedVisibilityFrame, RayTracedVisibilityBindings> {
 public:
-    RayTracedVisibilityPass(std::shared_ptr<br::render::CLodRayTracingSystem> system, std::shared_ptr<org::ResourceGroup> slabs, uint32_t mode)
-        : m_system(std::move(system)), m_slabs(std::move(slabs)), m_mode(mode) {
+    // `visibleClusters`, `transformIndices` and `capacity`: the primary (opaque) CLod variant's list of the same graph, where
+    // the pass writes its visible cluster records.
+    RayTracedVisibilityPass(std::shared_ptr<br::render::CLodRayTracingSystem> system, std::shared_ptr<org::ResourceGroup> slabs, uint32_t mode,
+        std::shared_ptr<org::Buffer> visibleClusters, std::shared_ptr<org::Buffer> transformIndices, uint32_t capacity)
+        : m_system(std::move(system)), m_slabs(std::move(slabs)), m_mode(mode), m_visibleClusters(std::move(visibleClusters)),
+          m_transformIndices(std::move(transformIndices)), m_capacity(capacity) {
     }
 
     RayTracedVisibilityBindings Declare(org::PassBuilder& builder) {
         RayTracedVisibilityBindings bindings{};
-        bindings.pipeline = builder.Pipeline(CLodRtComputePipeline(L"Shaders/ClusterLOD/rayTracedVisibility.hlsl", L"CLodRtVisibilityCS",
+        bindings.pipeline = br::render::DeclarePipeline(CLodRtComputePipeline(L"Shaders/ClusterLOD/rayTracedVisibility.hlsl", L"CLodRtVisibilityCS",
             "CLod.RayTracing.Visibility.PSO"));
-        bindings.clearPipeline = builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/rayTracingSceneBuild.hlsl", L"CLodRtClearCS",
+        bindings.clearPipeline = br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/rayTracingSceneBuild.hlsl", L"CLodRtClearCS",
             "CLod.RayTracing.ClearVisibility.PSO"));
         bindings.mode = m_mode;
         bindings.visibility = builder.UnorderedAccess(Builtin::PrimaryCamera::VisibilityTexture).View();
-        bindings.visibleClusters = builder.UnorderedAccess(m_system->GetPrimaryVisibleClusters()).View();
-        bindings.transformIndices = builder.UnorderedAccess(m_system->GetPrimaryTransformIndices()).View();
-        bindings.capacity = m_system->GetPrimaryVisibleClusterCapacity();
+        bindings.visibleClusters = builder.UnorderedAccess(m_visibleClusters).View();
+        bindings.transformIndices = builder.UnorderedAccess(m_transformIndices).View();
+        bindings.capacity = m_capacity;
         br::render::CLodRayTracingSystem::DeclareTracing(builder);
         m_system->DeclareVisibility(builder, m_mode == CLOD_RT_VIS_MODE_COMPARE);
         // Far from where raster's lists grow: hardware from the bottom, Reyes from the top.
@@ -246,6 +250,9 @@ private:
     std::shared_ptr<br::render::CLodRayTracingSystem> m_system;
     std::shared_ptr<org::ResourceGroup> m_slabs;
     uint32_t m_mode = CLOD_RT_VIS_MODE_WRITE;
+    std::shared_ptr<org::Buffer> m_visibleClusters;
+    std::shared_ptr<org::Buffer> m_transformIndices;
+    uint32_t m_capacity = 0u;
 };
 
 // Sun shadows by ray. Trace writes a working texture, filter writes the mask the deferred pass reads.
@@ -257,7 +264,7 @@ struct RayTracedShadowFrame {
 };
 
 struct RayTracedShadowBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken output, input;
     bool filter = false;
 };
@@ -272,7 +279,7 @@ public:
 
     RayTracedShadowBindings Declare(org::PassBuilder& builder) {
         RayTracedShadowBindings bindings{};
-        bindings.pipeline = builder.Pipeline(CLodRtComputePipeline(L"Shaders/ClusterLOD/rayTracedShadows.hlsl",
+        bindings.pipeline = br::render::DeclarePipeline(CLodRtComputePipeline(L"Shaders/ClusterLOD/rayTracedShadows.hlsl",
             m_filter ? L"CLodRtShadowFilterCS" : L"CLodRtShadowTraceCS",
             m_filter ? "CLod.RayTracing.ShadowFilter.PSO" : "CLod.RayTracing.ShadowTrace.PSO"));
         bindings.filter = m_filter;

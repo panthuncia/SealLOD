@@ -840,12 +840,6 @@ CLodRayTracingSystem::VisibilityDescriptors CLodRayTracingSystem::GetVisibilityD
     return { m_tlasSrv, m_clasInfo.srv, m_instanceRows.srv, m_visibilityHash.uav, m_limits.visibilityHashEntries, m_visibilityStats.uav };
 }
 
-void CLodRayTracingSystem::SetPrimaryVisibleClusters(std::shared_ptr<org::Buffer> clusters, std::shared_ptr<org::Buffer> transformIndices, uint32_t capacity) {
-    m_primaryVisibleClusters = std::move(clusters);
-    m_primaryTransformIndices = std::move(transformIndices);
-    m_primaryVisibleClusterCapacity = capacity;
-}
-
 void CLodRayTracingSystem::BeginFrame(MeshManager& meshManager) {
     if (!m_stats.initialized) return;
     BT_ZONE_SCOPE("CLodRT::BeginFrame");
@@ -1438,7 +1432,7 @@ void CLodRayTracingSystem::RecordCache(org::RecordingContext& recording, const S
     auto& commands = recording.Commands();
     const uint32_t budget = m_limits.clusterBuildBudget;
     MiscConstants cache = CacheConstants();
-    const auto dispatch = [&](const org::PipelineState& pipeline, uint32_t threads, uint32_t groupWidth) {
+    const auto dispatch = [&](const br::PipelineState& pipeline, uint32_t threads, uint32_t groupWidth) {
         recording.BindComputePipeline(pipeline);
         PushMiscConstants(recording, cache);
         commands.Dispatch((threads + groupWidth - 1u) / groupWidth, 1u, 1u);
@@ -1776,7 +1770,7 @@ void CLodRayTracingSystem::RecordBlasCache(org::RecordingContext& recording, con
     bc[CLOD_RT_BC_POOL_HIGH] = High(m_bcPool.address);
     bc[CLOD_RT_BC_CLASSES_SRV] = m_bcClasses.srv;
     bc[CLOD_RT_BC_ENTRY_RING_OFFSET] = m_bcRingItems;
-    const auto run = [&](const org::PipelineState& pipeline, uint32_t threads, uint32_t width) {
+    const auto run = [&](const br::PipelineState& pipeline, uint32_t threads, uint32_t width) {
         recording.BindComputePipeline(pipeline);
         PushMiscConstants(recording, bc);
         commands.Dispatch((threads + width - 1u) / width, 1u, 1u);
@@ -1848,7 +1842,7 @@ void CLodRayTracingSystem::RecordSceneTlas(org::RecordingContext& recording, con
         tlasScene[CLOD_RT_SCENE_TLAS_INSTANCE_COUNT] = m_tlasInstanceCount;
         m_stats.tlasBuildRows = m_stats.instances;
         const uint32_t slotGroups = (m_limits.maxInstances + 63u) / 64u;
-        const auto run = [&](const org::PipelineState& pipeline, uint32_t groups) {
+        const auto run = [&](const br::PipelineState& pipeline, uint32_t groups) {
             recording.BindComputePipeline(pipeline);
             PushMiscConstants(recording, tlasScene);
             commands.Dispatch(groups, 1u, 1u);
@@ -1943,7 +1937,7 @@ void CLodRayTracingSystem::RecordSceneTlas(org::RecordingContext& recording, con
     commands.Dispatch(1u, 1u, 1u);
 }
 
-void CLodRayTracingSystem::RecordVisibilityBegin(org::RecordingContext& recording, const org::PipelineState& clearPipeline, bool clearStats) {
+void CLodRayTracingSystem::RecordVisibilityBegin(org::RecordingContext& recording, const br::PipelineState& clearPipeline, bool clearStats) {
     auto& commands = recording.Commands();
     const auto clear = [&](const GraphBuffer& buffer) {
         const uint32_t words = static_cast<uint32_t>(buffer.bytes / 4u);
@@ -1974,7 +1968,7 @@ uint32_t CLodRayTracingSystem::GetPixelWatchUav() const noexcept {
     return m_watchBright > 0.0f && m_pixelWatch.bytes != 0u ? m_pixelWatch.uav : CLOD_RT_PT_NO_DESCRIPTOR;
 }
 
-void CLodRayTracingSystem::RecordPixelWatchBegin(org::RecordingContext& recording, const org::PipelineState& clearPipeline) {
+void CLodRayTracingSystem::RecordPixelWatchBegin(org::RecordingContext& recording, const br::PipelineState& clearPipeline) {
     if (GetPixelWatchUav() == CLOD_RT_PT_NO_DESCRIPTOR) return;
     auto& commands = recording.Commands();
     MiscConstants constants{};

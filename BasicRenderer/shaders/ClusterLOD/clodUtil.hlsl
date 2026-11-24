@@ -4577,7 +4577,10 @@ void CompactClustersAndBuildIndirectArgsCS(uint3 dtid : SV_DispatchThreadID)
             uint dispatchItemCount = count;
             if ((CLOD_COMPACTION_READ_MODE_FLAGS & CLOD_COMPACTION_READ_FLAG_BUILD_SW_DISPATCH) != 0u)
             {
-                dispatchItemCount = (count + SW_RASTER_CLUSTERS_PER_GROUP - 1u) / SW_RASTER_CLUSTERS_PER_GROUP;
+                // The software raster PSO's SW_RASTER_CLUSTERS_PER_GROUP, which depends on its output kind.
+                const uint clustersPerGroup = max(1u, (CLOD_COMPACTION_READ_MODE_FLAGS >> CLOD_COMPACTION_READ_SW_CLUSTERS_PER_GROUP_SHIFT) &
+                    CLOD_COMPACTION_READ_SW_CLUSTERS_PER_GROUP_MASK);
+                dispatchItemCount = (count + clustersPerGroup - 1u) / clustersPerGroup;
             }
 
             uint dispatchX = (uint) ceil(sqrt((float) dispatchItemCount));

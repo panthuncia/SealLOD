@@ -22,7 +22,7 @@ VirtualShadowMapBuildMarkTilesBindings VirtualShadowMapBuildMarkTilesPass::Decla
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.ShaderResource(Subresources(Builtin::PrimaryCamera::LinearDepthMap, org::Mip{ 0, 1 }));
-    return {builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+    return {br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
                 L"CLodVirtualShadowBuildMarkTilesCSMain", "CLod.VirtualShadow.BuildMarkTiles.PSO")),
         builder.UnorderedAccess(m_tileWorkBuffer), builder.UnorderedAccess(m_tileCountBuffer)};
 }

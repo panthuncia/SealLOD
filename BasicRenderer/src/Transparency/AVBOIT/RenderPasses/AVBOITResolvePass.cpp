@@ -25,7 +25,7 @@ AVBOITResolveBindings AVBOITResolvePass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.UnorderedAccess(Builtin::Color::HDRColorTarget);
-    return {builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/AVBOITResolve.hlsl", L"CLodAVBOITResolveCS", "CLod.AVBOITResolve.PSO")), 
+    return {br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/AVBOITResolve.hlsl", L"CLodAVBOITResolveCS", "CLod.AVBOITResolve.PSO")), 
         builder.ShaderResource(m_configBuffer),
         builder.ShaderResource(m_accumulationTexture),
         builder.ShaderResource(m_normalizationTexture),

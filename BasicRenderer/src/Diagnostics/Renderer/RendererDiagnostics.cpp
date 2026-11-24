@@ -9,7 +9,7 @@
 #include "Runtime/Device/DescriptorHeapManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "OpenRenderGraph/Runtime.h"
-#include "Render/PipelineLibrary.h"
+#include "Pipeline/PipelineState/PipelineLibrary.h"
 
 #include <BasicTelemetry/Tracy.h>
 #include <d3d12.h>
@@ -20,7 +20,7 @@
 
 uint32_t Renderer::GetPendingShaderCompileCount() const {
     uint32_t pending = PSOManager::GetInstance().PendingAsyncPipelineCount();
-    if (m_orgRuntime && m_orgRuntime->Pipelines()) pending += m_orgRuntime->Pipelines()->BuildsPending();
+    if (auto* library = PSOManager::GetInstance().GetPipelineLibrary()) pending += library->BuildsPending();
     return pending;
 }
 

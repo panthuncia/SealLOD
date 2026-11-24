@@ -3,7 +3,7 @@
 #include <memory>
 #include <vector>
 
-#include "Render/PipelineState.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 
@@ -11,7 +11,7 @@ namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct VirtualShadowMapDirtyHierarchyBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken pageTable;
     std::vector<org::DeclaredViewToken> hierarchy;
     org::DeclaredViewToken clipmapInfo;

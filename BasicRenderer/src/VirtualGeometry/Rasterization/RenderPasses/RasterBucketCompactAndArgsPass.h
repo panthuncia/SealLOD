@@ -5,12 +5,13 @@
 #include <rhi.h>
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 
 namespace org { class Buffer; }
 
 struct RasterBucketCompactAndArgsBindings {
-    org::PipelineState clearPipeline, compactPipeline;
-    org::CommandSignatureState commandSignature;
+    br::PipelineState clearPipeline, compactPipeline;
+    br::CommandSignatureState commandSignature;
     org::DeclaredViewToken visibleClusters, visibleTransforms, visibleCount, compactedBaseCount, readBaseCount;
     org::ResourceBindingToken indirectCommand;
     org::DeclaredViewToken histogram, offsets, writeCursor, compactedClusters;
@@ -19,6 +20,7 @@ struct RasterBucketCompactAndArgsBindings {
     bool appendToExisting = false;
     bool readReverse = false;
     bool buildSoftwareRasterDispatch = false;
+    uint32_t softwareRasterClustersPerGroup = 0;
     bool hasReadBaseCount = false;
     bool hasReyesOwnership = false;
     bool hasTelemetry = false;
@@ -52,7 +54,8 @@ public:
         bool appendToExisting,
         bool readReverse = false,
         bool buildSoftwareRasterDispatch = false,
-        bool runWhenComputeSWRasterEnabledOnly = false);
+        bool runWhenComputeSWRasterEnabledOnly = false,
+        uint32_t softwareRasterClustersPerGroup = 0); // CLodSoftwareRasterClustersPerGroup, with buildSoftwareRasterDispatch
 
     RasterBucketCompactAndArgsBindings Declare(org::PassBuilder& builder);
     RasterBucketCompactAndArgsFrame Prepare(const RasterBucketCompactAndArgsBindings&,
@@ -82,6 +85,7 @@ private:
     bool m_appendToExisting = false;
     bool m_readReverse = false;
     bool m_buildSoftwareRasterDispatch = false;
+    uint32_t m_softwareRasterClustersPerGroup = 0;
     bool m_runWhenComputeSWRasterEnabledOnly = false;
     uint32_t m_numBuckets = 0;
     bool m_enabled = false;

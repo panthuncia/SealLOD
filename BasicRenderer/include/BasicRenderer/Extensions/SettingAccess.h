@@ -4,6 +4,8 @@
 #include <functional>
 #include <string>
 #include <utility>
+#include <variant>
+#include <vector>
 
 class SettingsManager;
 enum class UpscaleQualityMode;
@@ -23,6 +25,25 @@ std::uint32_t ReadUnsignedSetting(const std::string& name);
 // type with no accessor here (an enum, a callback); Missing is no setting by that name.
 enum class SettingValueType : std::uint8_t { Missing, Bool, Float, UInt32, Int32, UInt8, Other };
 SettingValueType GetSettingValueType(const std::string& name);
+
+// Any setting by name, as a plain value: for control commands and scripts that do not know the C++ type.
+// - bool, signed and unsigned integers, floats and strings map to the alternative of that kind;
+// - an enum maps to its underlying integer;
+// - a vector of numbers or strings, or a small struct of x/y/z/w numbers (DirectX::XMUINT2), maps to a list.
+// Anything else (callbacks) is monostate: readable as "not representable" and never writable.
+using SettingValue = std::variant<std::monostate, bool, std::int64_t, std::uint64_t, double, std::string, std::vector<double>,
+	std::vector<std::string>>;
+
+// Every registered setting's name, sorted.
+std::vector<std::string> ListSettingNames();
+// "bool", "float", "uint32", "enum UpscalingMode", "vector<float>", "callback", ...; empty when there is no such setting.
+std::string DescribeSettingType(const std::string& name);
+// Throws std::runtime_error when there is no setting by that name.
+SettingValue ReadSettingValue(const std::string& name);
+// Converts the value to the setting's type (integers range-checked, an integral double accepted for an integer) and writes
+// it, which runs the setting's observers. Returns false, and writes nothing, when the setting already holds that value.
+// Throws std::runtime_error when there is no such setting, or the value does not fit its type.
+bool WriteSettingValue(const std::string& name, const SettingValue& value);
 
 
 template <typename T>

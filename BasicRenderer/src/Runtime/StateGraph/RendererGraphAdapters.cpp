@@ -21,7 +21,6 @@ AsyncStateGraphHostHooks MakeRendererGraphHooks(std::shared_ptr<VersionedBufferR
     for (auto& policy : hooks.artifactPolicies) policy.pinExactContent = false;
     hooks.artifactPolicies[static_cast<std::size_t>(ArtifactKind::ActiveDrawList)].pinExactContent = true;
     hooks.artifactPolicies[static_cast<std::size_t>(ArtifactKind::StaticTransaction)].allowCoalescing = false;
-    hooks.artifactPolicies[static_cast<std::size_t>(ArtifactKind::BufferVersion)].traceResourceLifetime = true;
     for (const auto kind : { ArtifactKind::StaticTemplate, ArtifactKind::StaticVariant, ArtifactKind::StaticGroup,
              ArtifactKind::TextureResidency }) {
         hooks.artifactPolicies[static_cast<std::size_t>(kind)].bulkCompletions = true;

@@ -33,7 +33,7 @@ VirtualShadowMapClearDirtyBitsBindings VirtualShadowMapClearDirtyBitsPass::Decla
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
     return {
-        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+        br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
             L"CLodVirtualShadowClearDirtyBitsCSMain", "CLod.VirtualShadow.ClearDirtyBits.PSO")),
         builder.UnorderedAccess(m_pageTableTexture, {static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)}),
         builder.UnorderedAccess(m_dirtyFlagsBuffer),

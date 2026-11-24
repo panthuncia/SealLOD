@@ -85,16 +85,6 @@ bool NvPerfCaptureSuppressesCLodReadback()
 
 }
 
-struct CLodStreamingSystem::ParallelSortState {
-    std::shared_ptr<org::Buffer> keyScratch;
-    std::shared_ptr<org::Buffer> payloadScratch;
-    std::shared_ptr<org::Buffer> sumTable;
-    std::shared_ptr<org::Buffer> reduceTable;
-    std::shared_ptr<org::Buffer> constants;
-    std::shared_ptr<org::Buffer> countScatterArgs;
-    std::shared_ptr<org::Buffer> reduceScanArgs;
-};
-
 namespace {
     struct CLodStreamingUploadSnapshotKey {
         uint64_t dstResourceId = 0;
@@ -669,6 +659,173 @@ namespace {
 
 }
 
+std::shared_ptr<CLodStreamingGraphBinding> CLodStreamingGraphBinding::Create() {
+    auto binding = std::make_shared<CLodStreamingGraphBinding>();
+    auto tagBufferUsage = [](const std::shared_ptr<org::Buffer>& buffer, std::string_view usage) {
+        if (buffer) {
+            org::memory::SetResourceUsageHint(*buffer, std::string(usage));
+        }
+    };
+
+
+    binding->loadRequests = CreateAliasedUnmaterializedStructuredBuffer(
+        CLodStreamingRequestCapacity,
+        sizeof(CLodStreamingRequest),
+        true,
+        false,
+        false,
+        false);
+    binding->loadRequests->SetName("CLod Streaming Load Requests");
+    tagBufferUsage(binding->loadRequests, "Cluster LOD streaming");
+
+    binding->loadRequestKeys = CreateAliasedUnmaterializedStructuredBuffer(
+        CLodStreamingRequestCapacity,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        false);
+    binding->loadRequestKeys->SetName("CLod Streaming Load Request Keys");
+    tagBufferUsage(binding->loadRequestKeys, "Cluster LOD streaming");
+
+    binding->loadCounter = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false, false);
+    binding->loadCounter->SetName("CLod Streaming Load Counter");
+    tagBufferUsage(binding->loadCounter, "Cluster LOD streaming");
+
+    binding->runtimeState = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodStreamingRuntimeState), true, false, false, false);
+    binding->runtimeState->SetName("CLod Streaming Runtime State");
+    tagBufferUsage(binding->runtimeState, "Cluster LOD streaming");
+
+    binding->usedGroupsCounter = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false, false);
+    binding->usedGroupsCounter->SetName("CLod Used Groups Counter");
+    tagBufferUsage(binding->usedGroupsCounter, "Cluster LOD streaming");
+
+    binding->usedGroupsBuffer = CreateAliasedUnmaterializedStructuredBuffer(
+        CLodUsedGroupsCapacity,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        false);
+    binding->usedGroupsBuffer->SetName("CLod Used Groups Buffer");
+    tagBufferUsage(binding->usedGroupsBuffer, "Cluster LOD streaming");
+
+    // A bit per group, cleared each frame: a group is appended to the used list only by its first touch that frame. The
+    // clear is its first use, so it can share memory.
+    binding->usedGroupsBits = CreateAliasedUnmaterializedStructuredBuffer(
+        CLodTouchedGroupBitsWordCount, sizeof(uint32_t), true, false, false, true);
+    binding->usedGroupsBits->SetName("CLod Used Groups Bits");
+    tagBufferUsage(binding->usedGroupsBits, "Cluster LOD streaming");
+
+    binding->sourceGroupMismatchCounter = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false, false);
+    binding->sourceGroupMismatchCounter->SetName("CLod Source Group Mismatch Counter");
+    tagBufferUsage(binding->sourceGroupMismatchCounter, "Cluster LOD diagnostics");
+
+    binding->sourceGroupMismatchDetails = CreateAliasedUnmaterializedStructuredBuffer(
+        CLodSourceGroupMismatchDetailCapacity,
+        sizeof(CLodSourceGroupMismatchDetail),
+        true,
+        false,
+        false,
+        false);
+    binding->sourceGroupMismatchDetails->SetName("CLod Source Group Mismatch Details");
+    tagBufferUsage(binding->sourceGroupMismatchDetails, "Cluster LOD diagnostics");
+
+    // The feedback sort.
+    constexpr uint32_t blockSize = 4u * 128u;
+    constexpr uint32_t sortBinCount = 16u;
+    constexpr uint32_t numBlocks = (CLodStreamingRequestCapacity + blockSize - 1u) / blockSize;
+    constexpr uint32_t numReducedBlocks = (numBlocks + blockSize - 1u) / blockSize;
+    constexpr uint32_t sumTableElements = sortBinCount * numBlocks;
+    constexpr uint32_t reduceTableElements = sortBinCount * numReducedBlocks;
+    constexpr uint32_t radixIterationCount = 8u;
+
+    binding->sort.keyScratch = CreateAliasedUnmaterializedStructuredBuffer(
+        CLodStreamingRequestCapacity,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        false);
+    binding->sort.keyScratch->SetName("CLod Streaming Sort Key Scratch");
+
+    binding->sort.payloadScratch = CreateAliasedUnmaterializedStructuredBuffer(
+        CLodStreamingRequestCapacity,
+        sizeof(CLodStreamingRequest),
+        true,
+        false,
+        false,
+        false);
+    binding->sort.payloadScratch->SetName("CLod Streaming Sort Payload Scratch");
+
+    binding->sort.sumTable = CreateAliasedUnmaterializedStructuredBuffer(
+        sumTableElements,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        false);
+    binding->sort.sumTable->SetName("CLod Streaming Sort Sum Table");
+
+    binding->sort.reduceTable = CreateAliasedUnmaterializedStructuredBuffer(
+        reduceTableElements,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        false);
+    binding->sort.reduceTable->SetName("CLod Streaming Sort Reduce Table");
+
+    struct ParallelSortConstantsCpu {
+        uint32_t numKeys;
+        int32_t numBlocksPerThreadGroup;
+        uint32_t numThreadGroups;
+        uint32_t numThreadGroupsWithAdditionalBlocks;
+        uint32_t numReduceThreadgroupPerBin;
+        uint32_t numScanValues;
+        uint32_t shift;
+        uint32_t padding;
+    };
+    static_assert(sizeof(ParallelSortConstantsCpu) == 32u);
+
+    binding->sort.constants = CreateAliasedUnmaterializedStructuredBuffer(
+        radixIterationCount,
+        sizeof(ParallelSortConstantsCpu),
+        true,
+        false,
+        false,
+        false);
+    binding->sort.constants->SetName("CLod Streaming Sort Constants");
+
+    binding->sort.countScatterArgs = CreateAliasedUnmaterializedStructuredBuffer(
+        3u,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        false);
+    binding->sort.countScatterArgs->SetName("CLod Streaming Sort Count Scatter Args");
+
+    binding->sort.reduceScanArgs = CreateAliasedUnmaterializedStructuredBuffer(
+        3u,
+        sizeof(uint32_t),
+        true,
+        false,
+        false,
+        false);
+    binding->sort.reduceScanArgs->SetName("CLod Streaming Sort Reduce Scan Args");
+
+    tagBufferUsage(binding->sort.keyScratch, "Cluster LOD streaming sort");
+    tagBufferUsage(binding->sort.payloadScratch, "Cluster LOD streaming sort");
+    tagBufferUsage(binding->sort.sumTable, "Cluster LOD streaming sort");
+    tagBufferUsage(binding->sort.reduceTable, "Cluster LOD streaming sort");
+    tagBufferUsage(binding->sort.constants, "Cluster LOD streaming sort");
+    tagBufferUsage(binding->sort.countScatterArgs, "Cluster LOD streaming sort");
+    tagBufferUsage(binding->sort.reduceScanArgs, "Cluster LOD streaming sort");
+
+    return binding;
+}
+
 CLodStreamingSystem::CLodStreamingSystem() {
     auto tagBufferUsage = [](const std::shared_ptr<org::Buffer>& buffer, std::string_view usage) {
         if (buffer) {
@@ -738,68 +895,15 @@ CLodStreamingSystem::CLodStreamingSystem() {
 
     CreateResidencyStorage(m_streamingStorageGroupCapacity);
 
-    m_streamingLoadRequests = CreateAliasedUnmaterializedStructuredBuffer(
-        CLodStreamingRequestCapacity,
-        sizeof(CLodStreamingRequest),
-        true,
-        false,
-        false,
-        false);
-    m_streamingLoadRequests->SetName("CLod Streaming Load Requests");
-    tagBufferUsage(m_streamingLoadRequests, "Cluster LOD streaming");
-
-    m_streamingLoadRequestKeys = CreateAliasedUnmaterializedStructuredBuffer(
-        CLodStreamingRequestCapacity,
-        sizeof(uint32_t),
-        true,
-        false,
-        false,
-        false);
-    m_streamingLoadRequestKeys->SetName("CLod Streaming Load Request Keys");
-    tagBufferUsage(m_streamingLoadRequestKeys, "Cluster LOD streaming");
-
-    m_streamingLoadCounter = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false, false);
-    m_streamingLoadCounter->SetName("CLod Streaming Load Counter");
-    tagBufferUsage(m_streamingLoadCounter, "Cluster LOD streaming");
-
-    m_streamingRuntimeState = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodStreamingRuntimeState), true, false, false, false);
-    m_streamingRuntimeState->SetName("CLod Streaming Runtime State");
-    tagBufferUsage(m_streamingRuntimeState, "Cluster LOD streaming");
-
-    m_usedGroupsCounter = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false, false);
-    m_usedGroupsCounter->SetName("CLod Used Groups Counter");
-    tagBufferUsage(m_usedGroupsCounter, "Cluster LOD streaming");
-
-    m_usedGroupsBuffer = CreateAliasedUnmaterializedStructuredBuffer(
-        CLodUsedGroupsCapacity,
-        sizeof(uint32_t),
-        true,
-        false,
-        false,
-        false);
-    m_usedGroupsBuffer->SetName("CLod Used Groups Buffer");
-    tagBufferUsage(m_usedGroupsBuffer, "Cluster LOD streaming");
-
-    // A bit per group, cleared each frame: a group is appended to the used list only by its first touch that frame. The
-    // clear is its first use, so it can share memory.
-    m_usedGroupsBits = CreateAliasedUnmaterializedStructuredBuffer(
-        CLodTouchedGroupBitsWordCount, sizeof(uint32_t), true, false, false, true);
-    m_usedGroupsBits->SetName("CLod Used Groups Bits");
-    tagBufferUsage(m_usedGroupsBits, "Cluster LOD streaming");
-
-    m_sourceGroupMismatchCounter = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false, false);
-    m_sourceGroupMismatchCounter->SetName("CLod Source Group Mismatch Counter");
-    tagBufferUsage(m_sourceGroupMismatchCounter, "Cluster LOD diagnostics");
-
-    m_sourceGroupMismatchDetails = CreateAliasedUnmaterializedStructuredBuffer(
-        CLodSourceGroupMismatchDetailCapacity,
-        sizeof(CLodSourceGroupMismatchDetail),
-        true,
-        false,
-        false,
-        false);
-    m_sourceGroupMismatchDetails->SetName("CLod Source Group Mismatch Details");
-    tagBufferUsage(m_sourceGroupMismatchDetails, "Cluster LOD diagnostics");
+    // Frames bind the bitset of their published geometry cut; before the first cut, the initial allocation. Made once:
+    // every graph registers the same resolver.
+    m_nonResidentBitsResolver = std::make_shared<PublishedStateResourceResolver>(
+        br::render::PublishedStateSource::ProcessSource(),
+        br::render::PublishedResourceKey{
+            br::render::PublishedFragmentKind::Geometry,
+            br::render::PublishedResourceUsage::ShaderResource, 0, 0,
+            br::render::kCLodNonResidentBitsCatalogVariant },
+        m_initialResidencyStorage);
 
     // Self-managed readback pipeline
     {
@@ -872,15 +976,23 @@ CLodStreamingSystem::~CLodStreamingSystem() {
         m_streamingWakeState->owner = nullptr;
     }
     Shutdown();
-    DestroyParallelSortResources();
 }
 
-void CLodStreamingSystem::ShutdownGraphResources() {
+void CLodStreamingSystem::DetachGraph(const CLodStreamingGraphBinding* binding) {
+    if (binding && binding != m_binding.get()) return;
     StopStreamingService();
 
     if (ICLodGeometryStorage* meshManager = m_geometryStorage) {
         ClearStreamingUploadFunction(meshManager);
     }
+    DiscardGraphReadbacks();
+    InvalidateVirtualShadowUpgradeUploadMappings();
+    m_binding.reset();
+}
+
+void CLodStreamingSystem::DiscardGraphReadbacks() {
+    m_decodedReadbackBatch.clear();
+    m_decodedUsedGroupsBatch.clear();
     for (auto& slot : m_readbackStagingSlots) {
         slot.state.store(ReadbackStagingSlot::State::Free, std::memory_order_relaxed);
         slot.fenceValue = 0;
@@ -889,11 +1001,6 @@ void CLodStreamingSystem::ShutdownGraphResources() {
     m_streamingReadbackDiscardedFenceCounter.store(
         m_streamingReadbackFenceCounter.load(std::memory_order_acquire),
         std::memory_order_release);
-}
-
-void CLodStreamingSystem::QuiesceGraphResourceAccess() {
-    StopStreamingService();
-    InvalidateVirtualShadowUpgradeUploadMappings();
 }
 
 void CLodStreamingSystem::Shutdown() {
@@ -918,42 +1025,32 @@ void CLodStreamingSystem::Shutdown() {
     ResetStreamingStateForShutdown();
 }
 
-void CLodStreamingSystem::OnRegistryReset(org::ResourceRegistry* reg) {
-    (void)reg;
+void CLodStreamingSystem::AttachGraph(std::shared_ptr<CLodStreamingGraphBinding> binding) {
+    if (!binding) {
+        DetachGraph();
+        return;
+    }
     StopStreamingService();
     ClearVirtualShadowUpgradeState();
-
-    // The registry and the alias placements are graph-local, but CLod residency
-    // is not. Keep the CPU domain, page ownership, resident groups, LRU and
-    // pending disk work intact while releasing only graph-facing backings.
-    auto releaseBufferBacking = [](const std::shared_ptr<org::Buffer>& buffer) {
-        if (buffer) {
-            buffer->Dematerialize();
-        }
-    };
-
-    releaseBufferBacking(m_streamingLoadRequestKeys);
-    releaseBufferBacking(m_streamingLoadRequests);
-    releaseBufferBacking(m_streamingLoadCounter);
-    releaseBufferBacking(m_streamingRuntimeState);
-    releaseBufferBacking(m_usedGroupsCounter);
-    releaseBufferBacking(m_usedGroupsBuffer);
-    releaseBufferBacking(m_usedGroupsBits);
-    releaseBufferBacking(m_sourceGroupMismatchCounter);
-    releaseBufferBacking(m_sourceGroupMismatchDetails);
-    if (m_parallelSortState) {
-        releaseBufferBacking(m_parallelSortState->keyScratch);
-        releaseBufferBacking(m_parallelSortState->payloadScratch);
-        releaseBufferBacking(m_parallelSortState->sumTable);
-        releaseBufferBacking(m_parallelSortState->reduceTable);
-        releaseBufferBacking(m_parallelSortState->constants);
-        releaseBufferBacking(m_parallelSortState->countScatterArgs);
-        releaseBufferBacking(m_parallelSortState->reduceScanArgs);
-    }
-
-    if (ICLodGeometryStorage* meshManager = m_geometryStorage) {
+    ICLodGeometryStorage* meshManager = m_geometryStorage;
+    if (meshManager != nullptr) {
         ClearStreamingUploadFunction(meshManager);
     }
+
+    // The CPU domain, page ownership, resident groups, LRU, pending disk work and upload batches are not the graph's and
+    // carry over. The old binding stays alive in the old graph's passes until that graph retires.
+    m_binding = std::move(binding);
+    m_parallelSortAvailable = m_binding->sort.keyScratch != nullptr;
+    SetVirtualShadowUpgradeUploadBuffers(m_binding->virtualShadowUpgradeUploadBuffers);
+    if (m_binding->activeBranches != 0u) SetActiveBranches(m_binding->activeBranches);
+    if (meshManager != nullptr) {
+        if (const auto storages = meshManager->GetCLodResidencyStorages()) storages->AttachProducer();
+        // The DirectStorage launch resolves the slab group, the page table with it. It used to be added by every build.
+        if (PagePool* pool = meshManager->GetCLodPagePool()) {
+            if (auto pageTable = pool->GetPageTableBuffer()) pool->GetSlabResourceGroup()->AddResource(pageTable);
+        }
+    }
+
     // Residency storages are published state rather than graph-local backings
     // and keep their contents. Re-upload the authoritative CPU mirror anyway,
     // and refill any storage whose fill batch may not survive the rebuild.
@@ -972,47 +1069,24 @@ void CLodStreamingSystem::OnRegistryReset(org::ResourceRegistry* reg) {
 
     // Readbacks reference graph queue timelines/backings and cannot cross a
     // rebuild. Their decoded requests are advisory and will be regenerated.
-    m_decodedReadbackBatch.clear();
-    m_decodedUsedGroupsBatch.clear();
-    for (auto& slot : m_readbackStagingSlots) {
-        slot.state.store(ReadbackStagingSlot::State::Free, std::memory_order_relaxed);
-        slot.fenceValue = 0;
+    DiscardGraphReadbacks();
+
+    if (!m_uploadStream) {
+        m_uploadStream = std::make_unique<CLodUploadStream>();
     }
-    m_readbackStagingCursor = 0;
-    m_streamingReadbackDiscardedFenceCounter.store(
-        m_streamingReadbackFenceCounter.load(std::memory_order_acquire),
-        std::memory_order_release);
+    if (meshManager != nullptr && m_pageLruInitialized) {
+        InstallStreamingUploadFunction(meshManager);
+    }
     m_streamingServiceEpoch.fetch_add(1u, std::memory_order_release);
+    ++m_uploadBatchGeneration;
+    StartStreamingService();
 }
 
 void CLodStreamingSystem::ResetStreamingStateForShutdown() {
     StopStreamingService();
     ClearVirtualShadowUpgradeState();
-
-    auto releaseBufferBacking = [](const std::shared_ptr<org::Buffer>& buffer) {
-        if (buffer) {
-            buffer->Dematerialize();
-        }
-    };
-
-    releaseBufferBacking(m_streamingLoadRequestKeys);
-    releaseBufferBacking(m_streamingLoadRequests);
-    releaseBufferBacking(m_streamingLoadCounter);
-    releaseBufferBacking(m_streamingRuntimeState);
-    releaseBufferBacking(m_usedGroupsCounter);
-    releaseBufferBacking(m_usedGroupsBuffer);
-    releaseBufferBacking(m_usedGroupsBits);
-    releaseBufferBacking(m_sourceGroupMismatchCounter);
-    releaseBufferBacking(m_sourceGroupMismatchDetails);
-    if (m_parallelSortState) {
-        releaseBufferBacking(m_parallelSortState->keyScratch);
-        releaseBufferBacking(m_parallelSortState->payloadScratch);
-        releaseBufferBacking(m_parallelSortState->sumTable);
-        releaseBufferBacking(m_parallelSortState->reduceTable);
-        releaseBufferBacking(m_parallelSortState->constants);
-        releaseBufferBacking(m_parallelSortState->countScatterArgs);
-        releaseBufferBacking(m_parallelSortState->reduceScanArgs);
-    }
+    // The graph-facing buffers go with the graphs that hold them.
+    m_binding.reset();
     ICLodGeometryStorage* meshManager = m_geometryStorage;
 
     if (meshManager != nullptr) {
@@ -1232,32 +1306,6 @@ void CLodStreamingSystem::ResetStreamingStateForShutdown() {
         std::memory_order_release);
     m_streamingServiceEpoch.fetch_add(1u, std::memory_order_release);
     m_streamingServiceEpoch.notify_one();
-}
-
-void CLodStreamingSystem::Initialize(org::RenderGraph& rg) {
-    StopStreamingService();
-    ICLodGeometryStorage* meshManager = m_geometryStorage;
-    if (meshManager != nullptr) {
-        ClearStreamingUploadFunction(meshManager);
-    }
-    // Create a dedicated copy queue for async CLod streaming uploads.
-    m_uploadQueueSlot = rg.CreateQueue(
-        org::QueueKind::Copy,
-        "CLodAsyncUpload",
-        org::QueueAutoAssignmentPolicy::ManualOnly);
-
-    if (!m_uploadStream) {
-        m_uploadStream = std::make_unique<CLodUploadStream>();
-    }
-
-    EnsureParallelSortResources();
-    if (meshManager != nullptr && m_pageLruInitialized) {
-        InstallStreamingUploadFunction(meshManager);
-    }
-
-    m_streamingServiceEpoch.fetch_add(1u, std::memory_order_release);
-    ++m_uploadBatchGeneration;
-    StartStreamingService();
 }
 
 void CLodStreamingSystem::StartStreamingService() {
@@ -1492,27 +1540,17 @@ void CLodStreamingSystem::RunStreamingServiceWork() {
 
 }
 
-void CLodStreamingSystem::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& outPasses) {
-    if (!m_nonResidentBitsResolver) {
-        m_nonResidentBitsResolver = std::make_shared<PublishedStateResourceResolver>(
-            br::render::PublishedStateSource::ProcessSource(),
-            br::render::PublishedResourceKey{
-                br::render::PublishedFragmentKind::Geometry,
-                br::render::PublishedResourceUsage::ShaderResource, 0, 0,
-                br::render::kCLodNonResidentBitsCatalogVariant },
-            m_initialResidencyStorage);
-    }
+void CLodStreamingSystem::GatherStructuralPasses(
+    org::RenderGraph& rg, CLodStreamingGraphBinding& binding, std::vector<org::ExternalPassDesc>& outPasses) {
+    // The residency storages learn of their producer when the binding is attached (AttachGraph).
     rg.RegisterResolver(Builtin::CLod::StreamingNonResidentBits, m_nonResidentBitsResolver);
-    if (m_geometryStorage) {
-        if (const auto storages = m_geometryStorage->GetCLodResidencyStorages()) storages->AttachProducer();
-    }
-    rg.RegisterResource(Builtin::CLod::StreamingLoadRequestKeys, m_streamingLoadRequestKeys);
-    rg.RegisterResource(Builtin::CLod::StreamingLoadRequests, m_streamingLoadRequests);
-    rg.RegisterResource(Builtin::CLod::StreamingLoadCounter, m_streamingLoadCounter);
-    rg.RegisterResource(Builtin::CLod::StreamingRuntimeState, m_streamingRuntimeState);
-    rg.RegisterResource(Builtin::CLod::StreamingTouchedGroupsCounter, m_usedGroupsCounter);
-    rg.RegisterResource(Builtin::CLod::StreamingTouchedGroups, m_usedGroupsBuffer);
-    rg.RegisterResource(Builtin::CLod::StreamingTouchedGroupsBits, m_usedGroupsBits);
+    rg.RegisterResource(Builtin::CLod::StreamingLoadRequestKeys, binding.loadRequestKeys);
+    rg.RegisterResource(Builtin::CLod::StreamingLoadRequests, binding.loadRequests);
+    rg.RegisterResource(Builtin::CLod::StreamingLoadCounter, binding.loadCounter);
+    rg.RegisterResource(Builtin::CLod::StreamingRuntimeState, binding.runtimeState);
+    rg.RegisterResource(Builtin::CLod::StreamingTouchedGroupsCounter, binding.usedGroupsCounter);
+    rg.RegisterResource(Builtin::CLod::StreamingTouchedGroups, binding.usedGroupsBuffer);
+    rg.RegisterResource(Builtin::CLod::StreamingTouchedGroupsBits, binding.usedGroupsBits);
 
     // The async uploads are submitted through the graph's external client after each frame (SubmitExternalWork).
     auto asyncUpload = std::make_shared<CLodStructuralAsyncUploadPass>(
@@ -1561,18 +1599,19 @@ void CLodStreamingSystem::GatherStructuralPasses(org::RenderGraph& rg, std::vect
                     RequestStreamingFrameWork();
                     return result;
                 });
-    m_submitAsyncUploads = [asyncUpload, slot = org::ToUnderlying(m_uploadQueueSlot)](org::ExternalClient& client) {
-        asyncUpload->SubmitTo(client, slot);
+    // The binding's upload queue is made later in the build (CLodExtension::Initialize), so it is read at submission.
+    binding.submitAsyncUploads = [asyncUpload](org::ExternalClient& client, org::QueueSlotIndex uploadQueueSlot) {
+        asyncUpload->SubmitTo(client, org::ToUnderlying(uploadQueueSlot));
     };
 
 	auto streamingBeginPass = std::make_shared<CLodStreamingBeginFramePass>(
 		[]() -> org::UploadInstance* { return nullptr; },
-		m_streamingLoadCounter,
-        m_streamingLoadRequestKeys,
-		m_usedGroupsCounter,
-		m_usedGroupsBits,
-        m_sourceGroupMismatchCounter,
-		m_streamingRuntimeState,
+		binding.loadCounter,
+        binding.loadRequestKeys,
+		binding.usedGroupsCounter,
+		binding.usedGroupsBits,
+        binding.sourceGroupMismatchCounter,
+		binding.runtimeState,
 		[](std::vector<uint32_t>& outBits, uint32_t& outFirstWord, org::UploadInstance*) {
             // Non-resident data is sealed by the single streaming writer into
             // the same ticketed batch as page payload and page-map changes.
@@ -1604,20 +1643,21 @@ void CLodStreamingSystem::GatherStructuralPasses(org::RenderGraph& rg, std::vect
     outPasses.push_back(std::move(streamingBeginPassDesc));
 }
 
-void CLodStreamingSystem::GatherStructuralTailPasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& outPasses) {
-    const bool hasStreamingFeedbackSort = EnsureParallelSortResources();
+void CLodStreamingSystem::GatherStructuralTailPasses(
+    org::RenderGraph& rg, CLodStreamingGraphBinding& binding, std::vector<org::ExternalPassDesc>& outPasses) {
+    const bool hasStreamingFeedbackSort = binding.sort.keyScratch != nullptr;
     if (hasStreamingFeedbackSort) {
         auto feedbackSortPass = std::make_shared<CLodStreamingFeedbackSortPass>(
-            m_streamingLoadRequestKeys,
-            m_streamingLoadRequests,
-            m_streamingLoadCounter,
-            m_parallelSortState->keyScratch,
-            m_parallelSortState->payloadScratch,
-            m_parallelSortState->sumTable,
-            m_parallelSortState->reduceTable,
-            m_parallelSortState->constants,
-            m_parallelSortState->countScatterArgs,
-            m_parallelSortState->reduceScanArgs);
+            binding.loadRequestKeys,
+            binding.loadRequests,
+            binding.loadCounter,
+            binding.sort.keyScratch,
+            binding.sort.payloadScratch,
+            binding.sort.sumTable,
+            binding.sort.reduceTable,
+            binding.sort.constants,
+            binding.sort.countScatterArgs,
+            binding.sort.reduceScanArgs);
 
         outPasses.push_back(
             org::ExternalPassDesc::Compute(
@@ -1627,8 +1667,20 @@ void CLodStreamingSystem::GatherStructuralTailPasses(org::RenderGraph& rg, std::
                 .PreferQueue(org::QueueKind::Graphics));
     }
 
+    // The readback copies this graph's feedback: the binding's buffers, captured (not the binding, which owns this pass
+    // through its submit function). The shadow variant recorded its fallback dependency list in its PrepareForBuild,
+    // which runs before any gather.
+    CLodStreamingReadbackSources readbackSources{};
+    readbackSources.counterSource = binding.loadCounter;
+    readbackSources.requestsSource = binding.loadRequests;
+    readbackSources.usedGroupsCounterSource = binding.usedGroupsCounter;
+    readbackSources.usedGroupsBufferSource = binding.usedGroupsBuffer;
+    readbackSources.sourceGroupMismatchCounterSource = binding.sourceGroupMismatchCounter;
+    readbackSources.sourceGroupMismatchDetailsSource = binding.sourceGroupMismatchDetails;
+    readbackSources.virtualShadowDependencyCountSource = binding.virtualShadowFallbackDependencyCount;
+    readbackSources.virtualShadowDependenciesSource = binding.virtualShadowFallbackDependencies;
     auto readbackPass = std::make_shared<CLodStructuralStreamingReadbackCopyPass>(
-        [this](CLodStreamingReadbackSnapshot& snapshot) -> bool {
+        [this, readbackSources](CLodStreamingReadbackSnapshot& snapshot) -> bool {
             if (NvPerfCaptureSuppressesCLodReadback()) {
                 return false;
             }
@@ -1670,16 +1722,7 @@ void CLodStreamingSystem::GatherStructuralTailPasses(org::RenderGraph& rg, std::
             selected.fenceValue = 0;
 
             auto& slot = m_readbackStagingSlots[selectedSlot];
-            snapshot.inputs.counterSource = m_streamingLoadCounter;
-            snapshot.inputs.requestsSource = m_streamingLoadRequests;
-            snapshot.inputs.usedGroupsCounterSource = m_usedGroupsCounter;
-            snapshot.inputs.usedGroupsBufferSource = m_usedGroupsBuffer;
-            snapshot.inputs.sourceGroupMismatchCounterSource = m_sourceGroupMismatchCounter;
-            snapshot.inputs.sourceGroupMismatchDetailsSource = m_sourceGroupMismatchDetails;
-            snapshot.inputs.virtualShadowDependencyCountSource =
-                m_virtualShadowFallbackDependencyCountBuffer;
-            snapshot.inputs.virtualShadowDependenciesSource =
-                m_virtualShadowFallbackDependenciesBuffer;
+            snapshot.inputs = readbackSources;
             snapshot.counterStaging = slot.counterStaging;
             snapshot.requestsStaging = slot.requestsStaging;
             snapshot.usedGroupsCounterStaging = slot.usedGroupsCounterStaging;
@@ -1727,18 +1770,15 @@ void CLodStreamingSystem::GatherStructuralTailPasses(org::RenderGraph& rg, std::
 
     // The streaming feedback readback is submitted through the graph's external client after each frame, so it copies
     // what the frame wrote (SubmitExternalWork).
-    m_submitStreamingReadback = [readbackPass, slot = org::ToUnderlying(rg.GetQueueRegistry().FindGraphicsSlot())](
+    binding.submitStreamingReadback = [readbackPass, slot = org::ToUnderlying(rg.GetQueueRegistry().FindGraphicsSlot())](
         org::ExternalClient& client) { readbackPass->SubmitTo(client, slot); };
 
     CLodDirectStorageLaunchInputs launchInputs{};
     if (m_geometryStorage) {
         if (ICLodGeometryStorage* meshManager = m_geometryStorage) {
             if (PagePool* pool = meshManager->GetCLodPagePool()) {
-                auto slabGroup = pool->GetSlabResourceGroup();
-                if (auto pageTable = pool->GetPageTableBuffer()) {
-                    slabGroup->AddResource(pageTable);
-                }
-                launchInputs.targetSlabResolver = std::make_unique<ResourceGroupResolver>(slabGroup);
+                // The pool's page table joins the slab group at the attach (AttachGraph), not in the build.
+                launchInputs.targetSlabResolver = std::make_unique<ResourceGroupResolver>(pool->GetSlabResourceGroup());
             }
         }
     }
@@ -1777,9 +1817,9 @@ void CLodStreamingSystem::GatherStructuralTailPasses(org::RenderGraph& rg, std::
             .PreferQueue(org::QueueKind::Graphics));
 }
 
-void CLodStreamingSystem::SubmitExternalWork(org::ExternalClient& client) {
-    if (m_submitAsyncUploads) m_submitAsyncUploads(client);
-    if (m_submitStreamingReadback) m_submitStreamingReadback(client);
+void CLodStreamingSystem::SubmitExternalWork(org::ExternalClient& client, const CLodStreamingGraphBinding* binding) {
+    if (!binding || binding != m_binding.get()) return;
+    m_binding->SubmitExternalWork(client);
     PublishStreamingFrameWorkForFrame();
 }
 
@@ -1789,125 +1829,6 @@ uint32_t CLodStreamingSystem::BitWordAddress(uint32_t key) {
 
 uint32_t CLodStreamingSystem::BitMask(uint32_t key) {
     return 1u << (key & 31u);
-}
-
-bool CLodStreamingSystem::EnsureParallelSortResources() {
-    if (m_parallelSortAttempted) {
-        return m_parallelSortAvailable;
-    }
-
-    m_parallelSortAttempted = true;
-    m_parallelSortState = std::make_unique<ParallelSortState>();
-
-    auto tagBufferUsage = [](const std::shared_ptr<org::Buffer>& buffer, std::string_view usage) {
-        if (buffer) {
-            org::memory::SetResourceUsageHint(*buffer, std::string(usage));
-        }
-    };
-
-    constexpr uint32_t blockSize = 4u * 128u;
-    constexpr uint32_t sortBinCount = 16u;
-    constexpr uint32_t numBlocks = (CLodStreamingRequestCapacity + blockSize - 1u) / blockSize;
-    constexpr uint32_t numReducedBlocks = (numBlocks + blockSize - 1u) / blockSize;
-    constexpr uint32_t sumTableElements = sortBinCount * numBlocks;
-    constexpr uint32_t reduceTableElements = sortBinCount * numReducedBlocks;
-    constexpr uint32_t radixIterationCount = 8u;
-
-    m_parallelSortState->keyScratch = CreateAliasedUnmaterializedStructuredBuffer(
-        CLodStreamingRequestCapacity,
-        sizeof(uint32_t),
-        true,
-        false,
-        false,
-        false);
-    m_parallelSortState->keyScratch->SetName("CLod Streaming Sort Key Scratch");
-
-    m_parallelSortState->payloadScratch = CreateAliasedUnmaterializedStructuredBuffer(
-        CLodStreamingRequestCapacity,
-        sizeof(CLodStreamingRequest),
-        true,
-        false,
-        false,
-        false);
-    m_parallelSortState->payloadScratch->SetName("CLod Streaming Sort Payload Scratch");
-
-    m_parallelSortState->sumTable = CreateAliasedUnmaterializedStructuredBuffer(
-        sumTableElements,
-        sizeof(uint32_t),
-        true,
-        false,
-        false,
-        false);
-    m_parallelSortState->sumTable->SetName("CLod Streaming Sort Sum Table");
-
-    m_parallelSortState->reduceTable = CreateAliasedUnmaterializedStructuredBuffer(
-        reduceTableElements,
-        sizeof(uint32_t),
-        true,
-        false,
-        false,
-        false);
-    m_parallelSortState->reduceTable->SetName("CLod Streaming Sort Reduce Table");
-
-    struct ParallelSortConstantsCpu {
-        uint32_t numKeys;
-        int32_t numBlocksPerThreadGroup;
-        uint32_t numThreadGroups;
-        uint32_t numThreadGroupsWithAdditionalBlocks;
-        uint32_t numReduceThreadgroupPerBin;
-        uint32_t numScanValues;
-        uint32_t shift;
-        uint32_t padding;
-    };
-    static_assert(sizeof(ParallelSortConstantsCpu) == 32u);
-
-    m_parallelSortState->constants = CreateAliasedUnmaterializedStructuredBuffer(
-        radixIterationCount,
-        sizeof(ParallelSortConstantsCpu),
-        true,
-        false,
-        false,
-        false);
-    m_parallelSortState->constants->SetName("CLod Streaming Sort Constants");
-
-    m_parallelSortState->countScatterArgs = CreateAliasedUnmaterializedStructuredBuffer(
-        3u,
-        sizeof(uint32_t),
-        true,
-        false,
-        false,
-        false);
-    m_parallelSortState->countScatterArgs->SetName("CLod Streaming Sort Count Scatter Args");
-
-    m_parallelSortState->reduceScanArgs = CreateAliasedUnmaterializedStructuredBuffer(
-        3u,
-        sizeof(uint32_t),
-        true,
-        false,
-        false,
-        false);
-    m_parallelSortState->reduceScanArgs->SetName("CLod Streaming Sort Reduce Scan Args");
-
-    tagBufferUsage(m_parallelSortState->keyScratch, "Cluster LOD streaming sort");
-    tagBufferUsage(m_parallelSortState->payloadScratch, "Cluster LOD streaming sort");
-    tagBufferUsage(m_parallelSortState->sumTable, "Cluster LOD streaming sort");
-    tagBufferUsage(m_parallelSortState->reduceTable, "Cluster LOD streaming sort");
-    tagBufferUsage(m_parallelSortState->constants, "Cluster LOD streaming sort");
-    tagBufferUsage(m_parallelSortState->countScatterArgs, "Cluster LOD streaming sort");
-    tagBufferUsage(m_parallelSortState->reduceScanArgs, "Cluster LOD streaming sort");
-
-    m_parallelSortAvailable = true;
-    return true;
-}
-
-void CLodStreamingSystem::DestroyParallelSortResources() {
-    if (!m_parallelSortState) {
-        m_parallelSortAvailable = false;
-        return;
-    }
-
-    m_parallelSortState.reset();
-    m_parallelSortAvailable = false;
 }
 
 void CLodStreamingSystem::MarkStreamingNonResidentBitsDirtyWord(uint32_t wordAddress) {

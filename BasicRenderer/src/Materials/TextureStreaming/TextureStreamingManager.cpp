@@ -17,7 +17,7 @@
 #include <BasicRenderer/Pipeline/RendererSettings.h>
 #include "Materials/TextureStreaming/TextureBindingArtifacts.h"
 #include <BasicRenderer/Extensions/Resources/PublishedStateResourceResolver.h>
-#include "Render/Runtime/IReadbackService.h"
+#include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
 #include "Render/Runtime/IDescriptorService.h"
 #include "Resources/Buffers/Buffer.h"
 

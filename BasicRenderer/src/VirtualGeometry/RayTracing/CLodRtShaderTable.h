@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-#include "Render/PipelineState.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include <rhi.h>
 
 namespace br::render {
@@ -27,10 +27,10 @@ public:
 
     // Throws when a group is unknown or the buffer can't be made.
     static std::shared_ptr<const CLodRtShaderTable> Create(rhi::Device device, const RayTracingFeatureInfo& features,
-        const org::PipelineState& pipeline, const Layout& layout, const char* debugName);
+        const br::PipelineState& pipeline, const Layout& layout, const char* debugName);
 
     const std::shared_ptr<const org::PipelineStatePayload>& Payload() const noexcept { return m_payload; }
-    bool IsCurrent(const org::PipelineState& pipeline) const noexcept { return pipeline.PeekPayload() == m_payload.get(); }
+    bool IsCurrent(const br::PipelineState& pipeline) const noexcept { return pipeline.PeekPayload() == m_payload.get(); }
 
     rhi::RayTracingDispatchDesc DispatchDesc(uint32_t width, uint32_t height, uint32_t depth = 1) const noexcept {
         rhi::RayTracingDispatchDesc desc{};

@@ -332,9 +332,9 @@ WorkGraphCullingBindings WorkGraphCullingPass::Declare(org::PassBuilder& builder
     const auto& outputs = m_resources.outputs;
     const auto& replay = m_resources.occlusionReplay;
     WorkGraphCullingBindings bindings{};
-    bindings.clearPipeline = builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/clodUtil.hlsl",
+    bindings.clearPipeline = br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/clodUtil.hlsl",
         L"ClearUintStructuredBufferCSMain", "HierarchicalCullingClearUintPSO"));
-    bindings.createCommandPipeline = builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/clodUtil.hlsl",
+    bindings.createCommandPipeline = br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/clodUtil.hlsl",
         L"CreateRasterBucketsHistogramCommandCSMain", "HierarchicalLODCommandCreation"));
     bindings.scratch = scratch;
     bindings.maxVisibleClusters = m_config.maxVisibleClusters;

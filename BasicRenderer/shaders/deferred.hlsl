@@ -10,6 +10,17 @@
 #include "include/outputTypes.hlsli"
 #include "include/debugPayload.hlsli"
 
+// DEFERRED_SHADOWING_MODE (SHADOWING_MODE_*) is set by PSOManager::CreateDeferredPSO for a variant compiled for one
+// shadowing mode, which folds the other modes' code out; without it the mode comes from the root constants.
+uint DeferredShadowingMode()
+{
+#if defined(DEFERRED_SHADOWING_MODE)
+    return DEFERRED_SHADOWING_MODE;
+#else
+    return GetRootShadowingMode();
+#endif
+}
+
 [numthreads(8, 8, 1)]
 void DeferredCSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
@@ -91,8 +102,8 @@ void DeferredCSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     FragmentInfo fragmentInfo;
     GetFragmentInfoCanonicalSurface(pixel, viewDirWS, positionVS, positionWS, GetRootScreenSpaceAOMode(), fragmentInfo);
     
-    DirectLightingOptions lightingOptions = DirectLightingOptionsFromRoot();
-    if (GetRootEnableRayTracedSunShadow() && GetRootShadowingMode() == SHADOWING_MODE_VIRTUAL_SHADOW_MAPS)
+    DirectLightingOptions lightingOptions = MakeDirectLightingOptions(GetRootEnablePunctualLights(), DeferredShadowingMode());
+    if (GetRootEnableRayTracedSunShadow() && DeferredShadowingMode() == SHADOWING_MODE_VIRTUAL_SHADOW_MAPS)
     {
         // The ray traced sun mask covers what the shadow map's pages leave out; the loop combines the two by max.
         Texture2D<float> rayTracedSun = ResourceDescriptorHeap[OptionalResourceDescriptorIndex(Builtin::RayTracing::SunShadow)];
@@ -102,7 +113,7 @@ void DeferredCSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
     
     float3 lighting = lightingOutput.lighting;
     float3 stochasticLighting = 0.0f;
-    if (GetRootShadowingMode() == SHADOWING_MODE_STOCHASTIC)
+    if (DeferredShadowingMode() == SHADOWING_MODE_STOCHASTIC)
     {
         // Every analytic light, the sun included, sampled, traced and shaded by stochastic lighting (the loop above
         // skipped them).

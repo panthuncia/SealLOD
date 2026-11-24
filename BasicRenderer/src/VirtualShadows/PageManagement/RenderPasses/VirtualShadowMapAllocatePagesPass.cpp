@@ -43,13 +43,13 @@ VirtualShadowMapAllocatePagesBindings VirtualShadowMapAllocatePagesPass::Declare
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    org::CommandSignatureDesc signature;
+    br::CommandSignatureDesc signature;
     signature.args = {{.kind = rhi::IndirectArgKind::Dispatch}};
     signature.byteStride = sizeof(CLodReyesDispatchIndirectCommand);
     signature.name = "CLod.VirtualShadow.AllocatePages.Signature";
-    return {builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+    return {br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
                 L"CLodVirtualShadowAllocatePagesCSMain", "CLod.VirtualShadow.AllocatePages.PSO")),
-        builder.CommandSignature(std::move(signature)), builder.ShaderResource(m_allocationRequestsBuffer), builder.ShaderResource(m_allocationCountBuffer),
+        br::render::DeclareCommandSignature(std::move(signature)), builder.ShaderResource(m_allocationRequestsBuffer), builder.ShaderResource(m_allocationCountBuffer),
         builder.IndirectArguments(m_indirectArgsBuffer), builder.ShaderResource(m_clipmapInfoBuffer),
         builder.UnorderedAccess(m_pageTableTexture, {static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)}), builder.UnorderedAccess(m_pageMetadataBuffer),
         builder.UnorderedAccess(m_dirtyPageFlagsBuffer), builder.ShaderResource(m_freePhysicalPagesBuffer),

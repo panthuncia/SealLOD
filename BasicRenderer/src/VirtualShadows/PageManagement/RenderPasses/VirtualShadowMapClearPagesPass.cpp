@@ -37,7 +37,7 @@ VirtualShadowMapClearPagesBindings VirtualShadowMapClearPagesPass::Declare(org::
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.ShaderResource(Builtin::CameraBuffer);
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    return {builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+    return {br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
                 L"CLodVirtualShadowClearPhysicalPagesCSMain", "CLod.VirtualShadow.ClearPhysicalPages.PSO",
                 {{L"CLOD_VSM_TWO_LAYER_CLEAR_VERSION", L"2"}})),
         builder.UnorderedAccess(m_staticPagesTexture), builder.UnorderedAccess(m_dynamicPagesTexture),

@@ -11,7 +11,7 @@
 inline constexpr const char* kMaterialResolvedTextureDescriptorsResource = "Builtin::Material::ResolvedTextureDescriptors";
 
 struct ResolveMaterialTextureDescriptorsBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
 };
 struct ResolveMaterialTextureDescriptorsFrame {
     uint32_t groups = 0;
@@ -31,7 +31,7 @@ public:
         b.ShaderResource("Builtin::PerMaterialEvalDataBuffer", Builtin::Material::TextureStreamingMetadataBuffer);
         b.UnorderedAccess(kMaterialResolvedTextureDescriptorsResource);
         b.PreferQueue(org::QueueKind::Compute);
-        return {b.Pipeline(br::render::ComputePipeline(L"shaders/materialTextureResolve.hlsl",
+        return {br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/materialTextureResolve.hlsl",
             L"ResolveMaterialTextureDescriptorsCS", "VisUtil_ResolveMaterialTextureDescriptorsPSO"))};
     }
 

@@ -29,7 +29,7 @@ RasterBucketCreateCommandPass::RasterBucketCreateCommandPass(
 
 RasterBucketCreateCommandBindings RasterBucketCreateCommandPass::Declare(org::PassBuilder& builder) {
     RasterBucketCreateCommandBindings bindings{
-        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+        br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
             L"CreateRasterBucketsHistogramCommandCSMain", "CLod_RasterBucketsCreateCommandPSO")),
         builder.ShaderResource(m_visibleClustersCounterBuffer),
         builder.UnorderedAccess(m_histogramIndirectCommand)};

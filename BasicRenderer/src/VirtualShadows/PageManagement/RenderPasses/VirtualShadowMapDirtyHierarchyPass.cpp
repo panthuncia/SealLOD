@@ -30,7 +30,7 @@ VirtualShadowMapDirtyHierarchyBindings VirtualShadowMapDirtyHierarchyPass::Decla
         mipViews.push_back({static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull), mip});
     auto hierarchy = builder.UnorderedAccess(Subresources(m_dirtyHierarchyTexture, org::FromMip{0}), std::span<const org::UavView>{mipViews});
     return {
-        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+        br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
             L"CLodVirtualShadowBuildDirtyHierarchyCSMain", "CLod.VirtualShadow.DirtyHierarchy.PSO")),
         builder.ShaderResource(Subresources(m_pageTableTexture, org::Mip{0, 1}), {static_cast<uint32_t>(org::SRVViewType::Texture2DArrayFull)}),
         std::move(hierarchy.views),

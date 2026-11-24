@@ -12,6 +12,8 @@ RenderGraphIOService::RenderGraphIOService(TextureFactory& textures,
     : m_textures(&textures), m_uploads(std::move(uploads)), m_textureStreamingFeedback(&feedback) {}
 
 void RenderGraphIOService::SetRegistry(org::ResourceRegistry& registry) {
+    // The host's upload extension points the upload service at the graph's registry; without a host, this does.
+    if (!m_addsUploadPass) return;
     org::runtime::UploadResolveContext context;
     context.registry = &registry;
     context.epoch = 0;
@@ -20,9 +22,11 @@ void RenderGraphIOService::SetRegistry(org::ResourceRegistry& registry) {
 
 void RenderGraphIOService::GatherStructuralPasses(
     std::vector<org::ExternalPassDesc>& out) {
-    if (auto pass = m_uploads->GetUploadPass())
-        out.push_back(org::ExternalPassDesc::Render("Builtin::Uploads", pass)
-            .At(org::ExternalInsertPoint::Begin(0)));
+    if (m_addsUploadPass)
+        if (auto pass = m_uploads->GetUploadPass())
+            out.push_back(org::ExternalPassDesc::Render("Builtin::Uploads", pass).At(org::ExternalInsertPoint::Begin(0)));
+    // The upload service's pass comes from the graph's host (org::GraphHost adds it to every graph it builds). Adding the
+    // same pass object again would run it twice and point the upload service at this graph's registry a second time.
     // Mip generation and BC7 compression run in the texture job graph (TextureJobGraph), not here.
     // Texture readbacks (ReadbackManager) are submitted through the graph's external client after each frame.
 }

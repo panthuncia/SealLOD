@@ -13,7 +13,7 @@ struct GTAODenoiseFrame {
     uint32_t groupsX = 0, groupsY = 0;
 };
 struct GTAODenoiseBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     uint32_t samplerIndex = 0;
     org::DeclaredViewToken workingAO, workingEdges, outputAO;
 };
@@ -30,10 +30,10 @@ public:
         builder.ConstantBuffer("Builtin::GTAO::ConstantsBuffer");
 		builder.ConstantBuffer(Builtin::PerFrameBuffer);
         return {
-            builder.Pipeline(org::ComputePipelineDesc{
+            br::render::DeclarePipeline(br::ComputePipelineDesc{
                 .shader = {L"shaders/GTAO.hlsl", L"CSDenoiseLastPass"},
                 .name = "GTAO Denoise Last Pass",
-                .layout = org::PipelineLayoutRef::StandardGraphics()}),
+                .layout = br::PipelineLayoutRef::StandardGraphics()}),
             m_samplerIndex,
             builder.ShaderResource(Builtin::GTAO::WorkingAOTerm1),
             builder.ShaderResource(Builtin::GTAO::WorkingEdges),

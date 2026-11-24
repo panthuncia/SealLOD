@@ -7,6 +7,7 @@
 #include "Interfaces/IDynamicDeclaredResources.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 
 namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
@@ -21,7 +22,7 @@ struct DeepVisibilityResolveBindings {
     float terrainNormalBlend = 0, terrainNormalMipBias = 0, objectNormalMapBlend = 0;
 };
 struct DeepVisibilityResolveFrame {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     bool ready = false;
 };
 

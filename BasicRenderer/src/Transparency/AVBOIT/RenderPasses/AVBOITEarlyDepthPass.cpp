@@ -27,10 +27,10 @@ AVBOITEarlyDepthBindings AVBOITEarlyDepthPass::Declare(org::PassBuilder& builder
 {
     builder.ShaderResource(Builtin::CameraBuffer);
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    org::GraphicsPipelineDesc pipeline;
+    br::GraphicsPipelineDesc pipeline;
     pipeline.name = "CLod.AVBOITEarlyDepth.PSO";
-    pipeline.vertex = org::PipelineShaderSource{ L"shaders/ClusterLOD/AVBOITEarlyDepth.hlsl", L"AVBOITEarlyDepthTileVSMain", L"vs_6_6" };
-    pipeline.pixel = org::PipelineShaderSource{ L"shaders/ClusterLOD/AVBOITEarlyDepth.hlsl", L"AVBOITEarlyDepthPSMain", L"ps_6_6" };
+    pipeline.vertex = br::PipelineShaderSource{ L"shaders/ClusterLOD/AVBOITEarlyDepth.hlsl", L"AVBOITEarlyDepthTileVSMain", L"vs_6_6" };
+    pipeline.pixel = br::PipelineShaderSource{ L"shaders/ClusterLOD/AVBOITEarlyDepth.hlsl", L"AVBOITEarlyDepthPSMain", L"ps_6_6" };
 
     rhi::RasterState rasterState{};
     rasterState.fill = rhi::FillMode::Solid;
@@ -57,18 +57,18 @@ AVBOITEarlyDepthBindings AVBOITEarlyDepthPass::Declare(org::PassBuilder& builder
     pipeline.sample = rhi::SampleDesc{ 1, 0 };
     pipeline.topology = rhi::PrimitiveTopology::TriangleStrip;
 
-    org::CommandSignatureDesc signature;
+    br::CommandSignatureDesc signature;
     signature.args = {
         {.kind = rhi::IndirectArgKind::Constant, .u = {.rootConstants = { IndirectCommandSignatureRootSignatureIndex, 0, 3 } } },
         {.kind = rhi::IndirectArgKind::Draw }
     };
     signature.byteStride = sizeof(CLodAVBOITEarlyDepthTileIndirectCommand);
-    signature.layout = org::PipelineLayoutRef::StandardGraphics();
+    signature.layout = br::PipelineLayoutRef::StandardGraphics();
     signature.name = "CLod.AVBOITEarlyDepth.Signature";
 
     return {
-        builder.Pipeline(std::move(pipeline)),
-        builder.CommandSignature(std::move(signature)),
+        br::render::DeclarePipeline(std::move(pipeline)),
+        br::render::DeclareCommandSignature(std::move(signature)),
         builder.ShaderResource(m_configBuffer),
         builder.IndirectArguments(m_tileCommandsBuffer),
         builder.IndirectArguments(m_tileCountBuffer),

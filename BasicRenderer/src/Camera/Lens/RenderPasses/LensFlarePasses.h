@@ -27,7 +27,7 @@
 inline constexpr std::string_view kLensFlareTargetName = "Builtin::LensFlare::Target";
 
 struct LensFlareSourcesBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken sources, depth;
     bool rayQuery = false;
 };
@@ -51,7 +51,7 @@ public:
         if (bindings.rayQuery) {
             auto desc = CLodRtComputePipeline(L"Shaders/PostProcessing/lensFlareSources.hlsl", L"LensFlareSourcesCS", "LensFlare.Sources.RayQuery.PSO");
             desc.defines.push_back({ L"LENS_FLARE_RAY_QUERY", L"1" });
-            bindings.pipeline = builder.Pipeline(desc);
+            bindings.pipeline = br::render::DeclarePipeline(desc);
             br::render::CLodRayTracingSystem::DeclareTracing(builder);
             if (m_slabs) builder.ShaderResource(ResourceGroupResolver(m_slabs));
             builder.ShaderResource(Builtin::PerMeshBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases, Builtin::PerMaterialDataBuffer,
@@ -61,7 +61,7 @@ public:
                 Builtin::Material::TextureStreamingMetadataBuffer);
         }
         else {
-            bindings.pipeline = builder.Pipeline(br::render::ComputePipeline(L"Shaders/PostProcessing/lensFlareSources.hlsl", L"LensFlareSourcesCS",
+            bindings.pipeline = br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/PostProcessing/lensFlareSources.hlsl", L"LensFlareSourcesCS",
                 "LensFlare.Sources.PSO"));
             bindings.depth = builder.ShaderResource(Builtin::PrimaryCamera::ProjectedDepthTexture).View();
         }
@@ -130,7 +130,7 @@ private:
 };
 
 struct LensFlareTraceBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken vertices;
 };
 
@@ -145,7 +145,7 @@ public:
 
     LensFlareTraceBindings Declare(org::PassBuilder& builder) {
         LensFlareTraceBindings bindings{};
-        bindings.pipeline = builder.Pipeline(br::render::ComputePipeline(L"Shaders/PostProcessing/lensFlareTrace.hlsl", L"LensFlareTraceCS", "LensFlare.Trace.PSO"));
+        bindings.pipeline = br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/PostProcessing/lensFlareTrace.hlsl", L"LensFlareTraceCS", "LensFlare.Trace.PSO"));
         builder.ShaderResource(Builtin::RayTracing::LensData);
         builder.ShaderResource(org::ResourceIdentifier{ br::lens::kLensFlareGhostsName });
         builder.ShaderResource(org::ResourceIdentifier{ br::lens::kLensFlareSourcesName });
@@ -180,7 +180,7 @@ private:
 };
 
 struct LensFlareDrawBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken vertices, target;
 };
 
@@ -196,7 +196,7 @@ public:
 
     LensFlareDrawBindings Declare(org::PassBuilder& builder) {
         LensFlareDrawBindings bindings{};
-        bindings.pipeline = builder.Pipeline(PipelineDesc());
+        bindings.pipeline = br::render::DeclarePipeline(PipelineDesc());
         builder.ShaderResource(org::ResourceIdentifier{ br::lens::kLensFlareSourcesName });
         bindings.vertices = builder.ShaderResource(m_manager->EnsureVertexBuffer()).View();
         bindings.target = builder.RenderTarget(org::ResourceIdentifier{ kLensFlareTargetName });
@@ -241,8 +241,8 @@ public:
     }
 
 private:
-    static org::GraphicsPipelineDesc PipelineDesc() {
-        org::GraphicsPipelineDesc desc;
+    static br::GraphicsPipelineDesc PipelineDesc() {
+        br::GraphicsPipelineDesc desc;
         desc.name = "LensFlare.Draw.PSO";
         desc.vertex = { L"shaders/PostProcessing/lensFlareDraw.hlsl", L"LensFlareVS", L"vs_6_6" };
         desc.pixel = { L"shaders/PostProcessing/lensFlareDraw.hlsl", L"LensFlarePS", L"ps_6_6" };
@@ -276,7 +276,7 @@ private:
 };
 
 struct LensFlareCompositeBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken flare, target;
 };
 
@@ -292,7 +292,7 @@ public:
 
     LensFlareCompositeBindings Declare(org::PassBuilder& builder) {
         LensFlareCompositeBindings bindings{};
-        bindings.pipeline = builder.Pipeline(PipelineDesc());
+        bindings.pipeline = br::render::DeclarePipeline(PipelineDesc());
         bindings.flare = builder.ShaderResource(org::ResourceIdentifier{ kLensFlareTargetName }).View();
         bindings.target = builder.RenderTarget(Subresources(Builtin::PostProcessing::UpscaledHDR, org::Mip{ 0, 1 }));
         return bindings;
@@ -318,8 +318,8 @@ public:
     }
 
 private:
-    static org::GraphicsPipelineDesc PipelineDesc() {
-        org::GraphicsPipelineDesc desc;
+    static br::GraphicsPipelineDesc PipelineDesc() {
+        br::GraphicsPipelineDesc desc;
         desc.name = "LensFlare.Composite.PSO";
         desc.vertex = { L"shaders/fullscreenVS.hlsli", L"FullscreenVSNoViewRayMain", L"vs_6_6" };
         desc.pixel = { L"shaders/PostProcessing/lensFlareComposite.hlsl", L"LensFlareCompositePS", L"ps_6_6" };

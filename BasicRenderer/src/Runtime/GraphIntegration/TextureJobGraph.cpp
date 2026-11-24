@@ -32,7 +32,7 @@ TextureJobGraph::TextureJobGraph(std::shared_ptr<org::Runtime> runtime, TextureF
     if (auto pass = textures.GetBC7CompressionReadbackPass())
         desc.Add(org::ExternalPassDesc::Copy("TextureJobs::BC7CompressionReadback", pass)
             .At(org::ExternalInsertPoint::Begin(5))
-            .PinToQueue(static_cast<org::QueueSlotIndex>(2)));
+            .PreferQueue(org::QueueKind::Copy));
     m_instance = org::GraphInstance::Create(m_runtime, std::move(desc));
 }
 

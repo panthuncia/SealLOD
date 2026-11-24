@@ -8,10 +8,12 @@
 #include "Render/RenderGraph/RenderGraphExtension.h"
 namespace org { class RenderGraph; }
 #include "VirtualGeometry/GraphIntegration/CLodExtensionComponents.h"
+#include <BasicRenderer/Extensions/ProducerPersistentState.h>
 
 namespace org { class Buffer; }
 namespace br::render { class CLodRayTracingSystem; }
 class CLodStreamingSystem;
+struct CLodStreamingGraphBinding;
 class CLodAlphaVariant;
 class CLodShadowVariant;
 class CLodVisibilityVariant;
@@ -26,8 +28,13 @@ struct CLodExtensionOptions {
     bool enableVoxelRasterization = false;
     uint32_t voxelRasterWorkCapacity = 0u;
     std::shared_ptr<CLodStreamingSystem> streamingSystem;
+    // On the variant that owns streaming: the CLOD_BRANCH_* its graph's views take, applied when the graph is attached.
+    uint32_t streamingActiveBranches = 0u;
+    // The build's caster set (FrameBuildOutputs::virtualShadowCasters): the shadow variant gathers their passes.
     std::shared_ptr<VirtualShadowCasterRegistry> virtualShadowCasters;
     std::shared_ptr<ProducerPersistentState> persistentState;
+    // The shadow variant's persistent atlas, as the renderer made it for this build (CLodShadowVariant::EnsureDirectionalVsmAtlas).
+    std::shared_ptr<const ProducerPersistentState::DirectionalVsmResources> directionalVsm;
     std::shared_ptr<org::ResourceGroup> slabResourceGroup;
     std::shared_ptr<br::render::CLodRayTracingSystem> rayTracingSystem;
     // Raster leaves the draws the BVH represents to RayTracedVisibilityPass.
@@ -45,6 +52,10 @@ struct CLodExtensionOptions {
     bool unifiedRayTracingCulling = false;
 };
 
+// One CLod variant of one frame graph. The renderer makes a new instance for every graph build (Renderer::MakeFrameBuild
+// decides the options, the host's factory constructs it on the build's thread); it lives and dies with that graph. It makes
+// all its resources when it is constructed, sized from the build's settings, and changes no shared state during the build:
+// what the renderer must see goes into the build's outputs (br::render::CurrentFrameBuild()).
 class CLodExtension final : public org::IRenderGraphExtension, public org::IResourceProvider {
 public:
     explicit CLodExtension(
@@ -56,7 +67,6 @@ public:
     void PrepareForBuild(org::RenderGraph& rg) override;
     void Initialize(org::RenderGraph& rg) override;
     void Shutdown(org::RenderGraph& rg) override;
-    void OnRegistryReset(org::ResourceRegistry* reg) override;
     void GatherStructuralPasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& outPasses) override;
     void AppendRayTracingPasses(const CLodVariantTraits& traits, std::vector<org::ExternalPassDesc>& outPasses);
     void AfterExecute(org::RenderGraph& rg) override;
@@ -69,23 +79,22 @@ private:
     friend class CLodVisibilityVariant;
 
     bool IsReyesTessellationDisabled() const;
-    void RefreshShadowConfiguredSettings();
+    // The streaming binding of the build in progress, made by the first variant that asks.
+    CLodStreamingGraphBinding* BuildStreamingBinding();
+    // The shadow variant's upgrade upload slots and fallback dependency list go to streaming through the binding.
+    void RecordShadowStreamingResources();
     uint32_t GetVisibleClusterCapacity() const;
-    void RefreshCoreVisibleClusterCapacity();
     void InitializeCoreResources();
     void InitializeDeepVisibilityResources();
     void InitializeAVBOITResources();
     void InitializeShadowResources();
-    void RefreshTransparencyResourcesForCurrentSettings();
-    void RefreshShadowResourcesForCurrentSettings();
     void TagCoreResourceUsages();
     void TagTransparencyResourceUsages();
     void TagShadowResourceUsages();
-    void ReleaseBufferBackings();
-    void ReleaseTransparencyResourceBackings();
-    void ReleaseShadowResourceBackings();
-    void EnsureReyesResourcesInitialized();
+    void InitializeReyesResources();
     void SyncReyesResourceEntities(bool enabled);
+    // The opaque variant hands material evaluation its buffers through the current frame build.
+    void PublishPrimaryBuffersToFrameBuild() const;
     void AppendPhaseReyesStructuralPasses(
         const CLodVariantTraits& traits,
         const std::shared_ptr<org::ResourceGroup>& slabGroup,
@@ -208,6 +217,8 @@ private:
     std::shared_ptr<org::Buffer> m_reyesRasterWorkIndirectArgsBufferPhase2;
     std::shared_ptr<org::Buffer> m_reyesTelemetryBufferPhase1;
     std::shared_ptr<org::Buffer> m_reyesTelemetryBufferPhase2;
+    // Whether the Reyes buffers are in the CLod resource directory (SyncReyesResourceEntities).
+    bool m_reyesResourcesPublished = false;
 
     std::shared_ptr<org::Buffer> m_swVisibleClustersCounterBuffer;
     std::shared_ptr<org::Buffer> m_swVisibleClustersCounterBufferPhase2;
@@ -290,13 +301,17 @@ private:
     std::shared_ptr<org::Buffer> m_vsmExpandedVisibleClustersBufferSw;
     std::shared_ptr<org::Buffer> m_vsmExpandedVisibleClusterTransformIndicesBufferSw;
 
+    // The renderer's streaming service (it outlives this instance), and on the variant that owns streaming, this graph's
+    // binding: its after-frame submission is ignored unless the binding is the attached one.
     std::shared_ptr<CLodStreamingSystem> m_streamingSystem;
-    bool m_providerRegisteredForCurrentRegistry = false;
+    std::shared_ptr<CLodStreamingGraphBinding> m_streamingBinding;
+    // The shadow variant's first frame resets the atlas and its state: a new graph does not know what an older one left.
     bool m_shadowVirtualResourcesNeedReset = true;
-    uint32_t m_transparencyConfiguredRenderWidth = 0u;
-    uint32_t m_transparencyConfiguredRenderHeight = 0u;
-    uint32_t m_shadowConfiguredBackingResolution = 0u;
-    uint32_t m_shadowConfiguredMaxPhysicalPageCount = 0u;
-    uint32_t m_shadowConfiguredComputeClusterCapacity = 0u;
-    uint32_t m_shadowConfiguredExpandedRecordCapacity = 0u;
+    // Whether the shadow variant provides its resources to the graph (the enableShadows setting, read when made).
+    bool m_shadowProviderEnabled = false;
+    // The shadow variant's sizes, from the build's settings.
+    uint32_t m_shadowBackingResolution = 0u;
+    uint32_t m_shadowMaxPhysicalPageCount = 0u;
+    uint32_t m_shadowComputeClusterCapacity = 0u;
+    uint32_t m_shadowExpandedRecordCapacity = 0u;
 };

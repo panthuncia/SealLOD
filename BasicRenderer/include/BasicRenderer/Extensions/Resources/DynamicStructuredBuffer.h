@@ -20,6 +20,7 @@
 #include "Resources/GPUBacking/GpuBufferBacking.h"
 #include "Interfaces/IHasMemoryMetadata.h"
 #include "Render/Runtime/UploadPolicyServiceAccess.h"
+#include <BasicRenderer/Extensions/Buffers/StructuredBackingFlags.h>
 
 using Microsoft::WRL::ComPtr;
 
@@ -314,6 +315,7 @@ private:
                 .byteSize = sizeof(T) * static_cast<size_t>(m_pendingResizeCapacity),
                 .unorderedAccess = m_UAV,
                 .debugName = name,
+                .extraFlags = BackingResourceFlags() | StructuredBackingFlags(sizeof(T)),
             });
             return;
         }
@@ -327,6 +329,7 @@ private:
             .byteSize = sizeof(T) * static_cast<size_t>(newCapacity),
             .unorderedAccess = m_UAV,
             .debugName = name,
+            .extraFlags = BackingResourceFlags() | StructuredBackingFlags(sizeof(T)),
         });
     }
 
@@ -460,7 +463,7 @@ private:
             rhi::HeapType::DeviceLocal,
             sizeof(T) * capacity,
             GetGlobalResourceID(),
-            m_UAV);
+            m_UAV, nullptr, false, BackingResourceFlags() | StructuredBackingFlags(sizeof(T)));
         ApplyResizeBacking(std::move(backing), capacity, previousCapacity);
     }
 

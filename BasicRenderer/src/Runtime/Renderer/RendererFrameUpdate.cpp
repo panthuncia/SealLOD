@@ -9,6 +9,7 @@
 #include "OpenRenderGraph/Runtime.h"
 #include <BasicRenderer/Renderer.h>
 #include "OpenRenderGraph/GraphInstance.h"
+#include "OpenRenderGraph/GraphHost.h"
 #include "Runtime/StateGraph/AsyncStateGraph.h"
 #include "Runtime/Publication/PersistentRendererPublication.h"
 
@@ -71,6 +72,7 @@
 #include "Lighting/Environment/EnvironmentManager.h"
 #include "Animation/Skeletons/SkeletonManager.h"
 #include "Runtime/IO/ReadbackManager.h"
+#include "Runtime/IO/ReadbackCaptureService.h"
 #include "Scene/Views/ViewManager.h"
 #include "Scene/Objects/IndirectCommandBufferManager.h"
 #include "Materials/MaterialManager.h"
@@ -99,11 +101,11 @@
 #include "VirtualGeometry/Streaming/CLodStreamingSystem.h"
 #include "BasicRenderer/Diagnostics/CLodTelemetry.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
-#include "Render/Runtime/IReadbackService.h"
+#include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
 #include "Render/Runtime/ScopedActiveGraphServices.h"
 #include "Resources/Resource.h"
 #include <BasicRenderer/Extensions/ResourceComponent.h>
-#include "Resources/ReadbackRequest.h"
+#include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
 #include "Resources/DynamicResource.h"
 #include "Resources/ExternalTextureResource.h"
 #include "Render/MemoryIntrospectionBackend.h"
@@ -151,6 +153,9 @@ void Renderer::Update(float elapsedSeconds) {
 	}
 	PSOManager::GetInstance().PublishPendingLivePipelines(std::move(pipelineRetirementPoints));
 	PSOManager::GetInstance().CollectRetiredLivePipelines();
+    // Readbacks whose copies completed, every Update: some complete work a frame waits for (BC7 texture compression
+    // feeds material publication, which gates the frame), so they cannot wait for a frame to be presented.
+    if (m_readbackCaptures) m_readbackCaptures->ProcessCompleted();
 	// One log line per batch of shader requests (startup, a reload), once nothing waits on a compile: what they cost.
 	if (br::shaderstore::HasUnreportedRequests() && GetPendingShaderCompileCount() == 0) {
 		br::shaderstore::FinishBatchWhenSettled();
@@ -195,7 +200,7 @@ void Renderer::Update(float elapsedSeconds) {
             StallPipeline();
             std::string rebuildError;
             if (PSOManager::GetInstance().RebuildAllPipelines(rebuildError)) {
-                rebuildRenderGraph = true;
+                RequestGraphRebuild("shader reload");
             } else {
                 spdlog::error("Renderer: global PSO rebuild failed: {}", rebuildError);
             }
@@ -271,7 +276,7 @@ void Renderer::Update(float elapsedSeconds) {
             spdlog::info("Renderer: material resolved texture table {} -> {} rows (material tables {}); rebuilding the graph",
                 tableRows, grown, materialRows);
             settings.getSettingSetter<uint32_t>(MaterialResolvedTextureCapacitySettingName)(grown);
-            rebuildRenderGraph = true;
+            RequestGraphRebuild("material resolved texture table grown");
         }
     }
 
@@ -288,30 +293,20 @@ void Renderer::Update(float elapsedSeconds) {
             grown = std::min<uint64_t>(grown, 1ull << 30);
             spdlog::info("Renderer: light grid {} {} -> {} (needed {}); rebuilding the graph", what, capacity, grown, needed);
             settings.getSettingSetter<uint32_t>(name)(static_cast<uint32_t>(grown));
-            rebuildRenderGraph = true;
+            RequestGraphRebuild(std::string("light grid ") + what + " grown");
         };
         grow(LightGridIndexCapacitySettingName, LightGridMinIndexCapacity, m_pLightManager->GetCullingStats().maxNeededLights, "index entries");
         grow(LightGridRecordCapacitySettingName, LightGridMinRecordCapacity, m_pLightManager->GetNumLights(), "culling records");
     }
 
-    if (rebuildRenderGraph) {
-        runCapturedStage("RenderGraphBuild", [&]() {
-            BT_ZONE_SCOPE("Renderer::Update::RenderGraphBuild");
-            try {
-		        CreateRenderGraph();
-                m_pipelineRollbackRecipe.reset();
-                ConfirmPipelineReplacement();
-            }
-            catch (const std::exception& error) {
-                if (!m_pipelineRollbackRecipe) {
-                    throw;
-                }
-                HandlePipelineReplacementFailure(error);
-                CreateRenderGraph();
-            }
-        });
-        ProbeGraphicsCommandListCreation(DeviceManager::GetInstance().GetDevice(), "after RenderGraphBuild");
-    }
+    // A capture after a pass the graph has no copy for yet adds one: a structural change.
+    if (m_readbackCaptures && m_readbackCaptures->ConsumeRebuildRequest()) RequestGraphRebuild("readback capture site added");
+    // The consolidation point: a finished graph build is attached here, and the graph changes requested since the last build
+    // started start one (ConsolidateFrameGraph). The build itself runs on the build thread while this graph keeps rendering.
+    runCapturedStage("RenderGraphBuild", [&]() {
+        BT_ZONE_SCOPE("Renderer::Update::RenderGraphBuild");
+        ConsolidateFrameGraph();
+    });
     runCapturedStage("RenderResourceSync", [&]() {
         RunRenderResourceSyncStage();
     });
@@ -359,11 +354,8 @@ void Renderer::Update(float elapsedSeconds) {
 		// the slot.  Doing this in FrameMaintenance (after RenderGraph::Update)
 		// recycled current-frame staging pages before RenderGraph::Execute had
 		// submitted their copies.
-		if (currentRenderGraph) {
-			if (auto* uploadService = m_orgRuntime->Uploads().get()) {
-				uploadService->ProcessDeferredReleases(m_preparationFrameIndex);
-			}
-		}
+		// The frame graph host retires upload pages by its own run leases (ExecuteFrame); a second release here by the
+		// renderer's slot would free pages a run still uses.
 		// Descriptor releases and deferred deletions whose submission frontier the GPU reached.
 		if (m_orgRuntime) m_orgRuntime->Retire();
         });
@@ -976,7 +968,15 @@ void Renderer::Update(float elapsedSeconds) {
     const bool publicationsReady = publishedMaterialState
         && updateData.lightTables && updateData.poses;
     if (!publicationsReady) {
+        static auto lastBackpressureLog = std::chrono::steady_clock::time_point{};
+        if (const auto now = std::chrono::steady_clock::now(); now - lastBackpressureLog > std::chrono::seconds(2)) {
+            lastBackpressureLog = now;
+            spdlog::info("Renderer: frame waits for publications: material={} lights={} poses={}",
+                static_cast<bool>(publishedMaterialState), static_cast<bool>(updateData.lightTables), static_cast<bool>(updateData.poses));
+        }
         m_frameInputs.reset();
+        // The publications may wait for uploads only a frame's upload pass submits: submit them without the frame.
+        SubmitUploadsWithoutFrame();
         basic_telemetry::AddCounter("SARP.FrameInputs.PublicationAdmissionBackpressure");
         basic_telemetry::SetGauge("SARP.FrameInputs.PublicationAdmissionReady", 0);
         return;
@@ -1027,7 +1027,7 @@ void Renderer::Update(float elapsedSeconds) {
                 [](const auto& view) { return view.primary; }) : decltype(views->views.begin()){};
             const auto cameraResource = m_pViewManager ? m_pViewManager->GetCameraBuffer() : nullptr;
             if (cameraResource && views && primary != views->views.end()) {
-                if (auto* service = m_orgRuntime->Readbacks().get()) {
+                if (auto* service = m_readbackCaptures.get()) {
                     const auto requestFrame = m_totalFramesRendered;
                     const auto cameraRevision = m_frameInputs->PrimaryCameraUpload().revision;
                     const auto expected = primary->cameraInfo;
@@ -1035,7 +1035,7 @@ void Renderer::Update(float elapsedSeconds) {
                         service->RequestReadbackCaptureAfterGraph(
                             cameraResource.get(), org::RangeSpec{},
                             [state = cameraReadbackState, path = cameraReadbackPath, requestFrame,
-                                cameraRevision, expected](org::ReadbackCaptureResult&& result) {
+                                cameraRevision, expected](br::ReadbackCaptureResult&& result) {
                             CameraInfo camera{};
                             if (result.data.size() >= sizeof(camera))
                                 std::memcpy(&camera, result.data.data(), sizeof(camera));
@@ -1101,7 +1101,7 @@ void Renderer::Update(float elapsedSeconds) {
             if (value && value[0]) {
                 const std::filesystem::path directory(value);
                 std::filesystem::create_directories(directory);
-                if (auto* service = m_orgRuntime->Readbacks().get()) {
+                if (auto* service = m_readbackCaptures.get()) {
                     gpuWorkReadbackRequested = true;
                     const auto captureResource = [&](const char* label, const char* anchor,
                         std::shared_ptr<org::Resource> resource,
@@ -1132,7 +1132,7 @@ void Renderer::Update(float elapsedSeconds) {
                         service->RequestReadbackCapture(anchor, resource.get(), org::RangeSpec{},
                             [path, frame, drawRecordsRevision, indirectRevision,
                                 desiredDrawRecordsRevision, indirectDrawRecordsRevision,
-                                version = std::move(version)](org::ReadbackCaptureResult&& result) {
+                                version = std::move(version)](br::ReadbackCaptureResult&& result) {
                                 std::ofstream output(path, std::ios::binary | std::ios::trunc);
                                 output.write(reinterpret_cast<const char*>(result.data.data()),
                                     static_cast<std::streamsize>(result.data.size()));
@@ -1260,12 +1260,12 @@ void Renderer::Update(float elapsedSeconds) {
                 const std::filesystem::path path(outputPath);
                 std::free(outputPath);
                 outputPath = nullptr;
-                if (auto* readbackService = m_orgRuntime->Readbacks().get()) {
+                if (auto* readbackService = m_readbackCaptures.get()) {
                     colorOutputReadbackRequested = true;
                     readbackService->RequestReadbackCaptureAfterGraph(
                         m_dynamicPresentationColor.get(),
                         org::RangeSpec{},
-                        [path](org::ReadbackCaptureResult&& result) {
+                        [path](br::ReadbackCaptureResult&& result) {
                             BT_ZONE_SCOPE("Renderer::ColorOutputReadback::Analyze");
                             std::ofstream output(path, std::ios::binary | std::ios::trunc);
                             if (output && !result.data.empty()) {
@@ -1360,7 +1360,7 @@ void Renderer::Update(float elapsedSeconds) {
                 const std::filesystem::path path(outputPath);
                 std::free(outputPath);
                 outputPath = nullptr;
-                if (auto* readbackService = m_orgRuntime->Readbacks().get()) {
+                if (auto* readbackService = m_readbackCaptures.get()) {
                     const auto lease = m_context.publishedManifestLease;
                     const auto published = lease ? lease->state : nullptr;
                     const auto materialState = published
@@ -1459,7 +1459,7 @@ void Renderer::Update(float elapsedSeconds) {
                             readbackService->RequestReadbackCapture(
                                 "EvaluateMaterialGroupsPass",
                                 captureResource ? captureResource : table->resource.get(), org::RangeSpec{},
-                                [tablePath, expected, resourceID, label](org::ReadbackCaptureResult&& result) {
+                                [tablePath, expected, resourceID, label](br::ReadbackCaptureResult&& result) {
                                     std::ofstream output(tablePath, std::ios::binary | std::ios::trunc);
                                     if (output && !result.data.empty()) {
                                         output.write(reinterpret_cast<const char*>(result.data.data()),
@@ -1514,7 +1514,7 @@ void Renderer::Update(float elapsedSeconds) {
                             const auto resourceID = texture->GetGlobalResourceID();
                             readbackService->RequestReadbackCapture(
                                 "EvaluateMaterialGroupsPass", texture.get(), org::RangeSpec{},
-                                [texturePath, resourceID, label](org::ReadbackCaptureResult&& result) {
+                                [texturePath, resourceID, label](br::ReadbackCaptureResult&& result) {
                                     std::ofstream output(texturePath, std::ios::binary | std::ios::trunc);
                                     if (output && !result.data.empty()) {
                                         output.write(reinterpret_cast<const char*>(result.data.data()),
@@ -1590,7 +1590,7 @@ void Renderer::Update(float elapsedSeconds) {
             m_dynamicPresentationColor->SetResource(
                 m_presentationColorResources[m_preparationFrameIndex]);
         }
-        m_preparedFrame = std::make_unique<org::Execution>(m_frameGraph->Prepare(context));
+        ExecuteFrameGraph(context);
     });
     ProbeGraphicsCommandListCreation(deviceManager.GetDevice(), "after RenderGraphUpdate");
 

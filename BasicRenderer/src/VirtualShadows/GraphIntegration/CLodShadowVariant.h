@@ -11,12 +11,18 @@ namespace org { class RenderGraph; }
 
 class CLodExtension;
 struct CLodVariantTraits;
+struct ProducerPersistentState;
 namespace org { class ResourceGroup; }
 struct VirtualShadowCasterBuildContext;
 
 class CLodShadowVariant {
 public:
-    static void RefreshConfiguredSettings(CLodExtension& extension);
+    // Render thread, before a build that makes the shadow variant: the renderer's directional atlas (page table, physical
+    // pages, upgrade upload slots) for the build's settings. Made once, and made again only when the backing resolution or
+    // the page count changes (ProducerPersistentState::DirectionalVsmResources).
+    static void EnsureDirectionalVsmAtlas(ProducerPersistentState& persistent);
+    // The variant's sizes, from the build's settings. Once, when the instance is made.
+    static void ConfigureSettings(CLodExtension& extension);
     static uint32_t GetVisibleClusterCapacity(const CLodExtension& extension);
     static std::string AppendStructuralPrelude(
         CLodExtension& extension,
@@ -46,12 +52,11 @@ public:
         std::vector<org::ExternalPassDesc>& outPasses);
     static void InitializeResources(CLodExtension& extension);
     static void TagResourceUsages(CLodExtension& extension);
-    static void ReleaseResourceBackings(CLodExtension& extension);
-    static void RefreshResourcesForCurrentSettings(CLodExtension& extension);
     static std::shared_ptr<org::Resource> ProvideResource(CLodExtension& extension, org::ResourceIdentifier const& key);
     static std::vector<org::ResourceIdentifier> GetSupportedKeys(const CLodExtension& extension);
 
 private:
+    static uint32_t UpgradeUploadSlotCount();
     static VirtualShadowCasterBuildContext MakeCasterContext(CLodExtension& extension);
     static std::string AppendFineRasterPassForPhase(
         CLodExtension& extension,

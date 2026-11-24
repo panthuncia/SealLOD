@@ -4,11 +4,12 @@
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 
 namespace org { class Buffer; }
 
 struct RasterBucketCreateCommandBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken visibleCount, indirectCommand, replayState, nodeInputs;
     uint32_t visibleCapacity = 0;
     bool patchReplay = false;

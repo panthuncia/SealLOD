@@ -10,7 +10,7 @@
 
 #include <rhi.h>
 
-#include "Render/PipelineState.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "Render/PreparedPass.h"
 #include "BasicRenderer/Extensions/ShaderBuffers.h"
 
@@ -24,7 +24,7 @@ inline void PushMiscConstants(org::RecordingContext& context, const MiscConstant
 }
 
 // Bind, push the constant block and dispatch. Zero groups records nothing.
-inline void DispatchCompute(org::RecordingContext& context, const org::PipelineState& pipeline,
+inline void DispatchCompute(org::RecordingContext& context, const br::PipelineState& pipeline,
     const MiscConstants& constants, uint32_t groupsX, uint32_t groupsY = 1, uint32_t groupsZ = 1) {
     if (!groupsX || !groupsY || !groupsZ) return;
     context.BindComputePipeline(pipeline);
@@ -33,7 +33,7 @@ inline void DispatchCompute(org::RecordingContext& context, const org::PipelineS
 }
 
 // Bind, push the constant block and execute indirect dispatches.
-inline void DispatchComputeIndirect(org::RecordingContext& context, const org::PipelineState& pipeline,
+inline void DispatchComputeIndirect(org::RecordingContext& context, const br::PipelineState& pipeline,
     const MiscConstants& constants, const std::shared_ptr<const rhi::CommandSignaturePtr>& signature,
     org::ResourceBindingToken arguments, uint64_t argumentOffset = 0, uint32_t maxCommandCount = 1,
     std::optional<org::ResourceBindingToken> count = std::nullopt, uint64_t countOffset = 0) {
@@ -42,8 +42,8 @@ inline void DispatchComputeIndirect(org::RecordingContext& context, const org::P
     context.ExecuteIndirect(signature, arguments, argumentOffset, maxCommandCount, count, countOffset);
 }
 
-inline void DispatchComputeIndirect(org::RecordingContext& context, const org::PipelineState& pipeline,
-    const MiscConstants& constants, const org::CommandSignatureState& signature,
+inline void DispatchComputeIndirect(org::RecordingContext& context, const br::PipelineState& pipeline,
+    const MiscConstants& constants, const br::CommandSignatureState& signature,
     org::ResourceBindingToken arguments, uint64_t argumentOffset = 0, uint32_t maxCommandCount = 1,
     std::optional<org::ResourceBindingToken> count = std::nullopt, uint64_t countOffset = 0) {
     context.BindComputePipeline(pipeline);
@@ -52,7 +52,7 @@ inline void DispatchComputeIndirect(org::RecordingContext& context, const org::P
 }
 
 // One full-screen triangle into `color`.
-inline void DrawFullscreen(org::RecordingContext& context, const org::PipelineState& pipeline,
+inline void DrawFullscreen(org::RecordingContext& context, const br::PipelineState& pipeline,
     const MiscConstants& constants, const rhi::ColorAttachment& color, uint32_t width, uint32_t height,
     const char* debugName = nullptr) {
     rhi::PassBeginInfo begin{};

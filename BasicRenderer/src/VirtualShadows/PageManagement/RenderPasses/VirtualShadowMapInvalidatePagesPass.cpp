@@ -28,6 +28,7 @@ VirtualShadowMapInvalidatePagesPass::VirtualShadowMapInvalidatePagesPass(
     std::shared_ptr<org::Buffer> pageMetadataBuffer,
     std::shared_ptr<org::Buffer> directionalPageViewInfoBuffer,
     std::shared_ptr<org::Buffer> statsBuffer,
+    std::shared_ptr<flecs::query<const Components::ObjectDrawInfo>> transformChangedQuery,
     std::shared_ptr<VirtualShadowInvalidationQueue> extensionInvalidations)
     : m_invalidationInputsBuffer(std::move(invalidationInputsBuffer))
     , m_invalidationCountBuffer(std::move(invalidationCountBuffer))
@@ -39,18 +40,20 @@ VirtualShadowMapInvalidatePagesPass::VirtualShadowMapInvalidatePagesPass(
     , m_directionalPageViewInfoBuffer(std::move(directionalPageViewInfoBuffer))
     , m_statsBuffer(std::move(statsBuffer))
     , m_extensionInvalidations(std::move(extensionInvalidations))
+    , m_transformChangedQuery(std::move(transformChangedQuery))
 {
     m_boundsInvalidationBuffer = org::DynamicBuffer::CreateShared(
         sizeof(float) * 4u + sizeof(uint32_t) * 4u,
         CLodVirtualShadowMaxInvalidationInputs,
         "CLod.VirtualShadow.ExtensionInvalidationBounds");
-    auto& ecsWorld = RendererECSManager::GetInstance().GetWorld();
-
-    m_transformChangedQuery = ecsWorld.query_builder<const Components::ObjectDrawInfo>()
-        .with<Components::Active>()
-        .with<Components::RenderTransformUpdated>()
-        .without<Components::SkipShadowPass>()
-        .build();
+    if (!m_transformChangedQuery) {
+        m_transformChangedQuery = std::make_shared<flecs::query<const Components::ObjectDrawInfo>>(
+            RendererECSManager::GetInstance().GetWorld().query_builder<const Components::ObjectDrawInfo>()
+                .with<Components::Active>()
+                .with<Components::RenderTransformUpdated>()
+                .without<Components::SkipShadowPass>()
+                .build());
+    }
 }
 
 VirtualShadowMapInvalidatePagesBindings VirtualShadowMapInvalidatePagesPass::Declare(org::PassBuilder& builder)
@@ -63,9 +66,9 @@ VirtualShadowMapInvalidatePagesBindings VirtualShadowMapInvalidatePagesPass::Dec
             Builtin::PerInstanceTransformBuffer,
             Builtin::PerObjectBuffer);
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    return {builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+    return {br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
                 L"CLodVirtualShadowInvalidatePagesCSMain", "CLod.VirtualShadow.InvalidatePages.PSO")),
-        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+        br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
                 L"CLodVirtualShadowInvalidateBoundsCSMain", "CLod.VirtualShadow.InvalidateBounds.PSO")),
         builder.ShaderResource(m_invalidationInputsBuffer), builder.ShaderResource(m_invalidationCountBuffer),
         builder.ShaderResource(m_clipmapInfoBuffer), builder.ShaderResource(m_boundsInvalidationBuffer),
@@ -120,7 +123,7 @@ void VirtualShadowMapInvalidatePagesPass::Update(const org::UpdateExecutionConte
         invalidatedInstancesBitset[drawRecordIndex >> 5u] |= 1u << (drawRecordIndex & 31u);
     };
 
-    m_transformChangedQuery.each([&](flecs::entity entity, const Components::ObjectDrawInfo& drawInfo) {
+    m_transformChangedQuery->each([&](flecs::entity entity, const Components::ObjectDrawInfo& drawInfo) {
         const bool skinned = entity.has<Components::Skinned>();
         const uint32_t dynamicSkinnedClipmapCount =
             g_clodSkinnedShadowEffectiveDynamicClipmapCount.load(std::memory_order_relaxed);

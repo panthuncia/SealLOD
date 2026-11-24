@@ -1,5 +1,6 @@
 #include <BasicRenderer/Renderer.h>
 #include "OpenRenderGraph/GraphInstance.h"
+#include "OpenRenderGraph/GraphHost.h"
 #include "Resources/DynamicResource.h"
 #include <BasicRenderer/Streaming/TaskScheduler.h>
 #include <BasicRenderer/Diagnostics/NvPerfIntegration.h>
@@ -26,6 +27,7 @@
 #include "Runtime/Settings/RendererSettingsHelpers.h"
 #include "Resources/ExternalTextureResource.h"
 #include "Runtime/IO/ReadbackManager.h"
+#include "Runtime/IO/ReadbackCaptureService.h"
 #include "OpenRenderGraph/ExternalClient.h"
 #include "Runtime/Frame/RendererFrameInputs.h"
 #include "Diagnostics/Telemetry/FrameTaskGraphTelemetry.h"
@@ -110,31 +112,15 @@ void SyncOpenRenderGraphSettings(uint8_t numFramesInFlight) {
     orgSettings.numFramesInFlight = numFramesInFlight;
     orgSettings.collectPassStatistics = sm.getSettingGetter<bool>("collectPassStatistics")();
     orgSettings.collectPipelineStatistics = sm.getSettingGetter<bool>("collectPipelineStatistics")();
-    orgSettings.useAsyncCompute = sm.getSettingGetter<bool>("useAsyncCompute")();
     orgSettings.renderGraphCompileDumpEnabled = sm.getSettingGetter<bool>("renderGraphCompileDumpEnabled")();
     orgSettings.renderGraphVramDumpEnabled = sm.getSettingGetter<bool>("renderGraphVramDumpEnabled")();
     orgSettings.renderGraphBatchTraceEnabled = sm.getSettingGetter<bool>("renderGraphBatchTraceEnabled")();
-    orgSettings.renderGraphLightweightCompileSummaryEnabled = sm.getSettingGetter<bool>("renderGraphLightweightCompileSummaryEnabled")();
     orgSettings.readOnlyUniformTransitionElisionEnabled = true;
     orgSettings.autoAliasMode = static_cast<uint8_t>(sm.getSettingGetter<org::AutoAliasMode>("autoAliasMode")());
     orgSettings.autoAliasPackingStrategy = static_cast<uint8_t>(sm.getSettingGetter<org::AutoAliasPackingStrategy>("autoAliasPackingStrategy")());
     orgSettings.autoAliasEnableLogging = sm.getSettingGetter<bool>("autoAliasEnableLogging")();
-    orgSettings.autoAliasLogExclusionReasons = sm.getSettingGetter<bool>("autoAliasLogExclusionReasons")();
-    orgSettings.autoAliasBuildDebugData = sm.getSettingGetter<bool>("autoAliasBuildDebugData")();
-    orgSettings.queueSchedulingEnableLogging = sm.getSettingGetter<bool>("queueSchedulingEnableLogging")();
-    orgSettings.queueSchedulingSelectionPolicy = static_cast<org::runtime::QueueSchedulingSelectionPolicy>(sm.getSettingGetter<uint8_t>("queueSchedulingSelectionPolicy")());
-    orgSettings.queueSchedulingWidthScale = sm.getSettingGetter<float>("queueSchedulingWidthScale")();
-    orgSettings.queueSchedulingPenaltyBias = sm.getSettingGetter<float>("queueSchedulingPenaltyBias")();
-    orgSettings.queueSchedulingMinPenalty = sm.getSettingGetter<float>("queueSchedulingMinPenalty")();
-    orgSettings.queueSchedulingResourcePressureWeight = sm.getSettingGetter<float>("queueSchedulingResourcePressureWeight")();
-    orgSettings.queueSchedulingUavPressureWeight = sm.getSettingGetter<float>("queueSchedulingUavPressureWeight")();
-    orgSettings.queueSchedulingAutoGraphicsBias = sm.getSettingGetter<float>("queueSchedulingAutoGraphicsBias")();
-    orgSettings.queueSchedulingAsyncOverlapBonus = sm.getSettingGetter<float>("queueSchedulingAsyncOverlapBonus")();
-    orgSettings.queueSchedulingCrossQueueHandoffPenalty = sm.getSettingGetter<float>("queueSchedulingCrossQueueHandoffPenalty")();
     orgSettings.autoAliasPoolRetireIdleFrames = sm.getSettingGetter<uint32_t>("autoAliasPoolRetireIdleFrames")();
     orgSettings.autoAliasPoolGrowthHeadroom = sm.getSettingGetter<float>("autoAliasPoolGrowthHeadroom")();
-    orgSettings.transitionPlacementMode = static_cast<org::runtime::TransitionPlacementMode>(sm.getSettingGetter<uint8_t>("transitionPlacementMode")());
-    orgSettings.heavyDebug = sm.getSettingGetter<bool>("heavyDebug")();
     // ORG's diagnostic logs, under BasicRenderer's established environment switches.
     static const uint32_t diagnosticLogs = [] {
         using br::runtime::renderer_settings::ReadTruthyEnvironmentFlag;
@@ -154,8 +140,9 @@ void SyncOpenRenderGraphSettings(uint8_t numFramesInFlight) {
 
 
 
-void Renderer::Render() {
-    BT_ZONE_SCOPE("Renderer::Render");
+void Renderer::ExecuteFrameGraph(const org::UpdateExecutionContext& frameContext) {
+    BT_ZONE_SCOPE("Renderer::ExecuteFrameGraph");
+    m_frameExecuted = false;
 
     const auto runCapturedStage = [this](const char* stageName, auto&& stageFn) {
         const auto stageStart = std::chrono::steady_clock::now();
@@ -291,15 +278,6 @@ void Renderer::Render() {
 
     }
 
-    org::PassExecutionContext passExecutionContext{};
-    passExecutionContext.device = deviceManager.GetDevice();
-    passExecutionContext.frameIndex = m_context.frameIndex;
-    passExecutionContext.executionSlot = renderedFrameIndex;
-    passExecutionContext.frameFenceValue = m_context.frameFenceValue;
-    passExecutionContext.deltaTime = m_context.deltaTime;
-    passExecutionContext.ownedHostData = m_frameInputs;
-    passExecutionContext.hostData = passExecutionContext.ownedHostData.get();
-
     auto graphicsQueue = deviceManager.GetGraphicsQueue();
     auto computeQueue = deviceManager.GetComputeQueue();
 
@@ -328,7 +306,7 @@ void Renderer::Render() {
 #if BASICRENDERER_ENABLE_NVPERF
             // NVPerf's per-pass ranges. The persistent executor records them from the graph's callbacks and never
             // reads the execution context's hooks, so they are set on the graph.
-            currentRenderGraph->SetGpuPassRangeCallbacks(
+            m_frameHost->SetGpuPassRangeCallbacks(
                 [activeBackend](rhi::CommandList commandList, rhi::Queue queue, const char* queueName, const char* passName) {
                     br::telemetry::nvperf::BeginPassRange(activeBackend, commandList, queue, queueName, passName);
                 },
@@ -336,14 +314,33 @@ void Renderer::Render() {
                     br::telemetry::nvperf::EndPassRange(activeBackend, commandList, queue);
                 });
 #endif
-            // Main render graph execution: the one Update prepared.
-            if (!m_preparedFrame) throw std::logic_error("Renderer: no frame was prepared for execution");
-            const auto prepared = std::move(m_preparedFrame);
-            prepared->Submit(passExecutionContext);
+            // The frame graph: the host prepares its passes for this frame's inputs and submits them before returning.
+            // m_frameInputs stays alive until the frame's GPU work completes.
+            if (m_useGraphInstance) {
+                auto prepared = m_frameInstance->Prepare(frameContext);
+                org::PassExecutionContext passExecutionContext{};
+                passExecutionContext.device = deviceManager.GetDevice();
+                passExecutionContext.frameIndex = m_context.frameIndex;
+                passExecutionContext.executionSlot = renderedFrameIndex;
+                passExecutionContext.frameFenceValue = m_context.frameFenceValue;
+                passExecutionContext.deltaTime = m_context.deltaTime;
+                passExecutionContext.ownedHostData = m_frameInputs;
+                passExecutionContext.hostData = passExecutionContext.ownedHostData.get();
+                prepared.Submit(passExecutionContext);
+            } else {
+            m_frameHost->ExecuteFrame(frameContext, {}, kFrameEpoch, m_frameInputs);
+            // The frame boundary: everything this frame submitted is on the device queues. Runs and the runtime's
+            // retirement wait only for runs a seal came after.
+            m_frameHost->SealSubmitted();
+            }
             // Texture readbacks copy what the frame wrote, so they are submitted right after the frame's execution.
             if (m_pReadbackManager) {
                 const auto graphicsSlot = currentRenderGraph->GetQueueRegistry().FindGraphicsSlot();
                 m_pReadbackManager->Submit(currentRenderGraph->GetExternalClient(), org::ToUnderlying(graphicsSlot));
+            }
+            if (m_readbackCaptures) {
+                const auto graphicsSlot = currentRenderGraph->GetQueueRegistry().FindGraphicsSlot();
+                m_readbackCaptures->SubmitAfterGraph(currentRenderGraph->GetExternalClient(), org::ToUnderlying(graphicsSlot));
             }
             static const std::filesystem::path submittedCameraTracePath = [] {
                 wchar_t* value = nullptr;
@@ -403,8 +400,51 @@ void Renderer::Render() {
         }
     });
 
+    // What Render presents: this frame's slot-owned presentation color and the swapchain image acquired for it.
+    m_executedPresentationSlot = static_cast<uint8_t>(frameContext.preparationSlot);
+    m_executedFrameIndex = renderedFrameIndex;
+    m_frameExecuted = true;
+}
+
+void Renderer::SubmitUploadsWithoutFrame() {
+    BT_ZONE_SCOPE("Renderer::SubmitUploadsWithoutFrame");
+    if (!m_frameHost || m_useGraphInstance) return;
+    auto* uploads = m_orgRuntime ? m_orgRuntime->Uploads().get() : nullptr;
+    if (!uploads || !uploads->HasPendingUploads()) return;
+    try {
+        m_frameHost->ExecuteFrame(nullptr, {}, kUploadEpoch);
+        m_frameHost->SealSubmitted();
+    } catch (const std::exception& error) {
+        spdlog::error("Renderer: submitting uploads without a frame failed: {}", error.what());
+    }
+}
+
+void Renderer::Render() {
+    BT_ZONE_SCOPE("Renderer::Render");
+
+    const auto runCapturedStage = [this](const char* stageName, auto&& stageFn) {
+        const auto stageStart = std::chrono::steady_clock::now();
+        stageFn();
+        const auto stageEnd = std::chrono::steady_clock::now();
+        RecordFrameTaskStage(stageName, br::telemetry::CpuTaskDomain::MainThread, stageStart, stageEnd);
+    };
+    // Update submitted the frame graph (ExecuteFrameGraph). Without a submitted frame there is nothing to present.
+    if (!m_frameExecuted || !currentRenderGraph) {
+        return;
+    }
+    m_frameExecuted = false;
+    const bool renderGraphBatchTraceEnabled = SettingsManager::GetInstance().getSettingGetter<bool>("renderGraphBatchTraceEnabled")();
+    const uint8_t renderedFrameIndex = m_executedFrameIndex;
+    auto& deviceManager = DeviceManager::GetInstance();
+    auto graphicsQueue = deviceManager.GetGraphicsQueue();
+
     if (!currentRenderGraph->GetLastPresentDependency()) {
         basic_telemetry::AddCounter("ORG.PresentationTail.DeferredForRecording");
+        static auto lastDeferredLog = std::chrono::steady_clock::time_point{};
+        if (const auto now = std::chrono::steady_clock::now(); now - lastDeferredLog > std::chrono::seconds(2)) {
+            lastDeferredLog = now;
+            spdlog::warn("Renderer: frame {} has no present dependency; presentation deferred", m_totalFramesRendered);
+        }
         br::telemetry::nvperf::EndFrameCapture(
             deviceManager.GetBackend(), graphicsQueue, m_totalFramesRendered);
         PublishFrameTaskGraphCapture();
@@ -415,8 +455,7 @@ void Renderer::Render() {
     // Acquire/bind the swapchain image only after scene recording and FIFO
     // submission selected the logical frame. PresentationColor is slot-owned
     // and was left in CopySource by PresentationReadyPass.
-    const auto presentationSlot = currentRenderGraph->GetLastExecutedPreparationSlot();
-    const auto sourceSlot = static_cast<size_t>(presentationSlot.value_or(renderedFrameIndex));
+    const auto sourceSlot = static_cast<size_t>(m_executedPresentationSlot);
     if (sourceSlot >= m_presentationColorResources.size()
         || renderedFrameIndex >= m_backbufferResources.size()
         || renderedFrameIndex >= m_commandAllocators.size()
@@ -515,20 +554,19 @@ void Renderer::Render() {
 
     runCapturedStage("SignalFence", [&]() {
         BT_ZONE_SCOPE("Renderer::Render::SignalFence");
-        const auto preparationSlot = currentRenderGraph->GetLastExecutedPreparationSlot();
-        SignalFence(graphicsQueue,
-            static_cast<uint8_t>(preparationSlot.value_or(renderedFrameIndex)));
+        // The renderer's slot: WaitForFrame waits on it before the slot's resources are written again.
+        SignalFence(graphicsQueue, m_executedPresentationSlot);
+        // The capture copies this frame recorded complete with its fence.
+        if (m_readbackCaptures) m_readbackCaptures->NoteFrameSubmitted(m_frameFence.Get(), m_currentFrameFenceValue);
         br::telemetry::nvperf::EndFrameCapture(deviceManager.GetBackend(), graphicsQueue, m_totalFramesRendered);
     });
 
     AdvanceFrameIndex();
 
     runCapturedStage("ReadbackRequests", [&]() {
-        if (currentRenderGraph) {
+        if (m_readbackCaptures) {
             BT_ZONE_SCOPE("Renderer::Render::ReadbackRequests");
-            if (auto* readbackService = m_orgRuntime->Readbacks().get()) {
-                readbackService->ProcessReadbackRequests(); // Process readback captures
-            }
+            m_readbackCaptures->ProcessCompleted();
         }
         if (m_pReadbackManager) {
             m_pReadbackManager->ProcessReadbackRequests(); // Save images to disk if requested

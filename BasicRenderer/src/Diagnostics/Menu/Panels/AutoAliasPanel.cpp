@@ -34,9 +34,6 @@ void Menu::DrawAutoAliasPlannerWindow() {
         setAutoAliasPackingStrategy(m_autoAliasPackingStrategy);
     }
 
-    if (ImGui::Checkbox("Log Exclusions", &m_autoAliasLogExclusionReasons)) {
-        setAutoAliasLogExclusionReasons(m_autoAliasLogExclusionReasons);
-    }
 
     int retireIdleFrames = static_cast<int>(m_autoAliasPoolRetireIdleFrames);
     if (ImGui::SliderInt("Pool Retire Idle Frames", &retireIdleFrames, 0, 2000)) {

@@ -9,7 +9,7 @@
 #include "BasicRenderer/Diagnostics/CLodTelemetry.h"
 #include <BasicRenderer/Extensions/Resources/PublishedStateResourceResolver.h>
 #include "Render/MemoryIntrospectionAPI.h"
-#include "Render/PipelineState.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "Resources/Buffers/Buffer.h"
 #include "Runtime/Settings/SettingsManager.h"
 #include "Scene/Objects/IndirectStateArtifacts.h"

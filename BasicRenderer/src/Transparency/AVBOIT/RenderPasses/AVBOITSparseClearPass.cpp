@@ -33,7 +33,7 @@ AVBOITSparseClearBindings AVBOITSparseClearPass::Declare(org::PassBuilder& build
             m_scalarExtinctionTexture,
             m_chromaticExtinctionTexture,
             m_zeroTransmittanceSliceTexture);
-    return {builder.Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/AVBOITSparseClear.hlsl", L"CLodAVBOITSparseClearCS", "CLod.AVBOITSparseClear.PSO")), builder.ShaderResource(m_configBuffer), builder.UnorderedAccess(m_occupancyTexture)};
+    return {br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/AVBOITSparseClear.hlsl", L"CLodAVBOITSparseClearCS", "CLod.AVBOITSparseClear.PSO")), builder.ShaderResource(m_configBuffer), builder.UnorderedAccess(m_occupancyTexture)};
 }
 
 AVBOITSparseClearFrame AVBOITSparseClearPass::Prepare(const AVBOITSparseClearBindings& bindings, const org::PassPrepareContext& preparation) const {

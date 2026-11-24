@@ -9,7 +9,7 @@
 #include <BasicRenderer/Extensions/BuiltinResources.h>
 #include <BasicRenderer/Extensions/IndirectCommand.h>
 #include "Render/PassBuilders.h"
-#include <Render/PipelineDesc.h>
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include <BasicRenderer/Diagnostics/OutputTypes.h>
 #include <BasicRenderer/Pipeline/RendererSettings.h>
@@ -23,7 +23,7 @@
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 #include <BasicRenderer/Extensions/Resources/DynamicStructuredBuffer.h>
 #include "Resources/PixelBuffer.h"
-#include "Render/Runtime/IReadbackService.h"
+#include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
 #include "BasicRenderer/Extensions/ShaderBuffers.h"
 
 #include <fmt/format.h>
@@ -45,6 +45,7 @@
 #include <sstream>
 #include <unordered_map>
 #include <vector>
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 
 namespace br::wind {
 namespace {
@@ -194,7 +195,7 @@ static_assert(sizeof(WindActiveInstanceGPU) == 32u);
 
 struct WindSharedResources {
     std::shared_ptr<org::GloballyIndexedResource> inverseBindResource;
-    explicit WindSharedResources(std::shared_ptr<ProceduralWindRuntime> runtimeIn, org::runtime::IReadbackService* readbackServiceIn)
+    explicit WindSharedResources(std::shared_ptr<ProceduralWindRuntime> runtimeIn, br::ReadbackCaptureService* readbackServiceIn)
         : runtime(std::move(runtimeIn))
 		, readbackService(readbackServiceIn)
         , fieldSlices{ DynamicStructuredBuffer<std::uint32_t>::CreateShared(1u, "ProceduralWind.FieldSlice0"),
@@ -249,7 +250,7 @@ struct WindSharedResources {
         if (!readbackService || registeredTypeCount == 0u || residentPlacementCount == 0u || elapsedSeconds < nextTelemetrySeconds) return;
         nextTelemetrySeconds = elapsedSeconds + 2.0f;
         readbackService->RequestReadbackCaptureAfterGraph(allocationCounters.get(), {},
-            [](org::ReadbackCaptureResult&& result) {
+            [](br::ReadbackCaptureResult&& result) {
                 if (result.data.size() < 15u * sizeof(std::uint32_t)) return;
                 std::array<std::uint32_t, 15> c{};
                 std::memcpy(c.data(), result.data.data(), (std::min)(result.data.size(), sizeof(c)));
@@ -268,7 +269,7 @@ struct WindSharedResources {
         const float currentScale = displacementScale;
         const float currentStrength = state.strength;
         readbackService->RequestReadbackCaptureAfterGraph(diagnostics.get(), {},
-            [currentScale, currentStrength](org::ReadbackCaptureResult&& result) {
+            [currentScale, currentStrength](br::ReadbackCaptureResult&& result) {
 				if (result.data.size() < 112u * sizeof(std::uint32_t)) return;
 				std::array<std::uint32_t, 112> d{};
                 std::memcpy(d.data(), result.data.data(), (std::min)(result.data.size(), sizeof(d)));
@@ -769,7 +770,7 @@ struct WindSharedResources {
     std::uint32_t lastRegisteredTypes = 0u;
     std::uint32_t lastRequestedBoneCount = 0u;
     std::shared_ptr<ProceduralWindRuntime> runtime;
-	org::runtime::IReadbackService* readbackService = nullptr;
+	br::ReadbackCaptureService* readbackService = nullptr;
     std::array<std::shared_ptr<DynamicStructuredBuffer<std::uint32_t>>, 2> fieldSlices;
 	std::shared_ptr<DynamicStructuredBuffer<DynamicWindFrameGPU>> frameState;
     std::shared_ptr<DynamicStructuredBuffer<WindBoneGPU>> boneEntries;
@@ -983,8 +984,8 @@ void ResolveVisibleSkeletonViews(WindTransientConstants& constants, const org::P
 }
 
 struct WindPassBindings {
-    org::PipelineState pipeline;
-    org::CommandSignatureState signature;
+    br::PipelineState pipeline;
+    br::CommandSignatureState signature;
     WindTransientViews views;
     WindVisibleSkeletonViews visibleViews;
     org::DeclaredViewToken diagnostics, processedCounts, deferredEntries, baseTypeLookup;
@@ -1012,7 +1013,7 @@ public:
     WindPassBindings Declare(org::PassBuilder& builder)
     {
         WindPassBindings bindings{};
-        bindings.pipeline = builder.Pipeline(org::ComputePipelineDesc{
+        bindings.pipeline = br::render::DeclarePipeline(br::ComputePipelineDesc{
             .shader = {L"SARPShaders/ProceduralWind.hlsl", L"ResetWindTransientCS"},
             .name = "ProceduralWind.ResetTransient"});
         bindings.views = DeclareWindTransientViews(builder, *m_resources);
@@ -1062,7 +1063,7 @@ public:
     WindPassBindings Declare(org::PassBuilder& builder)
     {
         WindPassBindings bindings{};
-        bindings.pipeline = builder.Pipeline(org::ComputePipelineDesc{
+        bindings.pipeline = br::render::DeclarePipeline(br::ComputePipelineDesc{
             .shader = {L"SARPShaders/ProceduralWind.hlsl", L"ActivateWindInstancesCS"},
             .name = "ProceduralWind.ActivateInstances"});
         bindings.views = DeclareWindTransientViews(builder, *m_resources);
@@ -1140,7 +1141,7 @@ public:
         : m_resources(std::move(r)), m_latePhase(latePhase) {}
     WindPassBindings Declare(org::PassBuilder& b) {
         WindPassBindings bindings{};
-        bindings.pipeline = b.Pipeline(org::ComputePipelineDesc{
+        bindings.pipeline = br::render::DeclarePipeline(br::ComputePipelineDesc{
             .shader = {L"SARPShaders/ProceduralWind.hlsl", L"BuildWindCommandsCS"},
             .name = "ProceduralWind.BuildCommands"});
         bindings.views = DeclareWindTransientViews(b, *m_resources);
@@ -1181,7 +1182,7 @@ public:
 		: m_resources(std::move(resources)) {}
 	WindPassBindings Declare(org::PassBuilder& builder) {
         WindPassBindings bindings{};
-        bindings.pipeline = builder.Pipeline(org::ComputePipelineDesc{
+        bindings.pipeline = br::render::DeclarePipeline(br::ComputePipelineDesc{
             .shader = {L"SARPShaders/ProceduralWind.hlsl", L"FinalizeWindAllocationsCS"},
             .name = "ProceduralWind.FinalizeAllocations"});
         bindings.views = DeclareWindTransientViews(builder, *m_resources);
@@ -1226,14 +1227,14 @@ public:
         : m_resources(std::move(r)), m_latePhase(latePhase) {}
     WindPassBindings Declare(org::PassBuilder& b) {
         WindPassBindings bindings{};
-        bindings.pipeline = b.Pipeline(org::ComputePipelineDesc{
+        bindings.pipeline = br::render::DeclarePipeline(br::ComputePipelineDesc{
             .shader = {L"SARPShaders/ProceduralWind.hlsl", L"SimulateWindInstancesCS"},
             .name = "ProceduralWind.SimulateIndirect"});
-        org::CommandSignatureDesc signature;
+        br::CommandSignatureDesc signature;
         signature.args = {{.kind=rhi::IndirectArgKind::Constant,.u={.rootConstants={IndirectCommandSignatureRootSignatureIndex,0,3}}},{.kind=rhi::IndirectArgKind::Dispatch}};
         signature.byteStride = sizeof(WindIndirectCommand);
         signature.name = "ProceduralWind.SimulateIndirect.Signature";
-        bindings.signature = b.CommandSignature(std::move(signature));
+        bindings.signature = br::render::DeclareCommandSignature(std::move(signature));
         bindings.views = DeclareWindTransientViews(b, *m_resources);
         m_declaredInverseBind = m_resources->inverseBindResource != nullptr;
         bindings.diagnostics = b.UnorderedAccess(m_resources->diagnostics).View();
@@ -1277,8 +1278,8 @@ struct WindSkeletonDebugFrameData {
 };
 
 struct WindSkeletonDebugBindings {
-    org::PipelineState skeletonPipeline, spherePipeline;
-    org::CommandSignatureState signature;
+    br::PipelineState skeletonPipeline, spherePipeline;
+    br::CommandSignatureState signature;
     org::ResourceBindingToken indirectCommands{}, allocationCounters{};
     org::DeclaredViewToken target{};
     org::DeclaredViewToken types, bones, activeInstances, forwardSkin, inverseBind, skinningInfo;
@@ -1295,7 +1296,7 @@ public:
     {
         WindSkeletonDebugBindings bindings{};
         // Both overlays share every state but the shaders, the fill mode and the topology.
-        org::GraphicsPipelineDesc skeleton;
+        br::GraphicsPipelineDesc skeleton;
         skeleton.name = "ProceduralWind.SkeletonDebug.PSO";
         skeleton.mesh = { L"shaders/debugSkeleton.hlsl", L"MSWindMain", L"ms_6_6" };
         skeleton.pixel = { L"shaders/debugSkeleton.hlsl", L"PSWindMain", L"ps_6_6" };
@@ -1318,18 +1319,18 @@ public:
         sphere.raster = sphereRaster;
         sphere.topology = rhi::PrimitiveTopology::TriangleList;
 
-        bindings.skeletonPipeline = declaration.Pipeline(std::move(skeleton));
-        bindings.spherePipeline = declaration.Pipeline(std::move(sphere));
+        bindings.skeletonPipeline = br::render::DeclarePipeline(std::move(skeleton));
+        bindings.spherePipeline = br::render::DeclarePipeline(std::move(sphere));
 
-        org::CommandSignatureDesc signature;
+        br::CommandSignatureDesc signature;
         signature.args = {
             {.kind=rhi::IndirectArgKind::Constant,.u={.rootConstants={IndirectCommandSignatureRootSignatureIndex,0,3}}},
             {.kind=rhi::IndirectArgKind::DispatchMesh}
         };
         signature.byteStride = sizeof(WindIndirectCommand);
-        signature.layout = org::PipelineLayoutRef::StandardGraphics();
+        signature.layout = br::PipelineLayoutRef::StandardGraphics();
         signature.name = "ProceduralWind.SkeletonDebug.Signature";
-        bindings.signature = declaration.CommandSignature(std::move(signature));
+        bindings.signature = br::render::DeclareCommandSignature(std::move(signature));
         m_declaredInverseBind = m_resources->inverseBindResource != nullptr;
         bindings.types = declaration.ShaderResource(m_resources->windTypes).View();
         bindings.bones = declaration.ShaderResource(m_resources->boneEntries).View();
@@ -1421,7 +1422,7 @@ ProceduralWindExtension::ProceduralWindExtension(std::shared_ptr<ProceduralWindR
 
 void ProceduralWindExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& out)
 {
-    auto resources = std::make_shared<WindSharedResources>(m_runtime, rg.GetReadbackService());
+    auto resources = std::make_shared<WindSharedResources>(m_runtime, br::GetReadbackCaptureService());
 	rg.RegisterResource("Builtin::DynamicWind::VisibleSkeletons", resources->visibleSkeletons);
 	rg.RegisterResource("Builtin::DynamicWind::VisibleSkeletonCounter", resources->visibleSkeletonCounter);
 	rg.RegisterResource("Builtin::DynamicWind::VisibleSkeletonMembership", resources->visibleSkeletonMembership);

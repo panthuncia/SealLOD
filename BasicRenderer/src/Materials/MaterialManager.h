@@ -25,7 +25,6 @@
 #include <BasicRenderer/Extensions/Resources/PublishedStateResourceResolver.h>
 
 namespace org::runtime {
-class IReadbackService;
 class IUploadService;
 class IDescriptorService;
 }
@@ -270,7 +269,7 @@ private:
 	bool m_materialGraphActive = false;
 	std::uint64_t m_activeMaterialPublishedRevision = 0;
 	std::uint64_t m_acknowledgedMaterialPublishedRevision = 0;
-	std::array<std::shared_ptr<org::DynamicGloballyIndexedResource>, 3> m_materialStartupFallbacks;
+	std::array<std::shared_ptr<org::Resource>, 3> m_materialStartupFallbacks;
 	std::uint64_t m_materialStateFingerprint = 0;
 	std::uint64_t m_pendingMaterialStateFingerprint = 0;
 	std::uint32_t m_materialStateStableFrames = 0;

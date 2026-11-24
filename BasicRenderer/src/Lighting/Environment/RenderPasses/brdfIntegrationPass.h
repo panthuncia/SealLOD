@@ -7,9 +7,10 @@
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 
 #include <string>
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 
 struct BRDFIntegrationBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken target;
 };
 struct BRDFIntegrationFrame {
@@ -25,7 +26,7 @@ public:
     explicit BRDFIntegrationPass(std::shared_ptr<org::PixelBuffer> target) : m_target(std::move(target)) {}
 
     BRDFIntegrationBindings Declare(org::PassBuilder& builder) {
-        return {builder.Pipeline(PipelineDesc()), builder.RenderTarget(m_target).View()};
+        return {br::render::DeclarePipeline(PipelineDesc()), builder.RenderTarget(m_target).View()};
     }
 
     BRDFIntegrationFrame Prepare(const BRDFIntegrationBindings& bindings,
@@ -48,8 +49,8 @@ public:
 private:
     std::shared_ptr<org::PixelBuffer> m_target;
 
-    static org::GraphicsPipelineDesc PipelineDesc() {
-        org::GraphicsPipelineDesc desc;
+    static br::GraphicsPipelineDesc PipelineDesc() {
+        br::GraphicsPipelineDesc desc;
         desc.name = "BRDFIntegration.PSO";
         desc.vertex = {L"shaders/fullscreenVS.hlsli", L"FullscreenVSNoViewRayMain", L"vs_6_6"};
         desc.pixel = {L"shaders/brdfIntegration.hlsl", L"PSMain", L"ps_6_6"};

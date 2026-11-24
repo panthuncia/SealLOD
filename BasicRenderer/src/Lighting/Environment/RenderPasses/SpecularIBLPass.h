@@ -9,9 +9,10 @@
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "BasicRenderer/Scene/Scene.h"
 #include "PostProcessing/AmbientOcclusion/AmbientOcclusionSettings.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 
 struct SpecularIBLBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken target;
     ScreenSpaceAOMode screenSpaceAO = ScreenSpaceAOMode::Off;
 };
@@ -54,7 +55,7 @@ public:
         } else if (m_screenSpaceAOMode == ScreenSpaceAOMode::CORTAO) {
             builder.ShaderResource(Builtin::CORTAO::OutputAO);
         }
-        return {builder.Pipeline(PipelineDesc()), builder.RenderTarget(org::ResourceIdentifier{Builtin::Color::HDRColorTarget}), m_screenSpaceAOMode};
+        return {br::render::DeclarePipeline(PipelineDesc()), builder.RenderTarget(org::ResourceIdentifier{Builtin::Color::HDRColorTarget}), m_screenSpaceAOMode};
     }
 
     void Initialize() {}
@@ -81,8 +82,8 @@ private:
 
     ScreenSpaceAOMode m_screenSpaceAOMode = ScreenSpaceAOMode::Off;
 
-    static org::GraphicsPipelineDesc PipelineDesc() {
-        org::GraphicsPipelineDesc desc;
+    static br::GraphicsPipelineDesc PipelineDesc() {
+        br::GraphicsPipelineDesc desc;
         desc.name = "SpecularIBL.PSO";
         desc.vertex = {L"shaders/fullscreenVS.hlsli", L"FullscreenVSMain", L"vs_6_6"};
         desc.pixel = {L"shaders/specularIBL.hlsl",   L"PSMain",           L"ps_6_6"};

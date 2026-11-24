@@ -18,7 +18,7 @@ PerViewLinearDepthCopyPass::PerViewLinearDepthCopyPass(bool writeProjectedDepth)
 
 PerViewLinearDepthCopyBindings PerViewLinearDepthCopyPass::Declare(org::PassBuilder& builder) {
     PerViewLinearDepthCopyBindings bindings{};
-    bindings.pipeline = builder.Pipeline(br::render::ComputePipeline(
+    bindings.pipeline = br::render::DeclarePipeline(br::render::ComputePipeline(
         L"shaders/canonicalSurface.hlsl", L"PerViewPrimaryDepthCopyCS", "PerViewPrimaryDepthCopyPSO"));
     bindings.views.reserve(m_views.size());
     for (const auto& view : m_views) {

@@ -43,7 +43,7 @@ CLodStreamingBeginFramePass::CLodStreamingBeginFramePass(
 CLodStreamingBeginFrameBindings CLodStreamingBeginFramePass::Declare(org::PassBuilder& builder) {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     CLodStreamingBeginFrameBindings bindings{
-        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+        br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
             L"ClearUintStructuredBufferCSMain", "CLodStreamingBeginFrameClearUint")),
         builder.UnorderedAccess(m_loadCounter),
         builder.UnorderedAccess(m_loadRequestKeys), builder.UnorderedAccess(m_usedGroupsCounter),

@@ -7,7 +7,7 @@
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 
 struct MaterialBlockOffsetsBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     uint32_t blockSize = 0;
 };
 struct MaterialBlockOffsetsFrame {
@@ -23,7 +23,7 @@ public:
         b.UnorderedAccess("Builtin::VisUtil::MaterialOffsetBuffer", "Builtin::VisUtil::ScannedBlockSumsBuffer",
             "Builtin::VisUtil::TotalPixelCountBuffer");
         b.PreferQueue(org::QueueKind::Compute);
-        return {b.Pipeline(br::render::ComputePipeline(L"shaders/materialPrefixSum.hlsl", L"BlockOffsetsCS",
+        return {br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/materialPrefixSum.hlsl", L"BlockOffsetsCS",
             "VisUtil_BlockOffsetsPSO")), m_blockSize};
     }
 

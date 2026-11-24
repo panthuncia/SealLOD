@@ -3,7 +3,7 @@
 #include <array>
 #include <memory>
 
-#include "Render/PipelineState.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 
@@ -11,7 +11,7 @@ namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct VirtualShadowMapExpandPredictedPagesBindings {
-    org::PipelineState stampContentGenerationPipeline, expandPipeline, resetCandidateCountPipeline;
+    br::PipelineState stampContentGenerationPipeline, expandPipeline, resetCandidateCountPipeline;
     org::DeclaredViewToken candidates, candidateCount, rawPages, rawCount, clipmapInfo;
     org::DeclaredViewToken scratch, stats, pageTable, pageMetadata, pageViewInfo, replayState;
     std::array<org::DeclaredViewToken, 3> reyesOverflows{};

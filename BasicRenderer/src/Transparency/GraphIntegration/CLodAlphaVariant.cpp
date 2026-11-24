@@ -205,8 +205,6 @@ void CLodAlphaVariant::InitializeDeepVisibilityResources(CLodExtension& extensio
         return;
     }
 
-    auto& ecsWorld = RendererECSManager::GetInstance().GetWorld();
-    const flecs::entity typeEntity = traits.ensureTypeEntity(ecsWorld);
 
     extension.m_deepVisibilityNodesBuffer = CreateAliasedUnmaterializedStructuredBuffer(
         1,
@@ -219,17 +217,11 @@ void CLodAlphaVariant::InitializeDeepVisibilityResources(CLodExtension& extensio
 
     extension.m_deepVisibilityCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false, true);
     extension.m_deepVisibilityCounterBuffer->SetName(MakeVariantResourceName(traits, "Deep Visibility Counter Buffer"));
-    extension.m_deepVisibilityCounterBuffer->GetECSEntity()
-        .set<Components::Resource>({ extension.m_deepVisibilityCounterBuffer })
-        .add<CLodDeepVisibilityCounterTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodDeepVisibilityCounterTag>(traits, extension.m_deepVisibilityCounterBuffer);
 
     extension.m_deepVisibilityOverflowCounterBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false, true);
     extension.m_deepVisibilityOverflowCounterBuffer->SetName(MakeVariantResourceName(traits, "Deep Visibility Overflow Counter Buffer"));
-    extension.m_deepVisibilityOverflowCounterBuffer->GetECSEntity()
-        .set<Components::Resource>({ extension.m_deepVisibilityOverflowCounterBuffer })
-        .add<CLodDeepVisibilityOverflowCounterTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodDeepVisibilityOverflowCounterTag>(traits, extension.m_deepVisibilityOverflowCounterBuffer);
 
     extension.m_deepVisibilityStatsBuffer = CreateAliasedUnmaterializedStructuredBuffer(
         1,
@@ -239,10 +231,7 @@ void CLodAlphaVariant::InitializeDeepVisibilityResources(CLodExtension& extensio
         true,
         true);
     extension.m_deepVisibilityStatsBuffer->SetName(MakeVariantResourceName(traits, "Deep Visibility Stats Buffer"));
-    extension.m_deepVisibilityStatsBuffer->GetECSEntity()
-        .set<Components::Resource>({ extension.m_deepVisibilityStatsBuffer })
-        .add<CLodDeepVisibilityStatsTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodDeepVisibilityStatsTag>(traits, extension.m_deepVisibilityStatsBuffer);
 }
 
 void CLodAlphaVariant::InitializeAVBOITResources(CLodExtension& extension)
@@ -251,14 +240,7 @@ void CLodAlphaVariant::InitializeAVBOITResources(CLodExtension& extension)
         return;
     }
 
-    const auto renderResolution =
-        SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
-    extension.m_transparencyConfiguredRenderWidth = renderResolution.x;
-    extension.m_transparencyConfiguredRenderHeight = renderResolution.y;
-
-    auto& ecsWorld = RendererECSManager::GetInstance().GetWorld();
     const auto& traits = GetVariantTraits(extension.m_type);
-    const flecs::entity typeEntity = traits.ensureTypeEntity(ecsWorld);
 
     extension.m_AVBOITConfigBuffer = CreateAliasedUnmaterializedStructuredBuffer(
         1,
@@ -268,9 +250,7 @@ void CLodAlphaVariant::InitializeAVBOITResources(CLodExtension& extension)
         false,
         false);
     extension.m_AVBOITConfigBuffer->SetName(MakeVariantResourceName(traits, "AVBOIT Config Buffer"));
-    extension.m_AVBOITConfigBuffer->GetECSEntity()
-        .set<Components::Resource>({ extension.m_AVBOITConfigBuffer })
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource(traits, extension.m_AVBOITConfigBuffer);
 
     extension.m_AVBOITOccupancyHistogramBuffer = CreateAliasedUnmaterializedStructuredBuffer(
         CLodAVBOITDefaultVirtualSliceCount,
@@ -280,9 +260,7 @@ void CLodAlphaVariant::InitializeAVBOITResources(CLodExtension& extension)
         false,
         false);
     extension.m_AVBOITOccupancyHistogramBuffer->SetName(MakeVariantResourceName(traits, "AVBOIT Occupancy Histogram"));
-    extension.m_AVBOITOccupancyHistogramBuffer->GetECSEntity()
-        .set<Components::Resource>({ extension.m_AVBOITOccupancyHistogramBuffer })
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource(traits, extension.m_AVBOITOccupancyHistogramBuffer);
 
     extension.m_AVBOITDepthWarpLUTBuffer = CreateAliasedUnmaterializedStructuredBuffer(
         CLodAVBOITDepthWarpLUTResolution,
@@ -292,9 +270,7 @@ void CLodAlphaVariant::InitializeAVBOITResources(CLodExtension& extension)
         false,
         false);
     extension.m_AVBOITDepthWarpLUTBuffer->SetName(MakeVariantResourceName(traits, "AVBOIT Depth Warp LUT"));
-    extension.m_AVBOITDepthWarpLUTBuffer->GetECSEntity()
-        .set<Components::Resource>({ extension.m_AVBOITDepthWarpLUTBuffer })
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource(traits, extension.m_AVBOITDepthWarpLUTBuffer);
 
     extension.m_AVBOITFitStateBuffer = CreateAliasedUnmaterializedStructuredBuffer(
         1,
@@ -304,9 +280,7 @@ void CLodAlphaVariant::InitializeAVBOITResources(CLodExtension& extension)
         false,
         false);
     extension.m_AVBOITFitStateBuffer->SetName(MakeVariantResourceName(traits, "AVBOIT Adaptive Fit State"));
-    extension.m_AVBOITFitStateBuffer->GetECSEntity()
-        .set<Components::Resource>({ extension.m_AVBOITFitStateBuffer })
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource(traits, extension.m_AVBOITFitStateBuffer);
 
     extension.m_AVBOITEarlyDepthTileCommandsBuffer = CreateAliasedUnmaterializedStructuredBuffer(
         1,
@@ -316,9 +290,7 @@ void CLodAlphaVariant::InitializeAVBOITResources(CLodExtension& extension)
         false,
         true);
     extension.m_AVBOITEarlyDepthTileCommandsBuffer->SetName(MakeVariantResourceName(traits, "AVBOIT Early Depth Tile Commands"));
-    extension.m_AVBOITEarlyDepthTileCommandsBuffer->GetECSEntity()
-        .set<Components::Resource>({ extension.m_AVBOITEarlyDepthTileCommandsBuffer })
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource(traits, extension.m_AVBOITEarlyDepthTileCommandsBuffer);
 
     extension.m_AVBOITEarlyDepthTileCountBuffer = CreateAliasedUnmaterializedStructuredBuffer(
         1,
@@ -328,75 +300,51 @@ void CLodAlphaVariant::InitializeAVBOITResources(CLodExtension& extension)
         false,
         true);
     extension.m_AVBOITEarlyDepthTileCountBuffer->SetName(MakeVariantResourceName(traits, "AVBOIT Early Depth Tile Count"));
-    extension.m_AVBOITEarlyDepthTileCountBuffer->GetECSEntity()
-        .set<Components::Resource>({ extension.m_AVBOITEarlyDepthTileCountBuffer })
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource(traits, extension.m_AVBOITEarlyDepthTileCountBuffer);
 
     extension.m_AVBOITOccupancyTexture = org::PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITOccupancyDescription());
     extension.m_AVBOITOccupancyTexture->SetName(MakeVariantResourceName(traits, "AVBOIT Occupancy"));
-    extension.m_AVBOITOccupancyTexture->GetECSEntity()
-        .set<Components::Resource>({ extension.m_AVBOITOccupancyTexture })
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource(traits, extension.m_AVBOITOccupancyTexture);
 
     extension.m_AVBOITCoverageTexture = org::PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITOccupancyDescription());
     extension.m_AVBOITCoverageTexture->SetName(MakeVariantResourceName(traits, "AVBOIT Coverage"));
-    extension.m_AVBOITCoverageTexture->GetECSEntity()
-        .set<Components::Resource>({ extension.m_AVBOITCoverageTexture })
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource(traits, extension.m_AVBOITCoverageTexture);
 
     extension.m_AVBOITOccupancySliceMaskTexture = org::PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITOccupancySliceMaskDescription());
     extension.m_AVBOITOccupancySliceMaskTexture->SetName(MakeVariantResourceName(traits, "AVBOIT Occupancy Slice Mask"));
-    extension.m_AVBOITOccupancySliceMaskTexture->GetECSEntity()
-        .set<Components::Resource>({ extension.m_AVBOITOccupancySliceMaskTexture })
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource(traits, extension.m_AVBOITOccupancySliceMaskTexture);
 
     extension.m_AVBOITExtinctionTexture = org::PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITExtinctionDescription());
     extension.m_AVBOITExtinctionTexture->SetName(MakeVariantResourceName(traits, "AVBOIT Extinction"));
-    extension.m_AVBOITExtinctionTexture->GetECSEntity()
-        .set<Components::Resource>({ extension.m_AVBOITExtinctionTexture })
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource(traits, extension.m_AVBOITExtinctionTexture);
 
     extension.m_AVBOITChromaticExtinctionTexture = org::PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITChromaticExtinctionDescription());
     extension.m_AVBOITChromaticExtinctionTexture->SetName(MakeVariantResourceName(traits, "AVBOIT Chromatic Extinction"));
-    extension.m_AVBOITChromaticExtinctionTexture->GetECSEntity()
-        .set<Components::Resource>({ extension.m_AVBOITChromaticExtinctionTexture })
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource(traits, extension.m_AVBOITChromaticExtinctionTexture);
 
     extension.m_AVBOITIntegratedTransmittanceTexture = org::PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITIntegratedTransmittanceDescription());
     extension.m_AVBOITIntegratedTransmittanceTexture->SetName(MakeVariantResourceName(traits, "AVBOIT Integrated Transmittance"));
-    extension.m_AVBOITIntegratedTransmittanceTexture->GetECSEntity()
-        .set<Components::Resource>({ extension.m_AVBOITIntegratedTransmittanceTexture })
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource(traits, extension.m_AVBOITIntegratedTransmittanceTexture);
 
     extension.m_AVBOITZeroTransmittanceSliceTexture = org::PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITZeroTransmittanceSliceDescription());
     extension.m_AVBOITZeroTransmittanceSliceTexture->SetName(MakeVariantResourceName(traits, "AVBOIT Zero Transmittance Slice"));
-    extension.m_AVBOITZeroTransmittanceSliceTexture->GetECSEntity()
-        .set<Components::Resource>({ extension.m_AVBOITZeroTransmittanceSliceTexture })
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource(traits, extension.m_AVBOITZeroTransmittanceSliceTexture);
 
     extension.m_AVBOITAccumulationTexture = org::PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITAccumulationDescription());
     extension.m_AVBOITAccumulationTexture->SetName(MakeVariantResourceName(traits, "AVBOIT Accumulation"));
-    extension.m_AVBOITAccumulationTexture->GetECSEntity()
-        .set<Components::Resource>({ extension.m_AVBOITAccumulationTexture })
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource(traits, extension.m_AVBOITAccumulationTexture);
 
     extension.m_AVBOITNormalizationTexture = org::PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITNormalizationDescription());
     extension.m_AVBOITNormalizationTexture->SetName(MakeVariantResourceName(traits, "AVBOIT Normalization"));
-    extension.m_AVBOITNormalizationTexture->GetECSEntity()
-        .set<Components::Resource>({ extension.m_AVBOITNormalizationTexture })
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource(traits, extension.m_AVBOITNormalizationTexture);
 
     extension.m_AVBOITShadingExtinctionTexture = org::PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITShadingExtinctionDescription());
     extension.m_AVBOITShadingExtinctionTexture->SetName(MakeVariantResourceName(traits, "AVBOIT Shading Extinction"));
-    extension.m_AVBOITShadingExtinctionTexture->GetECSEntity()
-        .set<Components::Resource>({ extension.m_AVBOITShadingExtinctionTexture })
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource(traits, extension.m_AVBOITShadingExtinctionTexture);
 
     extension.m_AVBOITEarlyDepthTexture = org::PixelBuffer::CreateSharedUnmaterialized(CreateAVBOITEarlyDepthDescription());
     extension.m_AVBOITEarlyDepthTexture->SetName(MakeVariantResourceName(traits, "AVBOIT Early Depth"));
-    extension.m_AVBOITEarlyDepthTexture->GetECSEntity()
-        .set<Components::Resource>({ extension.m_AVBOITEarlyDepthTexture })
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource(traits, extension.m_AVBOITEarlyDepthTexture);
 }
 
 void CLodAlphaVariant::TagResourceUsages(CLodExtension& extension)
@@ -433,67 +381,6 @@ void CLodAlphaVariant::TagResourceUsages(CLodExtension& extension)
     tagTextureUsage(extension.m_AVBOITNormalizationTexture, "Cluster LOD AVBOIT");
     tagTextureUsage(extension.m_AVBOITShadingExtinctionTexture, "Cluster LOD AVBOIT");
     tagTextureUsage(extension.m_AVBOITEarlyDepthTexture, "Cluster LOD AVBOIT early depth");
-}
-
-void CLodAlphaVariant::ReleaseResourceBackings(CLodExtension& extension)
-{
-    std::unordered_set<org::Buffer*> releasedBuffers;
-    auto releaseBufferBacking = [&releasedBuffers](const std::shared_ptr<org::Buffer>& buffer) {
-        if (buffer && releasedBuffers.insert(buffer.get()).second) {
-            buffer->Dematerialize();
-        }
-    };
-
-    releaseBufferBacking(extension.m_deepVisibilityNodesBuffer);
-    releaseBufferBacking(extension.m_deepVisibilityCounterBuffer);
-    releaseBufferBacking(extension.m_deepVisibilityOverflowCounterBuffer);
-    releaseBufferBacking(extension.m_deepVisibilityStatsBuffer);
-    releaseBufferBacking(extension.m_AVBOITConfigBuffer);
-    releaseBufferBacking(extension.m_AVBOITOccupancyHistogramBuffer);
-    releaseBufferBacking(extension.m_AVBOITDepthWarpLUTBuffer);
-    releaseBufferBacking(extension.m_AVBOITFitStateBuffer);
-    releaseBufferBacking(extension.m_AVBOITEarlyDepthTileCommandsBuffer);
-    releaseBufferBacking(extension.m_AVBOITEarlyDepthTileCountBuffer);
-
-    std::unordered_set<org::PixelBuffer*> releasedTextures;
-    auto releaseTextureBacking = [&releasedTextures](const std::shared_ptr<org::PixelBuffer>& texture) {
-        if (texture && releasedTextures.insert(texture.get()).second) {
-            texture->Dematerialize();
-        }
-    };
-
-    releaseTextureBacking(extension.m_AVBOITOccupancyTexture);
-    releaseTextureBacking(extension.m_AVBOITCoverageTexture);
-    releaseTextureBacking(extension.m_AVBOITOccupancySliceMaskTexture);
-    releaseTextureBacking(extension.m_AVBOITExtinctionTexture);
-    releaseTextureBacking(extension.m_AVBOITChromaticExtinctionTexture);
-    releaseTextureBacking(extension.m_AVBOITIntegratedTransmittanceTexture);
-    releaseTextureBacking(extension.m_AVBOITZeroTransmittanceSliceTexture);
-    releaseTextureBacking(extension.m_AVBOITAccumulationTexture);
-    releaseTextureBacking(extension.m_AVBOITNormalizationTexture);
-    releaseTextureBacking(extension.m_AVBOITShadingExtinctionTexture);
-    releaseTextureBacking(extension.m_AVBOITEarlyDepthTexture);
-}
-
-void CLodAlphaVariant::RefreshResourcesForCurrentSettings(CLodExtension& extension)
-{
-    if (extension.m_type != CLodExtensionType::AlphaBlend) {
-        return;
-    }
-
-    const auto renderResolution =
-        SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
-    const bool renderResolutionChanged =
-        extension.m_transparencyConfiguredRenderWidth != renderResolution.x ||
-        extension.m_transparencyConfiguredRenderHeight != renderResolution.y;
-
-    if (!renderResolutionChanged || !extension.m_AVBOITOccupancyTexture) {
-        return;
-    }
-
-    ReleaseResourceBackings(extension);
-    InitializeAVBOITResources(extension);
-    TagResourceUsages(extension);
 }
 
 void CLodAlphaVariant::AppendSinglePassStructuralPasses(

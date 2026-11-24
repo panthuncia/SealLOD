@@ -18,7 +18,7 @@
 #include <rhi.h>
 
 #include "Interfaces/IDynamicDeclaredResources.h"
-#include "Render/PipelineState.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "Render/PreparedTablePublisher.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "VirtualGeometry/Culling/RenderPasses/CullingPassCommon.h"
@@ -41,7 +41,7 @@ struct WorkGraphReyesBindings {
 };
 
 struct WorkGraphCullingBindings {
-    org::PipelineState clearPipeline, createCommandPipeline;
+    br::PipelineState clearPipeline, createCommandPipeline;
     org::ResourceBindingToken scratch;
     CLodViewRasterDeclaration viewRasterInfoLayout;  // SW classification only.
     org::DeclaredTableLayout<CLodViewDepthSRVIndex> viewDepthLayout;    // Per-view depth occlusion only.

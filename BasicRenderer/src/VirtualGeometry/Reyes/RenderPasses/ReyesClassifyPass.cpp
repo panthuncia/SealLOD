@@ -64,9 +64,9 @@ ReyesClassifyBindings ReyesClassifyPass::Declare(org::PassBuilder& builder)
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
     builder.UnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer);
     ReyesClassifyBindings bindings{
-        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/reyesClassify.hlsl",
+        br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/reyesClassify.hlsl",
             L"ReyesClassifyCS", "CLod.ReyesClassify.PSO")),
-        builder.CommandSignature(br::render::RawDispatchCommandSignature()),
+        br::render::DeclareCommandSignature(br::render::RawDispatchCommandSignature()),
         builder.ShaderResource(m_visibleClustersBuffer).View(),
         builder.ShaderResource(m_visibleClustersCounterBuffer).View()};
     bindings.fullClusters = builder.UnorderedAccess(m_fullClusterOutputsBuffer).View();

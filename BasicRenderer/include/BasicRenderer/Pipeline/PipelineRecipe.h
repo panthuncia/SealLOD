@@ -222,12 +222,24 @@ public:
         const ResourceBindings& bindings,
         TechniqueCallback buildTechnique = {},
         TechniqueCallback registerExtensions = {})
-        : m_graph(graph)
+        : m_graph(&graph)
         , m_bindings(bindings)
         , m_buildTechnique(std::move(buildTechnique))
         , m_registerExtensions(std::move(registerExtensions)) {}
+    // A context with no graph: extension registration, which happens before the graphs that make the extensions exist.
+    PipelineBuildContext(
+        const ResourceBindings& bindings,
+        TechniqueCallback buildTechnique,
+        TechniqueCallback registerExtensions)
+        : m_bindings(bindings)
+        , m_buildTechnique(std::move(buildTechnique))
+        , m_registerExtensions(std::move(registerExtensions)) {}
 
-    org::RenderGraph& Graph() const { return m_graph; }
+    org::RenderGraph& Graph() const {
+        if (!m_graph) throw std::logic_error("Pipeline build context has no graph (extension registration)");
+        return *m_graph;
+    }
+    bool HasGraph() const noexcept { return m_graph != nullptr; }
     const ResourceBindings& Bindings() const { return m_bindings; }
     void BuildTechnique(TechniqueId id, const TechniqueOptions& options) const {
         if (!m_buildTechnique) {
@@ -268,7 +280,7 @@ public:
 private:
     void RegisterOutput(const org::ResourceIdentifier& id, std::shared_ptr<org::Resource> resource) const;
 
-    org::RenderGraph& m_graph;
+    org::RenderGraph* m_graph = nullptr;
     const ResourceBindings& m_bindings;
     TechniqueCallback m_buildTechnique;
     TechniqueCallback m_registerExtensions;

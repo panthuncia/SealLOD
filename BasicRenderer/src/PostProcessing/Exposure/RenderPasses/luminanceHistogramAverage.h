@@ -9,7 +9,7 @@
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 
 struct LuminanceHistogramAverageBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
 };
 struct LuminanceHistogramAverageFrame {
     float deltaTime = 0.0f;
@@ -21,7 +21,7 @@ public:
     LuminanceHistogramAverageBindings Declare(org::PassBuilder& builder) {
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         builder.UnorderedAccess(Builtin::PostProcessing::LuminanceHistogram, Builtin::PostProcessing::AdaptedLuminance, "FFX::LPMConstants");
-        return {builder.Pipeline(br::render::ComputePipeline(
+        return {br::render::DeclarePipeline(br::render::ComputePipeline(
             L"shaders/PostProcessing/LuminanceHistogramAverage.hlsl", L"CSMain", "LuminanceHistogramAverageCS"))};
     }
 

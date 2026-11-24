@@ -45,7 +45,6 @@ SelectionBindingInputs CaptureSelectionBindingInputs(const PublishedResourceSele
 }
 std::shared_ptr<const org::PublicationBindingBundle> BuildSelectionBindings(SelectionBindingInputs inputs) {
     auto result = std::make_shared<const org::PublicationBindingBundle>(std::move(inputs.bindings), std::move(inputs.owners));
-    org::TraceBindingHolder(result, result, "PublicationSelection");
     return result;
 }
 std::shared_ptr<const org::PublicationBindingBundle> CaptureSelectionBindings(const PublishedResourceSelection& selection) {
@@ -59,7 +58,6 @@ std::shared_ptr<const org::PublicationBindingBundle> GatherManifestBindings(
         if (shard && shard->bindingBundle) roots.push_back(shard->bindingBundle);
     auto result = std::make_shared<const org::PublicationBindingBundle>(
         std::vector<org::PublicationBindingBundle::Snapshot>{}, std::vector<std::shared_ptr<const void>>{}, std::move(roots));
-    org::TraceBindingHolder(result, result, "ManifestBindings", state.epoch);
     return result;
 }
 

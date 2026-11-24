@@ -6,13 +6,14 @@
 #include "ThirdParty/XeGTAO.h"
 #include "Render/Runtime/IDescriptorService.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 
 struct GTAOMainFrame {
     uint32_t noiseIndex = 0;
     uint32_t groupsX = 0, groupsY = 0;
 };
 struct GTAOMainBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     uint32_t samplerIndex = 0;
     org::DeclaredViewToken workingDepths, normals, workingAO, workingEdges;
 };
@@ -30,10 +31,10 @@ public:
         builder.ConstantBuffer("Builtin::GTAO::ConstantsBuffer");
 		builder.ConstantBuffer(Builtin::PerFrameBuffer);
         return {
-            builder.Pipeline(org::ComputePipelineDesc{
+            br::render::DeclarePipeline(br::ComputePipelineDesc{
                 .shader = {L"shaders/GTAO.hlsl", L"CSGTAOHigh"},
                 .name = "GTAO High Quality",
-                .layout = org::PipelineLayoutRef::StandardGraphics()}),
+                .layout = br::PipelineLayoutRef::StandardGraphics()}),
             m_samplerIndex,
             builder.ShaderResource(Builtin::GTAO::WorkingDepths),
             builder.ShaderResource(Builtin::Surface::NormalRoughness),

@@ -45,9 +45,9 @@
 #include "CaptureShared.h"
 #include "Viewer.h"
 #include "Render/RenderGraph/RenderGraph.h"
-#include "Render/Runtime/IReadbackService.h"
+#include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
 #include "Render/Runtime/IStatisticsService.h"
-#include "Resources/ReadbackRequest.h"
+#include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
 #include "Runtime/Settings/SettingsManager.h"
 
 // Same Agility SDK and GPU preferences as the demo.
@@ -234,8 +234,8 @@ public:
 			throw std::runtime_error(std::format("the render graph has no resource {}", layer.resource));
 		}
 		m_outstanding.fetch_add(1u);
-		graph.GetReadbackService()->RequestReadbackCapture(std::string(layer.anchorPass), resource.get(), org::RangeSpec{},
-			[this, name = std::string(layer.name)](org::ReadbackCaptureResult&& result) {
+		br::GetReadbackCaptureService()->RequestReadbackCapture(std::string(layer.anchorPass), resource.get(), org::RangeSpec{},
+			[this, name = std::string(layer.name)](br::ReadbackCaptureResult&& result) {
 				try {
 					WriteLayer(name, result);
 				}
@@ -255,8 +255,8 @@ public:
 			throw std::runtime_error(std::format("the render graph has no resource {}", layer.resource));
 		}
 		m_outstanding.fetch_add(1u);
-		graph.GetReadbackService()->RequestReadbackCapture(std::string(layer.anchorPass), resource.get(), org::RangeSpec{},
-			[this](org::ReadbackCaptureResult&& result) {
+		br::GetReadbackCaptureService()->RequestReadbackCapture(std::string(layer.anchorPass), resource.get(), org::RangeSpec{},
+			[this](br::ReadbackCaptureResult&& result) {
 				try {
 					Accumulate(result);
 				}
@@ -304,8 +304,8 @@ private:
 			throw std::runtime_error(std::format("the render graph has no resource {}", layer.resource));
 		}
 		m_outstanding.fetch_add(1u);
-		graph.GetReadbackService()->RequestReadbackCapture(std::string(layer.anchorPass), resource.get(), org::RangeSpec{},
-			[this](org::ReadbackCaptureResult&& result) {
+		br::GetReadbackCaptureService()->RequestReadbackCapture(std::string(layer.anchorPass), resource.get(), org::RangeSpec{},
+			[this](br::ReadbackCaptureResult&& result) {
 				try {
 					AccumulateCoverage(result);
 				}
@@ -316,7 +316,7 @@ private:
 			});
 	}
 
-	void AccumulateCoverage(const org::ReadbackCaptureResult& result)
+	void AccumulateCoverage(const br::ReadbackCaptureResult& result)
 	{
 		if (result.format != rhi::Format::R32G32_UInt || result.layouts.empty()) {
 			throw std::runtime_error("coverage expects an R32G32_UInt visibility target");
@@ -346,7 +346,7 @@ private:
 		++m_coverageFrames;
 	}
 
-	void WriteLayer(const std::string& name, const org::ReadbackCaptureResult& result)
+	void WriteLayer(const std::string& name, const br::ReadbackCaptureResult& result)
 	{
 		const FormatInfo format = DescribeFormat(result.format);
 		if (result.layouts.empty()) {
@@ -366,7 +366,7 @@ private:
 		m_layers.push_back({ { "name", name }, { "file", file }, { "dxgi_format", static_cast<uint32_t>(format.dxgi) }, { "width", result.width }, { "height", result.height } });
 	}
 
-	void Accumulate(const org::ReadbackCaptureResult& result)
+	void Accumulate(const br::ReadbackCaptureResult& result)
 	{
 		if (result.format != rhi::Format::R16G16B16A16_Float || result.layouts.empty()) {
 			throw std::runtime_error("accumulation expects an R16G16B16A16_Float target");

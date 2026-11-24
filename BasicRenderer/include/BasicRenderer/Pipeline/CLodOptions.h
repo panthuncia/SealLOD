@@ -50,6 +50,15 @@ enum class CLodRasterOutputKind : uint8_t {
     AVBOITShading,
 };
 
+// Clusters per group of the compute software raster's indirect dispatch (SW_RASTER_CLUSTERS_PER_GROUP in its PSO), which
+// the raster-bucket arguments pass follows. Measured on Zorah with a moving camera (BasicRenderer
+// docs/software-raster-optimization-experiments.md): the primary view's raster was fastest at 8 (1: 3.2 ms, 4: 2.6 ms,
+// 8: 2.4 ms, 16: 2.5 ms, 32: 3.6 ms). The virtual shadow raster keeps the 4 it was tuned at; its dynamic wind skin cache
+// passes assume that value.
+inline constexpr uint32_t CLodSoftwareRasterClustersPerGroup(CLodRasterOutputKind outputKind) {
+    return outputKind == CLodRasterOutputKind::VirtualShadow ? 4u : 8u;
+}
+
 enum class CLodTransparencyMode : uint8_t {
     LinkedListDeepVisibility,
     AVBOIT,

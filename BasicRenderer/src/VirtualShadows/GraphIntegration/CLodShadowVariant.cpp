@@ -139,20 +139,21 @@ std::string CLodShadowVariant::AppendFineRasterPassForPhase(
 
     return reyesShadowRasterPassName;
 }
-void CLodShadowVariant::RefreshConfiguredSettings(CLodExtension& extension)
+void CLodShadowVariant::ConfigureSettings(CLodExtension& extension)
 {
     if (extension.m_type != CLodExtensionType::Shadow) {
         return;
     }
 
-    extension.m_shadowConfiguredBackingResolution = CLodVirtualShadowGetConfiguredMaxBackingResolution();
-    extension.m_shadowConfiguredMaxPhysicalPageCount = CLodVirtualShadowGetConfiguredMaxPhysicalPageCapacity();
-    extension.m_shadowConfiguredComputeClusterCapacity =
+    extension.m_shadowProviderEnabled = AreRendererShadowsEnabled();
+    extension.m_shadowBackingResolution = CLodVirtualShadowGetConfiguredMaxBackingResolution();
+    extension.m_shadowMaxPhysicalPageCount = CLodVirtualShadowGetConfiguredMaxPhysicalPageCapacity();
+    extension.m_shadowComputeClusterCapacity =
         CLodVirtualShadowGetConfiguredComputeClusterCapacity(extension.m_maxVisibleClusters);
     const uint64_t budgetedExpandedRecordCapacity =
-        static_cast<uint64_t>(extension.m_shadowConfiguredComputeClusterCapacity) *
+        static_cast<uint64_t>(extension.m_shadowComputeClusterCapacity) *
         static_cast<uint64_t>(CLodVirtualShadowExpandedRecordCapacityMultiplier);
-    extension.m_shadowConfiguredExpandedRecordCapacity = static_cast<uint32_t>(
+    extension.m_shadowExpandedRecordCapacity = static_cast<uint32_t>(
         std::max<uint64_t>(
             1u,
             std::min({
@@ -230,6 +231,7 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
             extension.m_shadowPageMetadataBuffer,
             extension.m_shadowDirectionalPageViewInfoBuffer,
             extension.m_shadowStatsBuffer,
+            br::render::CurrentFrameBuild() ? br::render::CurrentFrameBuild()->inputs.vsmTransformChangedQuery : nullptr,
             extension.m_options.virtualShadowCasters
                 ? extension.m_options.virtualShadowCasters->GetInvalidationQueue()
                 : nullptr));
@@ -312,7 +314,7 @@ std::string CLodShadowVariant::AppendStructuralPrelude(
             extension.m_shadowAllocationIndirectArgsBuffer,
             nullptr,
             64u,
-            extension.m_shadowConfiguredMaxPhysicalPageCount));
+            extension.m_shadowMaxPhysicalPageCount));
     shadowBuildDispatchArgsPassDesc.At(org::ExternalInsertPoint::After(shadowBuildPageListsPassName));
     outPasses.push_back(std::move(shadowBuildDispatchArgsPassDesc));
 
@@ -482,7 +484,7 @@ void CLodShadowVariant::AppendStructuralTail(
             extension.m_shadowPageTableTexture,
             extension.m_shadowPageMetadataBuffer,
             extension.m_shadowDirectionalPageViewInfoBuffer,
-            extension.m_shadowConfiguredMaxPhysicalPageCount,
+            extension.m_shadowMaxPhysicalPageCount,
             extension.m_occlusionReplayStateBuffer,
             reyesQueuesResetEachFrame
                 ? std::array<std::shared_ptr<org::Buffer>, 3>{extension.m_reyesSplitQueueOverflowBufferA,
@@ -507,7 +509,7 @@ void CLodShadowVariant::AppendStructuralTail(
             extension.m_shadowPageTableTexture,
             extension.m_shadowPageMetadataBuffer,
             extension.m_shadowDirtyPageFlagsBuffer,
-            extension.m_shadowConfiguredMaxPhysicalPageCount));
+            extension.m_shadowMaxPhysicalPageCount));
     spdlog::info("CLod shadow structural tail: construct {} complete", shadowDeduplicatePredictedPagesPassName);
     shadowDeduplicatePredictedPagesPassDesc.At(
         org::ExternalInsertPoint::After(shadowExpandPredictedPagesPassName));
@@ -562,7 +564,8 @@ std::string CLodShadowVariant::AppendPhase2FineRasterPass(
 
 std::shared_ptr<org::Resource> CLodShadowVariant::ProvideResource(CLodExtension& extension, org::ResourceIdentifier const& key)
 {
-    if (extension.m_type != CLodExtensionType::Shadow || !AreRendererShadowsEnabled()) {
+    // The graph may ask at preparation, after the build: the setting as the instance was made, not the live one.
+    if (extension.m_type != CLodExtensionType::Shadow || !extension.m_shadowProviderEnabled) {
         return nullptr;
     }
 
@@ -617,7 +620,7 @@ std::shared_ptr<org::Resource> CLodShadowVariant::ProvideResource(CLodExtension&
 
 std::vector<org::ResourceIdentifier> CLodShadowVariant::GetSupportedKeys(const CLodExtension& extension)
 {
-    if (extension.m_type != CLodExtensionType::Shadow || !AreRendererShadowsEnabled()) {
+    if (extension.m_type != CLodExtensionType::Shadow || !extension.m_shadowProviderEnabled) {
         return {};
     }
 
@@ -640,6 +643,63 @@ std::vector<org::ResourceIdentifier> CLodShadowVariant::GetSupportedKeys(const C
     };
 }
 
+uint32_t CLodShadowVariant::UpgradeUploadSlotCount()
+{
+    return std::min<uint32_t>(
+        static_cast<uint32_t>(SettingsManager::GetInstance().getSettingGetter<uint8_t>("numFramesInFlight")()) + 1u, 8u);
+}
+
+void CLodShadowVariant::EnsureDirectionalVsmAtlas(ProducerPersistentState& persistent)
+{
+    const auto& traits = GetVariantTraits(CLodExtensionType::Shadow);
+    auto& atlas = persistent.directionalVsm;
+    const uint32_t backingResolution = CLodVirtualShadowGetConfiguredMaxBackingResolution();
+    const uint32_t physicalPageCount = CLodVirtualShadowGetConfiguredMaxPhysicalPageCapacity();
+
+    if (!atlas.pageTable) {
+        auto pageTable = org::PixelBuffer::CreateSharedUnmaterialized(CreateVirtualShadowPageTableDescription());
+        pageTable->SetName(MakeVariantResourceName(traits, "Virtual Shadow Page Table"));
+        org::memory::SetResourceUsageHint(*pageTable, "Cluster LOD virtual shadow maps");
+        atlas.pageTable = std::move(pageTable);
+    }
+    if (!atlas.physicalPages || !atlas.staticPhysicalPages || atlas.backingResolution != backingResolution ||
+        atlas.physicalPageCount != physicalPageCount) {
+        if (atlas.physicalPages) {
+            spdlog::info("CLodShadow: new physical page atlas ({} -> {} backing resolution, {} -> {} pages)", atlas.backingResolution,
+                backingResolution, atlas.physicalPageCount, physicalPageCount);
+        }
+        // New objects, never a resize: a graph still running holds the old ones until it retires.
+        auto physicalPages = org::PixelBuffer::CreateSharedUnmaterialized(
+            CreateVirtualShadowPhysicalPagesDescription(backingResolution, physicalPageCount));
+        physicalPages->SetName(MakeVariantResourceName(traits, "Virtual Shadow Physical Pages"));
+        org::memory::SetResourceUsageHint(*physicalPages, "Cluster LOD virtual shadow maps");
+        auto staticPhysicalPages = org::PixelBuffer::CreateSharedUnmaterialized(
+            CreateVirtualShadowPhysicalPagesDescription(backingResolution, physicalPageCount));
+        staticPhysicalPages->SetName(MakeVariantResourceName(traits, "Virtual Shadow Static Physical Pages"));
+        org::memory::SetResourceUsageHint(*staticPhysicalPages, "Cluster LOD virtual shadow maps");
+        atlas.physicalPages = std::move(physicalPages);
+        atlas.staticPhysicalPages = std::move(staticPhysicalPages);
+        atlas.backingResolution = backingResolution;
+        atlas.physicalPageCount = physicalPageCount;
+        ++atlas.generation;
+    }
+    if (atlas.upgradeUploadSlots.size() != UpgradeUploadSlotCount()) {
+        atlas.upgradeUploadSlots.clear();
+        for (uint32_t slotIndex = 0u; slotIndex < UpgradeUploadSlotCount(); ++slotIndex) {
+            auto buffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
+                CLodVirtualShadowMaxInvalidationInputs,
+                sizeof(CLodVirtualShadowUpgradeInvalidationInput),
+                false,
+                false,
+                false,
+                rhi::HeapType::Upload);
+            buffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Upgrade Upload Slot " + std::to_string(slotIndex)));
+            org::memory::SetResourceUsageHint(*buffer, "Cluster LOD virtual shadow maps");
+            atlas.upgradeUploadSlots.push_back(std::move(buffer));
+        }
+    }
+}
+
 void CLodShadowVariant::InitializeResources(CLodExtension& extension)
 {
     const auto& traits = GetVariantTraits(extension.m_type);
@@ -647,16 +707,14 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
         return;
     }
 
-    auto& ecsWorld = RendererECSManager::GetInstance().GetWorld();
-    const flecs::entity typeEntity = traits.ensureTypeEntity(ecsWorld);
-    const uint32_t maxShadowPhysicalPageCount = extension.m_shadowConfiguredMaxPhysicalPageCount;
-    const uint32_t vsmExpandedRecordCapacity = extension.m_shadowConfiguredExpandedRecordCapacity;
+    const uint32_t maxShadowPhysicalPageCount = extension.m_shadowMaxPhysicalPageCount;
+    const uint32_t vsmExpandedRecordCapacity = extension.m_shadowExpandedRecordCapacity;
     const uint32_t shadowAtlasPagesWide = CLodVirtualShadowPhysicalAtlasPagesWideFromPhysicalPageCount(
         maxShadowPhysicalPageCount,
-        extension.m_shadowConfiguredBackingResolution);
+        extension.m_shadowBackingResolution);
     const uint32_t shadowAtlasPagesHigh = CLodVirtualShadowPhysicalAtlasPagesHighFromPhysicalPageCount(
         maxShadowPhysicalPageCount,
-        extension.m_shadowConfiguredBackingResolution);
+        extension.m_shadowBackingResolution);
     const uint64_t shadowAtlasWidth =
         static_cast<uint64_t>(shadowAtlasPagesWide) *
         CLodVirtualShadowPhysicalPageSize;
@@ -669,56 +727,55 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
     spdlog::info(
         "{}Shadow sizing: backingResolution={} physicalAtlas={}x{} pages={} texture={}x{} atlasLayers=2 combinedAtlasMiB={:.2f} computeClusters={} expandedRecords={}",
         traits.resourcePrefix,
-        extension.m_shadowConfiguredBackingResolution,
+        extension.m_shadowBackingResolution,
         shadowAtlasPagesWide,
         shadowAtlasPagesHigh,
         maxShadowPhysicalPageCount,
         shadowAtlasWidth,
         shadowAtlasHeight,
         static_cast<double>(combinedAtlasBytes) / (1024.0 * 1024.0),
-        extension.m_shadowConfiguredComputeClusterCapacity,
+        extension.m_shadowComputeClusterCapacity,
         vsmExpandedRecordCapacity);
 
-    auto persistent = extension.m_options.persistentState;
-    if (persistent && persistent->directionalVsm.pageTable)
-        extension.m_shadowPageTableTexture = std::dynamic_pointer_cast<org::PixelBuffer>(persistent->directionalVsm.pageTable);
-    if (!extension.m_shadowPageTableTexture)
+    // The atlas is the renderer's (EnsureDirectionalVsmAtlas, made for this build's settings): every graph binds the same
+    // one. Without one that matches, this graph makes its own.
+    const auto* atlas = extension.m_options.directionalVsm.get();
+    const bool atlasMatches = atlas && atlas->backingResolution == extension.m_shadowBackingResolution &&
+        atlas->physicalPageCount == maxShadowPhysicalPageCount;
+    if (!atlasMatches) {
+        spdlog::warn("{}Shadow: no persistent atlas for this build's settings; the graph makes its own", traits.resourcePrefix);
+    }
+    if (atlasMatches) {
+        extension.m_shadowPageTableTexture = std::dynamic_pointer_cast<org::PixelBuffer>(atlas->pageTable);
+        extension.m_shadowPhysicalPagesTexture = std::dynamic_pointer_cast<org::PixelBuffer>(atlas->physicalPages);
+        extension.m_shadowStaticPhysicalPagesTexture = std::dynamic_pointer_cast<org::PixelBuffer>(atlas->staticPhysicalPages);
+    }
+    if (!extension.m_shadowPageTableTexture) {
         extension.m_shadowPageTableTexture = org::PixelBuffer::CreateSharedUnmaterialized(CreateVirtualShadowPageTableDescription());
-    extension.m_shadowPageTableTexture->SetName(MakeVariantResourceName(traits, "Virtual Shadow Page Table"));
-    extension.m_shadowPageTableTexture->GetECSEntity()
-        .set<Components::Resource>({ extension.m_shadowPageTableTexture })
-        .add<CLodVirtualShadowPageTableTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+        extension.m_shadowPageTableTexture->SetName(MakeVariantResourceName(traits, "Virtual Shadow Page Table"));
+    }
+    PublishCLodResource<CLodVirtualShadowPageTableTag>(traits, extension.m_shadowPageTableTexture);
 
-    if (persistent && persistent->directionalVsm.physicalPages)
-        extension.m_shadowPhysicalPagesTexture = std::dynamic_pointer_cast<org::PixelBuffer>(persistent->directionalVsm.physicalPages);
-    if (!extension.m_shadowPhysicalPagesTexture)
+    if (!extension.m_shadowPhysicalPagesTexture) {
         extension.m_shadowPhysicalPagesTexture = org::PixelBuffer::CreateSharedUnmaterialized(
             CreateVirtualShadowPhysicalPagesDescription(
-                extension.m_shadowConfiguredBackingResolution,
+                extension.m_shadowBackingResolution,
                 maxShadowPhysicalPageCount));
-    extension.m_shadowPhysicalPagesTexture->SetName(MakeVariantResourceName(traits, "Virtual Shadow Physical Pages"));
-    extension.m_shadowPhysicalPagesTexture->GetECSEntity()
-        .set<Components::Resource>({ extension.m_shadowPhysicalPagesTexture })
-        .add<CLodVirtualShadowPhysicalPagesTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
-    if (persistent) {
-        persistent->directionalVsm.pageTable = extension.m_shadowPageTableTexture;
-        persistent->directionalVsm.physicalPages = extension.m_shadowPhysicalPagesTexture;
+        extension.m_shadowPhysicalPagesTexture->SetName(MakeVariantResourceName(traits, "Virtual Shadow Physical Pages"));
     }
+    PublishCLodResource<CLodVirtualShadowPhysicalPagesTag>(traits, extension.m_shadowPhysicalPagesTexture);
 
-    extension.m_shadowStaticPhysicalPagesTexture =
-        org::PixelBuffer::CreateSharedUnmaterialized(
-            CreateVirtualShadowPhysicalPagesDescription(
-                extension.m_shadowConfiguredBackingResolution,
-                maxShadowPhysicalPageCount));
-    extension.m_shadowStaticPhysicalPagesTexture->SetName(
-        MakeVariantResourceName(
-            traits, "Virtual Shadow Static Physical Pages"));
-    extension.m_shadowStaticPhysicalPagesTexture->GetECSEntity()
-        .set<Components::Resource>({
-            extension.m_shadowStaticPhysicalPagesTexture })
-        .add<CLodExtensionTypeTag>(typeEntity);
+    if (!extension.m_shadowStaticPhysicalPagesTexture) {
+        extension.m_shadowStaticPhysicalPagesTexture =
+            org::PixelBuffer::CreateSharedUnmaterialized(
+                CreateVirtualShadowPhysicalPagesDescription(
+                    extension.m_shadowBackingResolution,
+                    maxShadowPhysicalPageCount));
+        extension.m_shadowStaticPhysicalPagesTexture->SetName(
+            MakeVariantResourceName(
+                traits, "Virtual Shadow Static Physical Pages"));
+    }
+    PublishCLodResource(traits, extension.m_shadowStaticPhysicalPagesTexture);
 
     extension.m_shadowPageMetadataBuffer = CreateAliasedUnmaterializedStructuredBuffer(
         maxShadowPhysicalPageCount,
@@ -728,10 +785,7 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
         false,
         false);
     extension.m_shadowPageMetadataBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Page Metadata Buffer"));
-    extension.m_shadowPageMetadataBuffer->GetECSEntity()
-        .set<Components::Resource>({ extension.m_shadowPageMetadataBuffer })
-        .add<CLodVirtualShadowPageMetadataTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodVirtualShadowPageMetadataTag>(traits, extension.m_shadowPageMetadataBuffer);
 
     extension.m_shadowInvalidationInputsBuffer = CreateAliasedUnmaterializedStructuredBuffer(
         CLodVirtualShadowMaxInvalidationInputs,
@@ -740,17 +794,11 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
         false,
         false);
     extension.m_shadowInvalidationInputsBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Invalidation Inputs Buffer"));
-    extension.m_shadowInvalidationInputsBuffer->GetECSEntity()
-        .set<Components::Resource>({ extension.m_shadowInvalidationInputsBuffer })
-        .add<CLodVirtualShadowInvalidationInputsTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodVirtualShadowInvalidationInputsTag>(traits, extension.m_shadowInvalidationInputsBuffer);
 
     extension.m_shadowInvalidationCountBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), false, false, false);
     extension.m_shadowInvalidationCountBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Invalidation Count Buffer"));
-    extension.m_shadowInvalidationCountBuffer->GetECSEntity()
-        .set<Components::Resource>({ extension.m_shadowInvalidationCountBuffer })
-        .add<CLodVirtualShadowInvalidationCountTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodVirtualShadowInvalidationCountTag>(traits, extension.m_shadowInvalidationCountBuffer);
 
     extension.m_shadowInvalidatedInstancesBitsetBuffer = CreateAliasedUnmaterializedStructuredBuffer(
         CLodVirtualShadowMovedInstanceBitWordCount(),
@@ -760,37 +808,31 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
         false);
     extension.m_shadowInvalidatedInstancesBitsetBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Invalidated Instances Bitset Buffer"));
 
-    const uint32_t upgradeUploadSlotCount = std::min<uint32_t>(
-        static_cast<uint32_t>(
-            SettingsManager::GetInstance()
-                .getSettingGetter<uint8_t>("numFramesInFlight")()) +
-            1u,
-        8u);
+    // The upgrade upload slots are the atlas's too: CLod streaming maps them from its worker, and the same slots carry over
+    // from one graph to the next. Streaming takes them through the build's binding at the attach
+    // (RecordShadowStreamingResources).
     extension.m_shadowUpgradeInvalidationUploadBuffers.clear();
-    extension.m_shadowUpgradeInvalidationUploadBuffers.reserve(
-        upgradeUploadSlotCount);
-    for (uint32_t slotIndex = 0u; slotIndex < upgradeUploadSlotCount;
-         ++slotIndex) {
-        auto buffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
-            CLodVirtualShadowMaxInvalidationInputs,
-            sizeof(CLodVirtualShadowUpgradeInvalidationInput),
-            false,
-            false,
-            false,
-            rhi::HeapType::Upload);
-        buffer->SetName(MakeVariantResourceName(
-            traits,
-            "Virtual Shadow Upgrade Upload Slot " +
-                std::to_string(slotIndex)));
-        buffer->GetECSEntity()
-            .set<Components::Resource>({buffer})
-            .add<CLodExtensionTypeTag>(typeEntity);
-        extension.m_shadowUpgradeInvalidationUploadBuffers.push_back(
-            std::move(buffer));
+    if (atlas && atlas->upgradeUploadSlots.size() == UpgradeUploadSlotCount()) {
+        for (const auto& slot : atlas->upgradeUploadSlots) {
+            if (auto buffer = std::dynamic_pointer_cast<org::Buffer>(slot)) extension.m_shadowUpgradeInvalidationUploadBuffers.push_back(std::move(buffer));
+        }
     }
-    if (extension.m_streamingSystem) {
-        extension.m_streamingSystem->SetVirtualShadowUpgradeUploadBuffers(
-            extension.m_shadowUpgradeInvalidationUploadBuffers);
+    if (extension.m_shadowUpgradeInvalidationUploadBuffers.size() != UpgradeUploadSlotCount()) {
+        extension.m_shadowUpgradeInvalidationUploadBuffers.clear();
+        for (uint32_t slotIndex = 0u; slotIndex < UpgradeUploadSlotCount(); ++slotIndex) {
+            auto buffer = org::Buffer::CreateUnmaterializedStructuredBuffer(
+                CLodVirtualShadowMaxInvalidationInputs,
+                sizeof(CLodVirtualShadowUpgradeInvalidationInput),
+                false,
+                false,
+                false,
+                rhi::HeapType::Upload);
+            buffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Upgrade Upload Slot " + std::to_string(slotIndex)));
+            extension.m_shadowUpgradeInvalidationUploadBuffers.push_back(std::move(buffer));
+        }
+    }
+    for (const auto& buffer : extension.m_shadowUpgradeInvalidationUploadBuffers) {
+        PublishCLodResource(traits, buffer);
     }
 
     extension.m_shadowPredictiveInvalidationCandidatesBuffer = CreateAliasedUnmaterializedStructuredBuffer(
@@ -800,15 +842,11 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
         false,
         false);
     extension.m_shadowPredictiveInvalidationCandidatesBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Predictive Invalidation Candidates Buffer"));
-    extension.m_shadowPredictiveInvalidationCandidatesBuffer->GetECSEntity()
-        .set<Components::Resource>({ extension.m_shadowPredictiveInvalidationCandidatesBuffer })
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource(traits, extension.m_shadowPredictiveInvalidationCandidatesBuffer);
 
     extension.m_shadowPredictiveInvalidationCandidateCountBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false);
     extension.m_shadowPredictiveInvalidationCandidateCountBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Predictive Invalidation Candidate Count Buffer"));
-    extension.m_shadowPredictiveInvalidationCandidateCountBuffer->GetECSEntity()
-        .set<Components::Resource>({ extension.m_shadowPredictiveInvalidationCandidateCountBuffer })
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource(traits, extension.m_shadowPredictiveInvalidationCandidateCountBuffer);
 
     extension.m_shadowPredictiveRawPagesBuffer = CreateAliasedUnmaterializedStructuredBuffer(
         CLodVirtualShadowPredictiveRawPageCapacity,
@@ -817,15 +855,11 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
         false,
         false);
     extension.m_shadowPredictiveRawPagesBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Predictive Raw Pages Buffer"));
-    extension.m_shadowPredictiveRawPagesBuffer->GetECSEntity()
-        .set<Components::Resource>({ extension.m_shadowPredictiveRawPagesBuffer })
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource(traits, extension.m_shadowPredictiveRawPagesBuffer);
 
     extension.m_shadowPredictiveRawPageCountBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false);
     extension.m_shadowPredictiveRawPageCountBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Predictive Raw Page Count Buffer"));
-    extension.m_shadowPredictiveRawPageCountBuffer->GetECSEntity()
-        .set<Components::Resource>({ extension.m_shadowPredictiveRawPageCountBuffer })
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource(traits, extension.m_shadowPredictiveRawPageCountBuffer);
 
     extension.m_shadowPredictedInvalidationScratchBitsetBuffer = CreateAliasedUnmaterializedStructuredBuffer(
         CLodVirtualShadowFallbackDependencyHashCapacity,
@@ -835,9 +869,7 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
         false,
         true);
     extension.m_shadowPredictedInvalidationScratchBitsetBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Predicted Invalidation Scratch Bitset Buffer"));
-    extension.m_shadowPredictedInvalidationScratchBitsetBuffer->GetECSEntity()
-        .set<Components::Resource>({ extension.m_shadowPredictedInvalidationScratchBitsetBuffer })
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource(traits, extension.m_shadowPredictedInvalidationScratchBitsetBuffer);
 
     extension.m_shadowPredictedInvalidationPagesBufferA = CreateAliasedUnmaterializedStructuredBuffer(
         CLodVirtualShadowPredictedPageListCapacity(),
@@ -847,20 +879,11 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
         false,
         false);
     extension.m_shadowPredictedInvalidationPagesBufferA->SetName(MakeVariantResourceName(traits, "Virtual Shadow Predicted Invalidation Pages Buffer"));
-    extension.m_shadowPredictedInvalidationPagesBufferA->GetECSEntity()
-        .set<Components::Resource>({ extension.m_shadowPredictedInvalidationPagesBufferA })
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource(traits, extension.m_shadowPredictedInvalidationPagesBufferA);
 
     extension.m_shadowPredictedInvalidationPageCountBufferA = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false, false);
     extension.m_shadowPredictedInvalidationPageCountBufferA->SetName(MakeVariantResourceName(traits, "Virtual Shadow Predicted Invalidation Page Count Buffer"));
-    extension.m_shadowPredictedInvalidationPageCountBufferA->GetECSEntity()
-        .set<Components::Resource>({ extension.m_shadowPredictedInvalidationPageCountBufferA })
-        .add<CLodExtensionTypeTag>(typeEntity);
-    if (extension.m_streamingSystem) {
-        extension.m_streamingSystem->SetVirtualShadowFallbackFeedbackResources(
-            extension.m_shadowPredictedInvalidationPagesBufferA,
-            extension.m_shadowPredictedInvalidationPageCountBufferA);
-    }
+    PublishCLodResource(traits, extension.m_shadowPredictedInvalidationPageCountBufferA);
 
     extension.m_shadowAllocationRequestsBuffer = CreateAliasedUnmaterializedStructuredBuffer(
         CLodVirtualShadowMaxAllocationRequests,
@@ -870,17 +893,11 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
         false,
         true);
     extension.m_shadowAllocationRequestsBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Allocation Requests Buffer"));
-    extension.m_shadowAllocationRequestsBuffer->GetECSEntity()
-        .set<Components::Resource>({ extension.m_shadowAllocationRequestsBuffer })
-        .add<CLodVirtualShadowAllocationRequestsTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodVirtualShadowAllocationRequestsTag>(traits, extension.m_shadowAllocationRequestsBuffer);
 
     extension.m_shadowAllocationCountBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(uint32_t), true, false, false);
     extension.m_shadowAllocationCountBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Allocation Count Buffer"));
-    extension.m_shadowAllocationCountBuffer->GetECSEntity()
-        .set<Components::Resource>({ extension.m_shadowAllocationCountBuffer })
-        .add<CLodVirtualShadowAllocationCountTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodVirtualShadowAllocationCountTag>(traits, extension.m_shadowAllocationCountBuffer);
 
     extension.m_shadowAllocationIndirectArgsBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodReyesDispatchIndirectCommand), true, false, false);
     extension.m_shadowAllocationIndirectArgsBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Allocation Indirect Args Buffer"));
@@ -964,7 +981,7 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
             "Virtual Shadow Dynamic Active Block Metadata Buffer"));
 
     extension.m_shadowBlockClusterCoverageBuffer = CreateAliasedUnmaterializedStructuredBuffer(
-        extension.m_shadowConfiguredComputeClusterCapacity,
+        extension.m_shadowComputeClusterCapacity,
         sizeof(uint32_t),
         true,
         false,
@@ -980,10 +997,7 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
         false,
         false);
     extension.m_shadowFreePhysicalPagesBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Free Physical Pages Buffer"));
-    extension.m_shadowFreePhysicalPagesBuffer->GetECSEntity()
-        .set<Components::Resource>({ extension.m_shadowFreePhysicalPagesBuffer })
-        .add<CLodVirtualShadowFreePhysicalPagesTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodVirtualShadowFreePhysicalPagesTag>(traits, extension.m_shadowFreePhysicalPagesBuffer);
 
     extension.m_shadowReusablePhysicalPagesBuffer = CreateAliasedUnmaterializedStructuredBuffer(
         maxShadowPhysicalPageCount,
@@ -993,17 +1007,11 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
         false,
         false);
     extension.m_shadowReusablePhysicalPagesBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Reusable Physical Pages Buffer"));
-    extension.m_shadowReusablePhysicalPagesBuffer->GetECSEntity()
-        .set<Components::Resource>({ extension.m_shadowReusablePhysicalPagesBuffer })
-        .add<CLodVirtualShadowReusablePhysicalPagesTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodVirtualShadowReusablePhysicalPagesTag>(traits, extension.m_shadowReusablePhysicalPagesBuffer);
 
     extension.m_shadowPageListHeaderBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodVirtualShadowPageListHeader), true, false, false, false);
     extension.m_shadowPageListHeaderBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Page List Header Buffer"));
-    extension.m_shadowPageListHeaderBuffer->GetECSEntity()
-        .set<Components::Resource>({ extension.m_shadowPageListHeaderBuffer })
-        .add<CLodVirtualShadowPageListHeaderTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodVirtualShadowPageListHeaderTag>(traits, extension.m_shadowPageListHeaderBuffer);
 
     extension.m_shadowDirtyPageFlagsBuffer = CreateAliasedUnmaterializedStructuredBuffer(
         CLodVirtualShadowDirtyWordCount(maxShadowPhysicalPageCount),
@@ -1013,17 +1021,11 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
         false,
         false);
     extension.m_shadowDirtyPageFlagsBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Dirty Page Flags Buffer"));
-    extension.m_shadowDirtyPageFlagsBuffer->GetECSEntity()
-        .set<Components::Resource>({ extension.m_shadowDirtyPageFlagsBuffer })
-        .add<CLodVirtualShadowDirtyPageFlagsTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodVirtualShadowDirtyPageFlagsTag>(traits, extension.m_shadowDirtyPageFlagsBuffer);
 
     extension.m_shadowDirtyPageHierarchyTexture = org::PixelBuffer::CreateSharedUnmaterialized(CreateVirtualShadowDirtyHierarchyDescription());
     extension.m_shadowDirtyPageHierarchyTexture->SetName(MakeVariantResourceName(traits, "Virtual Shadow Dirty Hierarchy"));
-    extension.m_shadowDirtyPageHierarchyTexture->GetECSEntity()
-        .set<Components::Resource>({ extension.m_shadowDirtyPageHierarchyTexture })
-        .add<CLodVirtualShadowDirtyHierarchyTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodVirtualShadowDirtyHierarchyTag>(traits, extension.m_shadowDirtyPageHierarchyTexture);
 
     // Slice rows, then view rows (CLodVirtualShadowClipInfoRowCount).
     extension.m_shadowClipmapInfoBuffer = CreateAliasedUnmaterializedStructuredBuffer(
@@ -1034,10 +1036,7 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
         false,
         false);
     extension.m_shadowClipmapInfoBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Clipmap Info Buffer"));
-    extension.m_shadowClipmapInfoBuffer->GetECSEntity()
-        .set<Components::Resource>({ extension.m_shadowClipmapInfoBuffer })
-        .add<CLodVirtualShadowClipmapInfoTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodVirtualShadowClipmapInfoTag>(traits, extension.m_shadowClipmapInfoBuffer);
 
     extension.m_shadowMarkClipmapDataBuffer = CreateAliasedUnmaterializedStructuredBuffer(
         CLodVirtualShadowMaxSupportedClipmapCount,
@@ -1047,9 +1046,7 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
         false,
         false);
     extension.m_shadowMarkClipmapDataBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Mark Clipmap Data Buffer"));
-    extension.m_shadowMarkClipmapDataBuffer->GetECSEntity()
-        .set<Components::Resource>({ extension.m_shadowMarkClipmapDataBuffer })
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource(traits, extension.m_shadowMarkClipmapDataBuffer);
 
     extension.m_shadowCompactMainCameraBuffer = CreateAliasedUnmaterializedStructuredBuffer(
         1,
@@ -1078,32 +1075,15 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
         false,
         false);
     extension.m_shadowDirectionalPageViewInfoBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Directional Page View Info Buffer"));
-    extension.m_shadowDirectionalPageViewInfoBuffer->GetECSEntity()
-        .set<Components::Resource>({ extension.m_shadowDirectionalPageViewInfoBuffer })
-        .add<CLodVirtualShadowDirectionalPageViewInfoTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
-
-    if (persistent) {
-        persistent->directionalVsm.clipmapInfo = extension.m_shadowClipmapInfoBuffer;
-        persistent->directionalVsm.mainCamera = extension.m_shadowCompactMainCameraBuffer;
-        persistent->directionalVsm.shadowCameras = extension.m_shadowCompactShadowCameraBuffer;
-        persistent->directionalVsm.pageViewInfo = extension.m_shadowDirectionalPageViewInfoBuffer;
-        persistent->directionalVsm.pageMetadata = extension.m_shadowPageMetadataBuffer;
-    }
+    PublishCLodResource<CLodVirtualShadowDirectionalPageViewInfoTag>(traits, extension.m_shadowDirectionalPageViewInfoBuffer);
 
     extension.m_shadowRuntimeStateBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodVirtualShadowRuntimeState), true, false, false);
     extension.m_shadowRuntimeStateBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Runtime State Buffer"));
-    extension.m_shadowRuntimeStateBuffer->GetECSEntity()
-        .set<Components::Resource>({ extension.m_shadowRuntimeStateBuffer })
-        .add<CLodVirtualShadowRuntimeStateTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodVirtualShadowRuntimeStateTag>(traits, extension.m_shadowRuntimeStateBuffer);
 
     extension.m_shadowStatsBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodVirtualShadowStats), true, false, false, true);
     extension.m_shadowStatsBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Stats Buffer"));
-    extension.m_shadowStatsBuffer->GetECSEntity()
-        .set<Components::Resource>({ extension.m_shadowStatsBuffer })
-        .add<CLodVirtualShadowStatsTag>()
-        .add<CLodExtensionTypeTag>(typeEntity);
+    PublishCLodResource<CLodVirtualShadowStatsTag>(traits, extension.m_shadowStatsBuffer);
 
     extension.m_vsmExpandedVisibleClustersBuffer = CreateAliasedUnmaterializedRawBuffer(
         static_cast<uint64_t>(vsmExpandedRecordCapacity) * PackedVisibleClusterStrideBytes,
@@ -1184,59 +1164,4 @@ void CLodShadowVariant::TagResourceUsages(CLodExtension& extension)
     tagBufferUsage(extension.m_vsmExpandedVisibleClustersBuffer, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_vsmExpandedVisibleClustersBufferSw, "Cluster LOD virtual shadow maps");
     tagBufferUsage(extension.m_vsmExpandedVisibleClusterTransformIndicesBufferSw, "Cluster LOD virtual shadow maps");
-}
-
-void CLodShadowVariant::ReleaseResourceBackings(CLodExtension& extension)
-{
-    std::unordered_set<org::Buffer*> releasedBuffers;
-    std::unordered_set<org::PixelBuffer*> releasedTextures;
-    auto releaseBufferBacking = [&releasedBuffers](const std::shared_ptr<org::Buffer>& buffer) {
-        if (buffer && releasedBuffers.insert(buffer.get()).second) {
-            buffer->Dematerialize();
-        }
-    };
-    auto releaseTextureBacking = [&releasedTextures](const std::shared_ptr<org::PixelBuffer>& texture) {
-        if (texture && releasedTextures.insert(texture.get()).second) {
-            texture->Dematerialize();
-        }
-    };
-
-    releaseTextureBacking(extension.m_shadowPageTableTexture);
-    releaseTextureBacking(extension.m_shadowPhysicalPagesTexture);
-    releaseTextureBacking(extension.m_shadowStaticPhysicalPagesTexture);
-    releaseTextureBacking(extension.m_shadowDirtyPageHierarchyTexture);
-    releaseBufferBacking(extension.m_vsmExpandedVisibleClustersBuffer);
-    releaseBufferBacking(extension.m_vsmExpandedVisibleClustersBufferSw);
-    releaseBufferBacking(extension.m_vsmExpandedVisibleClusterTransformIndicesBufferSw);
-    releaseBufferBacking(extension.m_shadowDynamicActiveBlockMetadataBuffer);
-    extension.m_shadowVirtualResourcesNeedReset = true;
-}
-
-void CLodShadowVariant::RefreshResourcesForCurrentSettings(CLodExtension& extension)
-{
-    if (extension.m_type != CLodExtensionType::Shadow) {
-        return;
-    }
-
-    const uint32_t previousBackingResolution = extension.m_shadowConfiguredBackingResolution;
-    const uint32_t previousMaxPhysicalPageCount = extension.m_shadowConfiguredMaxPhysicalPageCount;
-    const uint32_t previousComputeClusterCapacity = extension.m_shadowConfiguredComputeClusterCapacity;
-    const uint32_t previousVisibleClusterCapacity = extension.m_visibleClusterCapacity;
-
-    RefreshConfiguredSettings(extension);
-
-    if (extension.m_shadowPhysicalPagesTexture &&
-        previousBackingResolution == extension.m_shadowConfiguredBackingResolution &&
-        previousMaxPhysicalPageCount == extension.m_shadowConfiguredMaxPhysicalPageCount &&
-        previousComputeClusterCapacity == extension.m_shadowConfiguredComputeClusterCapacity &&
-        previousVisibleClusterCapacity == GetVisibleClusterCapacity(extension)) {
-        return;
-    }
-
-    extension.RefreshCoreVisibleClusterCapacity();
-
-    ReleaseResourceBackings(extension);
-    InitializeResources(extension);
-    TagResourceUsages(extension);
-    extension.m_shadowVirtualResourcesNeedReset = true;
 }

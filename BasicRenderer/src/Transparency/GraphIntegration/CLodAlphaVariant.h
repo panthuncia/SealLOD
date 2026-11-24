@@ -16,8 +16,6 @@ public:
     static void InitializeDeepVisibilityResources(CLodExtension& extension);
     static void InitializeAVBOITResources(CLodExtension& extension);
     static void TagResourceUsages(CLodExtension& extension);
-    static void ReleaseResourceBackings(CLodExtension& extension);
-    static void RefreshResourcesForCurrentSettings(CLodExtension& extension);
 
     static void AppendSinglePassStructuralPasses(
         CLodExtension& extension,

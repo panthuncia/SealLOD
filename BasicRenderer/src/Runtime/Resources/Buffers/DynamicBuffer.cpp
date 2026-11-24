@@ -13,6 +13,7 @@
 #include "Runtime/Device/DeviceManager.h"
 #include "Resources/GPUBacking/GpuBufferBacking.h"
 #include "Render/Runtime/UploadPolicyServiceAccess.h"
+#include <BasicRenderer/Extensions/Buffers/StructuredBackingFlags.h>
 
 namespace {
 
@@ -297,6 +298,7 @@ void org::DynamicBuffer::RequestAsyncReserveBytesLocked(size_t size) {
                 .byteSize = m_requestedResizeCapacity,
                 .unorderedAccess = m_UAV,
                 .debugName = m_name,
+                .extraFlags = BackingResourceFlags() | StructuredBackingFlags(m_byteAddress ? 0 : m_elementSize),
             });
         }
         spdlog::debug(
@@ -324,6 +326,7 @@ void org::DynamicBuffer::RequestAsyncReserveBytesLocked(size_t size) {
             .byteSize = desiredBackingCapacity,
             .unorderedAccess = m_UAV,
             .debugName = m_name,
+            .extraFlags = BackingResourceFlags() | StructuredBackingFlags(m_byteAddress ? 0 : m_elementSize),
         });
     }
 }
@@ -410,6 +413,7 @@ bool org::DynamicBuffer::PublishReadyAsyncResizeLocked(bool wait) {
             .byteSize = newCapacity,
             .unorderedAccess = m_UAV,
             .debugName = m_name,
+            .extraFlags = BackingResourceFlags() | StructuredBackingFlags(m_byteAddress ? 0 : m_elementSize),
         });
         return false;
     }
@@ -1190,7 +1194,7 @@ void org::DynamicBuffer::CreateBuffer(size_t capacity) {
     std::lock_guard lock(m_allocationMutex);
 	auto device = DeviceManager::GetInstance().GetDevice();
 	m_capacity = capacity;
-	auto newDataBuffer = org::GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, capacity, GetGlobalResourceID(), m_UAV);
+	auto newDataBuffer = org::GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, capacity, GetGlobalResourceID(), m_UAV, nullptr, false, BackingResourceFlags() | StructuredBackingFlags(m_byteAddress ? 0 : m_elementSize));
 	SetBacking(std::move(newDataBuffer), capacity);
     {
         std::lock_guard<std::recursive_mutex> uploadLock(m_uploadPolicyMirrorMutex);
@@ -1223,7 +1227,7 @@ void org::DynamicBuffer::GrowBuffer(size_t newSize) {
         "DynamicBuffer '{}' id={} GrowBuffer creating new GPU backing",
         m_name,
         GetGlobalResourceID());
-    auto newDataBuffer = org::GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, newSize, GetGlobalResourceID(), m_UAV);
+    auto newDataBuffer = org::GpuBufferBacking::CreateUnique(rhi::HeapType::DeviceLocal, newSize, GetGlobalResourceID(), m_UAV, nullptr, false, BackingResourceFlags() | StructuredBackingFlags(m_byteAddress ? 0 : m_elementSize));
     spdlog::debug(
         "DynamicBuffer '{}' id={} GrowBuffer created new GPU backing",
         m_name,

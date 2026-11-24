@@ -48,11 +48,11 @@ RasterBucketHistogramPass::~RasterBucketHistogramPass() = default;
 
 RasterBucketHistogramBindings RasterBucketHistogramPass::Declare(org::PassBuilder& builder) {
     RasterBucketHistogramBindings bindings{
-        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+        br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
             L"ClearUintStructuredBufferCSMain", "ClearUintStructuredBufferCSMain")),
-        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+        br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
             L"ClusterRasterBucketsHistogramCSMain", "ClusterRasterBucketsHistogramCSMain")),
-        builder.CommandSignature(br::render::ConstantsDispatchCommandSignature(2,
+        br::render::DeclareCommandSignature(br::render::ConstantsDispatchCommandSignature(2,
             sizeof(RasterBucketsHistogramIndirectCommand), "CLod_RasterBucketsHistogram.Signature")),
         builder.ShaderResource(m_visibleClustersBuffer), builder.ShaderResource(m_visibleClustersCounterBuffer),
         builder.IndirectArguments(m_histogramIndirectCommand), builder.UnorderedAccess(m_histogramBuffer)};

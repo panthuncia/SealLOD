@@ -21,6 +21,7 @@ namespace org { class RenderGraph; class ExternalClient; }
 #include "BasicRenderer/Diagnostics/CLodTelemetry.h"
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "VirtualGeometry/Streaming/CLodPageLRU.h"
+#include "VirtualGeometry/Streaming/CLodStreamingGraphBinding.h"
 #include "VirtualGeometry/Streaming/CLodUploadStream.h"
 #include "Resources/Buffers/Buffer.h"
 #include <BasicRenderer/Extensions/Resources/PublishedStateResourceResolver.h>
@@ -61,7 +62,7 @@ public:
     ~CLodStreamingSystem();
 
     // Renderer-scoped geometry storage. This dependency is installed before
-    // Initialize and remains valid until Shutdown completes; streaming workers
+    // AttachGraph and remains valid until Shutdown completes; streaming workers
     // no longer discover it through the process-global settings registry.
     void SetGeometryStorage(ICLodGeometryStorage* storage) noexcept { m_geometryStorage = storage; }
     // The CLOD_BRANCH_* of forked DAGs the views take (set at graph construction). Only those branches' coarsest groups
@@ -71,25 +72,27 @@ public:
     void SetPriorityMode(CLodPriorityMode mode) { m_priorityMode = mode; }
     CLodPriorityMode GetPriorityMode() const { return m_priorityMode; }
 
-    void Initialize(org::RenderGraph& rg);
     void Shutdown();
-    void ShutdownGraphResources();
-    void QuiesceGraphResourceAccess();
-    void OnRegistryReset(org::ResourceRegistry* reg);
-    void GatherStructuralPasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& outPasses);
-    void GatherStructuralTailPasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& outPasses);
+    // Render thread, after a frame graph build and before that graph's first frame (Renderer::PublishFrameBuild): the
+    // service now runs with this graph's binding. Keeps residency, the LRU, pending disk work and upload batches. Drops
+    // only what belongs to the previous graph: readbacks in flight, the virtual shadow upgrade state, the snapshots.
+    void AttachGraph(std::shared_ptr<CLodStreamingGraphBinding> binding);
+    // Stops the service and drops its binding: at renderer teardown, or when the attached graph has no CLod. With a
+    // binding, does nothing unless that binding is the attached one.
+    void DetachGraph(const CLodStreamingGraphBinding* binding = nullptr);
+    // A build's streaming passes, over the build's binding. They read only `binding` and the service's own state, and
+    // change neither.
+    void GatherStructuralPasses(org::RenderGraph& rg, CLodStreamingGraphBinding& binding, std::vector<org::ExternalPassDesc>& outPasses);
+    void GatherStructuralTailPasses(org::RenderGraph& rg, CLodStreamingGraphBinding& binding, std::vector<org::ExternalPassDesc>& outPasses);
     // Submits this frame's async uploads and streaming feedback readback through `client`, then takes the newest
-    // active-group snapshot for the next frame. Call it after the frame graph's execution (CLodExtension::AfterExecute).
-    void SubmitExternalWork(org::ExternalClient& client);
-    std::shared_ptr<org::Buffer> GetSourceGroupMismatchCounterBuffer() const { return m_sourceGroupMismatchCounter; }
-    std::shared_ptr<org::Buffer> GetSourceGroupMismatchDetailsBuffer() const { return m_sourceGroupMismatchDetails; }
-    void SetVirtualShadowUpgradeUploadBuffers(std::vector<std::shared_ptr<org::Buffer>> buffers);
+    // active-group snapshot for the next frame. Call it after the frame graph's execution (CLodExtension::AfterExecute)
+    // with that graph's binding: nothing happens unless it is the attached one.
+    void SubmitExternalWork(org::ExternalClient& client, const CLodStreamingGraphBinding* binding);
     VirtualShadowUpgradeQueue GetVirtualShadowUpgradeQueue() const { return m_virtualShadowUpgradeQueue; }
-    void SetVirtualShadowFallbackFeedbackResources(
-        std::shared_ptr<org::Buffer> dependencies,
-        std::shared_ptr<org::Buffer> dependencyCount);
 
 private:
+    void SetVirtualShadowUpgradeUploadBuffers(std::vector<std::shared_ptr<org::Buffer>> buffers);
+
     struct VirtualShadowDependency;
     struct VirtualShadowDependencyBucket;
 
@@ -271,8 +274,6 @@ private:
     void RequestStreamingFrameWork();
     void PublishStreamingFrameWorkForFrame();
     void RunStreamingServiceWork();
-    bool EnsureParallelSortResources();
-    void DestroyParallelSortResources();
     void ClearStreamingUploadFunction(ICLodGeometryStorage* meshManager);
     void InstallStreamingUploadFunction(ICLodGeometryStorage* meshManager);
     bool PublishRetainedUploadBatch();
@@ -281,6 +282,9 @@ private:
     void PublishActiveGroupSnapshot();
     void StartStreamingService();
     void StopStreamingService();
+    // Forgets the readbacks in flight: they copy the old graph's feedback, on its queues. Their requests are advisory and
+    // will be made again.
+    void DiscardGraphReadbacks();
 
     // Page-level LRU helpers
     void InitializePageLru(ICLodGeometryStorage* meshManager);
@@ -401,15 +405,8 @@ private:
     // cut this falls back to the initial allocation.
     std::shared_ptr<PublishedStateResourceResolver> m_nonResidentBitsResolver;
     std::shared_ptr<org::Buffer> m_initialResidencyStorage; // resolver fallback
-    std::shared_ptr<org::Buffer> m_streamingLoadRequestKeys;
-    std::shared_ptr<org::Buffer> m_streamingLoadRequests;
-    std::shared_ptr<org::Buffer> m_streamingLoadCounter;
-    std::shared_ptr<org::Buffer> m_streamingRuntimeState;
-    std::shared_ptr<org::Buffer> m_usedGroupsCounter;
-    std::shared_ptr<org::Buffer> m_usedGroupsBuffer;
-    std::shared_ptr<org::Buffer> m_usedGroupsBits;
-    std::shared_ptr<org::Buffer> m_sourceGroupMismatchCounter;
-    std::shared_ptr<org::Buffer> m_sourceGroupMismatchDetails;
+    // The attached graph's binding (AttachGraph). Changed only while the service is stopped.
+    std::shared_ptr<CLodStreamingGraphBinding> m_binding;
 
     std::vector<uint32_t> m_streamingNonResidentBitsCpu;
     std::vector<uint32_t> m_streamingActiveGroupsBitsCpu;
@@ -599,9 +596,6 @@ private:
     uint64_t m_streamingNonResidentBitsUploadFenceValue = 0u;
     ICLodGeometryStorage* m_geometryStorage = nullptr;
     std::function<uint32_t()> m_getStreamingCpuUploadBudgetRequests;
-    // Set by GatherStructuralPasses: submit the async uploads and the streaming feedback readback.
-    std::function<void(org::ExternalClient&)> m_submitAsyncUploads;
-    std::function<void(org::ExternalClient&)> m_submitStreamingReadback;
 
     std::vector<PendingStreamingRequest> m_pendingStreamingRequests;
     std::vector<uint32_t> m_pendingStreamingRequestHeapIndexByGroup;
@@ -666,8 +660,6 @@ private:
     VirtualShadowUpgradeQueue m_virtualShadowUpgradeQueue;
     std::vector<uint32_t> m_virtualShadowResidencyGenerationByGroup;
     CLodVirtualShadowUpgradeQueueStats m_virtualShadowUpgradeStats;
-    std::shared_ptr<org::Buffer> m_virtualShadowFallbackDependenciesBuffer;
-    std::shared_ptr<org::Buffer> m_virtualShadowFallbackDependencyCountBuffer;
 
     std::vector<br::render::CLodStreamingDomainEvent> m_streamingDomainEventScratch;
     std::vector<uint32_t> m_childGroupsScratch;
@@ -797,12 +789,9 @@ private:
     uint32_t m_decodeSeenGeneration = 1u;
     uint32_t m_decodeUsedSeenGeneration = 1u;
 
-    struct ParallelSortState;
-    std::unique_ptr<ParallelSortState> m_parallelSortState;
+    // Whether the attached graph sorts the feedback before the readback (its binding has the sort scratch).
     bool m_parallelSortAvailable = false;
-    bool m_parallelSortAttempted = false;
 
-    // Dedicated upload instance + copy queue for async CLod streaming uploads.
+    // Staging for async CLod streaming uploads. Their queue is the attached graph's (CLodStreamingGraphBinding).
     std::unique_ptr<CLodUploadStream> m_uploadStream;
-    org::QueueSlotIndex m_uploadQueueSlot{};
 };

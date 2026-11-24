@@ -2,7 +2,7 @@
 
 #include "Assets/Textures/TextureFactory.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
-#include <Render/PipelineDesc.h>
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include <vector>
 
 // The mip chains taken at declaration, in queue order, with everything their dispatches need.
@@ -11,7 +11,7 @@ struct TextureMipmappingBindings {
             bool hasTexture = false;
             bool preserveAlphaCoverage = false;
             bool isSrgb = false;
-            org::PipelineState pipeline;
+            br::PipelineState pipeline;
             org::DeclaredViewToken constants, source, counter, alphaStats, alphaScales;
             std::vector<org::DeclaredViewToken> alphaSources, outputs;
             uint32_t constantsIndex = 0;
@@ -20,7 +20,7 @@ struct TextureMipmappingBindings {
             uint32_t mipsToGenerate = 0;
             uint32_t width = 0, height = 0;
         };
-        org::PipelineState alphaReset, alphaDownsample, alphaResolveScale, alphaApplyScale;
+        br::PipelineState alphaReset, alphaDownsample, alphaResolveScale, alphaApplyScale;
         std::vector<Job> jobs;
         // The pass's queue entries these views were declared for (its private snapshot type).
         // Kept with the bindings: a later structural build declares again while this build's
@@ -145,8 +145,8 @@ class TextureFactory::MipmappingPass : public org::TypedRenderGraphPass<Mipmappi
         org::runtime::FrameWorkQueue<Job> m_jobs;
 
         static bool TryGetValueType(const org::PixelBuffer& tex, MipmapValueType& outValueType);
-        static org::ComputePipelineDesc PipelineDesc(MipmapValueType valueType, bool isArray);
-        static org::ComputePipelineDesc AlphaPipelineDesc(const wchar_t* entryPoint, const char* debugName);
+        static br::ComputePipelineDesc PipelineDesc(MipmapValueType valueType, bool isArray);
+        static br::ComputePipelineDesc AlphaPipelineDesc(const wchar_t* entryPoint, const char* debugName);
 
         std::atomic_bool m_declaredResourcesChanged = true;
     };
@@ -162,8 +162,8 @@ struct TextureBC7CompressionBindings {
             org::DeclaredViewToken blocks;
             bool bc6h = false;
         };
-        org::PipelineState pipeline;
-        org::PipelineState bc6hPipeline;
+        br::PipelineState pipeline;
+        br::PipelineState bc6hPipeline;
         std::vector<Job> jobs;
         // The pass's DeclaredJob list for `jobs` (its private type), as TextureMipmappingBindings::declaredJobs.
         std::shared_ptr<const void> declaredJobs;
@@ -269,7 +269,7 @@ class TextureFactory::BC7CompressionReadbackPass
               BC7CompressionReadbackFrameData, BC7CompressionReadbackBindings>,
           public org::IDynamicDeclaredResources {
     public:
-        void SetReadbackService(std::shared_ptr<org::runtime::IReadbackService> readbackService);
+        void SetReadbackService(std::shared_ptr<br::FrameReadbackCaptures> readbackService);
         bool HasReadbackService() const { return static_cast<bool>(m_readbackService); }
         void EnqueueJob(const std::shared_ptr<BC7CompressionJob>& job);
 
@@ -294,6 +294,6 @@ class TextureFactory::BC7CompressionReadbackPass
         std::shared_ptr<const std::vector<DeclaredJob>> m_declaredJobs = std::make_shared<const std::vector<DeclaredJob>>();
         std::vector<std::shared_ptr<BC7CompressionJob>> m_pending;
         mutable std::mutex m_pendingMutex;
-        std::shared_ptr<org::runtime::IReadbackService> m_readbackService;
+        std::shared_ptr<br::FrameReadbackCaptures> m_readbackService;
         std::atomic_bool m_declaredResourcesChanged = true;
     };

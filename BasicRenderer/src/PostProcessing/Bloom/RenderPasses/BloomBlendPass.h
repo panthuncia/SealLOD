@@ -11,9 +11,10 @@
 #include "Utilities/Utilities.h"
 #include "../shaders/PerPassRootConstants/bloomBlendRootConstants.h"
 #include "Resources/PixelBuffer.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 
 struct BloomBlendBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
     org::DeclaredViewToken bloomMip1, bloomMip2, target;
 };
 struct BloomBlendFrame {
@@ -27,7 +28,7 @@ public:
     BloomBlendBindings Declare(org::PassBuilder& builder) {
         const org::SrvView bloomViews[] = {{UINT32_MAX, 1}, {UINT32_MAX, 2}};
         auto bloom = builder.ShaderResource(Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{1, 2}), std::span<const org::SrvView>{bloomViews});
-        return {builder.Pipeline(PipelineDesc()), bloom.View(0), bloom.View(1), builder.RenderTarget(Subresources(Builtin::PostProcessing::UpscaledHDR, org::Mip{0, 1}))};
+        return {br::render::DeclarePipeline(PipelineDesc()), bloom.View(0), bloom.View(1), builder.RenderTarget(Subresources(Builtin::PostProcessing::UpscaledHDR, org::Mip{0, 1}))};
     }
 
     BloomBlendFrame Prepare(const BloomBlendBindings& bindings,
@@ -58,8 +59,8 @@ private:
     unsigned int m_mipIndex;
     bool m_isUpsample = false;
 
-    static org::GraphicsPipelineDesc PipelineDesc() {
-        org::GraphicsPipelineDesc desc;
+    static br::GraphicsPipelineDesc PipelineDesc() {
+        br::GraphicsPipelineDesc desc;
         desc.name = "BloomBlend (RHI)";
         desc.vertex = {L"shaders/fullscreenVS.hlsli", L"FullscreenVSNoViewRayMain", L"vs_6_6"};
         desc.pixel = {L"shaders/PostProcessing/bloomBlend.hlsl", L"blend", L"ps_6_6"};

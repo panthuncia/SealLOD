@@ -15,7 +15,6 @@ void br::assets::RegisterHeadlessStaticImportSettings()
 		"directionalLightCascadeSplits",
 		std::vector<float>(clipmapCount, 1.0f));
 	settings.registerSetting<float>("directionalShadowSceneExtent", 0.0f);
-	settings.registerSetting<bool>("enableMeshShader", false);
 	settings.registerSetting<CLodSoftwareRasterMode>(
 		CLodSoftwareRasterModeSettingName, CLodSoftwareRasterMode::Compute);
 	settings.registerSetting<CLodVSMRasterMode>(

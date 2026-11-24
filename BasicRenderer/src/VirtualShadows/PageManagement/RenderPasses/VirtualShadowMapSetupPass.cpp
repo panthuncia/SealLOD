@@ -156,7 +156,7 @@ VirtualShadowMapSetupBindings VirtualShadowMapSetupPass::Declare(org::PassBuilde
         m_compactShadowCameraBuffer);
 
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    return {builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+    return {br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
                 L"CLodVirtualShadowSetupCSMain", "CLod.VirtualShadow.Setup.PSO")),
         builder.UnorderedAccess(m_pageTableTexture, {static_cast<uint32_t>(org::UAVViewType::Texture2DArrayFull)}), builder.UnorderedAccess(m_pageMetadataBuffer),
         builder.UnorderedAccess(m_allocationCountBuffer), builder.UnorderedAccess(m_dirtyPageFlagsBuffer),

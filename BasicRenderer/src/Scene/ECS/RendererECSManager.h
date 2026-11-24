@@ -31,6 +31,19 @@ public:
     void FlushDeferredWorldOperations();
     const std::unordered_map<RenderPhase, flecs::entity, RenderPhase::Hasher>& GetRenderPhaseEntities() const;
 
+    // A debug check for M3 (docs/frame_graph_composition_plan.md). While one is alive on a thread, every world access
+    // through this manager on that thread is logged with a stack trace, when BASICRENDERER_CHECK_BUILD_ECS=1. The renderer
+    // marks the frame-graph build with it: a build on another thread could not make these accesses. Resources made under
+    // the check also get deferred entities, as on another thread (RendererLifecycle's entity hook).
+    static bool BuildWorldAccessCheckActive();
+    class ScopedBuildWorldAccessCheck {
+    public:
+        ScopedBuildWorldAccessCheck() noexcept;
+        ~ScopedBuildWorldAccessCheck();
+        ScopedBuildWorldAccessCheck(const ScopedBuildWorldAccessCheck&) = delete;
+        ScopedBuildWorldAccessCheck& operator=(const ScopedBuildWorldAccessCheck&) = delete;
+    };
+
 private:
 	void RequireMainThread(const char* operation) const;
     std::unique_ptr<flecs::world> m_world;

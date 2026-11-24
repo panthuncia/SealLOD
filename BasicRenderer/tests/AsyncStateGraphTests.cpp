@@ -35,6 +35,7 @@
 #include <random>
 #include <source_location>
 #include <thread>
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 
 using namespace br::render;
 
@@ -177,7 +178,7 @@ int main() {
             rhi::Pipeline native{rhi::PipelineHandle{index, 1}};
             native.impl = &nativeObject;
             native.vt = &pipelineTable;
-            return org::PipelineState(rhi::PipelinePtr(rhi::Device{}, native, nullptr), 0, {}, {},
+            return br::PipelineState(rhi::PipelinePtr(rhi::Device{}, native, nullptr), 0, {}, {},
                 rhi::PipelineLayoutHandle{index, 1});
         };
         rhi::CommandSignature signature{rhi::CommandSignatureHandle{1, 1}};
@@ -185,7 +186,7 @@ int main() {
         signature.vt = &signatureTable;
 
         ClusterRasterBindings raster{};
-        raster.commandSignature = org::CommandSignatureState(std::make_shared<const rhi::CommandSignaturePtr>(rhi::Device{}, signature, nullptr));
+        raster.commandSignature = br::CommandSignatureState(std::make_shared<const rhi::CommandSignaturePtr>(rhi::Device{}, signature, nullptr));
         raster.histogram = {layout, 0, 0};
         raster.visible = {layout, 1, 0};
         raster.transforms = {layout, 2, 0};

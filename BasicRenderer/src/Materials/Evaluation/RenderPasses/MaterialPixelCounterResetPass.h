@@ -8,7 +8,7 @@
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 
 struct MaterialUAVResetBindings {
-    org::PipelineState pipeline;
+    br::PipelineState pipeline;
 };
 struct MaterialUAVResetFrame {
     uint32_t slotsUsed = 0;
@@ -21,7 +21,7 @@ public:
             "Builtin::VisUtil::MaterialWriteCursorBuffer");
 		builder.ConstantBuffer(Builtin::PerFrameBuffer);
         builder.PreferQueue(org::QueueKind::Compute);
-        return {builder.Pipeline(br::render::ComputePipeline(L"shaders/VisUtil.hlsl", L"ClearMaterialCountersCS",
+        return {br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/VisUtil.hlsl", L"ClearMaterialCountersCS",
             "ClearMaterialCountersPSO"))};
     }
 

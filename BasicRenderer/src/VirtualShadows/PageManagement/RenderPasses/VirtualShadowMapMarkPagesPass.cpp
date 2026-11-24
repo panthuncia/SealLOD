@@ -40,18 +40,18 @@ VirtualShadowMapMarkPagesBindings VirtualShadowMapMarkPagesPass::Declare(org::Pa
     builder->ShaderResource(Builtin::Shadows::CLodCompactMainCamera);
     // Local light faces' slice rows and cameras.
     builder->ShaderResource(Builtin::Shadows::CLodCompactShadowCameras, Builtin::Shadows::CLodClipmapInfo);
-    org::CommandSignatureDesc signature;
+    br::CommandSignatureDesc signature;
     signature.args = {{.kind = rhi::IndirectArgKind::Dispatch}};
     signature.byteStride = sizeof(CLodReyesDispatchIndirectCommand);
     signature.name = "CLod.VirtualShadow.MarkPages.Signature";
     VirtualShadowMapMarkPagesBindings bindings{
-        builder->Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+        br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
             L"CLodVirtualShadowMarkBlocksCSMain", "CLod.VirtualShadow.MarkPages.PSO")),
-        builder->Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+        br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
             L"ClearUintStructuredBufferCSMain", "CLod.VirtualShadow.MarkBlocks.Clear.PSO")),
-        builder->Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+        br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
             L"ClearUint2StructuredBufferCSMain", "CLod.VirtualShadow.ReceiverMask.ClearUint2.PSO")),
-        builder->CommandSignature(std::move(signature)),
+        br::render::DeclareCommandSignature(std::move(signature)),
         builder->ShaderResource(m_tileWorkBuffer), builder->ShaderResource(m_tileCountBuffer),
         builder->IndirectArguments(m_indirectArgsBuffer), builder->ShaderResource(m_markClipmapDataBuffer),
         builder->UnorderedAccess(m_markedBlocksMaskBuffer), builder->UnorderedAccess(m_markedBlocksListBuffer),

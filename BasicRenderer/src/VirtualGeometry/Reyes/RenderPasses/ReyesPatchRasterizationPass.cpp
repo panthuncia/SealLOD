@@ -99,11 +99,11 @@ ReyesPatchRasterBindings ReyesPatchRasterizationPass::Declare(org::PassBuilder& 
             Builtin::Terrain::RvtStats);
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
     ReyesPatchRasterBindings bindings{
-        builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/reyesPatchRaster.hlsl",
+        br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/reyesPatchRaster.hlsl",
             L"ReyesPatchRasterCS", "CLod.ReyesPatchRaster.PSO", [] {
                 // reyesPatchRaster.hlsl carries both telemetry blocks behind defines
                 // that default to 0, so neither costs anything in a normal run.
-                std::vector<org::PipelineShaderDefine> defines;
+                std::vector<br::PipelineShaderDefine> defines;
                 if (IsTerrainRvtTelemetryDebugEnabled()) {
                     defines.push_back({L"TERRAIN_RVT_TELEMETRY", L"1"});
                 }
@@ -112,7 +112,7 @@ ReyesPatchRasterBindings ReyesPatchRasterizationPass::Declare(org::PassBuilder& 
                 }
                 return defines;
             }())),
-        builder.CommandSignature(br::render::RawDispatchCommandSignature()),
+        br::render::DeclareCommandSignature(br::render::RawDispatchCommandSignature()),
         builder.ShaderResource(m_visibleClustersBuffer).View(), builder.ShaderResource(m_visibleClusterTransformIndicesBuffer).View(),
         builder.ShaderResource(m_diceQueueBuffer).View(), builder.ShaderResource(m_diceQueueCounterBuffer).View(),
         builder.ShaderResource(m_rasterWorkBuffer).View(), builder.ShaderResource(m_rasterWorkCounterBuffer).View(),

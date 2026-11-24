@@ -7,8 +7,8 @@
 
 #include <rhi.h>
 
-#include "Render/PipelineState.h"
-#include "Render/PipelineDesc.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "BasicRenderer/Extensions/ShaderBuffers.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
@@ -25,8 +25,8 @@ struct VirtualShadowMarkFrameData {
 };
 
 struct VirtualShadowMapMarkPagesBindings {
-    org::PipelineState markPipeline, clearPipeline, clearUint2Pipeline;
-    org::CommandSignatureState commandSignature;
+    br::PipelineState markPipeline, clearPipeline, clearUint2Pipeline;
+    br::CommandSignatureState commandSignature;
     org::DeclaredViewToken tileWork, tileCount;
     org::ResourceBindingToken indirectArgs;
     org::DeclaredViewToken clipmapData;

@@ -26,7 +26,7 @@ VirtualShadowMapComposePagesPass::VirtualShadowMapComposePagesPass(
 VirtualShadowMapComposePagesBindings VirtualShadowMapComposePagesPass::Declare(org::PassBuilder& builder)
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
-    return {builder.Pipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
+    return {br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
                 L"CLodVirtualShadowComposePhysicalPagesCSMain", "CLod.VirtualShadow.ComposePhysicalPages.PSO",
                 {{L"CLOD_VSM_TWO_LAYER_COMPOSE_VERSION", L"2"}})),
         builder.ShaderResource(m_staticPagesTexture), builder.UnorderedAccess(m_dynamicPagesTexture),

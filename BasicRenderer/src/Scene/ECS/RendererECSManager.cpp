@@ -1,7 +1,14 @@
 #include "Scene/ECS/RendererECSManager.h"
 
+#include <cstdlib>
 #include <stdexcept>
 #include <format>
+#include <sstream>
+#if __has_include(<stacktrace>)
+#include <stacktrace>
+#endif
+
+#include <spdlog/spdlog.h>
 
 #include "BasicRenderer/Scene/Components.h"
 
@@ -116,7 +123,49 @@ const std::unordered_map<RenderPhase, flecs::entity, RenderPhase::Hasher>& Rende
 	return m_renderPhaseEntities;
 }
 
+namespace {
+thread_local int t_buildWorldAccessCheckDepth = 0;
+
+bool BuildWorldAccessCheckEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("BASICRENDERER_CHECK_BUILD_ECS");
+        return value && value[0] == '1';
+    }();
+    return enabled;
+}
+
+void ReportBuildWorldAccess(const char* operation) {
+    std::string trace = "(no <stacktrace> support in this build)";
+#if defined(__cpp_lib_stacktrace) && (__cpp_lib_stacktrace >= 202011L)
+    try {
+        std::ostringstream stream;
+        stream << std::stacktrace::current(2, 24);
+        trace = stream.str();
+    }
+    catch (...) {
+        trace = "(stacktrace capture failed)";
+    }
+#endif
+    spdlog::error("RendererECSManager::{} inside the frame-graph build:\n{}", operation, trace);
+}
+}
+
+bool RendererECSManager::BuildWorldAccessCheckActive() {
+    return t_buildWorldAccessCheckDepth > 0 && BuildWorldAccessCheckEnabled();
+}
+
+RendererECSManager::ScopedBuildWorldAccessCheck::ScopedBuildWorldAccessCheck() noexcept {
+    ++t_buildWorldAccessCheckDepth;
+}
+
+RendererECSManager::ScopedBuildWorldAccessCheck::~ScopedBuildWorldAccessCheck() {
+    --t_buildWorldAccessCheckDepth;
+}
+
 void RendererECSManager::RequireMainThread(const char* operation) const {
+	if (BuildWorldAccessCheckActive()) {
+		ReportBuildWorldAccess(operation);
+	}
 	if (m_mainThreadId != std::thread::id{} && std::this_thread::get_id() != m_mainThreadId) {
 		throw std::runtime_error(std::format(
 			"RendererECSManager::{} may only run on the renderer thread", operation));

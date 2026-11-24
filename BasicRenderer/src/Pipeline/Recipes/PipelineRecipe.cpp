@@ -7,7 +7,7 @@ namespace br::pipeline {
 
 void PipelineBuildContext::RegisterOutput(const org::ResourceIdentifier& id, std::shared_ptr<org::Resource> resource) const
 {
-    m_graph.RegisterResource(id, std::move(resource));
+    Graph().RegisterResource(id, std::move(resource));
 }
 
 namespace {

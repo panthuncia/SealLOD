@@ -4,15 +4,15 @@
 #include <optional>
 #include <vector>
 
-#include "Render/PipelineState.h"
+#include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 
 namespace org { class Buffer; }
 
 struct ReyesQueueResetBindings {
-    org::PipelineState clearCountersPipeline;
-    org::PipelineState clearOwnershipBitsetPipeline;
+    br::PipelineState clearCountersPipeline;
+    br::PipelineState clearOwnershipBitsetPipeline;
     org::DeclaredViewToken fullClusterCounter;
     org::DeclaredViewToken ownedClusterCounter;
     std::vector<org::DeclaredViewToken> splitQueueCounters;

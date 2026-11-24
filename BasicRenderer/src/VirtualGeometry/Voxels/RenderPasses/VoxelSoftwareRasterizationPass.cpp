@@ -133,7 +133,7 @@ VoxelRasterBindings VoxelSoftwareRasterizationPass::Declare(org::PassBuilder& de
     const auto pipelineId = [&pipelineSuffix](std::string_view base) {
         return std::string(base) + pipelineSuffix;
     };
-    std::vector<org::PipelineShaderDefine> defines = {
+    std::vector<br::PipelineShaderDefine> defines = {
         { L"CLOD_SW_RASTER_OUTPUT_VIRTUAL_SHADOW", m_outputKind == CLodRasterOutputKind::VirtualShadow ? L"1" : L"0" },
         { L"CLOD_VSM_TWO_LAYER_VOXEL_VERSION", m_outputKind == CLodRasterOutputKind::VirtualShadow ? L"2" : L"0" },
         { L"CLOD_VOXEL_RASTER_FAST_SPHERE_PROJECT", L"1" },
@@ -145,19 +145,19 @@ VoxelRasterBindings VoxelSoftwareRasterizationPass::Declare(org::PassBuilder& de
     telemetryDefines.push_back({ L"CLOD_VOXEL_RASTER_TELEMETRY", L"1" });
     auto skinnedTelemetryDefines = skinnedDefines;
     skinnedTelemetryDefines.push_back({ L"CLOD_VOXEL_RASTER_TELEMETRY", L"1" });
-    const auto rasterPipeline = [&](std::string_view base, std::vector<org::PipelineShaderDefine> rasterDefines) {
-        return builder->Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/voxelSoftwareRaster.hlsl",
+    const auto rasterPipeline = [&](std::string_view base, std::vector<br::PipelineShaderDefine> rasterDefines) {
+        return br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/voxelSoftwareRaster.hlsl",
             L"VoxelRasterCS", pipelineId(base), std::move(rasterDefines)));
     };
 
     VoxelRasterBindings bindings{
-        builder->Pipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/voxelSoftwareRaster.hlsl",
+        br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/voxelSoftwareRaster.hlsl",
             L"VoxelRasterBuildDispatchArgsCS", pipelineId("CLod.VoxelRaster.BuildDispatchArgs"), defines)),
         {rasterPipeline("CLod.VoxelRaster.Rasterize.Rigid", defines),
             rasterPipeline("CLod.VoxelRaster.Rasterize.Skinned", skinnedDefines)},
         {rasterPipeline("CLod.VoxelRaster.Rasterize.Rigid.Telemetry", telemetryDefines),
             rasterPipeline("CLod.VoxelRaster.Rasterize.Skinned.Telemetry", skinnedTelemetryDefines)},
-        builder->CommandSignature(br::render::RawDispatchCommandSignature()),
+        br::render::DeclareCommandSignature(br::render::RawDispatchCommandSignature()),
         builder->ShaderResource(m_visibleClustersBuffer).View(),
         builder->ShaderResource(m_visibleClusterTransformIndicesBuffer).View(),
         {}};

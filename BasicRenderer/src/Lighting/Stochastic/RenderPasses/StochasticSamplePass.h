@@ -15,6 +15,7 @@
 #include "Runtime/Settings/SettingsManager.h"
 #include "Lighting/Stochastic/StochasticLightingResources.h"
 #include "../shaders/PerPassRootConstants/stochasticLightingRootConstants.h"
+#include <BasicRenderer/Extensions/PipelineDescs.h>
 
 namespace br::render {
 
@@ -62,8 +63,8 @@ enum class StochasticSampleKernel : uint8_t {
 };
 
 struct StochasticSampleBindings {
-    org::PipelineState pipeline, argumentsPipeline;
-    org::CommandSignatureState signature;
+    br::PipelineState pipeline, argumentsPipeline;
+    br::CommandSignatureState signature;
     org::DeclaredViewToken diffuse, specular, accumulationDiffuse, accumulationSpecular;
     // Shading's, with the denoiser: the guide it divides the noisy inputs by (docs/stochastic_lighting.md "Guide-normalized accumulation").
     org::DeclaredViewToken guide;
@@ -73,7 +74,7 @@ struct StochasticSampleBindings {
     // Visibility gradients (docs/stochastic_lighting.md "Visibility gradients"): the buffer, in the
     // denoised graph only, and the trace's re-tracing kernel.
     org::DeclaredViewToken gradient;
-    org::PipelineState gradientPipeline;
+    br::PipelineState gradientPipeline;
     uint32_t rayCapacity = 0u;
     StochasticSampleKernel kernel = StochasticSampleKernel::Single;
     bool estimator = false;
@@ -111,16 +112,16 @@ public:
         const auto kernel = bindings.kernel;
         switch (kernel) {
         case StochasticSampleKernel::Single:
-            bindings.pipeline = builder.Pipeline(CLodRtComputePipeline(L"Shaders/Stochastic/stochasticReference.hlsl", L"StochasticReferenceCS", "Stochastic.Reference.PSO"));
+            bindings.pipeline = br::render::DeclarePipeline(CLodRtComputePipeline(L"Shaders/Stochastic/stochasticReference.hlsl", L"StochasticReferenceCS", "Stochastic.Reference.PSO"));
             break;
         case StochasticSampleKernel::Select:
-            bindings.pipeline = builder.Pipeline(CLodRtComputePipeline(L"Shaders/Stochastic/stochasticSelect.hlsl", L"StochasticSelectCS", "Stochastic.Select.PSO"));
+            bindings.pipeline = br::render::DeclarePipeline(CLodRtComputePipeline(L"Shaders/Stochastic/stochasticSelect.hlsl", L"StochasticSelectCS", "Stochastic.Select.PSO"));
             break;
         case StochasticSampleKernel::Trace:
-            bindings.argumentsPipeline = builder.Pipeline(CLodRtComputePipeline(L"Shaders/Stochastic/stochasticTrace.hlsl", L"StochasticTraceArgsCS", "Stochastic.TraceArgs.PSO"));
-            bindings.pipeline = builder.Pipeline(CLodRtComputePipeline(L"Shaders/Stochastic/stochasticTrace.hlsl", L"StochasticTraceCS", "Stochastic.Trace.PSO"));
-            bindings.gradientPipeline = builder.Pipeline(CLodRtComputePipeline(L"Shaders/Stochastic/stochasticTrace.hlsl", L"StochasticTraceGradientCS", "Stochastic.TraceGradient.PSO"));
-            bindings.signature = builder.CommandSignature(br::render::RawDispatchCommandSignature());
+            bindings.argumentsPipeline = br::render::DeclarePipeline(CLodRtComputePipeline(L"Shaders/Stochastic/stochasticTrace.hlsl", L"StochasticTraceArgsCS", "Stochastic.TraceArgs.PSO"));
+            bindings.pipeline = br::render::DeclarePipeline(CLodRtComputePipeline(L"Shaders/Stochastic/stochasticTrace.hlsl", L"StochasticTraceCS", "Stochastic.Trace.PSO"));
+            bindings.gradientPipeline = br::render::DeclarePipeline(CLodRtComputePipeline(L"Shaders/Stochastic/stochasticTrace.hlsl", L"StochasticTraceGradientCS", "Stochastic.TraceGradient.PSO"));
+            bindings.signature = br::render::DeclareCommandSignature(br::render::RawDispatchCommandSignature());
             break;
         case StochasticSampleKernel::Shade: {
             // With the denoiser, shading can write the paired ratio's unshadowed estimate (docs/stochastic_lighting.md "The paired ratio"), which reads the albedos: STOCHASTIC_SHADE_PAIRED 1 and the surface textures declared below. Without it
@@ -131,7 +132,7 @@ public:
             if (m_mode == StochasticLightingPassMode::Estimator && !m_accumulate && m_resources->Denoised()) {
                 desc.defines.push_back({ L"STOCHASTIC_SHADE_PAIRED", L"1" });
             }
-            bindings.pipeline = builder.Pipeline(desc);
+            bindings.pipeline = br::render::DeclarePipeline(desc);
             break;
         }
         }
