@@ -606,6 +606,9 @@ void Renderer::Initialize(
             org::GraphHost::FramePlacementSettings placement;
             placement.enabled = true;
             placement.logLifetimes = br::runtime::renderer_settings::ReadTruthyEnvironmentFlag("BASICRENDERER_FRAME_PLACEMENT_LOG");
+            // A rebuilt graph's new version keeps the running graphs' resources where they are (M4 step 9). =0 packs every new
+            // version from scratch, and the running graphs place again (step 8).
+            placement.keepRunning = !br::runtime::renderer_settings::ReadFalsyEnvironmentFlag("BASICRENDERER_FRAME_PLACEMENT_KEEP");
             m_frameHost->SetFramePlacement(placement);
             spdlog::info("Renderer: ORG frame placement on (BASICRENDERER_FRAME_PLACEMENT)");
         }

@@ -71,6 +71,7 @@ class DynamicResource;
 class ExternalTextureResource;
 class PixelBuffer;
 class RenderGraph;
+struct ScheduleTrace;
 class GraphHost;
 class GraphInstance;
 class Runtime;
@@ -578,6 +579,10 @@ private:
     // Render thread, after an attach: what the attached host epochs' graphs share, by identity, and names that are separate
     // objects in two graphs (M4 step 5).
     void CheckFrameInterfaceAcrossGraphs(uint64_t serial);
+    // Each graph's schedule trace, taken by CheckFrameEpochInterface on the thread that built it, for the across-graphs check at
+    // the attach (a trace of every graph there cost about 1.2 ms of render thread per attach). Kept for the attached graphs only.
+    std::mutex m_graphTraceMutex;
+    std::unordered_map<const org::RenderGraph*, std::shared_ptr<const org::ScheduleTrace>> m_graphTraces;
     // The frame host epochs (FrameBuild.h: {1, 3, 4} split), each a graph of the host; one for the in-place graph.
     std::vector<uint32_t> FrameGraphHostEpochs() const;
     // A host epoch's graph (the in-place graph for any), null before its build.
@@ -619,7 +624,12 @@ private:
         double totalMs = 0.0;
         double worstMs = 0.0;
         uint32_t frames = 0;
+        // This frame's, for the slow-frame line: each epoch's time and phases, and the consolidation point's time before it.
+        std::string frameEpochs;
+        double consolidationMs = 0.0;
     } m_frameGraphExecutionTiming;
+    // Frames since the latest attach of frame graphs (FinishFrameBuild), for the first frames' line. UINT32_MAX: none yet.
+    uint32_t m_framesSinceFrameGraphAttach = UINT32_MAX;
     // No mixed frames (M4 step 7): each frame, before its first ExecuteFrame, every host epoch's attached graph (GraphHost::
     // BuildGeneration) is mapped back to the build that attached it. A frame is mixed when an epoch runs an older build than
     // another epoch's build attached together with it (a build's set must run whole). Counted per 600 frames and in total.

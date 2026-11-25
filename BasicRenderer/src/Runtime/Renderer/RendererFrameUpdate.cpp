@@ -307,7 +307,10 @@ void Renderer::Update(float elapsedSeconds) {
     // started start one (ConsolidateFrameGraph). The build itself runs on the build thread while this graph keeps rendering.
     runCapturedStage("RenderGraphBuild", [&]() {
         BT_ZONE_SCOPE("Renderer::Update::RenderGraphBuild");
+        const auto consolidationBegin = std::chrono::steady_clock::now();
         ConsolidateFrameGraph();
+        m_frameGraphExecutionTiming.consolidationMs +=
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - consolidationBegin).count();
     });
     runCapturedStage("RenderResourceSync", [&]() {
         RunRenderResourceSyncStage();

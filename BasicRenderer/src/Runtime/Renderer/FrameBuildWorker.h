@@ -42,6 +42,9 @@ struct FrameBuildJob {
         std::unique_ptr<org::GraphHost::EpochGraph> graph;
     };
     std::vector<EpochGraphBuild> graphs;
+    // Graphs whose transients the build placed (GraphHost::PlaceEpochGraphs), and how long that took on the build's thread.
+    size_t graphsPlacedAtBuild = 0;
+    double placementMs = 0.0;
     // Built on the render thread by the host's own build point (GraphHost::BuildIfRequested), so already in place: no attach.
     bool installed = false;
     std::vector<std::string> pipelineFailures;

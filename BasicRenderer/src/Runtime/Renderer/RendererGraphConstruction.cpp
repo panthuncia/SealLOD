@@ -502,10 +502,9 @@ void Renderer::RunFrameBuild(br::render::FrameBuildJob& job) {
                 [this](org::RenderGraph& graph) { DeclareFramePasses(graph); }), "BasicRenderer::Passes");
             org::runtime::ScopedActiveGraphServices activeGraphServices(currentRenderGraph->GetUploadService(), currentRenderGraph->GetDescriptorService());
             m_frameInstance->Rebuild([](org::RenderGraph& graph) { graph.PrepareExtensionsForBuild(); });
-        } else if (job.onRenderThread) {
-            // On the render thread the host builds in place of the old graphs (its own build point), as before builds moved off
-            // it. A detached build would do the lowering and the first schedule here and the alias placement again at the
-            // first preparation: about twice the render-thread time for nothing, since nothing renders meanwhile.
+        } else if (job.onRenderThread && !currentRenderGraph) {
+            // The first build, on the render thread: the host builds its graphs in place (its own build point). Nothing ran yet,
+            // so there is no set to keep whole.
             spdlog::info("Renderer: frame graph build {} on the render thread (host epochs {}); why: {}", job.serial,
                 DescribeHostEpochs(frameBuild.hostEpochs), job.reason);
             RendererECSManager::ScopedBuildWorldAccessCheck worldAccessCheck;
@@ -521,8 +520,10 @@ void Renderer::RunFrameBuild(br::render::FrameBuildJob& job) {
             // extensions' later-epoch passes to the later graph's build (ForwardedPasses). Each graph's extensions' PrepareForBuild
             // run the renderer's declarations (DeclareFrameProviders, DeclareFramePasses) for its own epochs, then the structural
             // build, Setup and the first schedule. The attached graphs are not touched.
-            spdlog::info("Renderer: frame graph build {} on the build thread (host epochs {}); why: {}", job.serial,
-                DescribeHostEpochs(frameBuild.hostEpochs), job.reason);
+            // A build after a GPU idle wait (resize, upscaler restart, path tracing on or off) runs this on the render thread,
+            // before any frame: it is attached as one staged set like any other (M4 step 8), not built in place epoch by epoch.
+            spdlog::info("Renderer: frame graph build {} on the {} thread (host epochs {}); why: {}", job.serial,
+                job.onRenderThread ? "render" : "build", DescribeHostEpochs(frameBuild.hostEpochs), job.reason);
             RendererECSManager::ScopedBuildWorldAccessCheck worldAccessCheck;
             for (const auto host : frameBuild.hostEpochs) {
                 auto graph = m_frameHost->BuildEpochGraph(host, job.reason, job.captureContext);
@@ -551,6 +552,24 @@ void Renderer::RunFrameBuild(br::render::FrameBuildJob& job) {
                 } else {
                     // Built in place: its schedule is selected at its first preparation, so it is checked after its first frame.
                     job.epochCheckDeferred = true;
+                }
+            }
+        }
+        // The graphs' transients are placed here, on the build's thread, from one staging of the host's frame placement (ORG
+        // GraphHost::PlaceEpochGraphs): the attach then only swaps them in. A graph whose placement would move a resource the
+        // running graphs bind (a new version that moves a shared one) places at its attach, as before; its version's heaps are
+        // allocated here all the same. Before the pipeline wait, so it overlaps the compiles.
+        if (built && !m_useGraphInstance && !job.installed && !job.graphs.empty()) {
+            BT_ZONE_SCOPE("Renderer::RunFrameBuild::PlaceTransients");
+            std::vector<org::GraphHost::EpochGraph*> graphs;
+            for (auto& entry : job.graphs) if (entry.graph) graphs.push_back(entry.graph.get());
+            const auto placeBegin = std::chrono::steady_clock::now();
+            job.graphsPlacedAtBuild = m_frameHost->PlaceEpochGraphs(graphs);
+            job.placementMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - placeBegin).count();
+            for (auto& entry : job.graphs) {
+                if (entry.graph && !entry.graph->Built()) {
+                    job.error = "host epoch " + std::to_string(entry.hostEpoch) + "'s graph: " + entry.graph->Error();
+                    built = false;
                 }
             }
         }
@@ -751,6 +770,7 @@ void Renderer::FinishFrameBuild(std::shared_ptr<br::render::FrameBuildJob> job) 
     m_lastGraphBuildHostEpochs = attachedHosts;
     auto& stats = m_graphBuildStats;
     stats.lastAttachMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
+    m_framesSinceFrameGraphAttach = 0;
     stats.lastPipelineWaitMs = job->pipelineWaitMs;
     stats.lastPipelinesDeclared = job->pipelinesDeclared;
     stats.lastLatencyMs = latencyMs;
@@ -773,9 +793,11 @@ void Renderer::FinishFrameBuild(std::shared_ptr<br::render::FrameBuildJob> job) 
         }
     }
     spdlog::info("Renderer: frame graph build {} attached (host epochs {}); built in {:.1f} ms {} ({:.1f} ms of it waiting for {} pipelines), {:.1f} ms after "
-        "its start, {} frames rendered meanwhile; render thread {:.1f} ms before it and {:.1f} ms at its attach",
+        "its start, {} frames rendered meanwhile; render thread {:.1f} ms before it and {:.1f} ms at its attach; transients of {} of {} graphs placed "
+        "at the build ({:.1f} ms)",
         job->serial, DescribeHostEpochs(attachedHosts), job->buildMs, job->onRenderThread ? "on the render thread" : "on the build thread", job->pipelineWaitMs,
-        job->pipelinesDeclared, latencyMs, stats.lastFrames, job->prepareMs, stats.lastAttachMs);
+        job->pipelinesDeclared, latencyMs, stats.lastFrames, job->prepareMs, stats.lastAttachMs, job->graphsPlacedAtBuild, job->graphs.size(),
+        job->placementMs);
     // What crosses the attached graphs, by identity (deferred for a graph built in place: it has no schedule yet).
     if (!m_frameEpochCheckDeferred && !m_useGraphInstance) CheckFrameInterfaceAcrossGraphs(job->serial);
 }
@@ -1148,6 +1170,11 @@ std::optional<std::string> Renderer::CheckFrameEpochInterface(org::RenderGraph& 
     auto trace = graph.TraceSelectedSchedule(hostEpoch == br::render::kNoFrameEpoch ? br::render::kFrameHostEpoch : hostEpoch);
     if (!trace) trace = graph.TraceSelectedSchedule(UINT32_MAX);
     if (!trace) return std::nullopt;
+    {
+        // For the across-graphs check at the attach. A graph's placement does not change what it uses, only where.
+        std::scoped_lock lock(m_graphTraceMutex);
+        m_graphTraces[&graph] = trace;
+    }
     const auto check = br::render::CheckFrameEpochs(*trace, build);
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
     // The crossing set, by identity and epochs: logged in full when it changes (or every build, BASICRENDERER_CHECK_EPOCH_INTERFACE=1).
@@ -1190,7 +1217,12 @@ void Renderer::CheckFrameInterfaceAcrossGraphs(uint64_t serial) {
     for (const auto host : hosts) {
         auto* graph = FrameGraph(host);
         if (!graph) return;
-        auto trace = graph->TraceSelectedSchedule(host);
+        std::shared_ptr<const org::ScheduleTrace> trace;
+        {
+            std::scoped_lock lock(m_graphTraceMutex);
+            if (const auto found = m_graphTraces.find(graph); found != m_graphTraces.end()) trace = found->second;
+        }
+        if (!trace) trace = graph->TraceSelectedSchedule(host);
         if (!trace) trace = graph->TraceSelectedSchedule(UINT32_MAX);
         if (!trace) {
             spdlog::info("Renderer: frame graph build {} across host epochs: host epoch {}'s graph has no schedule yet", serial, host);
@@ -1211,6 +1243,13 @@ void Renderer::CheckFrameInterfaceAcrossGraphs(uint64_t serial) {
             use.hostMask |= br::render::HostEpochBit(host);
             byName[resource.name][resource.objectId] |= br::render::HostEpochBit(host);
         }
+    }
+    {
+        // The traces of graphs no host epoch runs any more go.
+        std::scoped_lock lock(m_graphTraceMutex);
+        std::erase_if(m_graphTraces, [&](const auto& entry) {
+            return std::none_of(hosts.begin(), hosts.end(), [&](uint32_t host) { return FrameGraph(host) == entry.first; });
+        });
     }
     std::unordered_set<uint64_t> interfaceIds;
     if (m_frameInterface)

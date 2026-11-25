@@ -152,10 +152,25 @@ void Renderer::RecordFrameGraphExecution(size_t index, double milliseconds, doub
         timing.waitMs += waitMs;
         timing.updateMs += updateMs;
         timing.executeMs += executeMs;
+        const auto& hosts = br::render::FrameHostEpochs();
+        const auto& last = m_frameHost->LastFrameTimings();
+        timing.frameEpochs += fmt::format("{}{}: {:.2f} (build {:.2f}, wait {:.2f}, update {:.2f}, execute {:.2f})",
+            timing.frameEpochs.empty() ? "" : ", ", index < hosts.size() ? hosts[index] : 0u, milliseconds, last.buildUs / 1000.0, waitMs,
+            updateMs, executeMs);
         return;
     }
     timing.totalMs += milliseconds;
     timing.worstMs = (std::max)(timing.worstMs, milliseconds);
+    // A slow frame, or one of the two frames after an attach (diagnostic): where its render-thread time went, with the
+    // consolidation point before it.
+    const bool afterAttach = m_framesSinceFrameGraphAttach < 2;
+    if (m_framesSinceFrameGraphAttach != UINT32_MAX) ++m_framesSinceFrameGraphAttach;
+    if (milliseconds + timing.consolidationMs > 16.0 || afterAttach)
+        spdlog::info("Renderer: {} {}: consolidation {:.2f} ms, frame graph {:.2f} ms; per host epoch {}",
+            afterAttach ? (m_framesSinceFrameGraphAttach == 1 ? "first frame after an attach," : "second frame after an attach,") : "slow frame",
+            m_totalFramesRendered, timing.consolidationMs, milliseconds, timing.frameEpochs);
+    timing.frameEpochs.clear();
+    timing.consolidationMs = 0.0;
     if (++timing.frames < 600) return;
     std::string epochs;
     const auto& hosts = br::render::FrameHostEpochs();
