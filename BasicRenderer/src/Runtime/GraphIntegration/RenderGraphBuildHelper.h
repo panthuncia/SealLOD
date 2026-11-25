@@ -1,4 +1,7 @@
 #pragma once
+
+#include <functional>
+#include <string_view>
 #include <unordered_map>
 #include "BasicRenderer/Scene/Components.h"
 #include "Render/RenderGraph/RenderGraph.h"
@@ -41,7 +44,10 @@ inline void TagPassTechnique(org::RenderGraph* graph, std::string_view passName,
     graph->SetPassTechnique(std::string(passName), std::string(techniquePath));
 }
 
-inline void CreateDebugVisualizationResources(org::RenderGraph* graph) {
+// Where a resource helper puts what it makes: a graph's registration, or the renderer's frame interface (FrameInterface).
+using FrameResourceSink = std::function<void(std::string_view id, std::shared_ptr<org::Resource> resource)>;
+
+inline void CreateDebugVisualizationResources(const FrameResourceSink& sink) {
     auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
 
     org::TextureDescription debugVisDesc;
@@ -58,7 +64,13 @@ inline void CreateDebugVisualizationResources(org::RenderGraph* graph) {
     auto debugVisTex = org::PixelBuffer::CreateSharedUnmaterialized(debugVisDesc);
     debugVisTex->SetName("Debug Visualization");
     org::memory::SetResourceUsageHint(*debugVisTex, "Debug");
-    graph->RegisterResource(Builtin::DebugVisualization, debugVisTex);
+    sink(Builtin::DebugVisualization, debugVisTex);
+}
+
+inline void CreateDebugVisualizationResources(org::RenderGraph* graph) {
+    CreateDebugVisualizationResources([graph](std::string_view id, std::shared_ptr<org::Resource> resource) {
+        graph->RegisterResource(id, std::move(resource));
+    });
 }
 
 // The BRDF LUT is rendered once, in a graph of its own (Renderer::EnsureBrdfLut); the frame graph only reads it.
@@ -976,7 +988,7 @@ inline void BuildBloomPipeline(org::RenderGraph* graph) {
     // full-resolution HDR read/modify/write pass.
 }
 
-inline void CreateCanonicalSurfaceResources(org::RenderGraph* graph)
+inline void CreateCanonicalSurfaceResources(const FrameResourceSink& sink)
 {
     const auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
     const org::ImageDimensions dimensions{ resolution.x, resolution.y, 0, 0 };
@@ -996,7 +1008,7 @@ inline void CreateCanonicalSurfaceResources(org::RenderGraph* graph)
         auto texture = org::PixelBuffer::CreateSharedUnmaterialized(desc);
         texture->SetName(name);
         org::memory::SetResourceUsageHint(*texture, "SARP canonical surface contract v1");
-        graph->RegisterResource(id, std::move(texture));
+        sink(id, std::move(texture));
     };
 
     createTexture(Builtin::Surface::BaseColorOpacity, "SARP Surface Base Color + Opacity", rhi::Format::R8G8B8A8_UNorm);
@@ -1016,7 +1028,14 @@ inline void CreateCanonicalSurfaceResources(org::RenderGraph* graph)
     records->SetAllowAlias(true);
     records->SetName("SARP Surface Records");
     org::memory::SetResourceUsageHint(*records, "SARP canonical surface contract v1");
-    graph->RegisterResource(Builtin::Surface::Records, std::move(records));
+    sink(Builtin::Surface::Records, std::move(records));
+}
+
+inline void CreateCanonicalSurfaceResources(org::RenderGraph* graph)
+{
+    CreateCanonicalSurfaceResources([graph](std::string_view id, std::shared_ptr<org::Resource> resource) {
+        graph->RegisterResource(id, std::move(resource));
+    });
 }
 
 inline void BuildSSRPasses(org::RenderGraph* graph) {

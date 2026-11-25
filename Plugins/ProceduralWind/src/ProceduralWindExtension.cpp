@@ -10,6 +10,7 @@
 #include <BasicRenderer/Extensions/IndirectCommand.h>
 #include "Render/PassBuilders.h"
 #include <BasicRenderer/Pipeline/PipelineDesc.h>
+#include "BasicRenderer/Extensions/FrameEpochs.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include <BasicRenderer/Diagnostics/OutputTypes.h>
 #include <BasicRenderer/Pipeline/RendererSettings.h>
@@ -195,6 +196,36 @@ static_assert(sizeof(WindActiveInstanceGPU) == 32u);
 
 struct WindSharedResources {
     std::shared_ptr<org::GloballyIndexedResource> inverseBindResource;
+    // What the passes' declarations depend on (Declared): whether the inverse-bind table and the placement buffers are
+    // known. A pass declares again when this changes from what it declared with.
+    struct DeclaredState {
+        bool inverseBind = false, placements = false, activePlacements = false;
+        bool operator==(const DeclaredState&) const = default;
+    };
+    DeclaredState Declared() const {
+        return {inverseBindResource != nullptr, skinnedPlacements != nullptr, activeSkinnedPlacements != nullptr};
+    }
+    // Inside a frame-graph build, at the passes' first declaration: what the first frame's Updates will find (the
+    // inverse-bind table from the registry, the placement buffers from the frame the build started after,
+    // br::render::BuildUpdateContext), so the new graph's first frame does not declare the passes again. Once per graph.
+    void SeedDeclarations(const org::ResourceRegistryView* registry)
+    {
+        const auto* update = br::render::BuildUpdateContext();
+        if (seeded || !update) return;
+        seeded = true;
+        if (registry)
+            inverseBindResource = registry->RequestSharedAs<org::GloballyIndexedResource>(Builtin::SkeletonResources::InverseBindMatrices);
+        // As UpdateTypes finds them.
+        if (!update->windPaletteService || !update->poses || !update->publishedRendererState) return;
+        const auto publishedObjects = update->publishedRendererState->drawRecords.payload.Get<br::render::PublishedObjectBufferState>();
+        if (!publishedObjects) return;
+        const auto placementVersion = publishedObjects->FindVersion(br::render::kObjectSkinnedPlacementVariant);
+        const auto activePlacementVersion = publishedObjects->FindVersion(br::render::kObjectActiveSkinnedPlacementVariant);
+        if (!placementVersion || !activePlacementVersion) return;
+        skinnedPlacements = placementVersion->resource;
+        activeSkinnedPlacements = activePlacementVersion->resource;
+    }
+    bool seeded = false;
     explicit WindSharedResources(std::shared_ptr<ProceduralWindRuntime> runtimeIn, br::ReadbackCaptureService* readbackServiceIn)
         : runtime(std::move(runtimeIn))
 		, readbackService(readbackServiceIn)
@@ -1012,12 +1043,13 @@ public:
     explicit WindResetPass(std::shared_ptr<WindSharedResources> resources) : m_resources(std::move(resources)) {}
     WindPassBindings Declare(org::PassBuilder& builder)
     {
+        m_resources->SeedDeclarations(m_resourceRegistryView.get());
         WindPassBindings bindings{};
         bindings.pipeline = br::render::DeclarePipeline(br::ComputePipelineDesc{
             .shader = {L"SARPShaders/ProceduralWind.hlsl", L"ResetWindTransientCS"},
             .name = "ProceduralWind.ResetTransient"});
         bindings.views = DeclareWindTransientViews(builder, *m_resources);
-        m_declaredInverseBind = m_resources->inverseBindResource != nullptr;
+        m_declared = m_resources->Declared();
         bindings.visibleViews = DeclareVisibleSkeletonViews(builder, *m_resources);
         bindings.diagnostics = builder.UnorderedAccess(m_resources->diagnostics).View();
         bindings.processedCounts = builder.UnorderedAccess(m_resources->processedTypeCounts).View();
@@ -1029,7 +1061,7 @@ public:
     void Initialize() {}
     void Update(const org::UpdateExecutionContext& context) override { m_resources->UpdateTypes(context); }
     bool DeclaredResourcesChanged() const override {
-        return m_declaredInverseBind != (m_resources->inverseBindResource != nullptr);
+        return m_declared != m_resources->Declared();
     }
     WindDispatchFrame Prepare(const WindPassBindings& bindings, const org::PassPrepareContext& preparation) const
     {
@@ -1052,7 +1084,7 @@ public:
     }
 private:
     std::shared_ptr<WindSharedResources> m_resources;
-    bool m_declaredInverseBind = false;
+    WindSharedResources::DeclaredState m_declared{};
 };
 
 class WindActivatePass final : public org::TypedRenderGraphPass<WindActivatePass, WindDispatchFrame, WindPassBindings>,
@@ -1062,12 +1094,13 @@ public:
         : m_resources(std::move(resources)), m_latePhase(latePhase) {}
     WindPassBindings Declare(org::PassBuilder& builder)
     {
+        m_resources->SeedDeclarations(m_resourceRegistryView.get());
         WindPassBindings bindings{};
         bindings.pipeline = br::render::DeclarePipeline(br::ComputePipelineDesc{
             .shader = {L"SARPShaders/ProceduralWind.hlsl", L"ActivateWindInstancesCS"},
             .name = "ProceduralWind.ActivateInstances"});
         bindings.views = DeclareWindTransientViews(builder, *m_resources);
-        m_declaredInverseBind = m_resources->inverseBindResource != nullptr;
+        m_declared = m_resources->Declared();
         bindings.diagnostics = builder.UnorderedAccess(m_resources->diagnostics).View();
         bindings.deferredEntries = builder.UnorderedAccess(m_resources->deferredEntries).View();
         bindings.baseTypeLookup = builder.ShaderResource(m_resources->baseTypeLookup).View();
@@ -1087,7 +1120,7 @@ public:
     }
     void Initialize() {}
     bool DeclaredResourcesChanged() const override {
-        return m_declaredInverseBind != (m_resources->inverseBindResource != nullptr);
+        return m_declared != m_resources->Declared();
     }
     WindDispatchFrame Prepare(const WindPassBindings& bindings, const org::PassPrepareContext& preparation) const
     {
@@ -1130,7 +1163,7 @@ public:
     }
 private:
     std::shared_ptr<WindSharedResources> m_resources;
-    bool m_declaredInverseBind = false;
+    WindSharedResources::DeclaredState m_declared{};
     bool m_latePhase = false;
 };
 
@@ -1140,12 +1173,13 @@ public:
     WindBuildCommandsPass(std::shared_ptr<WindSharedResources> r, bool latePhase)
         : m_resources(std::move(r)), m_latePhase(latePhase) {}
     WindPassBindings Declare(org::PassBuilder& b) {
+        m_resources->SeedDeclarations(m_resourceRegistryView.get());
         WindPassBindings bindings{};
         bindings.pipeline = br::render::DeclarePipeline(br::ComputePipelineDesc{
             .shader = {L"SARPShaders/ProceduralWind.hlsl", L"BuildWindCommandsCS"},
             .name = "ProceduralWind.BuildCommands"});
         bindings.views = DeclareWindTransientViews(b, *m_resources);
-        m_declaredInverseBind = m_resources->inverseBindResource != nullptr;
+        m_declared = m_resources->Declared();
         bindings.diagnostics = b.UnorderedAccess(m_resources->diagnostics).View();
         bindings.processedCounts = b.UnorderedAccess(m_resources->processedTypeCounts).View();
         b.PreferQueue(org::QueueKind::Compute);
@@ -1154,7 +1188,7 @@ public:
     void Initialize() {}
     void Update(const org::UpdateExecutionContext&) override {}
     bool DeclaredResourcesChanged() const override {
-        return m_declaredInverseBind != (m_resources->inverseBindResource != nullptr);
+        return m_declared != m_resources->Declared();
     }
     WindDispatchFrame Prepare(const WindPassBindings& bindings, const org::PassPrepareContext& preparation) const {
         WindDispatchFrame frame{};
@@ -1172,7 +1206,7 @@ public:
         constants.fieldSlice0 = recording.Index(bindings.processedCounts);
         br::render::DispatchCompute(recording, bindings.pipeline, PackTransientConstants(constants), frame.groups);
     }
-private: std::shared_ptr<WindSharedResources> m_resources; bool m_declaredInverseBind = false; bool m_latePhase = false;
+private: std::shared_ptr<WindSharedResources> m_resources; WindSharedResources::DeclaredState m_declared{}; bool m_latePhase = false;
 };
 
 class WindFinalizeAllocationsPass final : public org::TypedRenderGraphPass<WindFinalizeAllocationsPass, WindDispatchFrame, WindPassBindings>,
@@ -1181,12 +1215,13 @@ public:
 	explicit WindFinalizeAllocationsPass(std::shared_ptr<WindSharedResources> resources)
 		: m_resources(std::move(resources)) {}
 	WindPassBindings Declare(org::PassBuilder& builder) {
+        m_resources->SeedDeclarations(m_resourceRegistryView.get());
         WindPassBindings bindings{};
         bindings.pipeline = br::render::DeclarePipeline(br::ComputePipelineDesc{
             .shader = {L"SARPShaders/ProceduralWind.hlsl", L"FinalizeWindAllocationsCS"},
             .name = "ProceduralWind.FinalizeAllocations"});
         bindings.views = DeclareWindTransientViews(builder, *m_resources);
-        m_declaredInverseBind = m_resources->inverseBindResource != nullptr;
+        m_declared = m_resources->Declared();
         bindings.visibleViews = DeclareVisibleSkeletonViews(builder, *m_resources);
         bindings.diagnostics = builder.UnorderedAccess(m_resources->diagnostics).View();
         bindings.boneRemaps = builder.ShaderResource(m_resources->boneRemaps).View();
@@ -1196,7 +1231,7 @@ public:
 	void Initialize() {}
 	void Update(const org::UpdateExecutionContext&) override {}
 	bool DeclaredResourcesChanged() const override {
-        return m_declaredInverseBind != (m_resources->inverseBindResource != nullptr);
+        return m_declared != m_resources->Declared();
     }
 	WindDispatchFrame Prepare(const WindPassBindings& bindings, const org::PassPrepareContext& preparation) const {
 		WindDispatchFrame frame{};
@@ -1217,7 +1252,7 @@ public:
 	}
 private:
 	std::shared_ptr<WindSharedResources> m_resources;
-    bool m_declaredInverseBind = false;
+    WindSharedResources::DeclaredState m_declared{};
 };
 
 class WindIndirectSimulatePass final : public org::TypedRenderGraphPass<WindIndirectSimulatePass, WindIndirectFrame, WindPassBindings>,
@@ -1226,6 +1261,7 @@ public:
     WindIndirectSimulatePass(std::shared_ptr<WindSharedResources> r, bool latePhase = false)
         : m_resources(std::move(r)), m_latePhase(latePhase) {}
     WindPassBindings Declare(org::PassBuilder& b) {
+        m_resources->SeedDeclarations(m_resourceRegistryView.get());
         WindPassBindings bindings{};
         bindings.pipeline = br::render::DeclarePipeline(br::ComputePipelineDesc{
             .shader = {L"SARPShaders/ProceduralWind.hlsl", L"SimulateWindInstancesCS"},
@@ -1236,7 +1272,7 @@ public:
         signature.name = "ProceduralWind.SimulateIndirect.Signature";
         bindings.signature = br::render::DeclareCommandSignature(std::move(signature));
         bindings.views = DeclareWindTransientViews(b, *m_resources);
-        m_declaredInverseBind = m_resources->inverseBindResource != nullptr;
+        m_declared = m_resources->Declared();
         bindings.diagnostics = b.UnorderedAccess(m_resources->diagnostics).View();
         b.ShaderResource(Builtin::InstanceDrawRecordBuffer, Builtin::PerInstanceTransformBuffer);
         bindings.argumentsBinding = b.IndirectArguments(m_resources->indirectCommands);
@@ -1247,7 +1283,7 @@ public:
     void Initialize() {}
     void Update(const org::UpdateExecutionContext&) override {}
     bool DeclaredResourcesChanged() const override {
-        return m_declaredInverseBind != (m_resources->inverseBindResource != nullptr);
+        return m_declared != m_resources->Declared();
     }
     WindIndirectFrame Prepare(const WindPassBindings& bindings, const org::PassPrepareContext& preparation) const {
         WindIndirectFrame frame{};
@@ -1266,7 +1302,7 @@ public:
         br::render::DispatchComputeIndirect(recording, bindings.pipeline, PackTransientConstants(constants),
             bindings.signature, bindings.argumentsBinding, 0, frame.maximumCount, bindings.countBinding, sizeof(uint32_t));
     }
-private: std::shared_ptr<WindSharedResources> m_resources; bool m_declaredInverseBind = false; bool m_latePhase = false;
+private: std::shared_ptr<WindSharedResources> m_resources; WindSharedResources::DeclaredState m_declared{}; bool m_latePhase = false;
 };
 
 struct WindSkeletonDebugFrameData {
@@ -1294,6 +1330,7 @@ public:
     explicit WindSkeletonDebugPass(std::shared_ptr<WindSharedResources> resources) : m_resources(std::move(resources)) {}
     WindSkeletonDebugBindings Declare(org::PassBuilder& declaration)
     {
+        m_resources->SeedDeclarations(m_resourceRegistryView.get());
         WindSkeletonDebugBindings bindings{};
         // Both overlays share every state but the shaders, the fill mode and the topology.
         br::GraphicsPipelineDesc skeleton;
@@ -1331,7 +1368,7 @@ public:
         signature.layout = br::PipelineLayoutRef::StandardGraphics();
         signature.name = "ProceduralWind.SkeletonDebug.Signature";
         bindings.signature = br::render::DeclareCommandSignature(std::move(signature));
-        m_declaredInverseBind = m_resources->inverseBindResource != nullptr;
+        m_declared = m_resources->Declared();
         bindings.types = declaration.ShaderResource(m_resources->windTypes).View();
         bindings.bones = declaration.ShaderResource(m_resources->boneEntries).View();
         bindings.activeInstances = declaration.ShaderResource(m_resources->activeInstances).View();
@@ -1356,7 +1393,7 @@ public:
         return bindings;
     }
     bool DeclaredResourcesChanged() const override {
-        return m_declaredInverseBind != (m_resources->inverseBindResource != nullptr);
+        return m_declared != m_resources->Declared();
     }
     WindSkeletonDebugFrameData Prepare(const WindSkeletonDebugBindings& bindings,
         const org::PassPrepareContext& preparation) const
@@ -1413,7 +1450,7 @@ public:
     }
 private:
     std::shared_ptr<WindSharedResources> m_resources;
-    bool m_declaredInverseBind = false;
+    WindSharedResources::DeclaredState m_declared{};
 };
 
 } // namespace
@@ -1448,10 +1485,12 @@ void ProceduralWindExtension::GatherStructuralPasses(org::RenderGraph& rg, std::
     // Draw the debug view before the present pass. That pass makes the last backbuffer access,
     // so its transition to PRESENT is not undone before IDXGISwapChain::Present.
     if (!rg.GetPresentPass().empty()) debugInsertion.AlsoBefore(rg.GetPresentPass());
+    // A debug view: the Overlay epoch's, not the extension's (Visibility).
     out.push_back(org::ExternalPassDesc::Render(
         "ProceduralWind::DebugActiveSkeletons",
         std::make_shared<WindSkeletonDebugPass>(resources))
-        .At(debugInsertion));
+        .At(debugInsertion)
+        .Epoch(br::render::kOverlayEpoch));
 }
 
 } // namespace br::wind

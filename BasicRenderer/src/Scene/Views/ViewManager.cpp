@@ -222,11 +222,12 @@ void ViewManager::AttachDepth(uint64_t viewID,
     m_publicationRevision.fetch_add(1, std::memory_order_release);
 }
 
-void ViewManager::AttachVisibilityBuffer(uint64_t viewID, std::shared_ptr<org::PixelBuffer> visibilityBuffer) {
+void ViewManager::AttachVisibilityBuffer(uint64_t viewID, std::shared_ptr<org::PixelBuffer> visibilityBuffer,
+    std::shared_ptr<org::PixelBuffer> headPointers) {
     auto* v = Get(viewID);
     if (!v) return;
     v->gpu.visibilityBuffer = visibilityBuffer;
-    v->gpu.clodDeepVisibilityHeadPointers.reset();
+    v->gpu.clodDeepVisibilityHeadPointers = std::move(headPointers);
     if (m_events.onVisibilityBufferAttached) {
         m_events.onVisibilityBufferAttached(*v);
     }
@@ -250,17 +251,23 @@ std::shared_ptr<org::PixelBuffer> ViewManager::EnsureCLodDeepVisibilityHeadPoint
         return v->gpu.clodDeepVisibilityHeadPointers;
     }
 
+    v->gpu.clodDeepVisibilityHeadPointers = MakeCLodDeepVisibilityHeadPointers(viewID, *v->gpu.visibilityBuffer);
+    ++m_resourceLayoutRevision;
+    m_publicationRevision.fetch_add(1, std::memory_order_release);
+    return v->gpu.clodDeepVisibilityHeadPointers;
+}
+
+std::shared_ptr<org::PixelBuffer> ViewManager::MakeCLodDeepVisibilityHeadPointers(uint64_t viewID,
+    const org::PixelBuffer& visibilityBuffer) const
+{
     auto headPointerTexture = org::PixelBuffer::CreateSharedUnmaterialized(
-        CreateCLodDeepVisibilityHeadPointerDesc(*v->gpu.visibilityBuffer));
+        CreateCLodDeepVisibilityHeadPointerDesc(visibilityBuffer));
     headPointerTexture->SetName("CLod Deep Visibility Head Pointers " + std::to_string(viewID));
     // These textures are created outside of RenderGraph::AddResource(), but later update code
     // immediately queries bindless UAV indices from them. Reserve descriptor slots up front so
     // GetUAVShaderVisibleInfo()/GetUAVNonShaderVisibleInfo() are valid before graph materialization.
     headPointerTexture->EnsureVirtualDescriptorSlotsAllocated();
-    v->gpu.clodDeepVisibilityHeadPointers = std::move(headPointerTexture);
-    ++m_resourceLayoutRevision;
-    m_publicationRevision.fetch_add(1, std::memory_order_release);
-    return v->gpu.clodDeepVisibilityHeadPointers;
+    return headPointerTexture;
 }
 
 void ViewManager::UpdateCamera(uint64_t viewID, const CameraInfo& cameraInfo) {

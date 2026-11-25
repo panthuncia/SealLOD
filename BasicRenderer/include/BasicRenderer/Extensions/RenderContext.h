@@ -186,3 +186,11 @@ struct UpdateContext {
 		return viewFamily ? viewFamily->resourceLayoutRevision : 0u;
 	}
 };
+
+namespace br::render {
+// Inside a frame-graph build: the update values of the last frame before it started (FrameBuildInputs::lastUpdate), or
+// null (outside a build, before any frame, or when the views' resources changed since). A pass whose declaration follows
+// what its Update reads (the views, the published state) makes its first declaration from these, so the new graph's
+// first frame finds the declaration it would have made and need not build again before it runs. Build thread only.
+const UpdateContext* BuildUpdateContext() noexcept;
+}

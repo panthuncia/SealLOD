@@ -7,6 +7,7 @@
 #include "OpenRenderGraph/GraphInstance.h"
 #include "OpenRenderGraph/GraphHost.h"
 #include "Runtime/Renderer/FrameBuildWorker.h"
+#include "Runtime/GraphIntegration/FrameBuild.h"
 #include "Runtime/GraphIntegration/EnvironmentJobGraph.h"
 #include "../../../generated/BuiltinResources.h"
 #include <BasicRenderer/Renderer.h>
@@ -123,7 +124,8 @@ void Renderer::Cleanup() {
     // A frame build in flight goes first: it builds against the host and the services torn down below.
     DiscardFrameBuildInFlight("shutdown");
     m_frameBuildWorker.reset();
-    if (currentRenderGraph) currentRenderGraph->StopFrameProduction();
+    for (const auto host : FrameGraphHostEpochs())
+        if (auto* graph = FrameGraph(host)) graph->StopFrameProduction();
     // Wait for all GPU frames to complete
 	spdlog::info("Stalling pipeline for cleanup");
 	StallPipeline();
@@ -131,6 +133,8 @@ void Renderer::Cleanup() {
     if (m_producerPersistentState && m_producerPersistentState->clodStreaming) m_producerPersistentState->clodStreaming->DetachGraph();
     // It holds the path tracer's accumulation buffer and dispatch arguments, which must go before the allocator does.
     m_pathTraceState.reset();
+    // The cross-epoch objects go with the graphs that use them.
+    m_frameInterface.reset();
     // Its worker posts to the state graph and its published buffer is a graph version: both go before the graph does.
     if (m_ghostFlareManager) m_ghostFlareManager->Shutdown();
     m_ghostFlareManager.reset();
@@ -214,9 +218,8 @@ void Renderer::Cleanup() {
             m_readbackCaptures->Shutdown();
         }
     }
-    if (currentRenderGraph) {
-        currentRenderGraph->ShutdownTaskWorkers();
-    }
+    for (const auto host : FrameGraphHostEpochs())
+        if (auto* graph = FrameGraph(host)) graph->ShutdownTaskWorkers();
     // Readback reservations are graph users. Join or cancel those users before
     // closing admission and detaching the shared request state.
     if (m_pReadbackManager) {
@@ -235,6 +238,7 @@ void Renderer::Cleanup() {
     currentRenderGraph = nullptr;
     // These hold flecs queries, which must go before the world does.
     m_frameBuild.reset();
+    m_epochBuilds.clear();
     m_vsmTransformChangedQuery.reset();
     m_debugSceneSnapshots.reset();
     m_publishedResourceEntities.clear();
@@ -275,6 +279,7 @@ void Renderer::Cleanup() {
     m_clodRayTracingSystem.reset();
     m_context = {};
     m_frameInputs.reset();
+    m_lastFrameUpdate.reset();
     m_materialEvaluationInputs = {};
     m_openPBRLookupResources = {};
     m_blueNoiseTexture.reset();
@@ -564,10 +569,46 @@ void Renderer::Initialize(
         org::GraphHost::Desc hostDesc{};
         hostDesc.runtime = m_orgRuntime;
         hostDesc.framesInFlight = m_numFramesInFlight;
-        hostDesc.epochOrder = {kUploadEpoch, kFrameEpoch};
+        m_useGraphInstance = br::runtime::renderer_settings::ReadTruthyEnvironmentFlag("BASICRENDERER_FRAME_GRAPH_INSTANCE");
+        // M4 step 6: Visibility, Shading, Post and Overlay each in a host epoch's graph of its own, executed in that order every
+        // frame. BASICRENDERER_FRAME_SPLIT=0 keeps the whole frame in one graph, =1 Visibility and Shading in one (step 5); the
+        // in-place graph is one graph.
+        {
+            int split = 2;
+            if (const char* value = std::getenv("BASICRENDERER_FRAME_SPLIT"); value && value[0] >= '0' && value[0] <= '2') split = value[0] - '0';
+            br::render::SetFrameSplit(m_useGraphInstance ? 0 : split);
+        }
+        hostDesc.epochOrder = {kUploadEpoch};
+        for (const auto host : br::render::FrameHostEpochs()) hostDesc.epochOrder.push_back(host);
+        // A replaced graph is destroyed on the runtime's deleter thread, not in a frame (M4 step 2): about 10 ms in raster.
+        // BASICRENDERER_RETIRED_GRAPHS_ON_RENDER_THREAD=1 destroys it on the render thread, as before.
+        hostDesc.destroyRetiredGraphsDetached =
+            !br::runtime::renderer_settings::ReadTruthyEnvironmentFlag("BASICRENDERER_RETIRED_GRAPHS_ON_RENDER_THREAD");
+        // ORG's frame placement (M4, decision D2): it places every epoch's transients from the frame's usage summaries, so a
+        // resource several epochs share is placed once over its whole span. On by default since it holds the single graph's
+        // aliasing (M4 step 4); BASICRENDERER_FRAME_PLACEMENT=0 turns it off.
+        m_framePlacement = !m_useGraphInstance && !br::runtime::renderer_settings::ReadFalsyEnvironmentFlag("BASICRENDERER_FRAME_PLACEMENT");
+        // The renderer builds its epochs itself, so it rebuilds the graphs whose placements went stale (ConsolidateFrameGraph).
+        hostDesc.reportStaleAliasPlacements = m_framePlacement;
         m_frameHost = std::make_unique<org::GraphHost>(std::move(hostDesc));
         m_frameHost->SetExplicitBuilds(true);
-        m_useGraphInstance = br::runtime::renderer_settings::ReadTruthyEnvironmentFlag("BASICRENDERER_FRAME_GRAPH_INSTANCE");
+        // Pass timestamps per retired run: with several epochs a frame, only the host knows which run index a completion read.
+        m_frameHost->SetCompletedFrameCallback([this](uint64_t hostFrame, const org::runtime::IStatisticsService& stats) {
+            OnFrameHostRunCompleted(hostFrame, stats);
+        });
+        if (m_framePlacement) {
+            // The frame's host epochs in frame order: each graph's uses count at its position, so a transient two epochs use
+            // is placed over the span between them and keeps its contents from the writing epoch to the reading one.
+            std::vector<org::GraphHost::FramePosition> positions;
+            for (const auto host : br::render::FrameHostEpochs())
+                positions.push_back({ host, static_cast<uint32_t>(positions.size()), false });
+            m_frameHost->SetFramePositions(std::move(positions));
+            org::GraphHost::FramePlacementSettings placement;
+            placement.enabled = true;
+            placement.logLifetimes = br::runtime::renderer_settings::ReadTruthyEnvironmentFlag("BASICRENDERER_FRAME_PLACEMENT_LOG");
+            m_frameHost->SetFramePlacement(placement);
+            spdlog::info("Renderer: ORG frame placement on (BASICRENDERER_FRAME_PLACEMENT)");
+        }
         // A failure of the attached graph's preparation, handed over by PollEpochFailures (ConsolidateFrameGraph). A build's own
         // failure comes back with its graph (BuildEpochGraph), not through here.
         m_frameHost->SetEpochFailedCallback([this](const org::GraphHost::EpochFailure& failure) {

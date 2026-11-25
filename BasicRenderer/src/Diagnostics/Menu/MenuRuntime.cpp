@@ -2376,14 +2376,28 @@ void Menu::Render(const RenderContext& context, rhi::CommandList commandList) {
         DrawPassTimingWindow();
     }
     
-    // A persistent graph traces its schedule only while the inspector shows it.
-    const bool persistentGraph = m_renderGraph != nullptr;
-    if (m_renderGraph && m_renderGraph->ScheduleTraceEnabled() != (showRG && persistentGraph))
-        m_renderGraph->SetScheduleTraceEnabled(showRG && persistentGraph);
+    // A persistent graph traces its schedule only while the inspector shows it. With several host epochs' graphs, the inspector
+    // shows the one picked and only that one traces.
+    if (m_inspectedEpochGraph >= m_epochGraphs.size()) m_inspectedEpochGraph = 0;
+    org::RenderGraph* inspected = m_epochGraphs.empty() ? m_renderGraph : m_epochGraphs[m_inspectedEpochGraph].second;
+    const bool persistentGraph = inspected != nullptr;
+    for (size_t index = 0; index < m_epochGraphs.size(); ++index) {
+        auto* graph = m_epochGraphs[index].second;
+        if (graph && graph != inspected && graph->ScheduleTraceEnabled()) graph->SetScheduleTraceEnabled(false);
+    }
+    if (inspected && inspected->ScheduleTraceEnabled() != (showRG && persistentGraph))
+        inspected->SetScheduleTraceEnabled(showRG && persistentGraph);
     if (showRG && persistentGraph) {
         static org::debugui::ScheduleInspectorState scheduleInspector;
         ImGui::Begin("Render Graph Inspector", nullptr);
-        if (const auto snapshot = m_renderGraph->GetPersistentScheduleSnapshot())
+        if (m_epochGraphs.size() > 1) {
+            for (size_t index = 0; index < m_epochGraphs.size(); ++index) {
+                if (index) ImGui::SameLine();
+                const std::string label = "Host epoch " + std::to_string(m_epochGraphs[index].first);
+                if (ImGui::RadioButton(label.c_str(), m_inspectedEpochGraph == index)) m_inspectedEpochGraph = index;
+            }
+        }
+        if (const auto snapshot = inspected->GetPersistentScheduleSnapshot())
             org::debugui::ShowScheduleInspector(*snapshot, scheduleInspector);
         else
             ImGui::TextWrapped("No schedule yet: the graph traces its executables from the next frame it prepares.");

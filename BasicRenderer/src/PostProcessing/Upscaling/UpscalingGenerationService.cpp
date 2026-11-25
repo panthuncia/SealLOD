@@ -32,6 +32,13 @@ void UpscalingGenerationService::RegisterRayReconstructionGuides(org::RenderGrap
     if (UpscalingManager::GetInstance().GetCurrentUpscalingMode() != UpscalingMode::DLSSRayReconstruction) {
         return;
     }
+    MakeRayReconstructionGuides([&](std::string_view id, std::shared_ptr<org::Resource> texture) {
+        graph.RegisterResource(id, std::move(texture));
+    });
+}
+
+void UpscalingGenerationService::MakeRayReconstructionGuides(
+    const std::function<void(std::string_view, std::shared_ptr<org::Resource>)>& sink) {
     const auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
     const auto registerGuide = [&](std::string_view id, const char* name, rhi::Format format, uint16_t channels) {
         org::TextureDescription desc;
@@ -43,7 +50,7 @@ void UpscalingGenerationService::RegisterRayReconstructionGuides(org::RenderGrap
         auto texture = org::PixelBuffer::CreateSharedUnmaterialized(desc);
         texture->SetName(name);
         org::memory::SetResourceUsageHint(*texture, "DLSS Ray Reconstruction guides");
-        graph.RegisterResource(id, std::move(texture));
+        sink(id, std::move(texture));
     };
     registerGuide(Builtin::RayTracing::SpecularAlbedo, "RR Specular Albedo", rhi::Format::R8G8B8A8_UNorm, 4);
     registerGuide(Builtin::RayTracing::SpecularHitDistance, "RR Specular Hit Distance", rhi::Format::R32_Float, 1);

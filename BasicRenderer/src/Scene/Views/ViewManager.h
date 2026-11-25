@@ -144,8 +144,14 @@ public:
         std::shared_ptr<org::PixelBuffer> depth,
         std::shared_ptr<org::PixelBuffer> linearDepth);
 
-	void AttachVisibilityBuffer(uint64_t viewID, std::shared_ptr<org::PixelBuffer> visibilityBuffer);
+	// headPointers: the view's deep visibility head pointers for this buffer (MakeCLodDeepVisibilityHeadPointers), or null to
+	// have EnsureCLodDeepVisibilityHeadPointers make them.
+	void AttachVisibilityBuffer(uint64_t viewID, std::shared_ptr<org::PixelBuffer> visibilityBuffer,
+		std::shared_ptr<org::PixelBuffer> headPointers = nullptr);
     std::shared_ptr<org::PixelBuffer> EnsureCLodDeepVisibilityHeadPointers(uint64_t viewID);
+    // New deep visibility head pointers for a visibility buffer the view will get (AttachVisibilityBuffer), so a graph built
+    // before the attach can declare the ones the view will have.
+    std::shared_ptr<org::PixelBuffer> MakeCLodDeepVisibilityHeadPointers(uint64_t viewID, const org::PixelBuffer& visibilityBuffer) const;
 
     // Update camera matrices/params
     void UpdateCamera(uint64_t viewID, const CameraInfo& cameraInfo);

@@ -8,6 +8,7 @@
 #include "Runtime/GraphIntegration/EnvironmentJobGraph.h"
 #include "OpenRenderGraph/Runtime.h"
 #include <BasicRenderer/Renderer.h>
+#include "Runtime/GraphIntegration/FrameBuild.h"
 #include "OpenRenderGraph/GraphInstance.h"
 #include "OpenRenderGraph/GraphHost.h"
 #include "Runtime/StateGraph/AsyncStateGraph.h"
@@ -276,7 +277,8 @@ void Renderer::Update(float elapsedSeconds) {
             spdlog::info("Renderer: material resolved texture table {} -> {} rows (material tables {}); rebuilding the graph",
                 tableRows, grown, materialRows);
             settings.getSettingSetter<uint32_t>(MaterialResolvedTextureCapacitySettingName)(grown);
-            RequestGraphRebuild("material resolved texture table grown");
+            // Material evaluation and the Shading passes that sample materials: the Visibility and Shading host epoch.
+            RequestGraphRebuild("material resolved texture table grown", br::render::HostEpochMaskOf({ br::render::kVisibilityEpoch }));
         }
     }
 
@@ -293,7 +295,7 @@ void Renderer::Update(float elapsedSeconds) {
             grown = std::min<uint64_t>(grown, 1ull << 30);
             spdlog::info("Renderer: light grid {} {} -> {} (needed {}); rebuilding the graph", what, capacity, grown, needed);
             settings.getSettingSetter<uint32_t>(name)(static_cast<uint32_t>(grown));
-            RequestGraphRebuild(std::string("light grid ") + what + " grown");
+            RequestGraphRebuild(std::string("light grid ") + what + " grown", br::render::HostEpochMaskOf({ br::render::kShadingEpoch }));
         };
         grow(LightGridIndexCapacitySettingName, LightGridMinIndexCapacity, m_pLightManager->GetCullingStats().maxNeededLights, "index entries");
         grow(LightGridRecordCapacitySettingName, LightGridMinRecordCapacity, m_pLightManager->GetNumLights(), "culling records");
@@ -984,6 +986,7 @@ void Renderer::Update(float elapsedSeconds) {
     basic_telemetry::SetGauge("SARP.FrameInputs.PublicationAdmissionReady", 1);
     renderSnapshot.uiDrawData = Menu::GetInstance().PrepareDrawData(renderSnapshot);
     auto immutableUpdate = std::make_shared<const UpdateContext>(updateData);
+    m_lastFrameUpdate = immutableUpdate;
     m_frameInputs = std::make_shared<const br::render::RendererFrameInputs>(
         std::move(immutableUpdate),
         std::make_shared<const RenderContext>(std::move(renderSnapshot)),
@@ -1260,10 +1263,13 @@ void Renderer::Update(float elapsedSeconds) {
                 const std::filesystem::path path(outputPath);
                 std::free(outputPath);
                 outputPath = nullptr;
-                if (auto* readbackService = m_readbackCaptures.get()) {
+                // The slot's texture the frame writes, not the slot-rotating indirection (a readback of a DynamicResource
+                // copies nothing).
+                auto presentationColor = m_dynamicPresentationColor->GetResource();
+                if (auto* readbackService = m_readbackCaptures.get(); readbackService && presentationColor) {
                     colorOutputReadbackRequested = true;
                     readbackService->RequestReadbackCaptureAfterGraph(
-                        m_dynamicPresentationColor.get(),
+                        presentationColor.get(),
                         org::RangeSpec{},
                         [path](br::ReadbackCaptureResult&& result) {
                             BT_ZONE_SCOPE("Renderer::ColorOutputReadback::Analyze");
@@ -1630,41 +1636,91 @@ void Renderer::Update(float elapsedSeconds) {
         if (currentRenderGraph) {
             BT_ZONE_SCOPE("Renderer::Update::FrameStatistics");
             if (auto* statisticsService = m_orgRuntime->Statistics().get()) {
-                // A long wait means the GPU fell a whole backlog behind. Only then, name the slowest passes of the frame
-                // just waited for, per queue, and how much of the queue's span they leave idle.
+                // A long wait means the GPU fell a whole backlog behind. Only then, name the slowest passes of the last run
+                // retired, per queue, and how much of the queue's span they leave idle.
                 constexpr double kHitchWaitMs = 50.0;
                 const bool hitch = m_lastWaitForFrameMs > kHitchWaitMs;
-                std::string hitchReport;
-                const auto describeQueue = [&](const char* queueName) {
-                    const auto& stamps = statisticsService->GetCompletedTimestamps();
-                    if (stamps.empty()) return;
-                    uint64_t first = UINT64_MAX;
-                    uint64_t last = 0u;
-                    double busyMs = 0.0;
-                    double ticksToMs = 0.0;
-                    std::vector<const org::runtime::CompletedTimestamp*> passes;
-                    for (const auto& stamp : stamps) {
-                        if (stamp.kind != org::runtime::TimestampRangeKind::Pass || stamp.endTick <= stamp.beginTick) continue;
-                        first = (std::min)(first, stamp.beginTick);
-                        last = (std::max)(last, stamp.endTick);
-                        busyMs += stamp.milliseconds;
-                        if (ticksToMs == 0.0) ticksToMs = stamp.milliseconds / static_cast<double>(stamp.endTick - stamp.beginTick);
-                        passes.push_back(&stamp);
-                    }
-                    if (passes.empty()) return;
-                    std::sort(passes.begin(), passes.end(), [](const auto* a, const auto* b) { return a->milliseconds > b->milliseconds; });
-                    hitchReport += fmt::format(" | {} span {:.1f} ms, passes {:.1f} ms:", queueName, static_cast<double>(last - first) * ticksToMs, busyMs);
-                    for (size_t i = 0; i < passes.size() && i < 6u; ++i) hitchReport += fmt::format(" {}={:.2f}", passes[i]->name, passes[i]->milliseconds);
-                };
-                statisticsService->OnFrameComplete(m_frameIndex, computeQueue); // Gather statistics for the last iteration of the frame
-                if (hitch) describeQueue("compute");
-                statisticsService->OnFrameComplete(m_frameIndex, graphicsQueue); // Gather statistics for the last iteration of the frame
+                // The in-place graph has no host to retire runs: its slot is the frame's.
+                if (m_useGraphInstance) {
+                    statisticsService->OnFrameComplete(m_frameIndex, computeQueue);
+                    OnFrameHostRunCompleted(m_totalFramesRendered, *statisticsService);
+                    statisticsService->OnFrameComplete(m_frameIndex, graphicsQueue);
+                    OnFrameHostRunCompleted(m_totalFramesRendered, *statisticsService);
+                }
                 if (hitch) {
-                    describeQueue("graphics");
+                    std::string hitchReport;
+                    const auto& names = statisticsService->GetPassNames();
+                    const auto describeQueue = [&](const char* queueName, std::vector<CompletedPassStamp> stamps) {
+                        if (stamps.empty()) return;
+                        uint64_t first = UINT64_MAX;
+                        uint64_t last = 0u;
+                        double busyMs = 0.0;
+                        double ticksToMs = 0.0;
+                        for (const auto& stamp : stamps) {
+                            first = (std::min)(first, stamp.begin);
+                            last = (std::max)(last, stamp.end);
+                            busyMs += stamp.milliseconds;
+                            if (ticksToMs == 0.0) ticksToMs = stamp.milliseconds / static_cast<double>(stamp.end - stamp.begin);
+                        }
+                        std::sort(stamps.begin(), stamps.end(), [](const auto& a, const auto& b) { return a.milliseconds > b.milliseconds; });
+                        hitchReport += fmt::format(" | {} span {:.1f} ms, passes {:.1f} ms:", queueName, static_cast<double>(last - first) * ticksToMs, busyMs);
+                        for (size_t i = 0; i < stamps.size() && i < 6u; ++i)
+                            if (stamps[i].passIndex >= 0 && static_cast<size_t>(stamps[i].passIndex) < names.size())
+                                hitchReport += fmt::format(" {}={:.2f}", names[stamps[i].passIndex], stamps[i].milliseconds);
+                    };
+                    describeQueue("compute", m_completedPassStamps[1]);
+                    describeQueue("graphics", m_completedPassStamps[0]);
                     spdlog::warn("Renderer hitch passes: frame {}{}", m_totalFramesRendered, hitchReport);
                 }
             }
         }
         });
     ProbeGraphicsCommandListCreation(deviceManager.GetDevice(), "after FrameMaintenance");
+}
+
+void Renderer::OnFrameHostRunCompleted(uint64_t hostFrame, const org::runtime::IStatisticsService& stats) {
+    const auto& completed = stats.GetCompletedTimestamps();
+    // BASICRENDERER_GPU_TIMELINE_PATH: every pass timestamp of the runs retired in frames [first, first + count) as CSV
+    // (BASICRENDERER_GPU_TIMELINE_FRAMES=first:count, default 1500:300), for looking at idle time per queue; a side file
+    // (.epochs.csv) has each pass's frame epoch.
+    static const auto timeline = []() {
+        struct Timeline { std::string path; uint64_t first = 1500, count = 300; };
+        Timeline t;
+        if (const char* path = std::getenv("BASICRENDERER_GPU_TIMELINE_PATH")) t.path = path;
+        if (const char* frames = std::getenv("BASICRENDERER_GPU_TIMELINE_FRAMES"))
+            std::sscanf(frames, "%llu:%llu", reinterpret_cast<unsigned long long*>(&t.first), reinterpret_cast<unsigned long long*>(&t.count));
+        return t;
+    }();
+    static std::ofstream timelineOut;
+    constexpr char kEndOfLine = 10;
+    static bool timelineDone = false;
+    if (!timeline.path.empty() && !timelineDone && m_totalFramesRendered >= timeline.first) {
+        if (m_totalFramesRendered >= timeline.first + timeline.count) {
+            timelineOut.close();
+            timelineDone = true;
+        } else {
+            if (!timelineOut.is_open()) {
+                timelineOut.open(timeline.path, std::ios::trunc);
+                timelineOut << "frame,host_frame,queue,kind,name,begin,end,ms" << kEndOfLine;
+                std::ofstream epochs(timeline.path + ".epochs.csv", std::ios::trunc);
+                if (m_knownPassEpochs)
+                    for (const auto& [pass, epoch] : *m_knownPassEpochs) epochs << pass << ',' << epoch << kEndOfLine;
+            }
+            for (const auto& stamp : completed)
+                timelineOut << m_totalFramesRendered << ',' << hostFrame << ',' << (stamp.queueKind == rhi::QueueKind::Compute ? 1 : 0) << ','
+                    << static_cast<int>(stamp.kind) << ',' << stamp.name << ',' << stamp.beginTick << ',' << stamp.endTick << ','
+                    << stamp.milliseconds << kEndOfLine;
+        }
+    }
+    // The hitch log's copy: the queue's passes of the last run that had any.
+    bool cleared[2] = { false, false };
+    for (const auto& stamp : completed) {
+        if (stamp.kind != org::runtime::TimestampRangeKind::Pass || stamp.endTick <= stamp.beginTick) continue;
+        const size_t queue = stamp.queueKind == rhi::QueueKind::Compute ? 1 : 0;
+        if (!cleared[queue]) {
+            m_completedPassStamps[queue].clear();
+            cleared[queue] = true;
+        }
+        m_completedPassStamps[queue].push_back({ stamp.passIndex, stamp.beginTick, stamp.endTick, stamp.milliseconds });
+    }
 }

@@ -17,6 +17,8 @@ PerViewLinearDepthCopyPass::PerViewLinearDepthCopyPass(bool writeProjectedDepth)
 }
 
 PerViewLinearDepthCopyBindings PerViewLinearDepthCopyPass::Declare(org::PassBuilder& builder) {
+    // A new graph's first declaration: from the views its build started with, as the first Update will see them.
+    if (const auto* seed = br::render::BuildUpdateContext()) (void)UpdateViews(*seed);
     PerViewLinearDepthCopyBindings bindings{};
     bindings.pipeline = br::render::DeclarePipeline(br::render::ComputePipeline(
         L"shaders/canonicalSurface.hlsl", L"PerViewPrimaryDepthCopyCS", "PerViewPrimaryDepthCopyPSO"));
@@ -40,9 +42,12 @@ void PerViewLinearDepthCopyPass::Initialize() {
 }
 
 void PerViewLinearDepthCopyPass::Update(const org::UpdateExecutionContext& executionContext) {
-    const auto* context = executionContext.hostData->Get<UpdateContext>();
+    m_declaredResourcesChanged = UpdateViews(*executionContext.hostData->Get<UpdateContext>());
+}
+
+bool PerViewLinearDepthCopyPass::UpdateViews(const UpdateContext& context) {
     std::vector<ViewSnapshot> views;
-    for (const auto& view : context->Views()) {
+    for (const auto& view : context.Views()) {
         if (!view.visibilityBuffer || !view.linearDepthMap) continue;
         const auto& projection = view.cameraInfo.unjitteredProjection;
         views.push_back({view.visibilityBuffer, view.linearDepthMap,
@@ -58,8 +63,9 @@ void PerViewLinearDepthCopyPass::Update(const org::UpdateExecutionContext& execu
         for (const auto& view : list) keys.emplace_back(view.visibility.get(), view.linearDepth.get(), view.primary);
         return keys;
     };
-    m_declaredResourcesChanged = declares(views) != declares(m_views);
+    const bool changed = declares(views) != declares(m_views);
     m_views = std::move(views);
+    return changed;
 }
 
 PerViewLinearDepthCopyFrame PerViewLinearDepthCopyPass::Prepare(const PerViewLinearDepthCopyBindings& bindings,

@@ -10,6 +10,9 @@
 #include <BasicRenderer/Extensions/Buffers/StructuredBackingFlags.h>
 
 SortedUnsignedIntBuffer::~SortedUnsignedIntBuffer() {
+    // Out of both client registries before any member goes: the policy service and the backing resize registry may call it
+    // from another thread until then (a retired graph is destroyed on the runtime's deleter thread).
+    UnregisterUploadPolicyClient();
     if (!m_graphManaged) UnregisterDeferredBackingResizeClient(this);
 }
 

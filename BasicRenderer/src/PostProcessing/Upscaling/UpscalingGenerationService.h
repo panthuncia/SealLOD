@@ -1,7 +1,9 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
+#include <string_view>
 
 #include <DirectXMath.h>
 #include <rhi.h>
@@ -10,7 +12,7 @@
 
 namespace Components { struct Camera; }
 
-namespace org { class RenderGraph; }
+namespace org { class RenderGraph; class Resource; }
 
 namespace br::render {
 
@@ -23,6 +25,8 @@ public:
 
     // Creates the guides only Ray Reconstruction reads, if the current mode is it.
     static void RegisterRayReconstructionGuides(org::RenderGraph& graph);
+    // The guides, made now (render resolution) and handed to `sink` by id: the renderer keeps them in its frame interface.
+    static void MakeRayReconstructionGuides(const std::function<void(std::string_view, std::shared_ptr<org::Resource>)>& sink);
 
     UpscalingMode Mode() const noexcept { return m_mode; }
     rhi::Backend Backend() const noexcept { return m_backend; }

@@ -29,6 +29,7 @@
 #include "VirtualGeometry/Streaming/CLodStreamingReadbackSources.h"
 #include "VirtualGeometry/Streaming/RenderPasses/CLodDirectStorageLaunchPass.h"
 #include "VirtualGeometry/Streaming/Publication/CLodResidencyStorageArtifacts.h"
+#include "BasicRenderer/Extensions/FrameEpochs.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Render/Runtime/ExternalSignalReservation.h"
 #include "Render/Runtime/UploadTypes.h"
@@ -657,6 +658,21 @@ namespace {
     };
 
 
+}
+
+std::shared_ptr<CLodStreamingGraphBinding> CLodStreamingGraphBinding::CreateSharing(const CLodStreamingGraphBinding& previous) {
+    auto binding = std::make_shared<CLodStreamingGraphBinding>();
+    binding->loadRequestKeys = previous.loadRequestKeys;
+    binding->loadRequests = previous.loadRequests;
+    binding->loadCounter = previous.loadCounter;
+    binding->runtimeState = previous.runtimeState;
+    binding->usedGroupsCounter = previous.usedGroupsCounter;
+    binding->usedGroupsBuffer = previous.usedGroupsBuffer;
+    binding->usedGroupsBits = previous.usedGroupsBits;
+    binding->sourceGroupMismatchCounter = previous.sourceGroupMismatchCounter;
+    binding->sourceGroupMismatchDetails = previous.sourceGroupMismatchDetails;
+    binding->sort = previous.sort;
+    return binding;
 }
 
 std::shared_ptr<CLodStreamingGraphBinding> CLodStreamingGraphBinding::Create() {
@@ -1540,8 +1556,7 @@ void CLodStreamingSystem::RunStreamingServiceWork() {
 
 }
 
-void CLodStreamingSystem::GatherStructuralPasses(
-    org::RenderGraph& rg, CLodStreamingGraphBinding& binding, std::vector<org::ExternalPassDesc>& outPasses) {
+void CLodStreamingSystem::RegisterGraphResources(org::RenderGraph& rg, const CLodStreamingGraphBinding& binding) {
     // The residency storages learn of their producer when the binding is attached (AttachGraph).
     rg.RegisterResolver(Builtin::CLod::StreamingNonResidentBits, m_nonResidentBitsResolver);
     rg.RegisterResource(Builtin::CLod::StreamingLoadRequestKeys, binding.loadRequestKeys);
@@ -1551,8 +1566,55 @@ void CLodStreamingSystem::GatherStructuralPasses(
     rg.RegisterResource(Builtin::CLod::StreamingTouchedGroupsCounter, binding.usedGroupsCounter);
     rg.RegisterResource(Builtin::CLod::StreamingTouchedGroups, binding.usedGroupsBuffer);
     rg.RegisterResource(Builtin::CLod::StreamingTouchedGroupsBits, binding.usedGroupsBits);
+}
 
-    // The async uploads are submitted through the graph's external client after each frame (SubmitExternalWork).
+void CLodStreamingSystem::GatherStructuralPasses(
+    org::RenderGraph& rg, CLodStreamingGraphBinding& binding, std::vector<org::ExternalPassDesc>& outPasses) {
+    RegisterGraphResources(rg, binding);
+
+	auto streamingBeginPass = std::make_shared<CLodStreamingBeginFramePass>(
+		[]() -> org::UploadInstance* { return nullptr; },
+		binding.loadCounter,
+        binding.loadRequestKeys,
+		binding.usedGroupsCounter,
+		binding.usedGroupsBits,
+        binding.sourceGroupMismatchCounter,
+		binding.runtimeState,
+		[](std::vector<uint32_t>& outBits, uint32_t& outFirstWord, org::UploadInstance*) {
+            // Non-resident data is sealed by the single streaming writer into
+            // the same ticketed batch as page payload and page-map changes.
+            outBits.clear();
+            outFirstWord = 0u;
+            return false;
+        },
+		[this](const UpdateContext& context) {
+            // Groups past the capacity of the bitset this frame binds read as
+            // nonresident; its published geometry never references them.
+            return std::min(m_publishedActiveGroupScanCount, BoundResidencyCapacity(context));
+		},
+        [this]() {
+            PublishStreamingFrameWorkForFrame();
+        },
+        [this]() {
+            RequestStreamingFrameWork();
+        });
+
+    auto streamingBeginPassDesc = org::ExternalPassDesc::Compute(
+        "CLod::StreamingBeginFramePass",
+        streamingBeginPass);
+    // Keep the CLod front-end behind the visibility/depth clear so the graph
+    // cannot legally sink ClearVisibilityBufferPass after CLod rasterization.
+    auto streamingBeginInsertPoint =
+        org::ExternalInsertPoint::After("ClearVisibilityBufferPass");
+    streamingBeginInsertPoint.keepExtensionOrder = false;
+    streamingBeginPassDesc.At(std::move(streamingBeginInsertPoint));
+    outPasses.push_back(std::move(streamingBeginPassDesc));
+}
+
+CLodStreamingTailWork CLodStreamingSystem::GatherStructuralTailPasses(
+    org::RenderGraph& rg, CLodStreamingGraphBinding& binding, std::vector<org::ExternalPassDesc>& outPasses) {
+    CLodStreamingTailWork work;
+    // The async uploads are submitted through the tail's graph's external client after each frame (SubmitExternalWork).
     auto asyncUpload = std::make_shared<CLodStructuralAsyncUploadPass>(
                 [this](CLodAsyncUploadSnapshot& outSnapshot) -> bool {
                     ZoneScopedN("CLodAsyncUpload::AcquireSnapshot");
@@ -1599,52 +1661,11 @@ void CLodStreamingSystem::GatherStructuralPasses(
                     RequestStreamingFrameWork();
                     return result;
                 });
-    // The binding's upload queue is made later in the build (CLodExtension::Initialize), so it is read at submission.
-    binding.submitAsyncUploads = [asyncUpload](org::ExternalClient& client, org::QueueSlotIndex uploadQueueSlot) {
+    // The upload queue is the tail's graph's (CLodStreamingTailExtension::Initialize), given at submission.
+    work.submitAsyncUploads = [asyncUpload](org::ExternalClient& client, org::QueueSlotIndex uploadQueueSlot) {
         asyncUpload->SubmitTo(client, org::ToUnderlying(uploadQueueSlot));
     };
 
-	auto streamingBeginPass = std::make_shared<CLodStreamingBeginFramePass>(
-		[]() -> org::UploadInstance* { return nullptr; },
-		binding.loadCounter,
-        binding.loadRequestKeys,
-		binding.usedGroupsCounter,
-		binding.usedGroupsBits,
-        binding.sourceGroupMismatchCounter,
-		binding.runtimeState,
-		[](std::vector<uint32_t>& outBits, uint32_t& outFirstWord, org::UploadInstance*) {
-            // Non-resident data is sealed by the single streaming writer into
-            // the same ticketed batch as page payload and page-map changes.
-            outBits.clear();
-            outFirstWord = 0u;
-            return false;
-        },
-		[this](const UpdateContext& context) {
-            // Groups past the capacity of the bitset this frame binds read as
-            // nonresident; its published geometry never references them.
-            return std::min(m_publishedActiveGroupScanCount, BoundResidencyCapacity(context));
-		},
-        [this]() {
-            PublishStreamingFrameWorkForFrame();
-        },
-        [this]() {
-            RequestStreamingFrameWork();
-        });
-
-    auto streamingBeginPassDesc = org::ExternalPassDesc::Compute(
-        "CLod::StreamingBeginFramePass",
-        streamingBeginPass);
-    // Keep the CLod front-end behind the visibility/depth clear so the graph
-    // cannot legally sink ClearVisibilityBufferPass after CLod rasterization.
-    auto streamingBeginInsertPoint =
-        org::ExternalInsertPoint::After("ClearVisibilityBufferPass");
-    streamingBeginInsertPoint.keepExtensionOrder = false;
-    streamingBeginPassDesc.At(std::move(streamingBeginInsertPoint));
-    outPasses.push_back(std::move(streamingBeginPassDesc));
-}
-
-void CLodStreamingSystem::GatherStructuralTailPasses(
-    org::RenderGraph& rg, CLodStreamingGraphBinding& binding, std::vector<org::ExternalPassDesc>& outPasses) {
     const bool hasStreamingFeedbackSort = binding.sort.keyScratch != nullptr;
     if (hasStreamingFeedbackSort) {
         auto feedbackSortPass = std::make_shared<CLodStreamingFeedbackSortPass>(
@@ -1659,16 +1680,16 @@ void CLodStreamingSystem::GatherStructuralTailPasses(
             binding.sort.countScatterArgs,
             binding.sort.reduceScanArgs);
 
+        // At the end of the graph that writes the feedback (CLodStreamingTailExtension): after every pass that writes a request.
         outPasses.push_back(
             org::ExternalPassDesc::Compute(
                 "CLod::StreamingFeedbackSort",
                 feedbackSortPass)
-                .At(org::ExternalInsertPoint::After(rg.GetPresentPass()))
+                .At(org::ExternalInsertPoint::End())
                 .PreferQueue(org::QueueKind::Graphics));
     }
 
-    // The readback copies this graph's feedback: the binding's buffers, captured (not the binding, which owns this pass
-    // through its submit function). The shadow variant recorded its fallback dependency list in its PrepareForBuild,
+    // The readback copies this graph's feedback: the binding's buffers, captured. The shadow variant recorded its fallback dependency list in its PrepareForBuild,
     // which runs before any gather.
     CLodStreamingReadbackSources readbackSources{};
     readbackSources.counterSource = binding.loadCounter;
@@ -1770,7 +1791,7 @@ void CLodStreamingSystem::GatherStructuralTailPasses(
 
     // The streaming feedback readback is submitted through the graph's external client after each frame, so it copies
     // what the frame wrote (SubmitExternalWork).
-    binding.submitStreamingReadback = [readbackPass, slot = org::ToUnderlying(rg.GetQueueRegistry().FindGraphicsSlot())](
+    work.submitStreamingReadback = [readbackPass, slot = org::ToUnderlying(rg.GetQueueRegistry().FindGraphicsSlot())](
         org::ExternalClient& client) { readbackPass->SubmitTo(client, slot); };
 
     CLodDirectStorageLaunchInputs launchInputs{};
@@ -1813,13 +1834,16 @@ void CLodStreamingSystem::GatherStructuralTailPasses(
         org::ExternalPassDesc::Copy(
             "CLod::DirectStorageLaunch",
             std::make_shared<CLodDirectStorageLaunchPass>(std::move(launchInputs)))
-            .At(org::ExternalInsertPoint::After(rg.GetPresentPass()))
+            .At(org::ExternalInsertPoint::End())
             .PreferQueue(org::QueueKind::Graphics));
+    return work;
 }
 
-void CLodStreamingSystem::SubmitExternalWork(org::ExternalClient& client, const CLodStreamingGraphBinding* binding) {
-    if (!binding || binding != m_binding.get()) return;
-    m_binding->SubmitExternalWork(client);
+void CLodStreamingSystem::SubmitExternalWork(org::ExternalClient& client, const CLodStreamingGraphBinding* binding,
+    const CLodStreamingTailWork& work, org::QueueSlotIndex uploadQueueSlot) {
+    if (!binding || !m_binding || !binding->SharesBuffersWith(*m_binding)) return;
+    if (work.submitAsyncUploads) work.submitAsyncUploads(client, uploadQueueSlot);
+    if (work.submitStreamingReadback) work.submitStreamingReadback(client);
     PublishStreamingFrameWorkForFrame();
 }
 

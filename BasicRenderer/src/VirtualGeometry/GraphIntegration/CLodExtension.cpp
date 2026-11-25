@@ -665,11 +665,11 @@ void CLodExtension::AppendRayTracingPasses(const CLodVariantTraits& traits, std:
         previous = passName;
     }
 
-    // Ray traced primary visibility writes into the opaque variant's list, which that variant put in the build's outputs in
-    // its PrepareForBuild (it runs before any gather).
+    // Ray traced primary visibility writes into the opaque variant's list, which that variant put in the build's Visibility
+    // outputs in its PrepareForBuild (it runs before any gather). Both variants are Visibility's.
     const auto* build = br::render::CurrentFrameBuild();
-    if (m_options.scheduleRayTracedVisibility && build && build->outputs.clodPrimary.visibleClusters) {
-        const auto& primary = build->outputs.clodPrimary;
+    if (m_options.scheduleRayTracedVisibility && build && build->Outputs(br::render::kVisibilityEpoch).clodPrimary.visibleClusters) {
+        const auto& primary = build->Outputs(br::render::kVisibilityEpoch).clodPrimary;
         auto visibilityDesc = org::ExternalPassDesc::Compute(MakeVariantPassName(traits, "VisibilityPass"), std::make_shared<RayTracedVisibilityPass>(
             m_options.rayTracingSystem, m_options.slabResourceGroup, m_options.rayTracedVisibilityMode, primary.visibleClusters,
             primary.visibleClusterTransformIndices, primary.visibleClusterCapacity));
@@ -1321,7 +1321,7 @@ void CLodExtension::PublishPrimaryBuffersToFrameBuild() const
     }
     // The same buffers the directory lists under the visibility buffer type, which the renderer's pass declarations
     // used to query: the Reyes ones only while they are listed.
-    auto& primary = build->outputs.clodPrimary;
+    auto& primary = build->Outputs(br::render::kVisibilityEpoch).clodPrimary;
     primary = {};
     primary.visibleClusters = m_visibleClustersBuffer;
     primary.visibleClusterCounter = m_visibleClustersCounterBuffer;
@@ -1342,9 +1342,21 @@ CLodStreamingGraphBinding* CLodExtension::BuildStreamingBinding()
     if (!build) {
         return nullptr;
     }
-    auto& binding = build->outputs.clodStreaming;
+    // The binding is Visibility's: the opaque variant owns streaming. A variant of another epoch (alpha, in Shading) writes its
+    // feedback into the same objects: this build's when it declares Visibility, else the attached graph's (FrameInterface).
+    if (!build->Declares(br::render::kVisibilityEpoch)) {
+        return build->inputs.frameInterface.clodStreaming.get();
+    }
+    auto& binding = build->Outputs(br::render::kVisibilityEpoch).clodStreaming;
     if (!binding) {
-        binding = CLodStreamingGraphBinding::Create();
+        // The attached binding's buffers again, so Shading's graph (the alpha variant, the streaming tail) keeps working with
+        // a Visibility rebuild's. Not with the shadow variant: its lists are per build, and the tail's readback copies them, so
+        // new buffers then, and the renderer rebuilds Shading with them (PublishFrameBuild).
+        const auto& previous = build->inputs.frameInterface.clodStreaming;
+        const bool shadow = build->inputs.extensionMakers.contains("CLodShadow");
+        binding = previous && !shadow && !previous->HasVirtualShadowResources()
+            ? CLodStreamingGraphBinding::CreateSharing(*previous)
+            : CLodStreamingGraphBinding::Create();
     }
     return binding.get();
 }
@@ -1378,14 +1390,10 @@ void CLodExtension::PrepareForBuild(org::RenderGraph& rg)
 void CLodExtension::Initialize(org::RenderGraph& rg)
 {
     if (GetVariantTraits(m_type).ownsStreaming && m_streamingSystem) {
-        // The graph's queue registry has its primary queues now. The binding is attached after the build.
+        // The binding is attached after the build. Its async upload queue is the streaming tail's graph's.
         if (auto* binding = BuildStreamingBinding()) {
-            binding->uploadQueueSlot = rg.CreateQueue(
-                org::QueueKind::Copy,
-                "CLodAsyncUpload",
-                org::QueueAutoAssignmentPolicy::ManualOnly);
             binding->activeBranches = m_options.streamingActiveBranches;
-            m_streamingBinding = br::render::CurrentFrameBuild()->outputs.clodStreaming;
+            m_streamingBinding = br::render::CurrentFrameBuild()->Outputs(br::render::kVisibilityEpoch).clodStreaming;
         }
     }
 }
@@ -1425,19 +1433,9 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
     const std::shared_ptr<org::Buffer> streamingMismatchDetails =
         mismatchBinding ? mismatchBinding->sourceGroupMismatchDetails : nullptr;
 
-    bool streamingTailAppended = false;
-    const auto appendStreamingTailPasses = [&]() {
-        if (streamingBinding && !streamingTailAppended) {
-            // Keep after-present streaming passes at the extension tail. If they
-            // are emitted before CLod raster passes, extension-local chaining can
-            // create Present -> streaming tail -> CLod raster -> Present cycles.
-            m_streamingSystem->GatherStructuralTailPasses(rg, *streamingBinding, outPasses);
-            streamingTailAppended = true;
-        }
-    };
-
+    // Streaming's frame tail (feedback sort, DirectStorage launch, readback) is CLodStreamingTailExtension's, at the end of the
+    // graph that writes the feedback.
     if (!traits.schedulesStructuralPasses) {
-        appendStreamingTailPasses();
         return;
     }
 
@@ -1457,7 +1455,6 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
         BuildStructuralSchedulingPolicy(traits, m_type, m_options.enableReyes);
     if (traits.type == CLodExtensionType::AlphaBlend && schedulingPolicy.transparencyMode == CLodTransparencyMode::Disabled) {
         applyTechniqueTags();
-        appendStreamingTailPasses();
         return;
     }
     // The constructor made the Reyes buffers when the variant has Reyes; the directory lists them only where it runs.
@@ -1971,14 +1968,9 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
             passName,
             std::make_shared<PerViewLinearDepthCopyPass>(phaseIndex == 2u));
         if (phaseFeedsPrimaryVisibility(phaseIndex)) {
-            auto depthCopyInsertPoint = org::ExternalInsertPoint::Before("DeferredShadingPass");
-            if (phaseIndex == 2u && SettingsManager::GetInstance().getSettingGetter<bool>("enableGTAO")()) {
-                // The screen-space AO slot's first pass reads the linear depth.
-                depthCopyInsertPoint.AlsoBefore(br::ambient_occlusion::ReadAmbientOcclusionTechnique()
-                        == br::ambient_occlusion::AmbientOcclusionTechnique::XeGTAO
-                    ? "GTAOFilterPass" : "CORTAOPrepass");
-            }
-            depthCopyPassDesc.At(std::move(depthCopyInsertPoint));
+            // Shading's passes (AO, deferred shading) read the linear depth: they run in a later epoch's graph, or after it in a
+            // shared one (their reads order it), so the AO settings are not read here.
+            depthCopyPassDesc.At(org::ExternalInsertPoint::Before("DeferredShadingPass"));
         }
         outPasses.push_back(std::move(depthCopyPassDesc));
     };
@@ -2108,7 +2100,6 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
 
     if (traits.type == CLodExtensionType::VisiblityBuffer && m_options.pathTraced) {
         applyTechniqueTags();
-        appendStreamingTailPasses();
         return;
     }
 
@@ -2143,7 +2134,6 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
             AppendRayTracingPasses(traits, outPasses);
         }
         applyTechniqueTags();
-        appendStreamingTailPasses();
         return;
     }
 
@@ -2159,7 +2149,6 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
             disableReyesTessellation,
             outPasses);
         applyTechniqueTags();
-        appendStreamingTailPasses();
         return;
     }
 
@@ -2185,13 +2174,67 @@ void CLodExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org
     appendLinearDepthDownsamplePass(2u);
 
     applyTechniqueTags();
-    appendStreamingTailPasses();
 }
 
 void CLodExtension::AfterExecute(org::RenderGraph& rg)
 {
-    if (GetVariantTraits(m_type).ownsStreaming && m_streamingSystem) {
-        m_streamingSystem->SubmitExternalWork(rg.GetExternalClient(), m_streamingBinding.get());
+    // Streaming's after-execution work is CLodStreamingTailExtension's.
+    (void)rg;
+}
+
+CLodStreamingTailExtension::CLodStreamingTailExtension(std::shared_ptr<CLodStreamingSystem> streamingSystem)
+    : m_streamingSystem(std::move(streamingSystem))
+{
+}
+
+std::shared_ptr<CLodStreamingGraphBinding> CLodStreamingTailExtension::BuildBinding()
+{
+    // The build's binding when it declares Visibility (the opaque variant made it; Visibility's graph is built first), else the
+    // attached one.
+    auto* build = br::render::CurrentFrameBuild();
+    if (!build) return nullptr;
+    if (build->Declares(br::render::kVisibilityEpoch))
+        if (const auto& made = build->Outputs(br::render::kVisibilityEpoch).clodStreaming) return made;
+    return build->inputs.frameInterface.clodStreaming;
+}
+
+void CLodStreamingTailExtension::PrepareForBuild(org::RenderGraph& rg)
+{
+    // A graph without Visibility's opaque variant (Shading's) registers the binding's buffers itself: its CLod alpha variant
+    // writes the feedback by id.
+    auto* build = br::render::CurrentFrameBuild();
+    if (!build || !m_streamingSystem) return;
+    const uint32_t host = rg.PassEpochFilter();
+    if (host == br::render::kNoFrameEpoch || build->DeclaresIn(br::render::kVisibilityEpoch, host)) return;
+    m_binding = BuildBinding();
+    if (m_binding) m_streamingSystem->RegisterGraphResources(rg, *m_binding);
+}
+
+void CLodStreamingTailExtension::Initialize(org::RenderGraph& rg)
+{
+    // The graph's queue registry has its primary queues now: the async uploads' queue, in the graph whose client submits them.
+    if (m_streamingSystem) {
+        m_uploadQueueSlot = rg.CreateQueue(org::QueueKind::Copy, "CLodAsyncUpload", org::QueueAutoAssignmentPolicy::ManualOnly);
+    }
+}
+
+void CLodStreamingTailExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& outPasses)
+{
+    if (!m_streamingSystem) {
+        return;
+    }
+    if (!m_binding) m_binding = BuildBinding();
+    if (m_binding) {
+        m_work = m_streamingSystem->GatherStructuralTailPasses(rg, *m_binding, outPasses);
+    }
+}
+
+void CLodStreamingTailExtension::AfterExecute(org::RenderGraph& rg)
+{
+    // The async uploads and the feedback readback, after the graph that writes the feedback. Only while the service runs with
+    // this graph's buffers.
+    if (m_streamingSystem && m_binding) {
+        m_streamingSystem->SubmitExternalWork(rg.GetExternalClient(), m_binding.get(), m_work, m_uploadQueueSlot);
     }
 }
 

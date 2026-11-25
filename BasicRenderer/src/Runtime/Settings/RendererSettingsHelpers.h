@@ -60,6 +60,17 @@ inline bool ReadTruthyEnvironmentFlag(const char* name) {
     return result;
 }
 
+// Whether an environment variable is set to turn something off ("0", "false", "no", "off"). Unset: false.
+inline bool ReadFalsyEnvironmentFlag(const char* name) {
+    char* value = nullptr;
+    size_t valueSize = 0;
+    if (_dupenv_s(&value, &valueSize, name) != 0 || value == nullptr) return false;
+    const bool result = std::strcmp(value, "0") == 0 || _stricmp(value, "false") == 0
+        || _stricmp(value, "no") == 0 || _stricmp(value, "off") == 0;
+    std::free(value);
+    return result;
+}
+
 // SARP_CLOD_VSM_FRAME_TELEMETRY=<csv path>: every frame's VSM page and receiver
 // counters, one CSV row per frame. Empty when unset.
 inline const std::string& CLodVirtualShadowFrameTelemetryPath() {

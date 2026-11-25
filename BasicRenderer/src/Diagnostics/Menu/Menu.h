@@ -84,6 +84,9 @@ public:
         DirectX::XMUINT2 outputResolution);
     bool HandleInput(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 	void SetRenderGraph(org::RenderGraph* renderGraph) { m_renderGraph = renderGraph; }
+    // Every frame host epoch's graph, in execution order (M4 step 5): the schedule inspector shows the one picked. Statistics and
+    // pass timings are the runtime's, shared by every graph, and the memory snapshot is the ECS world's.
+    void SetEpochGraphs(std::vector<std::pair<uint32_t, org::RenderGraph*>> graphs) { m_epochGraphs = std::move(graphs); }
     // Drawn every frame between ImGui's NewFrame and Render, for tools that link the renderer.
     void SetExternalPanel(std::function<void()> panel) { m_externalPanel = std::move(panel); }
     void SetMenuEnabled(bool enabled) { m_menuEnabled = enabled; }
@@ -156,6 +159,8 @@ private:
     std::unordered_map<uint64_t, SceneExplorerPendingEdit> m_sceneExplorerPendingEdits;
 
 	org::RenderGraph* m_renderGraph = nullptr;
+    std::vector<std::pair<uint32_t, org::RenderGraph*>> m_epochGraphs;
+    size_t m_inspectedEpochGraph = 0;
 
     struct CLodCaptureStats {
         uint32_t visibleClusterCount = 0;

@@ -67,6 +67,9 @@ ReyesSplitPass::ReyesSplitPass(
 
 ReyesSplitBindings ReyesSplitPass::Declare(org::PassBuilder& declaration)
 {
+    // A new graph's first declaration: from the views its build started with, as the first Update will see them.
+    if (const auto* seed = br::render::BuildUpdateContext(); seed && m_enableViewDepthOcclusion)
+        (void)m_viewDepthTable.Update(seed->Views(), m_phaseIndex == 1u);
     declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     auto* builder = &declaration;
     builder->ShaderResource(

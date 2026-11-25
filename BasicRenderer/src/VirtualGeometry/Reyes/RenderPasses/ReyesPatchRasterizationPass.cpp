@@ -54,6 +54,8 @@ ReyesPatchRasterizationPass::ReyesPatchRasterizationPass(
 
 ReyesPatchRasterBindings ReyesPatchRasterizationPass::Declare(org::PassBuilder& builder)
 {
+    // A new graph's first declaration: from the views its build started with, as the first Update will see them.
+    if (const auto* seed = br::render::BuildUpdateContext()) (void)UpdateViews(*seed);
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.ShaderResource(
             Builtin::PerMeshBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases,
@@ -139,9 +141,11 @@ ReyesPatchRasterBindings ReyesPatchRasterizationPass::Declare(org::PassBuilder& 
 
 void ReyesPatchRasterizationPass::Update(const org::UpdateExecutionContext& executionContext)
 {
-    auto* updateContext = executionContext.hostData->Get<UpdateContext>();
-    auto& context = *updateContext;
+    m_declaredResourcesChanged = UpdateViews(*executionContext.hostData->Get<UpdateContext>());
+}
 
+bool ReyesPatchRasterizationPass::UpdateViews(const UpdateContext& context)
+{
     std::vector<ViewInput> viewInputs;
     std::vector<CLodViewRasterInfo> rows(context.ViewCameraBufferSize());
     for (const auto& view : context.Views()) {
@@ -156,9 +160,10 @@ void ReyesPatchRasterizationPass::Update(const org::UpdateExecutionContext& exec
     }
     // The row count is part of the declaration. It grows in powers of two, so a new camera only rarely redeclares.
     rows.resize((std::max<size_t>)(16u, std::bit_ceil(rows.size())));
-    m_declaredResourcesChanged = viewInputs != m_viewInputs || rows.size() != m_viewRasterInfos.size();
+    const bool changed = viewInputs != m_viewInputs || rows.size() != m_viewRasterInfos.size();
     m_viewInputs = std::move(viewInputs);
     m_viewRasterInfos = std::move(rows);
+    return changed;
 }
 
 std::vector<uint32_t> ReyesPatchRasterizationPass::ViewInputCameras() const {

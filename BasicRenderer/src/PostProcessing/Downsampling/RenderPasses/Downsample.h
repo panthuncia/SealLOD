@@ -55,6 +55,9 @@ public:
 
     DownsampleBindings Declare(org::PassBuilder& declaration) {
         declaration.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
+        // A new graph's first declaration: the depth maps of the views its build started with, as the first Update will
+        // find them.
+        if (const auto* seed = br::render::BuildUpdateContext()) m_activeDepthMaps = CollectActiveDepthMaps(seed->Views());
         SyncMapInfos(m_activeDepthMaps);
         DownsampleBindings bindings;
         bindings.maps.reserve(m_perMapInfo.size());

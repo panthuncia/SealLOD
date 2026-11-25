@@ -18,6 +18,7 @@
 
 namespace org { class Buffer; }
 namespace org { class ResourceGroup; }
+struct UpdateContext;
 
 struct ReyesPatchRasterBindings {
     br::PipelineState pipeline;
@@ -88,5 +89,7 @@ private:
     std::vector<ViewInput> m_viewInputs;
     std::vector<CLodViewRasterInfo> m_viewRasterInfos;
     std::vector<uint32_t> ViewInputCameras() const;
+    // Takes this frame's views; returns whether what the pass declares changed.
+    bool UpdateViews(const UpdateContext& context);
     bool m_declaredResourcesChanged = true;
 };

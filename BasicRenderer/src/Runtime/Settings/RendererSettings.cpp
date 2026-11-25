@@ -1,4 +1,5 @@
 #include <BasicRenderer/Renderer.h>
+#include "OpenRenderGraph/GraphHost.h"
 #include "Render/Runtime/OpenRenderGraphSettings.h"
 #include "Render/RenderGraph/Aliasing/RenderGraphAliasingSubsystem.h"
 #include <rhi_debug.h>
@@ -26,6 +27,7 @@
 #include "PostProcessing/ToneMapping/TonemapTypes.h"
 #include "Utilities/Utilities.h"
 #include "Runtime/Settings/RendererSettingsHelpers.h"
+#include "Runtime/GraphIntegration/FrameBuild.h"
 #include "PostProcessing/AmbientOcclusion/AmbientOcclusionSettings.h"
 #include "../shaders/PerPassRootConstants/materialTextureResolveConstants.h"
 #include "../shaders/PerPassRootConstants/lightCullingRootConstants.h"
@@ -140,6 +142,21 @@ std::string Renderer::DescribeGraphRevisions() const {
         { "topology_requests", m_frameRevisions.TopologyRequests() },
         { "frames", m_totalFramesRendered },
     };
+    // M4 step 5: the frame's host epochs, each a graph of its own, and how many graphs each has had attached. A build answers
+    // the requests for the epochs it names (last_build_host_epochs); "builds" counts builds, not graphs.
+    nlohmann::json epochBuilds = nlohmann::json::object();
+    for (const auto& [host, count] : m_epochGraphBuilds) epochBuilds[std::to_string(host)] = count;
+    reply["epoch_builds"] = std::move(epochBuilds);
+    reply["host_epochs"] = FrameGraphHostEpochs();
+    reply["last_build_host_epochs"] = m_lastGraphBuildHostEpochs;
+    // M4 step 7: frames checked for a mixed set of builds (CheckFrameBuildSet), and the host's own count of staged sets.
+    reply["frame_sets"] = {
+        { "frames_checked", m_frameSetCheck.totalFrames },
+        { "mixed_frames", m_frameSetCheck.totalMixed },
+        { "unknown_frames", m_frameSetCheck.totalUnknown },
+        { "host_sets_attached", m_frameHost ? m_frameHost->AttachStatsTotal().setsAttached : 0 },
+        { "host_staged", m_frameHost ? m_frameHost->AttachStatsTotal().staged : 0 },
+    };
     // M3 step 9: builds run on the build thread and are attached at the consolidation point.
     const auto& stats = m_graphBuildStats;
     const bool inFlight = FrameBuildInFlight();
@@ -152,6 +169,8 @@ std::string Renderer::DescribeGraphRevisions() const {
         { "failed", stats.failed },
         { "discarded", stats.discarded },
         { "superseded", stats.superseded },
+        { "staged_sets", stats.stagedSets },
+        { "refused_sets", stats.refusedSets },
         { "epoch_failures", stats.epochFailures },
         { "last_prepare_ms", stats.lastPrepareMs },
         { "last_attach_ms", stats.lastAttachMs },
@@ -188,6 +207,20 @@ void Renderer::ReconfigureUpscalerIfRequested() {
             PrimaryCameraLodHeight(ingestionConfiguration));
         RequestGraphRebuild("upscaler reconfiguration");
     });
+}
+
+namespace {
+// Which host epochs a setting's rebuild builds (M4 steps 5 and 6; docs/frame_graph_settings_classification.md and the M4 design's
+// section 3). Read when a setting changes, after the host was made (the split is fixed then). Visibility ends after material
+// evaluation: CLod, terrain RVT and material settings are Visibility's; AO, lights, stochastic lighting, reflections and CLod
+// transparency Shading's. Settings that change what both epochs declare (ray tracing, the canonical surface) are both.
+uint32_t VisibilityEpochs() { return br::render::HostEpochMaskOf({ br::render::kVisibilityEpoch }); }
+uint32_t ShadingEpochs() { return br::render::HostEpochMaskOf({ br::render::kShadingEpoch }); }
+uint32_t VisibilityShadingEpochs() { return br::render::HostEpochMaskOf({ br::render::kVisibilityEpoch, br::render::kShadingEpoch }); }
+uint32_t ShadingPostEpochs() { return br::render::HostEpochMaskOf({ br::render::kShadingEpoch, br::render::kPostEpoch }); }
+uint32_t PostEpochs() { return br::render::HostEpochMaskOf({ br::render::kPostEpoch }); }
+uint32_t OverlayEpochs() { return br::render::HostEpochMaskOf({ br::render::kOverlayEpoch }); }
+uint32_t PostOverlayEpochs() { return br::render::HostEpochMaskOf({ br::render::kPostEpoch, br::render::kOverlayEpoch }); }
 }
 
 void Renderer::SetSettings() {
@@ -703,16 +736,16 @@ void Renderer::SetSettings() {
     // These choose stochastic lighting's passes, which its graph extension makes from the build's settings.
     for (const char* name : { "stochasticLightingReference", "stochasticLightingAccumulate", "stochasticLightingDenoise" }) {
         m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>(name, [this, name](const bool&) {
-            RequestGraphRebuild(std::string("setting ") + std::string(name));
+            RequestGraphRebuild(std::string("setting ") + std::string(name), ShadingEpochs());
         }));
     }
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("stochasticLightingDownsample", [this](const uint32_t&) {
-        RequestGraphRebuild(std::string("setting ") + "stochasticLightingDownsample");
+        RequestGraphRebuild(std::string("setting ") + "stochasticLightingDownsample", ShadingEpochs());
     }));
     // At full resolution the estimator's buffers hold the setting's samples per pixel (docs/stochastic_lighting.md "Kernel split"), so a change rebuilds them.
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("stochasticLightingSamplesPerPixel", [this](const uint32_t&) {
         if (SettingsManager::GetInstance().getSettingGetter<uint32_t>("stochasticLightingDownsample")() == 1u) {
-            RequestGraphRebuild(std::string("setting ") + "stochasticLightingSamplesPerPixel");
+            RequestGraphRebuild(std::string("setting ") + "stochasticLightingSamplesPerPixel", ShadingEpochs());
         }
     }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<std::string>("environmentName", [this](const std::string& newValue) {
@@ -725,7 +758,7 @@ void Renderer::SetSettings() {
         ::ResourceManager::GetInstance().SetOutputType(newValue);
         const bool newOutputTypeRequiresRenderGraphRebuild = OutputTypeRequiresRenderGraphRebuild(newValue);
         if (newOutputTypeRequiresRenderGraphRebuild != outputTypeRequiresRenderGraphRebuild) {
-            RequestGraphRebuild(std::string("setting ") + "outputType");
+            RequestGraphRebuild(std::string("setting ") + "outputType", PostOverlayEpochs());
         }
         outputTypeRequiresRenderGraphRebuild = newOutputTypeRequiresRenderGraphRebuild;
         }));
@@ -733,11 +766,11 @@ void Renderer::SetSettings() {
 		m_allowTearing = newValue;
 		}));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("drawBoundingSpheres", [this](const bool& newValue) {
-		RequestGraphRebuild(std::string("setting ") + "drawBoundingSpheres");
+		RequestGraphRebuild(std::string("setting ") + "drawBoundingSpheres", OverlayEpochs());
 		}));
     for (const char* name : { LightGridTileSizeSettingName, LightGridSlicesSettingName }) {
         m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(name, [this, name](const uint32_t&) {
-            RequestGraphRebuild(std::string("setting ") + std::string(name));
+            RequestGraphRebuild(std::string("setting ") + std::string(name), ShadingEpochs());
             }));
     }
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableClusteredLighting", [this](const bool& newValue) {
@@ -761,10 +794,10 @@ void Renderer::SetSettings() {
 		}));
     // Which technique fills the screen-space AO slot, and CORTAO's sample count (a pipeline define): both rebuild the graph.
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(br::ambient_occlusion::TechniqueSettingName, [this](const uint32_t&) {
-		RequestGraphRebuild(std::string("setting ") + std::string(br::ambient_occlusion::TechniqueSettingName));
+		RequestGraphRebuild(std::string("setting ") + std::string(br::ambient_occlusion::TechniqueSettingName), ShadingEpochs());
 		}));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(br::ambient_occlusion::CortaoSampleCountSettingName, [this](const uint32_t&) {
-		RequestGraphRebuild(std::string("setting ") + std::string(br::ambient_occlusion::CortaoSampleCountSettingName));
+		RequestGraphRebuild(std::string("setting ") + std::string(br::ambient_occlusion::CortaoSampleCountSettingName), ShadingEpochs());
 		}));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableTerrainRegionMaterialEvaluation", [this](const bool& newValue) {
         if (m_syncingPipelineTopologySettings) return;
@@ -790,102 +823,102 @@ void Renderer::SetSettings() {
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("terrainRvtCompression", [this](const bool& newValue) {
         (void)newValue;
         m_producerPersistentState->InvalidateTerrainRvt();
-        RequestGraphRebuild(std::string("setting ") + "terrainRvtCompression");
+        RequestGraphRebuild(std::string("setting ") + "terrainRvtCompression", VisibilityShadingEpochs());
         }));
     // Sizes the compression scratch.
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("terrainRvtMaxGeneratedPagesPerFrame", [this](const uint32_t& newValue) {
         (void)newValue;
-        RequestGraphRebuild(std::string("setting ") + "terrainRvtMaxGeneratedPagesPerFrame");
+        RequestGraphRebuild(std::string("setting ") + "terrainRvtMaxGeneratedPagesPerFrame", VisibilityShadingEpochs());
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("terrainRvtPageSize", [this](const uint32_t& newValue) {
         (void)newValue;
         m_producerPersistentState->InvalidateTerrainRvt();
-        RequestGraphRebuild(std::string("setting ") + "terrainRvtPageSize");
+        RequestGraphRebuild(std::string("setting ") + "terrainRvtPageSize", VisibilityShadingEpochs());
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("terrainRvtBorderTexels", [this](const uint32_t& newValue) {
         (void)newValue;
         m_producerPersistentState->InvalidateTerrainRvt();
-        RequestGraphRebuild(std::string("setting ") + "terrainRvtBorderTexels");
+        RequestGraphRebuild(std::string("setting ") + "terrainRvtBorderTexels", VisibilityShadingEpochs());
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("terrainRvtPhysicalAtlasPagesWide", [this](const uint32_t& newValue) {
         (void)newValue;
         m_producerPersistentState->InvalidateTerrainRvt();
-        RequestGraphRebuild(std::string("setting ") + "terrainRvtPhysicalAtlasPagesWide");
+        RequestGraphRebuild(std::string("setting ") + "terrainRvtPhysicalAtlasPagesWide", VisibilityShadingEpochs());
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("terrainRvtPhysicalAtlasPagesHigh", [this](const uint32_t& newValue) {
         (void)newValue;
         m_producerPersistentState->InvalidateTerrainRvt();
-        RequestGraphRebuild(std::string("setting ") + "terrainRvtPhysicalAtlasPagesHigh");
+        RequestGraphRebuild(std::string("setting ") + "terrainRvtPhysicalAtlasPagesHigh", VisibilityShadingEpochs());
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("terrainRvtPhysicalAtlasPoolCount", [this](const uint32_t& newValue) {
         (void)newValue;
         m_producerPersistentState->InvalidateTerrainRvt();
-        RequestGraphRebuild(std::string("setting ") + "terrainRvtPhysicalAtlasPoolCount");
+        RequestGraphRebuild(std::string("setting ") + "terrainRvtPhysicalAtlasPoolCount", VisibilityShadingEpochs());
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("terrainRvtClipPageTableResolution", [this](const uint32_t& newValue) {
         (void)newValue;
         m_producerPersistentState->InvalidateTerrainRvt();
-        RequestGraphRebuild(std::string("setting ") + "terrainRvtClipPageTableResolution");
+        RequestGraphRebuild(std::string("setting ") + "terrainRvtClipPageTableResolution", VisibilityShadingEpochs());
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("terrainRvtMaxTerrainSets", [this](const uint32_t& newValue) {
         (void)newValue;
         m_producerPersistentState->InvalidateTerrainRvt();
-        RequestGraphRebuild(std::string("setting ") + "terrainRvtMaxTerrainSets");
+        RequestGraphRebuild(std::string("setting ") + "terrainRvtMaxTerrainSets", VisibilityShadingEpochs());
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("terrainRvtMaxClipLevels", [this](const uint32_t& newValue) {
         (void)newValue;
         m_producerPersistentState->InvalidateTerrainRvt();
-        RequestGraphRebuild(std::string("setting ") + "terrainRvtMaxClipLevels");
+        RequestGraphRebuild(std::string("setting ") + "terrainRvtMaxClipLevels", VisibilityShadingEpochs());
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableOcclusionCulling", [this](const bool& newValue) {
 		m_occlusionCulling = newValue;
-		RequestGraphRebuild(std::string("setting ") + "enableOcclusionCulling");
+		RequestGraphRebuild(std::string("setting ") + "enableOcclusionCulling", VisibilityShadingEpochs());
 		}));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<CLodCullingBackend>(CLodCullingBackendSettingName, [this](const CLodCullingBackend& newValue) {
         (void)newValue;
-        RequestGraphRebuild(std::string("setting ") + std::string(CLodCullingBackendSettingName));
+        RequestGraphRebuild(std::string("setting ") + std::string(CLodCullingBackendSettingName), VisibilityShadingEpochs());
         }));
         m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableSceneRenderOverlap", [this](const bool& newValue) {
                 SetSceneRenderOverlapEnabled(newValue);
                 }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName, [this](const CLodSoftwareRasterMode& newValue) {
         (void)newValue;
-        RequestGraphRebuild(std::string("setting ") + std::string(CLodSoftwareRasterModeSettingName));
+        RequestGraphRebuild(std::string("setting ") + std::string(CLodSoftwareRasterModeSettingName), VisibilityShadingEpochs());
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<CLodVSMRasterMode>(CLodVSMRasterModeSettingName, [this](const CLodVSMRasterMode& newValue) {
         (void)newValue;
-        RequestGraphRebuild(std::string("setting ") + std::string(CLodVSMRasterModeSettingName));
+        RequestGraphRebuild(std::string("setting ") + std::string(CLodVSMRasterModeSettingName), VisibilityShadingEpochs());
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<CLodTransparencyMode>(CLodTransparencyModeSettingName, [this](const CLodTransparencyMode& newValue) {
         (void)newValue;
-        RequestGraphRebuild(std::string("setting ") + std::string(CLodTransparencyModeSettingName));
+        RequestGraphRebuild(std::string("setting ") + std::string(CLodTransparencyModeSettingName), ShadingEpochs());
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>(CLodDynamicWindBoundsCacheEnabledSettingName, [this](const bool&) {
-        RequestGraphRebuild(std::string("setting ") + std::string(CLodDynamicWindBoundsCacheEnabledSettingName));
+        RequestGraphRebuild(std::string("setting ") + std::string(CLodDynamicWindBoundsCacheEnabledSettingName), VisibilityShadingEpochs());
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(CLodDynamicWindBoundsCacheMiBSettingName, [this](const uint32_t&) {
-        RequestGraphRebuild(std::string("setting ") + std::string(CLodDynamicWindBoundsCacheMiBSettingName));
+        RequestGraphRebuild(std::string("setting ") + std::string(CLodDynamicWindBoundsCacheMiBSettingName), VisibilityShadingEpochs());
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>(CLodDynamicWindVertexCacheEnabledSettingName, [this](const bool&) {
-        RequestGraphRebuild(std::string("setting ") + std::string(CLodDynamicWindVertexCacheEnabledSettingName));
+        RequestGraphRebuild(std::string("setting ") + std::string(CLodDynamicWindVertexCacheEnabledSettingName), VisibilityShadingEpochs());
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(CLodDynamicWindVertexCacheMiBSettingName, [this](const uint32_t&) {
-        RequestGraphRebuild(std::string("setting ") + std::string(CLodDynamicWindVertexCacheMiBSettingName));
+        RequestGraphRebuild(std::string("setting ") + std::string(CLodDynamicWindVertexCacheMiBSettingName), VisibilityShadingEpochs());
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(CLodDirectionalVirtualShadowReceiverSubpageModeSettingName, [this](const uint32_t&) {
-        RequestGraphRebuild(std::string("setting ") + std::string(CLodDirectionalVirtualShadowReceiverSubpageModeSettingName));
+        RequestGraphRebuild(std::string("setting ") + std::string(CLodDirectionalVirtualShadowReceiverSubpageModeSettingName), VisibilityShadingEpochs());
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(CLodVisibleClusterCapacitySettingName, [this](const uint32_t& newValue) {
         (void)newValue;
-        RequestGraphRebuild(std::string("setting ") + std::string(CLodVisibleClusterCapacitySettingName));
+        RequestGraphRebuild(std::string("setting ") + std::string(CLodVisibleClusterCapacitySettingName), VisibilityShadingEpochs());
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>(CLodWorkGraphReyesVisibilitySettingName, [this](const bool& newValue) {
         (void)newValue;
-        RequestGraphRebuild(std::string("setting ") + std::string(CLodWorkGraphReyesVisibilitySettingName));
+        RequestGraphRebuild(std::string("setting ") + std::string(CLodWorkGraphReyesVisibilitySettingName), VisibilityShadingEpochs());
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>(CLodWorkGraphRigidOnlySettingName, [this](const bool& newValue) {
         (void)newValue;
-        RequestGraphRebuild(std::string("setting ") + std::string(CLodWorkGraphRigidOnlySettingName));
+        RequestGraphRebuild(std::string("setting ") + std::string(CLodWorkGraphRigidOnlySettingName), VisibilityShadingEpochs());
         }));
         m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>(CLodDisableReyesRasterizationSettingName, [this](const bool& newValue) {
             if (m_syncingPipelineTopologySettings) {
@@ -905,11 +938,11 @@ void Renderer::SetSettings() {
             }));
         m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(CLodDirectionalVirtualShadowMaxBackingResolutionSettingName, [this](const uint32_t& newValue) {
             (void)newValue;
-            RequestGraphRebuild(std::string("setting ") + std::string(CLodDirectionalVirtualShadowMaxBackingResolutionSettingName));
+            RequestGraphRebuild(std::string("setting ") + std::string(CLodDirectionalVirtualShadowMaxBackingResolutionSettingName), VisibilityShadingEpochs());
             }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(CLodReyesResourceBudgetBytesSettingName, [this](const uint32_t& newValue) {
         (void)newValue;
-        RequestGraphRebuild(std::string("setting ") + std::string(CLodReyesResourceBudgetBytesSettingName));
+        RequestGraphRebuild(std::string("setting ") + std::string(CLodReyesResourceBudgetBytesSettingName), VisibilityShadingEpochs());
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableBloom", [this](const bool& newValue) {
         m_bloom = newValue;
@@ -1029,7 +1062,7 @@ void Renderer::SetSettings() {
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableDilatedMotionVectors", [this](const bool&) {
         m_preFrameDeferredFunctions.defer([this]() {
             UpscalingManager::GetInstance().RequestHistoryReset();
-            RequestGraphRebuild(std::string("setting ") + "enableDilatedMotionVectors");
+            RequestGraphRebuild(std::string("setting ") + "enableDilatedMotionVectors", PostEpochs());
         });
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<WindowResolutionPreset>(
@@ -1041,7 +1074,7 @@ void Renderer::SetSettings() {
         }));
 	m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableScreenSpaceReflections", [this](const bool& newValue) {
 		m_screenSpaceReflections = newValue;
-		RequestGraphRebuild(std::string("setting ") + "enableScreenSpaceReflections");
+		RequestGraphRebuild(std::string("setting ") + "enableScreenSpaceReflections", ShadingEpochs());
 		}));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enablePathTracing", [this](const bool& newValue) {
         if (newValue == m_pathTracing) {
@@ -1071,23 +1104,23 @@ void Renderer::SetSettings() {
     // Accumulating averages samples itself, so it doesn't want Ray Reconstruction's denoising. The path trace pass makes its
     // accumulation buffer when the graph is built.
     // The ghost flares' passes and buffer sizes (LensFlarePasses.h) are fixed when the graph is built.
-    m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("lensFlareEnabled", [this](const bool&) { RequestGraphRebuild(std::string("setting ") + "lensFlareEnabled"); }));
+    m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("lensFlareEnabled", [this](const bool&) { RequestGraphRebuild(std::string("setting ") + "lensFlareEnabled", PostEpochs()); }));
     for (const char* name : { "lensFlareMaxGhosts", "lensFlareGridResolution", "lensFlareWavelengths", "lensFlareMaxLights" }) {
-        m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(name, [this, name](const uint32_t&) { RequestGraphRebuild(std::string("setting ") + std::string(name)); }));
+        m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>(name, [this, name](const uint32_t&) { RequestGraphRebuild(std::string("setting ") + std::string(name), PostEpochs()); }));
     }
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("pathTracingAccumulate", [this](const bool&) {
         if (m_pathTracing) {
             SelectPathTracingUpscaler(true);
-            RequestGraphRebuild(std::string("setting ") + "pathTracingAccumulate");
+            RequestGraphRebuild(std::string("setting ") + "pathTracingAccumulate", ShadingPostEpochs());
         }
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<uint32_t>("rayTracedPrimaryVisibilityMode", [this](const uint32_t& newValue) {
         m_rayTracedPrimaryVisibilityMode = newValue;
-        RequestGraphRebuild(std::string("setting ") + "rayTracedPrimaryVisibilityMode");
+        RequestGraphRebuild(std::string("setting ") + "rayTracedPrimaryVisibilityMode", VisibilityShadingEpochs());
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableRayTracedShadows", [this](const bool& newValue) {
         m_rayTracedShadows = newValue;
-        RequestGraphRebuild(std::string("setting ") + "enableRayTracedShadows");
+        RequestGraphRebuild(std::string("setting ") + "enableRayTracedShadows", VisibilityShadingEpochs());
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableRayTracedReflections", [this](const bool& newValue) {
         m_rayTracedReflections = newValue;
@@ -1095,7 +1128,7 @@ void Renderer::SetSettings() {
             m_warnedRayTracedReflectionsUnsupported = true;
             spdlog::warn("Ray traced reflections requested, but clustered ray tracing is not supported by the active RHI backend/device.");
         }
-        RequestGraphRebuild(std::string("setting ") + "enableRayTracedReflections");
+        RequestGraphRebuild(std::string("setting ") + "enableRayTracedReflections", VisibilityShadingEpochs());
         }));
 
 

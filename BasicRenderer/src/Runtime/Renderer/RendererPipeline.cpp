@@ -43,7 +43,8 @@ void Renderer::ApplyPendingPipelineReplacement() {
 
     m_pipelineRollbackRecipe = m_pipelineRecipe;
     m_pipelineRecipe = std::move(*pending);
-    RequestGraphRebuild("pipeline recipe replaced");
+    // Only the host epochs whose techniques or extensions changed (M4 step 5).
+    RequestGraphRebuild("pipeline recipe replaced", RecipeChangeHostEpochs(*m_pipelineRollbackRecipe, m_pipelineRecipe));
 
     SyncPipelineTopologySettings();
 }

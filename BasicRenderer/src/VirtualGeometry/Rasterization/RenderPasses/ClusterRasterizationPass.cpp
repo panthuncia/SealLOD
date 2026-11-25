@@ -100,6 +100,8 @@ ClusterRasterizationPass::ClusterRasterizationPass(
 ClusterRasterizationPass::~ClusterRasterizationPass() = default;
 
 ClusterRasterBindings ClusterRasterizationPass::Declare(org::PassBuilder& builder) {
+    // A new graph's first declaration: from the views its build started with, as the first Update will see them.
+    if (const auto* seed = br::render::BuildUpdateContext()) (void)UpdateViews(*seed);
     builder.ShaderResource(
             Builtin::PerObjectBuffer,
             Builtin::NormalMatrixBuffer,
@@ -235,8 +237,10 @@ ClusterRasterBindings ClusterRasterizationPass::Declare(org::PassBuilder& builde
 void ClusterRasterizationPass::Initialize() {}
 
 void ClusterRasterizationPass::Update(const org::UpdateExecutionContext& executionContext) {
-    auto* updateContext = executionContext.hostData->Get<UpdateContext>();
-    auto& context = *updateContext;
+    m_declaredResourcesChanged = UpdateViews(*executionContext.hostData->Get<UpdateContext>());
+}
+
+bool ClusterRasterizationPass::UpdateViews(const UpdateContext& context) {
     const CLodVirtualShadowResolutionConfig virtualShadowConfig = CLodVirtualShadowBuildRuntimeResolutionConfig();
 
     auto numViews = context.ViewCameraBufferSize();
@@ -362,9 +366,10 @@ void ClusterRasterizationPass::Update(const org::UpdateExecutionContext& executi
     // the table, so a resource moving to a new backing needs no redeclaration.
     // The row count is part of the declaration. It grows in powers of two, so a new camera only rarely redeclares.
     table.resize((std::max<size_t>)(16u, std::bit_ceil(table.size())));
-    m_declaredResourcesChanged = resourcesChanged || m_viewInputs != viewInputs || m_viewRasterInfos.size() != table.size();
+    const bool changed = resourcesChanged || m_viewInputs != viewInputs || m_viewRasterInfos.size() != table.size();
     m_viewInputs = std::move(viewInputs);
     m_viewRasterInfos = std::move(table);
+    return changed;
 }
 
 std::vector<uint32_t> ClusterRasterizationPass::ViewInputCameras() const {

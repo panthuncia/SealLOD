@@ -55,6 +55,9 @@ ReyesBuildRasterWorkPass::ReyesBuildRasterWorkPass(
 
 ReyesBuildRasterWorkBindings ReyesBuildRasterWorkPass::Declare(org::PassBuilder& builder)
 {
+    // A new graph's first declaration: from the views its build started with, as the first Update will see them.
+    if (const auto* seed = br::render::BuildUpdateContext(); seed && m_enableViewDepthOcclusion)
+        (void)m_viewDepthTable.Update(seed->Views(), m_phaseIndex == 1u);
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.ShaderResource(
             Builtin::PerMeshBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases,

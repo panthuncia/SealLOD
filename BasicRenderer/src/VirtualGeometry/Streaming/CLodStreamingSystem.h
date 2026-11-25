@@ -83,11 +83,16 @@ public:
     // A build's streaming passes, over the build's binding. They read only `binding` and the service's own state, and
     // change neither.
     void GatherStructuralPasses(org::RenderGraph& rg, CLodStreamingGraphBinding& binding, std::vector<org::ExternalPassDesc>& outPasses);
-    void GatherStructuralTailPasses(org::RenderGraph& rg, CLodStreamingGraphBinding& binding, std::vector<org::ExternalPassDesc>& outPasses);
-    // Submits this frame's async uploads and streaming feedback readback through `client`, then takes the newest
-    // active-group snapshot for the next frame. Call it after the frame graph's execution (CLodExtension::AfterExecute)
-    // with that graph's binding: nothing happens unless it is the attached one.
-    void SubmitExternalWork(org::ExternalClient& client, const CLodStreamingGraphBinding* binding);
+    // The binding's resources by their ids (and the non-resident bits' resolver), for a graph whose CLod passes read them.
+    void RegisterGraphResources(org::RenderGraph& rg, const CLodStreamingGraphBinding& binding);
+    // The frame tail's passes (the feedback sort, the DirectStorage launch) and its after-execution work, in the last graph that
+    // writes the feedback. The work is the caller's to keep (CLodStreamingTailExtension), not the binding's.
+    CLodStreamingTailWork GatherStructuralTailPasses(org::RenderGraph& rg, CLodStreamingGraphBinding& binding, std::vector<org::ExternalPassDesc>& outPasses);
+    // Submits this frame's async uploads (on `uploadQueueSlot` of the client's graph) and streaming feedback readback through
+    // `client`, then takes the newest active-group snapshot for the next frame. Call it after the tail's graph executes, with
+    // the binding its passes were built with: nothing happens unless it shares the attached binding's buffers.
+    void SubmitExternalWork(org::ExternalClient& client, const CLodStreamingGraphBinding* binding, const CLodStreamingTailWork& work,
+        org::QueueSlotIndex uploadQueueSlot);
     VirtualShadowUpgradeQueue GetVirtualShadowUpgradeQueue() const { return m_virtualShadowUpgradeQueue; }
 
 private:

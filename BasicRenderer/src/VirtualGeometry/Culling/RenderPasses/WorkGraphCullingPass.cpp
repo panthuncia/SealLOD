@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <mutex>
 #include <span>
 #include <stdexcept>
 #include <utility>
@@ -36,6 +37,8 @@
 
 namespace {
 
+// Passes are made on the frame-graph build thread and may be destroyed on the runtime's deleter thread (a retired graph).
+std::mutex g_liveWorkGraphCullingPassesMutex;
 std::vector<WorkGraphCullingPass*> g_liveWorkGraphCullingPasses;
 
 uint64_t GetNativeBufferDeviceAddress(rhi::Resource resource) noexcept
@@ -61,16 +64,19 @@ WorkGraphCullingPass::WorkGraphCullingPass(CullingPassConfig config, CullingPass
         m_resources.voxelQueues.Enabled())
 {
     InstallWorkGraph(CompileWorkGraph());
+    std::lock_guard lock(g_liveWorkGraphCullingPassesMutex);
     g_liveWorkGraphCullingPasses.push_back(this);
 }
 
 WorkGraphCullingPass::~WorkGraphCullingPass()
 {
+    std::lock_guard lock(g_liveWorkGraphCullingPassesMutex);
     std::erase(g_liveWorkGraphCullingPasses, this);
 }
 
 size_t WorkGraphCullingPass::ReloadAllWorkGraphs()
 {
+    std::lock_guard lock(g_liveWorkGraphCullingPassesMutex);
     for (WorkGraphCullingPass* pass : g_liveWorkGraphCullingPasses) {
         pass->InstallWorkGraph(pass->CompileWorkGraph());
     }
@@ -326,6 +332,12 @@ std::optional<WorkGraphReyesBindings> WorkGraphCullingPass::DeclareReyes(org::Pa
 
 WorkGraphCullingBindings WorkGraphCullingPass::Declare(org::PassBuilder& builder)
 {
+    // A new graph's first declaration: from the views its build started with, as the first Update will see them.
+    if (const auto* seed = br::render::BuildUpdateContext()) {
+        if (m_config.UsesSWClassification())
+            (void)m_viewRasterInfoLayout.Update(seed->Views(), seed->ViewCameraBufferSize(), m_config.rasterOutputKind);
+        if (m_config.UsesPerViewDepthOcclusion()) (void)m_viewDepthLayout.Update(seed->Views(), m_config.isFirstPass);
+    }
     m_scratchChanged = false;
     const auto scratch = DeclareSceneInputs(builder);
 

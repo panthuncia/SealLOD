@@ -20,6 +20,7 @@
 #include <optional>
 #include <array>
 #include <stdexcept>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <flecs.h>
@@ -42,6 +43,7 @@
 #include "BasicRenderer/Runtime/Detail/FrameTimer.h"
 #include "BasicRenderer/Runtime/Detail/FrameRevisions.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
+#include "BasicRenderer/Extensions/FrameEpochs.h"
 #include "BasicRenderer/Runtime/Detail/OpenPBRLookupResources.h"
 #include <BasicRenderer/Pipeline/RendererSettings.h>
 #include <BasicRenderer/Pipeline/UpscalingTypes.h>
@@ -78,9 +80,12 @@ struct UpdateExecutionContext;
 class SettingsSnapshot;
 namespace br::render {
 struct FrameBuild;
+struct FrameBuildInputs;
 struct FrameBuildJob;
 struct FrameBuildOutputs;
 class FrameBuildWorker;
+struct FrameInterface;
+struct FramePassDeclaration;
 class DebugSceneSnapshotService;
 class RendererFrameInputs;
 class TextureJobGraph;
@@ -110,6 +115,7 @@ namespace br::render { class CLodRayTracingSystem; }
 
 namespace org::runtime {
 class IUploadPolicyService;
+class IStatisticsService;
 }
 
 namespace br::render {
@@ -228,6 +234,9 @@ public:
     // renderer.revisions: graph builds so far, the last build's reasons, what is pending, and the frame count, as JSON
     // ({"builds", "last_build_frame", "last_build_reasons", "pending", "topology_requests", "frames"}).
     std::string DescribeGraphRevisions() const;
+    // renderer.memoryDump: writes the frame graph's VRAM usage dump now (rendergraph_dumps/rendergraph_vram_usage_latest.txt)
+    // and logs the frame placement when it is on, so memory can be read after placements settle. Render thread. JSON reply.
+    std::string DumpFrameGraphMemory();
     // upscaler.simulate_failure: see UpscalingManager::SimulateFailures.
     void SimulateUpscalerFailures(uint32_t outOfMemoryFrames, uint32_t settingsFailures);
     // Reads the primary view's visibility and visible clusters from one frame, so a tool can say what
@@ -309,6 +318,11 @@ private:
     // prefill is enabled. m_frameIndex remains the acquired swapchain image.
     uint8_t m_preparationFrameIndex = 0;
     double m_lastWaitForFrameMs = 0.0; // The frame's WaitForFrame, for the hitch log in FrameMaintenance.
+    // The pass timestamps of the last run the frame host retired, per queue ([0] graphics, [1] compute), for the hitch log
+    // and the GPU timeline dump (OnFrameHostRunCompleted). Pass indices into the statistics service's names.
+    struct CompletedPassStamp { int passIndex = -1; uint64_t begin = 0, end = 0; double milliseconds = 0.0; };
+    std::array<std::vector<CompletedPassStamp>, 2> m_completedPassStamps;
+    void OnFrameHostRunCompleted(uint64_t hostFrame, const org::runtime::IStatisticsService& stats);
     uint64_t m_totalFramesRendered = 0;
 	uint8_t m_numFramesInFlight = 3;
     rhi::TimelinePtr m_frameFence;
@@ -338,15 +352,25 @@ private:
     std::unique_ptr<org::GraphInstance> m_frameInstance;
     bool m_useGraphInstance = false;
     // The host's epochs: one that holds only the host's upload pass, run on frames the renderer holds back (publication
-    // backpressure) so staged uploads still reach the GPU; and the frame itself.
+    // backpressure) so staged uploads still reach the GPU; and the frame's. The frame epochs (FrameEpochs.h) are the
+    // host's epoch ids, Visibility, Shading, Post and Overlay. Until the frame is split (M4 step 4) the Visibility epoch's
+    // graph holds the whole frame (br::render::HostEpochOf): kFrameEpoch is that epoch.
     static constexpr uint32_t kUploadEpoch = 0;
-    static constexpr uint32_t kFrameEpoch = 1;
+    static constexpr uint32_t kVisibilityEpoch = br::render::kVisibilityEpoch;
+    static constexpr uint32_t kShadingEpoch = br::render::kShadingEpoch;
+    static constexpr uint32_t kPostEpoch = br::render::kPostEpoch;
+    static constexpr uint32_t kOverlayEpoch = br::render::kOverlayEpoch;
+    static constexpr uint32_t kFrameEpoch = kVisibilityEpoch;
+    // ORG's frame placement over the frame epochs (GraphHost::SetFramePlacement): on unless BASICRENDERER_FRAME_PLACEMENT=0.
+    // Graphs take a new placement in place; graphs whose pool placements went stale are rebuilt (ConsolidateFrameGraph).
+    bool m_framePlacement = false;
     // The host's graph. A build replaces it, so it is read again after each attach (FinishFrameBuild).
     org::RenderGraph* currentRenderGraph = nullptr;
     // The extension ids registered on the host, in build order, so a change of extensions removes the old ones. Each id's
     // factory makes what the build in progress decided for it (FrameBuildInputs::extensionMakers): every graph gets its
     // own extension instances, which live and die with it.
     std::vector<std::string> m_frameHostExtensionIds;
+    std::vector<std::vector<uint32_t>> m_frameHostExtensionEpochs;  // the host epochs each of m_frameHostExtensionIds is made into
     // The graph IO service: it persists, each graph gets its own extension over it.
     std::shared_ptr<br::render::RenderGraphIOService> m_frameIoService;
     // Set by ExecuteFrameGraph (in Update) once the frame graph was submitted; Render presents that frame.
@@ -365,6 +389,23 @@ private:
     // The build of the attached graph: its inputs (taken on the render thread before the build) and outputs (published after
     // it). See MakeFrameBuild and PublishFrameBuild.
     std::shared_ptr<br::render::FrameBuild> m_frameBuild;
+    // The objects the frame's epochs share (FrameBuild.h): made on the render thread, a build takes a copy (MakeFrameBuild).
+    std::shared_ptr<br::render::FrameInterface> m_frameInterface;
+    // The last epoch check's crossing set per host epoch's graph, and across them, so a full list is logged only when it
+    // changes (CheckFrameEpochInterface, CheckFrameInterfaceAcrossGraphs).
+    std::unordered_map<uint32_t, std::string> m_lastFrameEpochCheckKeys;
+    std::string m_lastFrameInterfaceCheckKey;
+    // Per host epoch: the build its attached graph came from, and how many graphs were attached for it (renderer.revisions).
+    std::unordered_map<uint32_t, std::shared_ptr<br::render::FrameBuild>> m_epochBuilds;
+    std::map<uint32_t, uint64_t> m_epochGraphBuilds;
+    std::vector<uint32_t> m_lastGraphBuildHostEpochs;
+    // The frame epoch of each pass of the attached graphs, by name (FrameBuildInputs::knownPassEpochs).
+    std::shared_ptr<const std::unordered_map<std::string, uint32_t>> m_knownPassEpochs;
+    // The host epochs the attached Visibility graph's build forwarded passes to (ForwardedPasses): built with Visibility.
+    uint32_t m_frameForwardMask = 0;
+    // The attached build's serial, and whether its epoch check waits for its schedule (built in place).
+    uint64_t m_frameBuildSerialAttached = 0;
+    bool m_frameEpochCheckDeferred = false;
     // Frame-graph builds run on this thread while the attached graph keeps rendering (M3 step 9); the render thread attaches a
     // finished one at its consolidation point (ConsolidateFrameGraph). Null with BASICRENDERER_SYNC_FRAME_BUILD=1 and for the
     // in-place graph (BASICRENDERER_FRAME_GRAPH_INSTANCE): those build on the render thread.
@@ -378,7 +419,12 @@ private:
     // Made once, for the same reason: virtual shadow page invalidation's changed-transform query (FrameBuildInputs).
     std::shared_ptr<flecs::query<const Components::ObjectDrawInfo>> m_vsmTransformChangedQuery;
     // The resources builds published in the ECS directory, by name (FrameBuild.h, ResourceEntityWrite::directoryKey).
-    std::unordered_map<std::string, std::weak_ptr<org::Resource>> m_publishedResourceEntities;
+    // Each with the host epoch whose build published it: a build drops only its own epochs' entries it does not publish again.
+    struct PublishedResourceEntity {
+        std::weak_ptr<org::Resource> resource;
+        uint32_t hostEpoch = 0;
+    };
+    std::unordered_map<std::string, PublishedResourceEntity> m_publishedResourceEntities;
     // The settings the last graph build read (SettingsManager::Snapshot). Opaque here: the type is private to the renderer.
     std::shared_ptr<const SettingsSnapshot> m_graphBuildSettings;
     // What renderer.revisions reports: attached builds, and the last one's frame and reasons.
@@ -392,6 +438,8 @@ private:
         uint64_t failed = 0;           // failed or refused at the attach: the old graph kept
         uint64_t discarded = 0;        // dropped before the attach (a GPU idle wait, shutdown)
         uint64_t superseded = 0;       // attached while newer requests waited (a follow-up build answers them)
+        uint64_t stagedSets = 0;       // builds of several host epochs attached as one staged set
+        uint64_t refusedSets = 0;      // staged sets refused at the attach: every graph of the set dropped
         uint64_t epochFailures = 0;    // GraphHost::PollEpochFailures
         uint64_t inFlightSinceFrame = 0;
         double lastPrepareMs = 0.0;    // render thread: the inputs before the build
@@ -404,7 +452,10 @@ private:
         std::string lastError;
         std::string lastEpochFailure;
     } m_graphBuildStats;
-    void RequestGraphRebuild(std::string_view reason) { m_frameRevisions.RequestTopology(reason); }
+    // A request names the host epochs to rebuild (br::render::HostEpochBit; all by default).
+    void RequestGraphRebuild(std::string_view reason, uint32_t hostEpochMask = br::render::FrameRevisions::kAllEpochs) {
+        m_frameRevisions.RequestTopology(reason, hostEpochMask);
+    }
     bool m_shaderReloadRequested = false;
 
     RenderContext m_context;
@@ -509,10 +560,35 @@ private:
     void ApplyPendingPipelineReplacement();
     // Render thread, before a graph build: what the build reads (M3, docs/frame_graph_composition_plan.md).
     void MakeFrameBuild(br::render::FrameBuild& build, flecs::entity primaryCamera);
+    // Render thread: what a build's passes declare from at Setup (FrameBuildInputs::lastUpdate).
+    std::shared_ptr<const UpdateContext> MakeBuildUpdateContext(const br::render::FrameBuildInputs& in);
+    // The last accepted frame's update values, for MakeBuildUpdateContext (m_frameInputs is cleared when a frame starts).
+    std::shared_ptr<const UpdateContext> m_lastFrameUpdate;
     // Render thread, after a successful build: hands its outputs to the renderer.
     void PublishFrameBuild(br::render::FrameBuild& build);
-    // Render thread: makes the ECS writes a build recorded, in order (FrameBuildOutputs::resourceEntityWrites).
-    void PublishResourceEntityWrites(br::render::FrameBuildOutputs& outputs);
+    // Render thread: makes the ECS writes a build recorded, in order (FrameBuildOutputs::resourceEntityWrites of each epoch).
+    void PublishResourceEntityWrites(br::render::FrameBuild& build);
+    // Render thread, from MakeFrameBuild: makes the cross-epoch objects the recipe needs, or again when their shape changed.
+    void UpdateFrameInterface(uint64_t primaryViewID);
+    // The building thread, after a build: every pass has a frame epoch (an error names those that have none), and what
+    // crosses epochs is logged. Nullopt while the graph has no schedule yet (a graph built in place, before its first frame).
+    // hostEpoch: the host epoch the graph is built for (kNoFrameEpoch: the in-place graph).
+    std::optional<std::string> CheckFrameEpochInterface(org::RenderGraph& graph, const br::render::FrameBuild& build, uint64_t serial,
+        uint32_t hostEpoch);
+    // Render thread, after an attach: what the attached host epochs' graphs share, by identity, and names that are separate
+    // objects in two graphs (M4 step 5).
+    void CheckFrameInterfaceAcrossGraphs(uint64_t serial);
+    // The frame host epochs (FrameBuild.h: {1, 3, 4} split), each a graph of the host; one for the in-place graph.
+    std::vector<uint32_t> FrameGraphHostEpochs() const;
+    // A host epoch's graph (the in-place graph for any), null before its build.
+    org::RenderGraph* FrameGraph(uint32_t hostEpoch);
+    // The graph that presents: the last host epoch's (Overlay's, with PresentationReadyPass).
+    org::RenderGraph* PresentationGraph();
+    // The host epochs a recipe replacement changes (a FrameRevisions mask).
+    static uint32_t RecipeChangeHostEpochs(const br::pipeline::PipelineRecipe& before, const br::pipeline::PipelineRecipe& after);
+    // The host epochs a build of these requests builds (StartFrameBuild). shadowVariant: the build makes the CLod shadow variant
+    // (its extension makers, known once MakeFrameBuild ran), whose Visibility graph needs a Shading graph built with it.
+    std::vector<uint32_t> SelectBuildHostEpochs(uint32_t topologyEpochs, bool shadowVariant);
     // Writes the recipe-backed settings (enableGTAO, enableBloom, enableShadows, ...) from m_pipelineRecipe.
     void SyncPipelineTopologySettings();
     br::pipeline::PipelineRecipe GetPipelineRecipeForMutation() const;
@@ -523,12 +599,42 @@ private:
     // and their options, stochastic lighting's options, the recipe's extensions, the caster set and the VSM atlas).
     void MakeFrameExtensions(br::render::FrameBuild& build);
     // Registers the declarations and the build's extension ids on the host, in build order, unless they already are.
-    void RegisterFrameHostExtensions(const std::vector<std::string>& extensionIds);
+    void RegisterFrameHostExtensions(const std::vector<std::string>& extensionIds,
+        const std::unordered_map<std::string, uint32_t>& extensionEpochs);
     // The renderer's part of a graph build, run by the host (DeclarationGraphExtension): first its providers, last its passes.
     void DeclareFrameProviders(org::RenderGraph& graph);
+    // The renderer's passes, in recipe order. Each technique's are declared by its frame epoch's function and tagged with it.
     void DeclareFramePasses(org::RenderGraph& graph);
+    void DeclareVisibilityPasses(const br::render::FramePassDeclaration& declaration, br::pipeline::TechniqueId id);
+    void DeclareShadingPasses(const br::render::FramePassDeclaration& declaration, br::pipeline::TechniqueId id);
+    void DeclarePostPasses(const br::render::FramePassDeclaration& declaration, br::pipeline::TechniqueId id);
+    void DeclareOverlayPasses(const br::render::FramePassDeclaration& declaration, br::pipeline::TechniqueId id);
     // Submits the frame graph for this frame: everything Render did before the graph's execution, then ExecuteFrame.
     void ExecuteFrameGraph(const org::UpdateExecutionContext& context);
+    // The render thread's ExecuteFrame time per host epoch and per frame, logged as means every 600 frames.
+    void RecordFrameGraphExecution(size_t index, double milliseconds, double waitMs = 0.0, double updateMs = 0.0, double executeMs = 0.0);
+    struct FrameGraphExecutionTiming {
+        std::vector<double> epochMs;
+        double waitMs = 0.0, updateMs = 0.0, executeMs = 0.0;  // GraphHost::LastFrameTimings, summed over epochs
+        double totalMs = 0.0;
+        double worstMs = 0.0;
+        uint32_t frames = 0;
+    } m_frameGraphExecutionTiming;
+    // No mixed frames (M4 step 7): each frame, before its first ExecuteFrame, every host epoch's attached graph (GraphHost::
+    // BuildGeneration) is mapped back to the build that attached it. A frame is mixed when an epoch runs an older build than
+    // another epoch's build attached together with it (a build's set must run whole). Counted per 600 frames and in total.
+    struct FrameSetCheck {
+        // Per host epoch: the build serial of each ORG build generation the renderer attached (the latest few).
+        std::unordered_map<uint32_t, std::map<uint64_t, uint64_t>> serialOfGeneration;
+        // Per build serial: the host epochs it attached together.
+        std::map<uint64_t, std::vector<uint32_t>> setOf;
+        uint64_t frames = 0, mixed = 0, unknown = 0;            // since the last log line
+        uint64_t totalFrames = 0, totalMixed = 0, totalUnknown = 0;
+    } m_frameSetCheck;
+    // Records the host epochs a build attached together (FinishFrameBuild).
+    void RecordAttachedBuildSet(uint64_t serial, const std::vector<uint32_t>& hosts);
+    // Checks the frame about to execute; false for a mixed frame (logged).
+    bool CheckFrameBuildSet();
     // A frame the renderer holds back still submits the uploads producers staged (the upload epoch).
     void SubmitUploadsWithoutFrame();
     void HandlePipelineReplacementFailure(const std::exception& error);

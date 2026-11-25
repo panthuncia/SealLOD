@@ -9,6 +9,7 @@
 #include <spdlog/spdlog.h>
 #include <rhi_debug.h>
 #include <algorithm>
+#include <array>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -30,6 +31,7 @@
 #include "Runtime/IO/ReadbackCaptureService.h"
 #include "OpenRenderGraph/ExternalClient.h"
 #include "Runtime/Frame/RendererFrameInputs.h"
+#include "Runtime/GraphIntegration/FrameBuild.h"
 #include "Diagnostics/Telemetry/FrameTaskGraphTelemetry.h"
 #include "Scene/ECS/RendererECSManager.h"
 #include "VirtualGeometry/GeometryStorage/MeshManager.h"
@@ -139,6 +141,91 @@ void SyncOpenRenderGraphSettings(uint8_t numFramesInFlight) {
 }
 
 
+
+// The render thread's frame-graph time (M4 step 5): each host epoch's ExecuteFrame and the whole frame's (with the seal), as means
+// over 600 frames in the log. index SIZE_MAX: the frame's total, which closes the frame.
+void Renderer::RecordFrameGraphExecution(size_t index, double milliseconds, double waitMs, double updateMs, double executeMs) {
+    auto& timing = m_frameGraphExecutionTiming;
+    if (index != SIZE_MAX) {
+        if (timing.epochMs.size() <= index) timing.epochMs.resize(index + 1, 0.0);
+        timing.epochMs[index] += milliseconds;
+        timing.waitMs += waitMs;
+        timing.updateMs += updateMs;
+        timing.executeMs += executeMs;
+        return;
+    }
+    timing.totalMs += milliseconds;
+    timing.worstMs = (std::max)(timing.worstMs, milliseconds);
+    if (++timing.frames < 600) return;
+    std::string epochs;
+    const auto& hosts = br::render::FrameHostEpochs();
+    for (size_t epoch = 0; epoch < timing.epochMs.size(); ++epoch)
+        epochs += fmt::format("{}{}: {:.3f}", epochs.empty() ? "" : ", ", epoch < hosts.size() ? hosts[epoch] : 0u, timing.epochMs[epoch] / timing.frames);
+    auto& sets = m_frameSetCheck;
+    spdlog::info("Renderer: frame graph ExecuteFrame over {} frames: mean {:.3f} ms per frame (worst {:.2f}; pacing wait {:.3f}, "
+        "update {:.3f}, execute {:.3f}); per host epoch {}; build sets: {} frames checked, {} mixed, {} unknown", timing.frames,
+        timing.totalMs / timing.frames, timing.worstMs, timing.waitMs / timing.frames, timing.updateMs / timing.frames,
+        timing.executeMs / timing.frames, epochs, sets.frames, sets.mixed, sets.unknown);
+    timing = {};
+    sets.frames = sets.mixed = sets.unknown = 0;
+}
+
+void Renderer::RecordAttachedBuildSet(uint64_t serial, const std::vector<uint32_t>& hosts) {
+    if (!m_frameHost || hosts.empty()) return;
+    auto& check = m_frameSetCheck;
+    for (const auto host : hosts) {
+        auto& generations = check.serialOfGeneration[host];
+        generations[m_frameHost->BuildGeneration(host)] = serial;
+        // The latest few are enough: an epoch runs its newest attached build.
+        while (generations.size() > 8) generations.erase(generations.begin());
+    }
+    check.setOf[serial] = hosts;
+    // Forget sets no epoch can run any more (older than every epoch's oldest kept generation).
+    uint64_t oldest = UINT64_MAX;
+    for (const auto& [host, generations] : check.serialOfGeneration)
+        if (!generations.empty()) oldest = (std::min)(oldest, generations.begin()->second);
+    while (!check.setOf.empty() && check.setOf.begin()->first < oldest) check.setOf.erase(check.setOf.begin());
+}
+
+bool Renderer::CheckFrameBuildSet() {
+    auto& check = m_frameSetCheck;
+    ++check.frames;
+    ++check.totalFrames;
+    const auto& hosts = br::render::FrameHostEpochs();
+    // Each epoch's running build, from the host's own generation of the graph it runs.
+    std::array<uint64_t, 8> serials{};
+    bool unknown = false;
+    for (size_t index = 0; index < hosts.size() && index < serials.size(); ++index) {
+        const auto found = check.serialOfGeneration.find(hosts[index]);
+        const auto generation = m_frameHost->BuildGeneration(hosts[index]);
+        const auto serial = found != check.serialOfGeneration.end() ? found->second.find(generation) : decltype(found->second.end()){};
+        if (found == check.serialOfGeneration.end() || serial == found->second.end()) {
+            unknown = true;
+            continue;
+        }
+        serials[index] = serial->second;
+    }
+    if (unknown) {
+        ++check.unknown;
+        ++check.totalUnknown;
+    }
+    // Every epoch a running build attached together with this one runs that build or a later one.
+    for (size_t index = 0; index < hosts.size() && index < serials.size(); ++index) {
+        if (!serials[index]) continue;
+        const auto set = check.setOf.find(serials[index]);
+        if (set == check.setOf.end()) continue;
+        for (const auto other : set->second) {
+            const auto position = std::find(hosts.begin(), hosts.end(), other) - hosts.begin();
+            if (position >= static_cast<std::ptrdiff_t>(serials.size()) || !serials[position] || serials[position] >= serials[index]) continue;
+            ++check.mixed;
+            ++check.totalMixed;
+            spdlog::error("Renderer: mixed frame {}: host epoch {} runs build {}, which attached host epoch {} with it, but that epoch runs "
+                "the older build {}", m_totalFramesRendered, hosts[index], serials[index], other, serials[position]);
+            return false;
+        }
+    }
+    return true;
+}
 
 void Renderer::ExecuteFrameGraph(const org::UpdateExecutionContext& frameContext) {
     BT_ZONE_SCOPE("Renderer::ExecuteFrameGraph");
@@ -328,19 +415,37 @@ void Renderer::ExecuteFrameGraph(const org::UpdateExecutionContext& frameContext
                 passExecutionContext.hostData = passExecutionContext.ownedHostData.get();
                 prepared.Submit(passExecutionContext);
             } else {
-            m_frameHost->ExecuteFrame(frameContext, {}, kFrameEpoch, m_frameInputs);
+            // Each frame host epoch's graph, in frame order (M4 step 6: Visibility, Shading, Post, Overlay). Each graph's
+            // after-execution work (CLod streaming's readback and async uploads, the texture streaming feedback: Shading's)
+            // runs after its own execution, in the last graph that writes its sources.
+            const auto executeBegin = std::chrono::steady_clock::now();
+            const auto& hosts = br::render::FrameHostEpochs();
+            // The frame's own hook (its diagnostics requests) runs once, in the first epoch's preparation.
+            org::UpdateExecutionContext laterEpochs = frameContext;
+            laterEpochs.beforeCompileFrame = {};
+            (void)CheckFrameBuildSet();
+            for (size_t index = 0; index < hosts.size(); ++index) {
+                const auto epochBegin = std::chrono::steady_clock::now();
+                m_frameHost->ExecuteFrame(index == 0 ? frameContext : laterEpochs, {}, hosts[index], m_frameInputs);
+                const auto& timings = m_frameHost->LastFrameTimings();
+                RecordFrameGraphExecution(index, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - epochBegin).count(),
+                    timings.waitUs / 1000.0, timings.updateUs / 1000.0, timings.executeUs / 1000.0);
+            }
             // The frame boundary: everything this frame submitted is on the device queues. Runs and the runtime's
             // retirement wait only for runs a seal came after.
             m_frameHost->SealSubmitted();
+            RecordFrameGraphExecution(SIZE_MAX, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - executeBegin).count());
             }
-            // Texture readbacks copy what the frame wrote, so they are submitted right after the frame's execution.
-            if (m_pReadbackManager) {
-                const auto graphicsSlot = currentRenderGraph->GetQueueRegistry().FindGraphicsSlot();
-                m_pReadbackManager->Submit(currentRenderGraph->GetExternalClient(), org::ToUnderlying(graphicsSlot));
+            // Texture readbacks and after-graph captures copy what the frame wrote, so they are submitted after the frame's last
+            // execution, through the last graph's client.
+            auto* lastGraph = m_useGraphInstance ? currentRenderGraph : PresentationGraph();
+            if (m_pReadbackManager && lastGraph) {
+                const auto graphicsSlot = lastGraph->GetQueueRegistry().FindGraphicsSlot();
+                m_pReadbackManager->Submit(lastGraph->GetExternalClient(), org::ToUnderlying(graphicsSlot));
             }
-            if (m_readbackCaptures) {
-                const auto graphicsSlot = currentRenderGraph->GetQueueRegistry().FindGraphicsSlot();
-                m_readbackCaptures->SubmitAfterGraph(currentRenderGraph->GetExternalClient(), org::ToUnderlying(graphicsSlot));
+            if (m_readbackCaptures && lastGraph) {
+                const auto graphicsSlot = lastGraph->GetQueueRegistry().FindGraphicsSlot();
+                m_readbackCaptures->SubmitAfterGraph(lastGraph->GetExternalClient(), org::ToUnderlying(graphicsSlot));
             }
             static const std::filesystem::path submittedCameraTracePath = [] {
                 wchar_t* value = nullptr;
@@ -432,13 +537,18 @@ void Renderer::Render() {
     if (!m_frameExecuted || !currentRenderGraph) {
         return;
     }
+    // The graph that presents: the last host epoch's, which has PresentationReadyPass (M4 step 5).
+    org::RenderGraph* presentationGraph = m_useGraphInstance ? currentRenderGraph : PresentationGraph();
+    if (!presentationGraph) {
+        return;
+    }
     m_frameExecuted = false;
     const bool renderGraphBatchTraceEnabled = SettingsManager::GetInstance().getSettingGetter<bool>("renderGraphBatchTraceEnabled")();
     const uint8_t renderedFrameIndex = m_executedFrameIndex;
     auto& deviceManager = DeviceManager::GetInstance();
     auto graphicsQueue = deviceManager.GetGraphicsQueue();
 
-    if (!currentRenderGraph->GetLastPresentDependency()) {
+    if (!presentationGraph->GetLastPresentDependency()) {
         basic_telemetry::AddCounter("ORG.PresentationTail.DeferredForRecording");
         static auto lastDeferredLog = std::chrono::steady_clock::time_point{};
         if (const auto now = std::chrono::steady_clock::now(); now - lastDeferredLog > std::chrono::seconds(2)) {
@@ -476,12 +586,12 @@ void Renderer::Render() {
     {
         BT_ZONE_SCOPE("Renderer::Render::PresentationTail");
         const auto graphicsSlot = static_cast<uint32_t>(
-            static_cast<uint8_t>(currentRenderGraph->GetQueueRegistry().FindGraphicsSlot()));
+            static_cast<uint8_t>(presentationGraph->GetQueueRegistry().FindGraphicsSlot()));
         const org::ResourceState copySource{rhi::ResourceAccessType::CopySource,
             rhi::AccessToLayout(rhi::ResourceAccessType::CopySource, true),
             rhi::RenderSyncFromAccess(rhi::ResourceAccessType::CopySource)};
         const std::array<org::ExternalClient::Access, 1> accesses{{{presentationSource.get(), {}, copySource}}};
-        currentRenderGraph->GetExternalClient().Submit(graphicsSlot, accesses,
+        presentationGraph->GetExternalClient().Submit(graphicsSlot, accesses,
             [&](rhi::CommandList& list) {
                 rhi::TextureSubresourceRange presentationRange{};
                 presentationRange.mipCount = 1;

@@ -1,5 +1,7 @@
 #include <BasicRenderer/Pipeline/PipelineRecipe.h>
 
+#include <stdexcept>
+
 #include <BasicRenderer/Extensions/BuiltinResources.h>
 #include "Render/RenderGraph/RenderGraph.h"
 
@@ -83,15 +85,26 @@ PipelineRecipe& PipelineRecipe::AddTechnique(std::shared_ptr<const IRenderTechni
     return *this;
 }
 
-PipelineRecipe& PipelineRecipe::AddExtension(std::string id, RenderGraphExtensionFactory factory)
+PipelineRecipe& PipelineRecipe::AddExtension(std::string id, RenderGraphExtensionFactory factory, uint32_t epoch)
 {
+    if (!br::render::IsFrameEpoch(epoch)) throw std::invalid_argument("PipelineRecipe::AddExtension: " + id + " has no frame epoch");
+    m_extensionEpochs.emplace_back(id, epoch);
     m_extensions.emplace_back(std::move(id), std::move(factory));
     return *this;
+}
+
+uint32_t PipelineRecipe::ExtensionEpoch(const std::string& id) const
+{
+    for (const auto& [extension, epoch] : m_extensionEpochs) {
+        if (extension == id) return epoch;
+    }
+    return br::render::kVisibilityEpoch;
 }
 
 PipelineRecipe& PipelineRecipe::ClearExtensions()
 {
     m_extensions.clear();
+    m_extensionEpochs.clear();
     return *this;
 }
 

@@ -87,6 +87,9 @@ VoxelSoftwareRasterizationPass::~VoxelSoftwareRasterizationPass() = default;
 
 VoxelRasterBindings VoxelSoftwareRasterizationPass::Declare(org::PassBuilder& declaration)
 {
+    // A new graph's first declaration: from the views its build started with, as the first Update will see them.
+    if (const auto* seed = br::render::BuildUpdateContext())
+        (void)m_viewRasterInfoTable.Update(seed->Views(), seed->ViewCameraBufferSize(), m_outputKind);
     auto* builder = &declaration;
     builder->PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     const org::ResourceState indirectState{

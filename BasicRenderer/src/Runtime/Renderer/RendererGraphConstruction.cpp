@@ -21,6 +21,7 @@
 #include <filesystem>
 #include <sstream>
 #include <array>
+#include <bit>
 #include <stacktrace>
 #include <thread>
 #include <future>
@@ -38,6 +39,7 @@
 #include "Pipeline/PipelineState/PipelineLibrary.h"
 #include "Runtime/GraphIntegration/FrameGraphExtensions.h"
 #include "OpenRenderGraph/GraphHost.h"
+#include "Render/RenderGraph/FramePlacement.h"
 #include "Runtime/Resources/ResourceManager.h"
 #include <BasicRenderer/Streaming/TaskScheduler.h>
 #include "BasicRenderer/Extensions/RenderContext.h"
@@ -153,6 +155,54 @@
 #include "BasicRenderer/Diagnostics/TerrainRvtTelemetry.h"
 
 namespace {
+// "1,3,4": a build's host epochs, for logs.
+std::string DescribeHostEpochs(const std::vector<uint32_t>& hosts) {
+    std::string text;
+    for (const auto host : hosts) text += (text.empty() ? "" : ",") + std::to_string(host);
+    return text.empty() ? std::string("none") : text;
+}
+}
+
+std::vector<uint32_t> Renderer::FrameGraphHostEpochs() const {
+    return m_useGraphInstance ? std::vector<uint32_t>{ br::render::kFrameHostEpoch } : br::render::FrameHostEpochs();
+}
+
+org::RenderGraph* Renderer::FrameGraph(uint32_t hostEpoch) {
+    if (m_useGraphInstance) return currentRenderGraph;
+    return m_frameHost ? m_frameHost->Graph(hostEpoch) : nullptr;
+}
+
+org::RenderGraph* Renderer::PresentationGraph() {
+    // The last frame host epoch's graph: it has PresentationReadyPass (Overlay's) and submits last.
+    const auto hosts = FrameGraphHostEpochs();
+    return FrameGraph(hosts.back());
+}
+
+// Which host epochs a build of these requests makes graphs for (M4 step 5). A request names host epochs (HostEpochBit; all for
+// FrameRevisions::kAllEpochs); an epoch with no graph yet is always built. An epoch that received forwarded passes from the
+// Visibility host epoch's graph (its extensions' later-epoch passes, ForwardedPasses) is built together with it, both ways.
+// A build of several host epochs is attached as one staged set (FinishFrameBuild), so every epoch a change needs is in it.
+std::vector<uint32_t> Renderer::SelectBuildHostEpochs(uint32_t mask, bool shadowVariant) {
+    const auto hosts = FrameGraphHostEpochs();
+    if (m_useGraphInstance) return hosts;
+    uint32_t wanted = 0;
+    for (const auto host : hosts)
+        if ((mask & br::render::HostEpochBit(host)) || !m_frameHost->Graph(host)) wanted |= br::render::HostEpochBit(host);
+    const uint32_t visibility = br::render::HostEpochBit(br::render::kFrameHostEpoch);
+    if (wanted & visibility) wanted |= m_frameForwardMask;
+    if (wanted & m_frameForwardMask) wanted |= visibility;
+    // A Visibility build with the CLod shadow variant, or replacing a binding that had it, makes new CLod streaming buffers
+    // (CLodExtension::BuildStreamingBinding), which Shading's graph (the streaming tail, the alpha variant) must be built with.
+    // Both come from the build's own inputs (the makers MakeFrameExtensions made), so the two graphs go in one set.
+    const uint32_t shading = br::render::HostEpochBit(br::render::HostEpochOf(br::render::kShadingEpoch));
+    if ((wanted & visibility) && shading != visibility) {
+        const bool attachedShadow = m_frameInterface && m_frameInterface->clodStreaming && m_frameInterface->clodStreaming->HasVirtualShadowResources();
+        if (shadowVariant || attachedShadow) wanted |= shading;
+    }
+    std::vector<uint32_t> selected;
+    for (const auto host : hosts)
+        if (wanted & br::render::HostEpochBit(host)) selected.push_back(host);
+    return selected;
 }
 
 Renderer::PathTracingAccumulation Renderer::GetPathTracingAccumulation() const {
@@ -207,6 +257,38 @@ void Renderer::ConsolidateFrameGraph() {
         if (auto job = m_frameBuildWorker->TakeFinished()) FinishFrameBuild(std::move(job));
     }
     if (!currentRenderGraph && !m_frameRevisions.TopologyPending() && !FrameBuildInFlight()) RequestGraphRebuild("first build");
+    // A graph built in place is checked once it has a schedule. It runs already, so a failure is only reported.
+    if (m_frameEpochCheckDeferred && currentRenderGraph && m_frameBuild) {
+        bool checked = true;
+        for (const auto host : br::render::FrameHostEpochs()) {
+            auto* graph = FrameGraph(host);
+            const auto found = m_epochBuilds.find(host);
+            const auto& build = found != m_epochBuilds.end() ? found->second : m_frameBuild;
+            if (!graph || !build) continue;
+            if (const auto failure = CheckFrameEpochInterface(*graph, *build, m_frameBuildSerialAttached, m_useGraphInstance ? br::render::kNoFrameEpoch : host)) {
+                if (!failure->empty()) spdlog::error("Renderer: the attached frame graph of host epoch {}: {}", host, *failure);
+            } else {
+                checked = false;
+            }
+        }
+        if (checked) {
+            m_frameEpochCheckDeferred = false;
+            CheckFrameInterfaceAcrossGraphs(m_frameBuildSerialAttached);
+        }
+    }
+    // With frame placement, a graph whose placements are in a pool generation another graph grew is built again. A graph placed
+    // from an older frame placement takes the current one in place, at its next preparation (ORG), so it is not rebuilt.
+    if (m_framePlacement && currentRenderGraph && !m_frameRevisions.TopologyPending() && !FrameBuildInFlight()) {
+        if (const auto stale = m_frameHost->StaleAliasPlacementEpochs(); !stale.empty()) {
+            std::string epochs;
+            uint32_t mask = 0;
+            for (const auto epoch : stale) {
+                epochs += (epochs.empty() ? "" : ",") + std::to_string(epoch);
+                mask |= br::render::HostEpochBit(epoch);
+            }
+            RequestGraphRebuild("stale alias placements in epoch(s) " + epochs, mask);
+        }
+    }
     // A second round only after a render-thread build whose graph was installed and then failed (its rollback follows at once).
     for (int round = 0; round < 2; ++round) {
         if (round && !m_nextFrameBuildSynchronous) return;
@@ -257,8 +339,8 @@ void Renderer::DiscardFrameBuildInFlight(std::string_view why) {
     auto job = m_frameBuildWorker->Wait();
     if (!job) return;
     // Built from inputs that are gone now. Nothing of it was published; its graph never ran.
-    job->build->outputs.resourceEntityWrites.clear();
-    job->graph.reset();
+    for (auto& outputs : job->build->outputs) outputs.resourceEntityWrites.clear();
+    job->graphs.clear();
     ++m_graphBuildStats.discarded;
     spdlog::info("Renderer: frame graph build {} dropped before its attach ({}); its requests are asked again: {}", job->serial, why,
         job->reason);
@@ -346,6 +428,8 @@ std::shared_ptr<br::render::FrameBuildJob> Renderer::StartFrameBuild(br::render:
     job->reason = job->requests.Empty() ? std::string("renderer graph rebuild") : job->requests.Describe();
     job->serial = ++m_frameBuildSerial;
     auto& frameBuild = *job->build;
+    frameBuild.inputs.knownPassEpochs = m_knownPassEpochs;
+    frameBuild.passEpochs->SetKnown(m_knownPassEpochs);
     br::settings_detail::t_writesUnderSnapshot.clear();
     {
         br::render::ScopedFrameBuild frameBuildScope(frameBuild);
@@ -362,8 +446,11 @@ std::shared_ptr<br::render::FrameBuildJob> Renderer::StartFrameBuild(br::render:
         frameBuild.inputs.settings = std::move(settings);
         // The host's factories are fixed per id; only a change of the recipe's extension ids changes them. Owner thread, and
         // never while a build runs: a build takes the host's extension list when it starts.
-        if (!m_useGraphInstance) RegisterFrameHostExtensions(frameBuild.inputs.extensionIds);
+        if (!m_useGraphInstance) RegisterFrameHostExtensions(frameBuild.inputs.extensionIds, frameBuild.inputs.extensionEpochs);
     }
+    // The host epochs to build, once the inputs say which extensions the build makes (the CLod shadow variant). Nothing above
+    // reads them: the declarations that do run in the build.
+    frameBuild.SetHostEpochs(SelectBuildHostEpochs(job->requests.topologyEpochs, frameBuild.inputs.extensionMakers.contains("CLodShadow")));
     if (auto& writes = br::settings_detail::t_writesUnderSnapshot; !writes.empty()) {
         std::sort(writes.begin(), writes.end());
         writes.erase(std::unique(writes.begin(), writes.end()), writes.end());
@@ -372,7 +459,7 @@ std::shared_ptr<br::render::FrameBuildJob> Renderer::StartFrameBuild(br::render:
         spdlog::warn("Renderer: the frame build's inputs wrote settings (its snapshot does not see these): {}", names);
         writes.clear();
     }
-    job->hostRequestsAtStart = m_useGraphInstance ? 0 : m_frameHost->RebuildRequests(kFrameEpoch);
+    for (const auto host : frameBuild.hostEpochs) job->hostRequestsAtStart.push_back(m_useGraphInstance ? 0 : m_frameHost->RebuildRequests(host));
     // Published-state resolvers capture against a manifest lease, as each frame's preparation does (RendererFrameUpdate).
     job->captureContext = std::make_shared<const org::ResolverCaptureContext>(m_context.publishedManifestLease,
         m_context.publishedRendererState ? m_context.publishedRendererState->bindingBundle : nullptr);
@@ -406,32 +493,66 @@ void Renderer::RunFrameBuild(br::render::FrameBuildJob& job) {
             for (const auto& id : frameBuild.inputs.extensionIds) {
                 const auto maker = frameBuild.inputs.extensionMakers.find(id);
                 if (maker == frameBuild.inputs.extensionMakers.end() || !maker->second) continue;
-                if (auto extension = maker->second()) currentRenderGraph->RegisterExtension(std::move(extension), id);
+                if (auto extension = maker->second()) {
+                    currentRenderGraph->RegisterExtension(std::make_unique<br::render::EpochTaggedExtension>(std::move(extension),
+                        frameBuild.inputs.ExtensionEpoch(id), frameBuild.passEpochs), id);
+                }
             }
             currentRenderGraph->RegisterExtension(std::make_unique<br::render::DeclarationGraphExtension>(
                 [this](org::RenderGraph& graph) { DeclareFramePasses(graph); }), "BasicRenderer::Passes");
             org::runtime::ScopedActiveGraphServices activeGraphServices(currentRenderGraph->GetUploadService(), currentRenderGraph->GetDescriptorService());
             m_frameInstance->Rebuild([](org::RenderGraph& graph) { graph.PrepareExtensionsForBuild(); });
         } else if (job.onRenderThread) {
-            // On the render thread the host builds in place of the old graph (its own build point), as before builds moved off
+            // On the render thread the host builds in place of the old graphs (its own build point), as before builds moved off
             // it. A detached build would do the lowering and the first schedule here and the alias placement again at the
             // first preparation: about twice the render-thread time for nothing, since nothing renders meanwhile.
-            spdlog::info("Renderer: frame graph build {} on the render thread; why: {}", job.serial, job.reason);
+            spdlog::info("Renderer: frame graph build {} on the render thread (host epochs {}); why: {}", job.serial,
+                DescribeHostEpochs(frameBuild.hostEpochs), job.reason);
             RendererECSManager::ScopedBuildWorldAccessCheck worldAccessCheck;
             const auto failuresBefore = m_graphBuildStats.epochFailures;
-            m_frameHost->RequestRebuild(kFrameEpoch, job.reason);
+            for (const auto host : frameBuild.hostEpochs) m_frameHost->RequestRebuild(host, job.reason);
             m_frameHost->BuildIfRequested();
             m_frameHost->PollEpochFailures();
             if (m_graphBuildStats.epochFailures != failuresBefore) job.error = m_graphBuildStats.lastEpochFailure;
             built = job.error.empty();
             job.installed = built;
         } else {
-            // A new graph, detached: its extensions' PrepareForBuild run the renderer's declarations (DeclareFrameProviders,
-            // DeclareFramePasses), then the structural build, Setup and the first schedule. The attached graph is not touched.
-            spdlog::info("Renderer: frame graph build {} on the build thread; why: {}", job.serial, job.reason);
+            // New graphs, detached, one per host epoch of the build, in execution order: an earlier epoch's graph forwards its
+            // extensions' later-epoch passes to the later graph's build (ForwardedPasses). Each graph's extensions' PrepareForBuild
+            // run the renderer's declarations (DeclareFrameProviders, DeclareFramePasses) for its own epochs, then the structural
+            // build, Setup and the first schedule. The attached graphs are not touched.
+            spdlog::info("Renderer: frame graph build {} on the build thread (host epochs {}); why: {}", job.serial,
+                DescribeHostEpochs(frameBuild.hostEpochs), job.reason);
             RendererECSManager::ScopedBuildWorldAccessCheck worldAccessCheck;
-            job.graph = m_frameHost->BuildEpochGraph(kFrameEpoch, job.reason, job.captureContext);
-            built = job.graph && job.graph->Built();
+            for (const auto host : frameBuild.hostEpochs) {
+                auto graph = m_frameHost->BuildEpochGraph(host, job.reason, job.captureContext);
+                const bool ok = graph && graph->Built();
+                job.graphs.push_back({ host, std::move(graph) });
+                if (!ok) {
+                    built = false;
+                    break;
+                }
+            }
+        }
+        if (built) {
+            // Every pass has a frame epoch, and what crosses epochs is logged (docs/frame_graph_composition_plan.md, M4).
+            const std::vector<uint32_t> hosts = m_useGraphInstance ? std::vector<uint32_t>{ br::render::kFrameHostEpoch } : frameBuild.hostEpochs;
+            for (const auto host : hosts) {
+                org::RenderGraph* graph = m_useGraphInstance ? currentRenderGraph : job.installed ? m_frameHost->Graph(host) : nullptr;
+                if (!m_useGraphInstance && !job.installed)
+                    for (auto& entry : job.graphs) if (entry.hostEpoch == host && entry.graph) graph = entry.graph->Graph();
+                if (!graph) continue;
+                if (auto failure = CheckFrameEpochInterface(*graph, *job.build, job.serial, m_useGraphInstance ? br::render::kNoFrameEpoch : host)) {
+                    if (!failure->empty()) {
+                        job.error = std::move(*failure);
+                        built = false;
+                        break;
+                    }
+                } else {
+                    // Built in place: its schedule is selected at its first preparation, so it is checked after its first frame.
+                    job.epochCheckDeferred = true;
+                }
+            }
         }
         job.pipelinesDeclared = declarations.Declared();
         if (built) {
@@ -454,53 +575,120 @@ void Renderer::FinishFrameBuild(std::shared_ptr<br::render::FrameBuildJob> job) 
     BT_ZONE_SCOPE("Renderer::FinishFrameBuild");
     const auto begin = std::chrono::steady_clock::now();
     auto& frameBuild = *job->build;
+    // Read only while the build ran; it holds the last frame's published state.
+    frameBuild.inputs.lastUpdate.reset();
     if (!job->settingsWritten.empty()) {
         std::string names;
         for (const auto& name : job->settingsWritten) names += (names.empty() ? "" : ", ") + name;
         spdlog::warn("Renderer: frame graph build {} wrote settings (its snapshot does not see these): {}", job->serial, names);
     }
     std::string failure = job->error;
-    if (failure.empty() && !m_useGraphInstance && !job->installed && !(job->graph && job->graph->Built()))
-        failure = job->graph ? job->graph->Error() : std::string("no graph was made");
+    if (failure.empty() && !m_useGraphInstance && !job->installed) {
+        if (job->graphs.size() != frameBuild.hostEpochs.size()) failure = "no graph was made for every host epoch";
+        for (auto& entry : job->graphs) {
+            if (!(entry.graph && entry.graph->Built())) {
+                failure = "host epoch " + std::to_string(entry.hostEpoch) + "'s graph: " + (entry.graph ? entry.graph->Error() : std::string("no graph was made"));
+                break;
+            }
+        }
+    }
     if (failure.empty() && !job->pipelineFailures.empty()) {
         failure = std::to_string(job->pipelineFailures.size()) + " pipeline(s) failed to build";
         for (const auto& pipelineFailure : job->pipelineFailures) failure += "; " + pipelineFailure;
     }
     bool askAgain = false;
     if (failure.empty() && !m_useGraphInstance && !job->installed && !m_frameHost->Graph(kUploadEpoch)) {
-        // The first build: the host's upload epoch (its upload pass alone) is built and attached first. The host's upload
-        // service resolves registry handles against the registry of the graph attached last, which must be the frame's.
+        // The first build: the host's upload epoch (its upload pass alone) is built and attached first. The host points the
+        // upload service at the registry of the graph it prepares (GraphHost::ExecuteFrame), and the frame's after this one.
         auto uploads = m_frameHost->BuildEpochGraph(kUploadEpoch, "first build");
         const auto attached = uploads && uploads->Built() ? m_frameHost->AttachEpochGraph(uploads) : org::GraphHost::AttachResult{};
         if (!attached.attached)
             failure = "the upload epoch's graph: " + (uploads && !uploads->Built() ? uploads->Error() : attached.reason);
     }
+    // The host epochs this build's graphs run in from now on.
+    std::vector<uint32_t> attachedHosts;
+    uint32_t refusedMask = 0;
     if (failure.empty() && !m_useGraphInstance && !job->installed) {
-        // The swap: the old graph stops and is released once its submitted work completes (no device wait).
-        const auto attached = m_frameHost->AttachEpochGraph(job->graph);
-        if (!attached.attached) {
-            failure = std::string("the host refused it (") + org::GraphHost::AttachRefusalName(attached.refusal) + "): " + attached.reason;
+        // The build's graphs are one staged set (M4 step 7): each is staged (GraphHost::StageEpochGraph checks it and runs its
+        // shared setup), then all are swapped in by one AttachStagedEpochGraphs at this consolidation point. A refusal of any
+        // drops the whole set, so no frame runs some epochs of this build with others of an older one. Each old graph stops and
+        // is released once its submitted work completes (no device wait). An epoch with no graph yet is attached at once by its
+        // staging: it ran nothing, so nothing old mixes with it.
+        std::vector<uint32_t> staged;
+        const auto refuse = [&](uint32_t host, const org::GraphHost::AttachRefusal refusal, const std::string& reason) {
+            const std::string why = std::string("the host refused host epoch ") + std::to_string(host) + "'s graph ("
+                + org::GraphHost::AttachRefusalName(refusal) + "): " + reason;
             // The host changed under the build: a new build sees the change.
-            askAgain = attached.refusal == org::GraphHost::AttachRefusal::HostConfiguration
-                || attached.refusal == org::GraphHost::AttachRefusal::EpochConfiguration
-                || attached.refusal == org::GraphHost::AttachRefusal::NewerAttached;
+            const bool hostChanged = refusal == org::GraphHost::AttachRefusal::HostConfiguration
+                || refusal == org::GraphHost::AttachRefusal::EpochConfiguration
+                || refusal == org::GraphHost::AttachRefusal::NewerAttached;
+            if (attachedHosts.empty()) {
+                failure = why;
+                askAgain = hostChanged;
+                return;
+            }
+            // Only epochs that had no graph were attached (at their staging). They keep the new graphs. The refused set's
+            // epochs keep theirs and are built again at once.
+            spdlog::error("Renderer: frame graph build {}: {}; the epochs that had no graph keep the new ones", job->serial, why);
+            for (const auto staging : staged) refusedMask |= br::render::HostEpochBit(staging);
+            refusedMask |= br::render::HostEpochBit(host);
+            ++m_graphBuildStats.failed;
+            m_graphBuildStats.lastError = why;
+        };
+        bool refused = false;
+        for (auto& entry : job->graphs) {
+            const auto result = m_frameHost->StageEpochGraph(entry.graph);
+            if (result.staged) {
+                staged.push_back(entry.hostEpoch);
+                continue;
+            }
+            if (result.attached) {
+                attachedHosts.push_back(entry.hostEpoch);
+                continue;
+            }
+            refuse(entry.hostEpoch, result.refusal, result.reason);
+            refused = true;
+            break;
         }
+        if (!refused) {
+            const auto set = m_frameHost->AttachStagedEpochGraphs(staged);
+            if (set.attached) {
+                attachedHosts.insert(attachedHosts.end(), staged.begin(), staged.end());
+                if (staged.size() > 1) ++m_graphBuildStats.stagedSets;
+            } else {
+                refuse(set.epoch, set.refusal, set.reason);
+                refused = true;
+            }
+        }
+        if (refused) {
+            const auto dropped = m_frameHost->DropStagedEpochGraphs(staged);
+            ++m_graphBuildStats.refusedSets;
+            spdlog::warn("Renderer: frame graph build {}: its staged set of host epochs {} was refused; {} staged graph(s) dropped, none attached",
+                job->serial, DescribeHostEpochs(staged), dropped);
+        }
+        // In the build's host epoch order.
+        std::vector<uint32_t> ordered;
+        for (const auto host : frameBuild.hostEpochs)
+            if (std::find(attachedHosts.begin(), attachedHosts.end(), host) != attachedHosts.end()) ordered.push_back(host);
+        attachedHosts = std::move(ordered);
+    } else if (failure.empty()) {
+        attachedHosts = m_useGraphInstance ? std::vector<uint32_t>{ br::render::kFrameHostEpoch } : frameBuild.hostEpochs;
     }
     const auto latencyMs = std::chrono::duration<double, std::milli>(begin - job->started).count();
     if (!failure.empty()) {
-        // Nothing of a failed build is published: its extension instances go with its graph, and the attached graph keeps
-        // its directory entries, streaming binding and casters.
-        frameBuild.outputs.resourceEntityWrites.clear();
-        job->graph.reset();
+        // Nothing of a failed build is published: its extension instances go with its graphs, and the attached graphs keep
+        // their directory entries, streaming binding and casters.
+        for (auto& outputs : frameBuild.outputs) outputs.resourceEntityWrites.clear();
+        job->graphs.clear();
         ++m_graphBuildStats.failed;
         m_graphBuildStats.lastError = failure;
         // A graph the host's own build point installed is in place already: it cannot be kept from running.
         const bool keep = currentRenderGraph && !m_useGraphInstance && !job->installed;
         spdlog::error("Renderer: frame graph build {} failed ({}): {}; why it was built: {}", job->serial,
-            keep ? "the attached graph keeps rendering" : "there is no graph to keep", failure, job->reason);
+            keep ? "the attached graphs keep rendering" : "there is no graph to keep", failure, job->reason);
         if (job->installed) {
             // Its pipelines failed after the host installed it: the rollback's build follows at once, on this thread.
-            currentRenderGraph = m_frameHost->Graph(kFrameEpoch);
+            currentRenderGraph = m_frameHost->Graph(br::render::kFrameHostEpoch);
             m_nextFrameBuildSynchronous = true;
         }
         if (m_pipelineRollbackRecipe) {
@@ -513,15 +701,45 @@ void Renderer::FinishFrameBuild(std::shared_ptr<br::render::FrameBuildJob> job) 
         return;
     }
     if (!m_useGraphInstance) {
-        currentRenderGraph = m_frameHost->Graph(kFrameEpoch);
+        currentRenderGraph = m_frameHost->Graph(br::render::kFrameHostEpoch);
         if (!currentRenderGraph) throw std::runtime_error("the frame graph host has no graph after its attach");
     }
     m_frameBuild = job->build;
+    m_frameBuildSerialAttached = job->serial;
+    if (!m_useGraphInstance) RecordAttachedBuildSet(job->serial, attachedHosts);
+    m_frameEpochCheckDeferred = job->epochCheckDeferred;
     m_graphBuildSettings = frameBuild.inputs.settings;
+    for (const auto host : attachedHosts) {
+        m_epochBuilds[host] = job->build;
+        ++m_epochGraphBuilds[host];
+    }
+    // The passes' epochs, for the next builds' readback capture anchors: this build's for its host epochs, the earlier
+    // builds' for the others.
+    {
+        auto known = std::make_shared<std::unordered_map<std::string, uint32_t>>();
+        if (m_knownPassEpochs)
+            for (const auto& [pass, epoch] : *m_knownPassEpochs)
+                if (std::find(attachedHosts.begin(), attachedHosts.end(), br::render::HostEpochOf(epoch)) == attachedHosts.end())
+                    known->emplace(pass, epoch);
+        for (const auto& [pass, epoch] : frameBuild.passEpochs->Tagged()) known->insert_or_assign(pass, epoch);
+        m_knownPassEpochs = std::move(known);
+    }
+    // An epoch that received another's passes is built with it from now on (StartFrameBuild).
+    if (std::find(attachedHosts.begin(), attachedHosts.end(), br::render::kFrameHostEpoch) != attachedHosts.end())
+        m_frameForwardMask = frameBuild.forwarded ? frameBuild.forwarded->hostEpochMask : 0u;
     PublishFrameBuild(frameBuild);
-    currentRenderGraph->GetMemorySnapshotProvider().SetProvider(
-        org::memory::CreateECSMemorySnapshotProvider(RendererECSManager::GetInstance().GetWorld()));
+    for (const auto host : attachedHosts) {
+        if (auto* graph = FrameGraph(host)) {
+            graph->GetMemorySnapshotProvider().SetProvider(
+                org::memory::CreateECSMemorySnapshotProvider(RendererECSManager::GetInstance().GetWorld()));
+        }
+    }
     Menu::GetInstance().SetRenderGraph(currentRenderGraph);
+    {
+        std::vector<std::pair<uint32_t, org::RenderGraph*>> graphs;
+        for (const auto host : FrameGraphHostEpochs()) graphs.emplace_back(host, FrameGraph(host));
+        Menu::GetInstance().SetEpochGraphs(std::move(graphs));
+    }
     // The recipe replacement this build carried is in place.
     m_pipelineRollbackRecipe.reset();
     ConfirmPipelineReplacement();
@@ -530,6 +748,7 @@ void Renderer::FinishFrameBuild(std::shared_ptr<br::render::FrameBuildJob> job) 
     m_lastGraphBuildMs = job->buildMs;
     m_lastGraphBuildFrame = m_totalFramesRendered;
     m_lastGraphBuildReasons = job->reason;
+    m_lastGraphBuildHostEpochs = attachedHosts;
     auto& stats = m_graphBuildStats;
     stats.lastAttachMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
     stats.lastPipelineWaitMs = job->pipelineWaitMs;
@@ -543,13 +762,56 @@ void Renderer::FinishFrameBuild(std::shared_ptr<br::render::FrameBuildJob> job) 
         ++stats.superseded;
         m_lastGraphBuildReasons += "; waiting for the next build: " + m_frameRevisions.Peek().Describe();
     }
+    // The epochs the host refused: built again.
+    if (refusedMask) RequestGraphRebuild("refused at the attach of build " + std::to_string(job->serial), refusedMask);
     // The host's own requests (an extension added, recording timestamps switched) made after the build started.
-    if (!m_useGraphInstance && m_frameHost->RebuildRequests(kFrameEpoch) != job->hostRequestsAtStart && m_frameHost->RebuildRequested(kFrameEpoch))
-        RequestGraphRebuild("frame graph host: " + m_frameHost->RebuildReasons(kFrameEpoch));
-    spdlog::info("Renderer: frame graph build {} attached; built in {:.1f} ms {} ({:.1f} ms of it waiting for {} pipelines), {:.1f} ms after "
+    if (!m_useGraphInstance) {
+        for (size_t index = 0; index < frameBuild.hostEpochs.size() && index < job->hostRequestsAtStart.size(); ++index) {
+            const auto host = frameBuild.hostEpochs[index];
+            if (m_frameHost->RebuildRequests(host) != job->hostRequestsAtStart[index] && m_frameHost->RebuildRequested(host))
+                RequestGraphRebuild("frame graph host: " + m_frameHost->RebuildReasons(host), br::render::HostEpochBit(host));
+        }
+    }
+    spdlog::info("Renderer: frame graph build {} attached (host epochs {}); built in {:.1f} ms {} ({:.1f} ms of it waiting for {} pipelines), {:.1f} ms after "
         "its start, {} frames rendered meanwhile; render thread {:.1f} ms before it and {:.1f} ms at its attach",
-        job->serial, job->buildMs, job->onRenderThread ? "on the render thread" : "on the build thread", job->pipelineWaitMs,
+        job->serial, DescribeHostEpochs(attachedHosts), job->buildMs, job->onRenderThread ? "on the render thread" : "on the build thread", job->pipelineWaitMs,
         job->pipelinesDeclared, latencyMs, stats.lastFrames, job->prepareMs, stats.lastAttachMs);
+    // What crosses the attached graphs, by identity (deferred for a graph built in place: it has no schedule yet).
+    if (!m_frameEpochCheckDeferred && !m_useGraphInstance) CheckFrameInterfaceAcrossGraphs(job->serial);
+}
+
+// The update values a build's passes declare from at Setup (FrameBuildInputs::lastUpdate): the last frame's, with the views
+// as the first frame after the attach will have them. Null when a view's resources changed since that frame (a resize, a
+// view made or destroyed): the passes then declare as the frame's Update finds them, as before.
+static std::shared_ptr<const UpdateContext> MakeBuildUpdateContextFrom(const UpdateContext* lastFrame, ViewManager& views,
+    const br::render::FrameBuildInputs& in) {
+    if (!lastFrame || !lastFrame->viewFamily) return nullptr;
+    const auto& last = *lastFrame;
+    auto family = std::make_shared<br::render::PreparedViewFamilyState>(*last.viewFamily);
+    size_t liveViews = 0;
+    views.ForEachView([&](uint64_t) { ++liveViews; });
+    if (family->views.size() != liveViews) return nullptr;
+    for (auto& view : family->views) {
+        const auto* live = views.Get(view.id);
+        if (!live || live->gpu.linearDepthMap != view.linearDepthMap) return nullptr;
+        if (view.id == in.primaryViewID && in.frameInterface.visibilityBuffer) {
+            view.visibilityBuffer = in.frameInterface.visibilityBuffer;
+            view.deepVisibilityHeadPointers = in.frameInterface.visibilityHeadPointers;
+        } else if (live->gpu.visibilityBuffer != view.visibilityBuffer) {
+            return nullptr;
+        }
+    }
+    auto update = std::make_shared<UpdateContext>(last);
+    update->viewFamily = std::move(family);
+    return update;
+}
+
+std::shared_ptr<const UpdateContext> Renderer::MakeBuildUpdateContext(const br::render::FrameBuildInputs& in) {
+    if (!m_pViewManager) return nullptr;
+    auto update = MakeBuildUpdateContextFrom(m_lastFrameUpdate.get(), *m_pViewManager, in);
+    if (!update && m_lastFrameUpdate)
+        spdlog::info("Renderer: the views changed since the last frame; the frame graph build's passes declare at their first Update");
+    return update;
 }
 
 void Renderer::MakeFrameBuild(br::render::FrameBuild& build, flecs::entity primaryCamera) {
@@ -562,6 +824,10 @@ void Renderer::MakeFrameBuild(br::render::FrameBuild& build, flecs::entity prima
     if (const auto* camera = primaryCamera.try_get<Components::Camera>()) in.camera = *camera;
     in.cameraBuffer = m_pViewManager->GetCameraBuffer();
     in.cullingCameraBuffer = m_pViewManager->GetCullingCameraBuffer();
+    // The renderer's cross-epoch objects, made before the views the build's passes declare from (in.lastUpdate).
+    UpdateFrameInterface(in.primaryViewID);
+    in.frameInterface = *m_frameInterface;
+    in.lastUpdate = MakeBuildUpdateContext(in);
 
     if (m_pipelineRecipe.Contains<BrdfIntegrationTechnique>()) in.brdfLut = EnsureBrdfLut();
 
@@ -635,8 +901,8 @@ void Renderer::MakeFrameBuild(br::render::FrameBuild& build, flecs::entity prima
         in.vsmTransformChangedQuery = m_vsmTransformChangedQuery;
     }
 
-    build.outputs.terrainRvtResources = m_producerPersistentState->terrainRvtResources;
-    build.outputs.terrainRvtGeneration = m_producerPersistentState->terrainRvtGeneration;
+    build.Outputs(br::render::kVisibilityEpoch).terrainRvtResources = m_producerPersistentState->terrainRvtResources;
+    build.Outputs(br::render::kVisibilityEpoch).terrainRvtGeneration = m_producerPersistentState->terrainRvtGeneration;
 
     // What the build reads of the renderer's own state, copied: the render thread keeps changing it while the build runs.
     in.recipe = std::make_shared<const PipelineRecipe>(m_pipelineRecipe);
@@ -675,21 +941,33 @@ bool Renderer::PrepareFrameRayTracing() {
     return ready;
 }
 
-void Renderer::PublishResourceEntityWrites(br::render::FrameBuildOutputs& outputs) {
-    auto& writes = outputs.resourceEntityWrites;
-    // The directory's resources are the build's extension instances', which are new every build. An entry this build does
-    // not publish again belongs to a graph that is retiring: it leaves the directory now, so first-match readers never see
-    // the old graph's buffers (a variant the new graph does not have, say).
+void Renderer::PublishResourceEntityWrites(br::render::FrameBuild& build) {
+    // Every declared epoch's, in frame epoch order: the directory below drops what none of them published again.
+    std::vector<br::render::ResourceEntityWrite> writes;
+    std::vector<uint32_t> writeHosts;
+    for (const auto epoch : build.epochs) {
+        auto& epochWrites = build.Outputs(epoch).resourceEntityWrites;
+        writeHosts.insert(writeHosts.end(), epochWrites.size(), br::render::HostEpochOf(epoch));
+        std::move(epochWrites.begin(), epochWrites.end(), std::back_inserter(writes));
+        epochWrites.clear();
+    }
+    // The directory's resources are the build's extension instances', which are new every build. An entry of an epoch this
+    // build rebuilt that it does not publish again belongs to a graph that is retiring: it leaves the directory now, so
+    // first-match readers never see the old graph's buffers (a variant the new graph does not have, say). Entries of epochs
+    // the build did not rebuild stay: their graphs keep running.
     std::unordered_set<std::string> republished;
     for (const auto& write : writes) {
         if (!write.directoryKey.empty()) republished.insert(write.directoryKey);
     }
+    const auto rebuilt = [&](uint32_t host) {
+        return std::find(build.hostEpochs.begin(), build.hostEpochs.end(), host) != build.hostEpochs.end() || build.hostEpochs.empty();
+    };
     for (auto it = m_publishedResourceEntities.begin(); it != m_publishedResourceEntities.end();) {
-        if (republished.contains(it->first)) {
+        if (republished.contains(it->first) || !rebuilt(it->second.hostEpoch)) {
             ++it;
             continue;
         }
-        if (auto previous = it->second.lock()) {
+        if (auto previous = it->second.resource.lock()) {
             if (auto entity = previous->GetECSEntity(); entity && entity.has<Components::Resource>()) entity.remove<Components::Resource>();
         }
         it = m_publishedResourceEntities.erase(it);
@@ -707,15 +985,17 @@ void Renderer::PublishResourceEntityWrites(br::render::FrameBuildOutputs& output
         ecs.FlushDeferredWorldOperations();
     }
     auto& world = ecs.GetWorld();
-    for (auto& write : writes) {
+    for (size_t index = 0; index < writes.size(); ++index) {
+        auto& write = writes[index];
         if (!write.directoryKey.empty()) {
             // A resource replaced under the same name leaves the directory, so its first-match readers see the new one.
             auto& published = m_publishedResourceEntities[write.directoryKey];
-            if (auto previous = published.lock(); previous && previous != write.resource) {
+            if (auto previous = published.resource.lock(); previous && previous != write.resource) {
                 if (auto entity = previous->GetECSEntity(); entity && entity.has<Components::Resource>())
                     entity.remove<Components::Resource>();
             }
-            published = write.resource;
+            published.resource = write.resource;
+            published.hostEpoch = writeHosts[index];
         }
         if (auto entity = write.resource->GetECSEntity()) write.write(world, entity);
     }
@@ -724,19 +1004,267 @@ void Renderer::PublishResourceEntityWrites(br::render::FrameBuildOutputs& output
 
 void Renderer::PublishFrameBuild(br::render::FrameBuild& build) {
     BT_ZONE_SCOPE("Renderer::PublishFrameBuild");
-    auto& out = build.outputs;
-    PublishResourceEntityWrites(out);
-    if (out.virtualShadowCasters && !out.virtualShadowCasters->Empty()) {
-        spdlog::info("Renderer: the frame graph has {} virtual shadow caster(s)", out.virtualShadowCasters->Size());
+    PublishResourceEntityWrites(build);
+    // Each epoch's outputs, from the epoch that owns them (FrameBuildOutputs). An epoch the build did not declare keeps what
+    // it published before.
+    if (build.Declares(br::render::kVisibilityEpoch)) {
+        auto& out = build.Outputs(br::render::kVisibilityEpoch);
+        if (out.virtualShadowCasters && !out.virtualShadowCasters->Empty()) {
+            spdlog::info("Renderer: the frame graph has {} virtual shadow caster(s)", out.virtualShadowCasters->Size());
+        }
+        // CLod streaming now runs with the new graph's binding; without CLod in the graph it stops.
+        if (const auto& streaming = m_producerPersistentState->clodStreaming) streaming->AttachGraph(out.clodStreaming);
+        // Shading's graph (the alpha variant, the streaming tail) works with the binding's buffers. A Visibility rebuild shares
+        // the attached ones (CLodExtension::BuildStreamingBinding); when it made new ones (the shadow variant's lists are per
+        // build) and Shading's graph was not built with them, Shading is rebuilt: until then its tail submits nothing.
+        const auto previous = m_frameInterface ? m_frameInterface->clodStreaming : nullptr;
+        // SelectBuildHostEpochs puts Shading in such a build's set, so this is a fallback that should not run.
+        if (out.clodStreaming && previous && !out.clodStreaming->SharesBuffersWith(*previous) && !build.Declares(br::render::kShadingEpoch)
+            && br::render::HostEpochOf(br::render::kShadingEpoch) != br::render::HostEpochOf(br::render::kVisibilityEpoch)) {
+            spdlog::warn("Renderer: a Visibility build replaced the CLod streaming buffers without a Shading graph in its set; Shading is "
+                "built again, and its streaming tail submits nothing until then");
+            RequestGraphRebuild("CLod streaming buffers replaced by a Visibility build", br::render::HostEpochMaskOf({ br::render::kShadingEpoch }));
+        }
+        // The CLod variants of later epochs' builds write their feedback into it (CLodExtension::BuildStreamingBinding).
+        if (m_frameInterface) m_frameInterface->clodStreaming = out.clodStreaming;
+        m_materialEvaluationInputs = out.materialEvaluationInputs;
+        if (out.visibilityBuffer)
+            m_pViewManager->AttachVisibilityBuffer(build.inputs.primaryViewID, out.visibilityBuffer, build.inputs.frameInterface.visibilityHeadPointers);
+        // Unless a terrain RVT setting invalidated the cache while the build ran: the next build makes it again.
+        if (out.terrainRvt && out.terrainRvtGeneration == m_producerPersistentState->terrainRvtGeneration)
+            m_producerPersistentState->terrainRvtResources = out.terrainRvtResources;
     }
-    // CLod streaming now runs with the new graph's binding; without CLod in the graph it stops.
-    if (const auto& streaming = m_producerPersistentState->clodStreaming) streaming->AttachGraph(out.clodStreaming);
-    m_materialEvaluationInputs = out.materialEvaluationInputs;
-    m_pathTraceState = out.pathTraceState;
-    if (out.visibilityBuffer) m_pViewManager->AttachVisibilityBuffer(build.inputs.primaryViewID, out.visibilityBuffer);
-    // Unless a terrain RVT setting invalidated the cache while the build ran: the next build makes it again.
-    if (out.terrainRvt && out.terrainRvtGeneration == m_producerPersistentState->terrainRvtGeneration)
-        m_producerPersistentState->terrainRvtResources = out.terrainRvtResources;
+    if (build.Declares(br::render::kShadingEpoch)) m_pathTraceState = build.Outputs(br::render::kShadingEpoch).pathTraceState;
+}
+
+std::string Renderer::DumpFrameGraphMemory() {
+    std::string reply = "{\"frame\":" + std::to_string(m_totalFramesRendered) + ",\"frame_placement\":" + (m_framePlacement ? "true" : "false");
+    if (currentRenderGraph) {
+        currentRenderGraph->WriteVramUsageDebugDumpNow(static_cast<uint32_t>(m_totalFramesRendered));
+        reply += ",\"vram_dump\":true";
+    }
+    if (m_frameHost && m_framePlacement) {
+        m_frameHost->LogFramePlacement(true);
+        if (const auto version = m_frameHost->LatestFramePlacement()) {
+            reply += ",\"frame_placement_version\":" + std::to_string(version->Id());
+            reply += ",\"frame_placement_packed_mb\":" + std::to_string(version->Bytes() / (1024.0 * 1024.0));
+        }
+        // What the placement's heaps hold now: current ones, and replaced ones still alive.
+        double current = 0.0, replaced = 0.0;
+        for (const auto& heap : m_frameHost->FramePlacementHeaps())
+            (heap.current ? current : replaced) += static_cast<double>(heap.capacity) / (1024.0 * 1024.0);
+        reply += ",\"frame_placement_heaps_mb\":" + std::to_string(current) + ",\"frame_placement_replaced_heaps_mb\":" + std::to_string(replaced);
+        reply += ",\"stale_epochs\":" + std::to_string(m_frameHost->StaleAliasPlacementEpochs().size());
+        // Each host epoch's graph: the version it placed from and how many candidates it placed from it (M4 step 5).
+        std::string epochs;
+        for (const auto host : FrameGraphHostEpochs()) {
+            const auto use = m_frameHost->FramePlacementInUse(host);
+            epochs += (epochs.empty() ? "" : ",") + std::string("{\"epoch\":") + std::to_string(host) + ",\"planned\":"
+                + (use.planned ? "true" : "false") + ",\"version\":" + std::to_string(use.version) + ",\"placed\":"
+                + std::to_string(use.placed) + "}";
+        }
+        reply += ",\"epochs\":[" + epochs + "]";
+    }
+    return reply + "}";
+}
+
+void Renderer::UpdateFrameInterface(uint64_t primaryViewID) {
+    if (!m_frameInterface) m_frameInterface = std::make_shared<br::render::FrameInterface>();
+    auto& frameInterface = *m_frameInterface;
+    if (!m_pipelineRecipe.Contains<br::pipeline::CanonicalSurfaceResourcesTechnique>()) {
+        // No graph declares a canonical surface: nothing to keep (the view keeps the one it has, as before).
+        frameInterface.visibilityBuffer.reset();
+        frameInterface.visibilityHeadPointers.reset();
+        frameInterface.primaryViewID = 0;
+        frameInterface.registrations.clear();
+        frameInterface.width = frameInterface.height = 0;
+        frameInterface.rayReconstructionGuides = false;
+        return;
+    }
+    const auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
+    // The cross-epoch transients every epoch's graph registers (M4 step 5): made again only for another render resolution,
+    // and the guides when Ray Reconstruction comes or goes.
+    const bool guides = UpscalingManager::GetInstance().GetCurrentUpscalingMode() == UpscalingMode::DLSSRayReconstruction;
+    if (frameInterface.registrations.empty() || frameInterface.width != resolution.x || frameInterface.height != resolution.y
+        || frameInterface.rayReconstructionGuides != guides) {
+        frameInterface.registrations.clear();
+        const auto keep = [&](std::string_view id, std::shared_ptr<org::Resource> resource) {
+            frameInterface.registrations.push_back({ std::string(id), std::move(resource) });
+        };
+        CreateCanonicalSurfaceResources(keep);
+        CreateDebugVisualizationResources(keep);
+        if (guides) br::render::UpscalingGenerationService::MakeRayReconstructionGuides(keep);
+        // Shading's inputs from Visibility (or Shading's own, by name in every graph): one object for every build, so a
+        // Visibility rebuild leaves Shading's graph valid and frame placement matches them across the two.
+        const auto texture = [&](uint32_t channels, rhi::Format format, const char* name, uint32_t arraySize = 0) {
+            org::TextureDescription desc;
+            desc.channels = channels;
+            desc.format = format;
+            desc.hasSRV = desc.hasUAV = true;
+            if (arraySize) {
+                desc.hasSRV = false;
+                desc.isArray = true;
+                desc.arraySize = arraySize;
+            }
+            desc.imageDimensions.emplace_back(resolution.x, resolution.y, 0, 0);
+            auto made = org::PixelBuffer::CreateSharedUnmaterialized(desc);
+            made->SetName(name);
+            return made;
+        };
+        frameInterface.sunShadowMask = texture(1, rhi::Format::R8_UNorm, "CLod RT sun shadow");
+        frameInterface.stochasticDiffuse = texture(4, rhi::Format::R16G16B16A16_Float, "Stochastic lighting diffuse");
+        frameInterface.stochasticSpecular = texture(4, rhi::Format::R16G16B16A16_Float, "Stochastic lighting specular");
+        // VSM flicker telemetry: the deferred pass reprojects each pixel's shadow outcome against the previous frame's
+        // (ping-pong slices).
+        frameInterface.vsmReceiverHistory = texture(4, rhi::Format::R32G32B32A32_UInt, "CLod VSM receiver history", 2);
+        frameInterface.width = resolution.x;
+        frameInterface.height = resolution.y;
+        frameInterface.rayReconstructionGuides = guides;
+        spdlog::info("Renderer: frame interface: {} cross-epoch transients for {}x{}{}", frameInterface.registrations.size(),
+            resolution.x, resolution.y, guides ? " (with the Ray Reconstruction guides)" : "");
+    }
+    if (const auto& current = frameInterface.visibilityBuffer; current && frameInterface.primaryViewID == primaryViewID
+        && current->GetWidth() == resolution.x && current->GetHeight() == resolution.y)
+        return;
+    // A transient of the graphs that use it (allowAlias): one object for all of them, placed by each graph's alias plan.
+    org::TextureDescription desc;
+    desc.channels = 2;
+    desc.format = rhi::Format::R32G32_UInt;
+    desc.hasRTV = desc.hasSRV = desc.hasUAV = desc.hasNonShaderVisibleUAV = true;
+    desc.allowAlias = true;
+    desc.imageDimensions.emplace_back(resolution.x, resolution.y, 0, 0);
+    frameInterface.visibilityBuffer = org::PixelBuffer::CreateSharedUnmaterialized(desc);
+    frameInterface.visibilityBuffer->SetName("Visibility Buffer");
+    org::memory::SetResourceUsageHint(*frameInterface.visibilityBuffer, "Canonical surface visibility");
+    frameInterface.visibilityHeadPointers = m_pViewManager->MakeCLodDeepVisibilityHeadPointers(primaryViewID, *frameInterface.visibilityBuffer);
+    frameInterface.primaryViewID = primaryViewID;
+    spdlog::info("Renderer: frame interface: visibility buffer {}x{} for view {}", resolution.x, resolution.y, primaryViewID);
+}
+
+std::optional<std::string> Renderer::CheckFrameEpochInterface(org::RenderGraph& graph, const br::render::FrameBuild& build, uint64_t serial,
+    uint32_t hostEpoch) {
+    BT_ZONE_SCOPE("Renderer::CheckFrameEpochInterface");
+    const auto begin = std::chrono::steady_clock::now();
+    auto trace = graph.TraceSelectedSchedule(hostEpoch == br::render::kNoFrameEpoch ? br::render::kFrameHostEpoch : hostEpoch);
+    if (!trace) trace = graph.TraceSelectedSchedule(UINT32_MAX);
+    if (!trace) return std::nullopt;
+    const auto check = br::render::CheckFrameEpochs(*trace, build);
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
+    // The crossing set, by identity and epochs: logged in full when it changes (or every build, BASICRENDERER_CHECK_EPOCH_INTERFACE=1).
+    // Inside one graph (Visibility and Shading share one since step 5) a crossing is the graph's own transient.
+    std::string key;
+    for (const auto& crossing : check.crossing) {
+        key += crossing.name;
+        for (const auto epoch : crossing.epochs) key += char('0' + epoch);
+        key += ';';
+    }
+    static const bool always = br::runtime::renderer_settings::ReadTruthyEnvironmentFlag("BASICRENDERER_CHECK_EPOCH_INTERFACE");
+    auto& lastKey = m_lastFrameEpochCheckKeys[hostEpoch];
+    const bool changed = always || key != lastKey || !check.untagged.empty();
+    lastKey = std::move(key);
+    spdlog::info("Renderer: frame graph build {} host epoch {} epochs ({:.1f} ms): {}", serial,
+        hostEpoch == br::render::kNoFrameEpoch ? std::string("(all)") : std::to_string(hostEpoch), ms, check.Describe(changed ? 200 : 0));
+    if (check.untagged.empty()) return std::string{};
+    std::string failure = std::to_string(check.untagged.size()) + " pass(es) without a frame epoch:";
+    for (const auto& pass : check.untagged) failure += " " + pass;
+    return failure;
+}
+
+// The epoch interface across the host epochs' graphs (M4 step 5): every resource the attached graphs' schedules use, by identity.
+// One used by two graphs is a cross-epoch resource: one object, which frame placement places over its span in the frame (or a
+// persistent one). The same name used by two graphs as different objects is a resource each epoch made for itself: the later
+// epoch does not see the earlier one's contents. Logged in full when the set changes; render thread, after an attach.
+void Renderer::CheckFrameInterfaceAcrossGraphs(uint64_t serial) {
+    BT_ZONE_SCOPE("Renderer::CheckFrameInterfaceAcrossGraphs");
+    const auto hosts = FrameGraphHostEpochs();
+    if (hosts.size() < 2) return;
+    const auto begin = std::chrono::steady_clock::now();
+    struct Use {
+        std::string name;
+        uint64_t bytes = 0;
+        bool aliasCandidate = false;
+        uint32_t hostMask = 0;
+    };
+    std::unordered_map<uint64_t, Use> byObject;
+    std::unordered_map<std::string, std::unordered_map<uint64_t, uint32_t>> byName;  // name -> object -> host mask
+    for (const auto host : hosts) {
+        auto* graph = FrameGraph(host);
+        if (!graph) return;
+        auto trace = graph->TraceSelectedSchedule(host);
+        if (!trace) trace = graph->TraceSelectedSchedule(UINT32_MAX);
+        if (!trace) {
+            spdlog::info("Renderer: frame graph build {} across host epochs: host epoch {}'s graph has no schedule yet", serial, host);
+            return;
+        }
+        std::vector<bool> used(trace->resources.size(), false);
+        for (const auto& pass : trace->passes)
+            for (const auto& access : pass.accesses)
+                if (access.resource < used.size()) used[access.resource] = true;
+        for (size_t index = 0; index < trace->resources.size(); ++index) {
+            if (!used[index]) continue;
+            const auto& resource = trace->resources[index];
+            if (!resource.objectId) continue;
+            auto& use = byObject[resource.objectId];
+            use.name = resource.name;
+            use.bytes = (std::max)(use.bytes, resource.bytes);
+            use.aliasCandidate = use.aliasCandidate || resource.aliasCandidate;
+            use.hostMask |= br::render::HostEpochBit(host);
+            byName[resource.name][resource.objectId] |= br::render::HostEpochBit(host);
+        }
+    }
+    std::unordered_set<uint64_t> interfaceIds;
+    if (m_frameInterface)
+        for (const auto* object : m_frameInterface->Objects()) interfaceIds.insert(object->GetGlobalResourceID());
+    const auto hostsOf = [&](uint32_t mask) {
+        std::string text;
+        for (const auto host : hosts) if (mask & br::render::HostEpochBit(host)) text += (text.empty() ? "" : "+") + std::to_string(host);
+        return text;
+    };
+    struct Row { std::string name; uint64_t bytes; uint32_t mask; bool interfaceObject; };
+    std::vector<Row> transients;
+    size_t persistent = 0;
+    uint64_t transientBytes = 0;
+    for (const auto& [id, use] : byObject) {
+        if (std::popcount(use.hostMask) < 2) continue;
+        if (!use.aliasCandidate) {
+            ++persistent;
+            continue;
+        }
+        transients.push_back({ use.name, use.bytes, use.hostMask, interfaceIds.contains(id) });
+        transientBytes += use.bytes;
+    }
+    std::sort(transients.begin(), transients.end(), [](const Row& a, const Row& b) { return a.bytes != b.bytes ? a.bytes > b.bytes : a.name < b.name; });
+    // Names two graphs use as different alias candidates.
+    std::vector<std::string> split;
+    for (const auto& [name, objects] : byName) {
+        if (objects.size() < 2) continue;
+        uint32_t union_ = 0;
+        for (const auto& [object, mask] : objects)
+            if (byObject[object].aliasCandidate) union_ |= mask;
+        bool separate = false;
+        for (const auto& [object, mask] : objects)
+            if (byObject[object].aliasCandidate && (union_ & ~mask)) separate = true;
+        if (separate) split.push_back(name + " (" + std::to_string(objects.size()) + " objects, host epochs " + hostsOf(union_) + ")");
+    }
+    std::sort(split.begin(), split.end());
+    std::string key;
+    for (const auto& row : transients) key += row.name + hostsOf(row.mask) + ";";
+    for (const auto& name : split) key += "!" + name;
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
+    static const bool always = br::runtime::renderer_settings::ReadTruthyEnvironmentFlag("BASICRENDERER_CHECK_EPOCH_INTERFACE");
+    const bool changed = always || key != m_lastFrameInterfaceCheckKey;
+    m_lastFrameInterfaceCheckKey = std::move(key);
+    std::string text = fmt::format("{} transient(s) {:.1f} MB cross the host epochs' graphs (one object each), {} persistent; "
+        "{} name(s) are different objects in different graphs", transients.size(), transientBytes / 1048576.0, persistent, split.size());
+    if (changed) {
+        for (const auto& row : transients)
+            text += fmt::format("\n  '{}' {:.2f} MB host epochs {}{}", row.name, row.bytes / 1048576.0, hostsOf(row.mask),
+                row.interfaceObject ? " (frame interface)" : "");
+        for (const auto& name : split) text += "\n  different objects: '" + name + "'";
+    }
+    spdlog::info("Renderer: frame graph build {} across host epochs ({:.1f} ms): {}", serial, ms, text);
+    if (!split.empty() && changed)
+        spdlog::warn("Renderer: {} resource name(s) are separate objects in different host epochs' graphs (no contents cross): see above", split.size());
 }
 
 void Renderer::DeclareFrameProviders(org::RenderGraph& graph) {
@@ -745,6 +1273,368 @@ void Renderer::DeclareFrameProviders(org::RenderGraph& graph) {
     if (!frameBuild) throw std::logic_error("DeclareFrameProviders: no frame build in progress");
     // The managers' copies MakeFrameBuild took (the graph keeps pointers to them: the providers' extension holds them).
     for (const auto& provider : frameBuild->inputs.providers) graph.RegisterProvider(provider.get());
+    // The renderer's cross-epoch objects, the same in every epoch's graph (FrameInterface), before any extension declares.
+    const auto& frameInterface = frameBuild->inputs.frameInterface;
+    if (frameInterface.visibilityBuffer) graph.RegisterResource(Builtin::PrimaryCamera::VisibilityTexture, frameInterface.visibilityBuffer);
+    for (const auto& registration : frameInterface.registrations) graph.RegisterResource(registration.id, registration.resource);
+    // Registered only for the options that use them: passes read their presence.
+    const auto& in = frameBuild->inputs;
+    if (in.rayTracedSunShadow && frameInterface.sunShadowMask) graph.RegisterResource(Builtin::RayTracing::SunShadow, frameInterface.sunShadowMask);
+    if (in.stochasticLightingActive && frameInterface.stochasticDiffuse) {
+        graph.RegisterResource(Builtin::StochasticLighting::Diffuse, frameInterface.stochasticDiffuse);
+        graph.RegisterResource(Builtin::StochasticLighting::Specular, frameInterface.stochasticSpecular);
+    }
+    if (!br::runtime::renderer_settings::CLodVirtualShadowFrameTelemetryPath().empty() && frameInterface.vsmReceiverHistory)
+        graph.RegisterResource(Builtin::Shadows::CLodReceiverHistory, frameInterface.vsmReceiverHistory);
+}
+
+namespace br::render {
+// What the renderer's pass declarations of one build share (Renderer::DeclareFramePasses and its epochs' functions).
+struct FramePassDeclaration {
+    org::RenderGraph& graph;
+    FrameBuild& build;
+    const FrameBuildInputs& in;
+    const br::pipeline::PipelineRecipe& recipe;
+};
+} // namespace br::render
+
+// Which frame epoch a technique's passes belong to (docs/frame_graph_composition_plan.md, M4; the M4 design's section 2):
+// Visibility ends with material evaluation. The frame resources, the BRDF table, the environment and the ray tracing scene
+// are registrations every epoch reads; until the frame is split they are declared once, with Visibility. DebugOutput has
+// passes in two epochs (Post's resolve, Overlay's skeletons and spheres). Present is Overlay's: it makes the frame's last
+// backbuffer access, so it ends the last epoch.
+static uint32_t FrameEpochOfTechnique(br::pipeline::TechniqueId id) {
+    using enum br::pipeline::TechniqueId;
+    switch (id) {
+    case FrameResources: case BrdfIntegration: case Environment: case ClusterLod: case ClusterLodShadow: case ClusterLodVoxel:
+    case CanonicalSurfaceResources: case VisibilityMaterialBinning: case TerrainRvt: case TerrainRegionMaterialEvaluation:
+    case MaterialEvaluation:
+        return br::render::kVisibilityEpoch;
+    case ClusterLodAlpha: case Gtao: case ClusteredLighting: case PrimaryLighting: case Reflections: case PathTracing:
+    case StochasticDirectLighting:
+        return br::render::kShadingEpoch;
+    case Exposure: case Upscaling: case Bloom: case Tonemapping: case DebugOutput: case DepthHistory:
+        return br::render::kPostEpoch;
+    case DebugUi: case Present:
+        return br::render::kOverlayEpoch;
+    }
+    return br::render::kNoFrameEpoch;
+}
+
+// The techniques whose declarations only register what every epoch's passes read. Each graph makes them (DeclareFramePasses).
+static bool IsSharedRegistrationTechnique(br::pipeline::TechniqueId id) {
+    using enum br::pipeline::TechniqueId;
+    return id == FrameResources || id == BrdfIntegration || id == Environment || id == ClusterLod || id == ClusterLodShadow
+        || id == ClusterLodVoxel;
+}
+
+// The host epochs a recipe replacement changes (M4 step 5): the epochs of the techniques it adds, removes or configures again
+// (an entry whose technique object differs), and of the extensions whose ids or epochs differ. A technique of several epochs'
+// passes (DebugOutput) or a shared registration (made in every graph) names every epoch it is in; path tracing also changes
+// whether the lens flares trace (Post).
+uint32_t Renderer::RecipeChangeHostEpochs(const br::pipeline::PipelineRecipe& before, const br::pipeline::PipelineRecipe& after) {
+    uint32_t mask = 0;
+    const auto touch = [&](br::pipeline::TechniqueId id) {
+        using enum br::pipeline::TechniqueId;
+        // Registrations every graph makes (the CLod techniques' are their extensions', Visibility's).
+        if (id == FrameResources || id == BrdfIntegration || id == Environment) {
+            mask = br::render::FrameRevisions::kAllEpochs;
+            return;
+        }
+        const auto epoch = FrameEpochOfTechnique(id);
+        if (br::render::IsFrameEpoch(epoch)) mask |= br::render::HostEpochMaskOf({ epoch });
+        else mask = br::render::FrameRevisions::kAllEpochs;
+        if (id == DebugOutput) mask |= br::render::HostEpochMaskOf({ br::render::kPostEpoch, br::render::kOverlayEpoch });
+        if (id == PathTracing) mask |= br::render::HostEpochMaskOf({ br::render::kPostEpoch });
+    };
+    const auto find = [](const br::pipeline::PipelineRecipe& recipe, br::pipeline::TechniqueId id) -> const br::pipeline::TechniqueEntry* {
+        for (const auto& entry : recipe.Techniques()) if (entry.id == id) return &entry;
+        return nullptr;
+    };
+    for (const auto& entry : before.Techniques()) {
+        const auto* other = find(after, entry.id);
+        if (!other || other->technique != entry.technique) touch(entry.id);
+    }
+    for (const auto& entry : after.Techniques())
+        if (!find(before, entry.id)) touch(entry.id);
+    // The order of the techniques is the declaration order inside each epoch.
+    std::vector<br::pipeline::TechniqueId> beforeOrder, afterOrder;
+    for (const auto& entry : before.Techniques()) if (find(after, entry.id)) beforeOrder.push_back(entry.id);
+    for (const auto& entry : after.Techniques()) if (find(before, entry.id)) afterOrder.push_back(entry.id);
+    if (beforeOrder != afterOrder) mask = br::render::FrameRevisions::kAllEpochs;
+    const auto extensionsOf = [](const br::pipeline::PipelineRecipe& recipe) {
+        std::vector<std::pair<std::string, uint32_t>> extensions;
+        for (const auto& [id, factory] : recipe.Extensions()) extensions.emplace_back(id, recipe.ExtensionEpoch(id));
+        return extensions;
+    };
+    const auto beforeExtensions = extensionsOf(before), afterExtensions = extensionsOf(after);
+    if (beforeExtensions != afterExtensions) {
+        for (const auto* list : { &beforeExtensions, &afterExtensions })
+            for (const auto& [id, epoch] : *list)
+                if (std::find(beforeExtensions.begin(), beforeExtensions.end(), std::pair{ id, epoch }) == beforeExtensions.end()
+                    || std::find(afterExtensions.begin(), afterExtensions.end(), std::pair{ id, epoch }) == afterExtensions.end())
+                    mask |= br::render::IsFrameEpoch(epoch) ? br::render::HostEpochMaskOf({ epoch }) : br::render::FrameRevisions::kAllEpochs;
+    }
+    // Nothing found (bindings, say): every epoch, as before.
+    return mask ? mask : br::render::FrameRevisions::kAllEpochs;
+}
+
+// Whether the debug output is the skeleton view, which replaces the debug resolve.
+static bool DebugSkeletonsShown() {
+    return SettingsManager::GetInstance().getSettingGetter<unsigned int>("outputType")() ==
+        static_cast<unsigned int>(OutputType::SKELETONS) && DeviceManager::GetInstance().GetMeshShadersSupported();
+}
+
+void Renderer::DeclareVisibilityPasses(const br::render::FramePassDeclaration& d, br::pipeline::TechniqueId id) {
+    BT_ZONE_SCOPE("Renderer::DeclareVisibilityPasses");
+    auto& graph = d.graph;
+    const auto& in = d.in;
+    const auto& recipe = d.recipe;
+    auto& out = d.build.Outputs(br::render::kVisibilityEpoch);
+    auto& materialEvaluationInputs = out.materialEvaluationInputs;
+    const auto& depth = in.depth;
+    const std::shared_ptr<org::PixelBuffer>& depthTexture = depth.depthMap;
+    const bool terrainRvtEnabled = recipe.Contains<br::pipeline::TerrainRvtTechnique>();
+    using enum br::pipeline::TechniqueId;
+    switch (id) {
+    case FrameResources:
+        graph.RegisterResource(Builtin::PrimaryCamera::DepthTexture, depthTexture);
+        graph.RegisterResource(Builtin::PrimaryCamera::LinearDepthMap, depth.linearDepthMap);
+        graph.RegisterResource(
+            Builtin::PrimaryCamera::ProjectedDepthTexture,
+            depth.projectedDepthMap);
+        graph.RegisterResource(Builtin::Backbuffer, m_dynamicBackbuffer);
+        graph.SetSwapchainResource(m_dynamicBackbuffer);
+        graph.RegisterResource(Builtin::PresentationColor, m_dynamicPresentationColor);
+        graph.RegisterResource(Builtin::PerFrameBuffer, ::ResourceManager::GetInstance().GetPerFrameBuffer());
+        break;
+    case BrdfIntegration:
+        RegisterBRDFLUT(&graph, in.brdfLut);
+        break;
+    case Environment: {
+        // A recipe binding (SARP's live environment) wins; otherwise the cubemaps MakeFrameBuild chose.
+        const auto registerEnvironment = [&](org::ResourceIdentifier resourceId, std::shared_ptr<org::Resource> chosen) {
+            if (const auto* binding = recipe.Bindings().Find(resourceId)) graph.RegisterResource(resourceId, binding->resource);
+            else graph.RegisterResource(resourceId, std::move(chosen));
+        };
+        registerEnvironment(Builtin::Environment::CurrentCubemap, in.environmentCubemap);
+        registerEnvironment(Builtin::Environment::CurrentPrefilteredCubemap, in.environmentPrefilteredCubemap);
+        if (m_blueNoiseTexture) graph.RegisterResource(Builtin::Noise::BlueNoise2D, m_blueNoiseTexture);
+        if (m_openPBRLookupResources.idealDielectricEnergyComplement) graph.RegisterResource(Builtin::OpenPBR::IdealDielectricEnergyComplement, m_openPBRLookupResources.idealDielectricEnergyComplement);
+        if (m_openPBRLookupResources.idealDielectricAverageEnergyComplement) graph.RegisterResource(Builtin::OpenPBR::IdealDielectricAverageEnergyComplement, m_openPBRLookupResources.idealDielectricAverageEnergyComplement);
+        if (m_openPBRLookupResources.idealDielectricReflectionRatio) graph.RegisterResource(Builtin::OpenPBR::IdealDielectricReflectionRatio, m_openPBRLookupResources.idealDielectricReflectionRatio);
+        if (m_openPBRLookupResources.opaqueDielectricEnergyComplement) graph.RegisterResource(Builtin::OpenPBR::OpaqueDielectricEnergyComplement, m_openPBRLookupResources.opaqueDielectricEnergyComplement);
+        if (m_openPBRLookupResources.opaqueDielectricAverageEnergyComplement) graph.RegisterResource(Builtin::OpenPBR::OpaqueDielectricAverageEnergyComplement, m_openPBRLookupResources.opaqueDielectricAverageEnergyComplement);
+        if (m_openPBRLookupResources.idealMetalEnergyComplement) graph.RegisterResource(Builtin::OpenPBR::IdealMetalEnergyComplement, m_openPBRLookupResources.idealMetalEnergyComplement);
+        if (m_openPBRLookupResources.idealMetalAverageEnergyComplement) graph.RegisterResource(Builtin::OpenPBR::IdealMetalAverageEnergyComplement, m_openPBRLookupResources.idealMetalAverageEnergyComplement);
+        if (m_openPBRLookupResources.fuzzLTC) graph.RegisterResource(Builtin::OpenPBR::FuzzLTC, m_openPBRLookupResources.fuzzLTC);
+        break;
+    }
+    case ClusterLod: {
+        // What passes which trace read of the ray tracing scene (CLodRayTracingSystem::DeclareTracing) they declare by
+        // name, so it is registered here, before any pass declares. MakeFrameBuild initialized the BVH. The extensions
+        // below set up the rest of ray tracing.
+        if (in.rayTracingReady) m_clodRayTracingSystem->RegisterGraphResources(graph);
+        break; // It and the techniques below own ordered graph extensions.
+    }
+    case ClusterLodShadow:
+    case ClusterLodVoxel:
+        break; // These techniques own ordered graph extensions.
+    case CanonicalSurfaceResources: {
+        const auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
+        // The visibility buffer, the canonical surface textures and records and the debug visualization are the renderer's
+        // frame interface, registered in every epoch's graph (DeclareFrameProviders).
+        const auto& visibilityBuffer = in.frameInterface.visibilityBuffer;  // MakeFrameBuild (the renderer's FrameInterface)
+        if (!visibilityBuffer) throw std::logic_error("DeclareFramePasses: the frame build has no visibility buffer");
+        // The sun shadow mask, stochastic lighting's radiance and the VSM receiver history are the interface's too, registered
+        // for the options that use them (DeclareFrameProviders).
+        out.visibilityBuffer = visibilityBuffer;  // attached to the primary view after the build (PublishFrameBuild)
+        if (in.frameInterface.registrations.empty()) throw std::logic_error("DeclareFramePasses: the frame build has no canonical surface");
+        graph.BuildPass<ClearVisibilityBufferPass>("ClearVisibilityBufferPass");
+        graph.SetPassTechnique("ClearVisibilityBufferPass", "Primary Visibility::Canonical Surface Construction");
+        break;
+    }
+    case VisibilityMaterialBinning:
+        RegisterVisUtilResources(&graph, false);
+        BuildVisibilityMaterialBinningPipeline(&graph, materialEvaluationInputs);
+        break;
+    case TerrainRvt:
+        out.terrainRvt = true;
+        RegisterVisUtilResources(&graph, true, false, &out.terrainRvtResources);
+        BuildTerrainRvtPipeline(&graph);
+        break;
+    case TerrainRegionMaterialEvaluation:
+        BuildTerrainRegionMaterialEvaluationPipeline(&graph, materialEvaluationInputs);
+        break;
+    case MaterialEvaluation:
+        BuildMaterialEvaluationPipeline(&graph, materialEvaluationInputs, terrainRvtEnabled);
+        break;
+    default:
+        break;
+    }
+}
+
+void Renderer::DeclareShadingPasses(const br::render::FramePassDeclaration& d, br::pipeline::TechniqueId id) {
+    BT_ZONE_SCOPE("Renderer::DeclareShadingPasses");
+    auto& graph = d.graph;
+    const auto& in = d.in;
+    const auto& recipe = d.recipe;
+    auto& out = d.build.Outputs(br::render::kShadingEpoch);
+    using enum br::pipeline::TechniqueId;
+    switch (id) {
+    case ClusterLodAlpha:
+        break; // These techniques own ordered graph extensions.
+    case Gtao:
+        // The screen-space AO slot: ambientOcclusionTechnique picks what fills it.
+        if (br::ambient_occlusion::ReadAmbientOcclusionTechnique() == br::ambient_occlusion::AmbientOcclusionTechnique::XeGTAO) {
+            RegisterGTAOResources(&graph);
+            BuildGTAOPipeline(&graph, in.camera ? &*in.camera : nullptr);
+        } else {
+            RegisterCORTAOResources(&graph);
+            BuildCORTAOPipeline(&graph);
+        }
+        break;
+    case ClusteredLighting:
+        // Forward runs only when a transparency pass reads them (AVBOIT shading, deep visibility resolve).
+        BuildLightClusteringPipeline(&graph, recipe.Contains<br::pipeline::ClusterLodAlphaTechnique>());
+        break;
+    case PrimaryLighting:
+        BuildPrimaryPass(&graph, nullptr,
+            in.hasEnvironment || recipe.Bindings().Contains(Builtin::Environment::CurrentCubemap), in.stochasticLightingActive);
+        break;
+    case Reflections: {
+        if (in.rayTracedReflections) BuildRayTracedReflectionPasses(&graph, in.clodSlabs, recipe.Contains<br::pipeline::TerrainRvtTechnique>());
+        else if (in.screenSpaceReflections) BuildSSRPasses(&graph);
+        break;
+    }
+    case PathTracing: {
+        auto pathTraceState = MakePathTraceState();
+        out.pathTraceState = pathTraceState;
+        graph.BuildPass<PathTraceArgsPass>("PathTraceArgsPass", pathTraceState);
+        if (m_lensManager) {
+            // The lens's focus for this frame's camera rays (manual, or a step toward the last autofocus measurement).
+            graph.BuildPass<LensFocusPass>("LensFocusPass", m_lensManager);
+            graph.SetPassTechnique("LensFocusPass", "Ray Tracing::Path Tracing");
+        }
+        graph.SetPassTechnique("PathTraceArgsPass", "Ray Tracing::Path Tracing");
+        graph.BuildPass<PathTracePass>("PathTracePass", pathTraceState, m_clodRayTracingSystem, in.clodSlabs,
+            recipe.Contains<br::pipeline::TerrainRvtTechnique>(),
+            in.upscalingMode == UpscalingMode::DLSSRayReconstruction, m_lensManager);
+        graph.SetPassTechnique("PathTracePass", "Ray Tracing::Path Tracing");
+        if (m_lensManager) {
+            // The primary hits' depth over the autofocus region, for the next frame's focus.
+            graph.BuildPass<LensAutofocusPass>("LensAutofocusPass", m_lensManager);
+            graph.SetPassTechnique("LensAutofocusPass", "Ray Tracing::Path Tracing");
+            graph.BuildPass<LensSelfTestPass>("LensSelfTestPass", m_lensManager);
+            graph.SetPassTechnique("LensSelfTestPass", "Ray Tracing::Path Tracing");
+        }
+        break;
+    }
+    case StochasticDirectLighting:
+        break; // Its passes come from a graph extension (RegisterPipelineExtensions).
+    default:
+        break;
+    }
+}
+
+void Renderer::DeclarePostPasses(const br::render::FramePassDeclaration& d, br::pipeline::TechniqueId id) {
+    BT_ZONE_SCOPE("Renderer::DeclarePostPasses");
+    auto& graph = d.graph;
+    const auto& in = d.in;
+    const auto& recipe = d.recipe;
+    using enum br::pipeline::TechniqueId;
+    switch (id) {
+    case Exposure: {
+        auto adapted = CreateIndexedStructuredBuffer(1, sizeof(float), true, false);
+        adapted->SetName("Adapted Luminance");
+        org::memory::SetResourceUsageHint(*adapted, "Post-Processing resources");
+        graph.RegisterResource(Builtin::PostProcessing::AdaptedLuminance, adapted);
+        auto histogram = CreateIndexedStructuredBuffer(256, sizeof(uint32_t), true, false);
+        histogram->SetName("Luminance Histogram Buffer");
+        org::memory::SetResourceUsageHint(*histogram, "Post-Processing resources");
+        graph.RegisterResource(Builtin::PostProcessing::LuminanceHistogram, histogram);
+		auto& histogramBuilder = graph.BuildPass<LuminanceHistogramPass>("luminanceHistogramPass");
+#if BASICRENDERER_HAS_INTEROP_VALIDATION
+		br::validation::SARPInteropValidation::ApplyPassPolicy(
+			"luminanceHistogramPass", histogramBuilder, DeviceManager::GetInstance().GetPeerBackend());
+#endif
+        graph.SetPassTechnique("luminanceHistogramPass", "Post Process::Exposure");
+        graph.BuildPass<LuminanceHistogramAveragePass>("LuminanceAveragePass");
+        graph.SetPassTechnique("LuminanceAveragePass", "Post Process::Exposure");
+        break;
+    }
+    case Upscaling:
+        // Ray Reconstruction's guides are the frame interface's (the path tracer writes them in Shading).
+        if (in.upscalingMode == UpscalingMode::DLSSRayReconstruction && !in.frameInterface.rayReconstructionGuides)
+            br::render::UpscalingGenerationService::RegisterRayReconstructionGuides(graph);
+        if (in.upscalingMode == UpscalingMode::DLSS &&
+            SettingsManager::GetInstance().getSettingGetter<bool>("enableDilatedMotionVectors")()) {
+            graph.BuildPass<DilateMotionVectorsPass>("DilateMotionVectorsPass");
+            graph.SetPassTechnique("DilateMotionVectorsPass", "Post Process::Upscaling");
+        }
+        graph.BuildPass<UpscalingPass>("UpscalingPass", in.upscaling);
+        graph.SetPassTechnique("UpscalingPass", "Post Process::Upscaling");
+        // The physical lens's ghost flares, added to the upscaled colour (Ray Reconstruction never sees them) before
+        // bloom and tonemapping. Path traced, with a BVH, their sources' visibility is by ray query.
+        if (m_ghostFlareManager && SettingsManager::GetInstance().getSettingGetter<bool>("lensFlareEnabled")()) {
+            const auto output = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("outputResolution")();
+            const bool rayQuery = in.lensFlareRayQuery;
+            BuildLensFlarePasses(&graph, m_ghostFlareManager, rayQuery ? m_clodRayTracingSystem : nullptr,
+                rayQuery ? in.clodSlabs : nullptr, output.x, output.y, 2u);
+        }
+        break;
+    case Bloom:
+		BuildBloomPipeline(&graph);
+        break;
+    case Tonemapping:
+        graph.BuildPass<TonemappingPass>(
+            "TonemappingPass",
+            recipe.Contains<br::pipeline::BloomTechnique>());
+        graph.SetPassTechnique("TonemappingPass", "Post Process::Tonemapping");
+        break;
+    case DebugOutput:
+        // The resolve is Post's; the skeleton view (which replaces it) and the bounding spheres are Overlay's.
+        if (!DebugSkeletonsShown()) {
+            graph.BuildPass<DebugResolvePass>("DebugResolvePass");
+            graph.SetPassTechnique("DebugResolvePass", "Debug::Visualization");
+        }
+        break;
+    case DepthHistory:
+        BuildLinearDepthHistoryCopyPass(&graph, &m_depthHistory);
+        break;
+    default:
+        break;
+    }
+}
+
+void Renderer::DeclareOverlayPasses(const br::render::FramePassDeclaration& d, br::pipeline::TechniqueId id) {
+    BT_ZONE_SCOPE("Renderer::DeclareOverlayPasses");
+    auto& graph = d.graph;
+    const auto& in = d.in;
+    using enum br::pipeline::TechniqueId;
+    switch (id) {
+    case DebugUi:
+        graph.BuildPass<MenuRenderPass>("MenuRenderPass");
+        graph.SetPassTechnique("MenuRenderPass", "Debug::UI");
+        break;
+    case Present:
+        graph.BuildPass<PresentationReadyPass>("PresentationReadyPass");
+        graph.SetPassTechnique("PresentationReadyPass", "Frame::Present");
+        graph.SetPresentPass("PresentationReadyPass");
+        break;
+    case DebugOutput:
+        if (DebugSkeletonsShown()) {
+            graph.BuildPass<DebugSkeletonPass>("DebugSkeletonPass", in.debugSnapshots);
+            graph.SetPassTechnique("DebugSkeletonPass", "Debug::Visualization");
+        }
+        if (in.drawBoundingSpheres) {
+            graph.BuildPass<DebugSpherePass>("DebugSpherePass", in.debugSnapshots);
+            graph.SetPassTechnique("DebugSpherePass", "Debug::Visualization");
+        }
+        break;
+    default:
+        break;
+    }
 }
 
 void Renderer::DeclareFramePasses(org::RenderGraph& graph) {
@@ -756,285 +1646,83 @@ void Renderer::DeclareFramePasses(org::RenderGraph& graph) {
     if (!frameBuild) throw std::logic_error("DeclareFramePasses: no frame build in progress");
     // The build reads only what MakeFrameBuild took on the render thread, and writes only its outputs.
     const br::render::FrameBuildInputs& in = frameBuild->inputs;
-    br::render::FrameBuildOutputs& out = frameBuild->outputs;
     // The recipe the build was started with (the render thread may have replaced the renderer's since).
     if (!in.recipe) throw std::logic_error("DeclareFramePasses: the frame build has no recipe");
     const br::pipeline::PipelineRecipe& recipe = *in.recipe;
+    const br::render::FramePassDeclaration declaration{ graph, *frameBuild, in, recipe };
+    auto& passEpochs = *frameBuild->passEpochs;
+    // The host epoch this graph is built for (M4 step 5): it declares only the frame epochs that run in it. kNoFrameEpoch (the
+    // in-place graph): every epoch.
+    const uint32_t hostEpoch = graph.PassEpochFilter();
+    // Runs one frame epoch's declarations, with the epoch current (ScopedDeclarationEpoch), and tags the passes they built
+    // with it. An epoch the build does not declare, or that another host epoch's graph holds, is skipped.
+    const auto declareIn = [&](uint32_t epoch, const auto& declare) {
+        if (!frameBuild->Declares(epoch)) return;
+        if (hostEpoch != br::render::kNoFrameEpoch && br::render::HostEpochOf(epoch) != hostEpoch) return;
+        const size_t first = graph.PassBuilderCount();
+        {
+            br::render::ScopedDeclarationEpoch scope(epoch);
+            declare();
+        }
+        for (const auto& name : graph.PassBuilderNamesFrom(first)) passEpochs.Tag(name, epoch);
+    };
 
-    // The primary camera is high-frequency frame data, not renderer-state
-    // publication. Insert its graphics-queue upload before all pipeline passes;
-    // their camera SRV declarations establish the required RAW dependencies.
-    graph.BuildPass<br::render::PrimaryCameraUploadPass>(
-        "PrimaryCameraUploadPass", in.cameraBuffer,
-        in.cullingCameraBuffer, m_numFramesInFlight);
+    declareIn(br::render::kVisibilityEpoch, [&] {
+        // The primary camera is high-frequency frame data, not renderer-state
+        // publication. Insert its graphics-queue upload before all pipeline passes;
+        // their camera SRV declarations establish the required RAW dependencies.
+        graph.BuildPass<br::render::PrimaryCameraUploadPass>(
+            "PrimaryCameraUploadPass", in.cameraBuffer,
+            in.cullingCameraBuffer, m_numFramesInFlight);
 
-    const auto& depth = in.depth;
-    std::shared_ptr<org::PixelBuffer> depthTexture = depth.depthMap;
+        auto& materialEvaluationInputs = frameBuild->Outputs(br::render::kVisibilityEpoch).materialEvaluationInputs;
+        materialEvaluationInputs = {};
+        materialEvaluationInputs.pipelines = &PSOManager::GetInstance();
+        materialEvaluationInputs.commandSignatures = &CommandSignatureManager::GetInstance();
+        materialEvaluationInputs.clodSlabResources = in.clodSlabs;
+        // The opaque CLod variant put its buffers in the build's Visibility outputs in its PrepareForBuild, which runs before this.
+        const auto& clodPrimary = frameBuild->Outputs(br::render::kVisibilityEpoch).clodPrimary;
+        materialEvaluationInputs.visibleClusters = clodPrimary.visibleClusters;
+        materialEvaluationInputs.visibleClusterCapacity = clodPrimary.visibleClusterCapacity;
+        materialEvaluationInputs.visibleClusterCounter = clodPrimary.visibleClusterCounter;
+        materialEvaluationInputs.visibleClusterTransformIndices = clodPrimary.visibleClusterTransformIndices;
+        materialEvaluationInputs.reyesDiceQueue = clodPrimary.reyesDiceQueue;
+        materialEvaluationInputs.reyesTessTableConfigs = clodPrimary.reyesTessTableConfigs;
+        materialEvaluationInputs.reyesTessTableVertices = clodPrimary.reyesTessTableVertices;
+        materialEvaluationInputs.reyesTessTableTriangles = clodPrimary.reyesTessTableTriangles;
+    });
 
-    const bool terrainRvtEnabled = recipe.Contains<br::pipeline::TerrainRvtTechnique>();
-    auto& materialEvaluationInputs = out.materialEvaluationInputs;
-    materialEvaluationInputs = {};
-    materialEvaluationInputs.pipelines = &PSOManager::GetInstance();
-    materialEvaluationInputs.commandSignatures = &CommandSignatureManager::GetInstance();
-    materialEvaluationInputs.clodSlabResources = in.clodSlabs;
-    // The opaque CLod variant put its buffers in the build's outputs in its PrepareForBuild, which runs before this.
-    const auto& clodPrimary = out.clodPrimary;
-    materialEvaluationInputs.visibleClusters = clodPrimary.visibleClusters;
-    materialEvaluationInputs.visibleClusterCapacity = clodPrimary.visibleClusterCapacity;
-    materialEvaluationInputs.visibleClusterCounter = clodPrimary.visibleClusterCounter;
-    materialEvaluationInputs.visibleClusterTransformIndices = clodPrimary.visibleClusterTransformIndices;
-    materialEvaluationInputs.reyesDiceQueue = clodPrimary.reyesDiceQueue;
-    materialEvaluationInputs.reyesTessTableConfigs = clodPrimary.reyesTessTableConfigs;
-    materialEvaluationInputs.reyesTessTableVertices = clodPrimary.reyesTessTableVertices;
-    materialEvaluationInputs.reyesTessTableTriangles = clodPrimary.reyesTessTableTriangles;
+    // In recipe order, so the passes are declared in the order they always were: each technique's declarations by its
+    // epoch's function.
     br::pipeline::PipelineBuildContext buildContext(
         graph,
         recipe.Bindings(),
         [&](br::pipeline::TechniqueId id, const br::pipeline::TechniqueOptions&) {
-            using enum br::pipeline::TechniqueId;
-            switch (id) {
-            case FrameResources:
-                graph.RegisterResource(Builtin::PrimaryCamera::DepthTexture, depthTexture);
-                graph.RegisterResource(Builtin::PrimaryCamera::LinearDepthMap, depth.linearDepthMap);
-                graph.RegisterResource(
-                    Builtin::PrimaryCamera::ProjectedDepthTexture,
-                    depth.projectedDepthMap);
-                graph.RegisterResource(Builtin::Backbuffer, m_dynamicBackbuffer);
-                graph.SetSwapchainResource(m_dynamicBackbuffer);
-                graph.RegisterResource(Builtin::PresentationColor, m_dynamicPresentationColor);
-                graph.RegisterResource(Builtin::PerFrameBuffer, ::ResourceManager::GetInstance().GetPerFrameBuffer());
-                break;
-            case BrdfIntegration:
-                RegisterBRDFLUT(&graph, in.brdfLut);
-                break;
-            case Environment: {
-                // A recipe binding (SARP's live environment) wins; otherwise the cubemaps MakeFrameBuild chose.
-                const auto registerEnvironment = [&](org::ResourceIdentifier resourceId, std::shared_ptr<org::Resource> chosen) {
-                    if (const auto* binding = recipe.Bindings().Find(resourceId)) graph.RegisterResource(resourceId, binding->resource);
-                    else graph.RegisterResource(resourceId, std::move(chosen));
-                };
-                registerEnvironment(Builtin::Environment::CurrentCubemap, in.environmentCubemap);
-                registerEnvironment(Builtin::Environment::CurrentPrefilteredCubemap, in.environmentPrefilteredCubemap);
-                if (m_blueNoiseTexture) graph.RegisterResource(Builtin::Noise::BlueNoise2D, m_blueNoiseTexture);
-                if (m_openPBRLookupResources.idealDielectricEnergyComplement) graph.RegisterResource(Builtin::OpenPBR::IdealDielectricEnergyComplement, m_openPBRLookupResources.idealDielectricEnergyComplement);
-                if (m_openPBRLookupResources.idealDielectricAverageEnergyComplement) graph.RegisterResource(Builtin::OpenPBR::IdealDielectricAverageEnergyComplement, m_openPBRLookupResources.idealDielectricAverageEnergyComplement);
-                if (m_openPBRLookupResources.idealDielectricReflectionRatio) graph.RegisterResource(Builtin::OpenPBR::IdealDielectricReflectionRatio, m_openPBRLookupResources.idealDielectricReflectionRatio);
-                if (m_openPBRLookupResources.opaqueDielectricEnergyComplement) graph.RegisterResource(Builtin::OpenPBR::OpaqueDielectricEnergyComplement, m_openPBRLookupResources.opaqueDielectricEnergyComplement);
-                if (m_openPBRLookupResources.opaqueDielectricAverageEnergyComplement) graph.RegisterResource(Builtin::OpenPBR::OpaqueDielectricAverageEnergyComplement, m_openPBRLookupResources.opaqueDielectricAverageEnergyComplement);
-                if (m_openPBRLookupResources.idealMetalEnergyComplement) graph.RegisterResource(Builtin::OpenPBR::IdealMetalEnergyComplement, m_openPBRLookupResources.idealMetalEnergyComplement);
-                if (m_openPBRLookupResources.idealMetalAverageEnergyComplement) graph.RegisterResource(Builtin::OpenPBR::IdealMetalAverageEnergyComplement, m_openPBRLookupResources.idealMetalAverageEnergyComplement);
-                if (m_openPBRLookupResources.fuzzLTC) graph.RegisterResource(Builtin::OpenPBR::FuzzLTC, m_openPBRLookupResources.fuzzLTC);
-                break;
+            // Registrations every epoch's passes read (the frame resources, the BRDF table, the environment, the ray
+            // tracing scene): made in every graph. They build no pass.
+            if (IsSharedRegistrationTechnique(id)) {
+                DeclareVisibilityPasses(declaration, id);
+                return;
             }
-            case ClusterLod: {
-                // What passes which trace read of the ray tracing scene (CLodRayTracingSystem::DeclareTracing) they declare by
-                // name, so it is registered here, before any pass declares. MakeFrameBuild initialized the BVH. The extensions
-                // below set up the rest of ray tracing.
-                if (in.rayTracingReady) m_clodRayTracingSystem->RegisterGraphResources(graph);
-                break; // It and the techniques below own ordered graph extensions.
+            switch (FrameEpochOfTechnique(id)) {
+            case br::render::kVisibilityEpoch:
+                declareIn(br::render::kVisibilityEpoch, [&] { DeclareVisibilityPasses(declaration, id); });
+                break;
+            case br::render::kShadingEpoch:
+                declareIn(br::render::kShadingEpoch, [&] { DeclareShadingPasses(declaration, id); });
+                break;
+            case br::render::kPostEpoch:
+                declareIn(br::render::kPostEpoch, [&] { DeclarePostPasses(declaration, id); });
+                break;
+            case br::render::kOverlayEpoch:
+                declareIn(br::render::kOverlayEpoch, [&] { DeclareOverlayPasses(declaration, id); });
+                break;
+            default:
+                throw std::logic_error("DeclareFramePasses: technique " + std::to_string(static_cast<uint32_t>(id)) + " has no frame epoch");
             }
-            case ClusterLodAlpha:
-            case ClusterLodShadow:
-            case ClusterLodVoxel:
-                break; // These techniques own ordered graph extensions.
-            case CanonicalSurfaceResources: {
-                const auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
-                org::TextureDescription desc;
-                desc.channels = 2;
-                desc.format = rhi::Format::R32G32_UInt;
-                desc.hasRTV = desc.hasSRV = desc.hasUAV = desc.hasNonShaderVisibleUAV = true;
-                desc.allowAlias = true;
-                desc.imageDimensions.emplace_back(resolution.x, resolution.y, 0, 0);
-                auto visibilityBuffer = org::PixelBuffer::CreateSharedUnmaterialized(desc);
-                visibilityBuffer->SetName("Visibility Buffer");
-                org::memory::SetResourceUsageHint(*visibilityBuffer, "Canonical surface visibility");
-                graph.RegisterResource(Builtin::PrimaryCamera::VisibilityTexture, visibilityBuffer);
-                // Stochastic lighting traces the sun itself.
-                if (in.rayTracedSunShadow) {
-                    org::TextureDescription sunDesc;
-                    sunDesc.channels = 1;
-                    sunDesc.format = rhi::Format::R8_UNorm;
-                    sunDesc.hasSRV = sunDesc.hasUAV = true;
-                    sunDesc.imageDimensions.emplace_back(resolution.x, resolution.y, 0, 0);
-                    auto sunMask = org::PixelBuffer::CreateSharedUnmaterialized(sunDesc);
-                    sunMask->SetName("CLod RT sun shadow");
-                    graph.RegisterResource(Builtin::RayTracing::SunShadow, sunMask);
-                }
-                if (in.stochasticLightingActive) {
-                    // Spot and point lights' diffuse and specular radiance, which the deferred pass adds.
-                    for (const auto& [id, name] : { std::pair{ Builtin::StochasticLighting::Diffuse, "Stochastic lighting diffuse" },
-                             std::pair{ Builtin::StochasticLighting::Specular, "Stochastic lighting specular" } }) {
-                        org::TextureDescription lightingDesc;
-                        lightingDesc.channels = 4;
-                        lightingDesc.format = rhi::Format::R16G16B16A16_Float;
-                        lightingDesc.hasSRV = lightingDesc.hasUAV = true;
-                        lightingDesc.imageDimensions.emplace_back(resolution.x, resolution.y, 0, 0);
-                        auto lighting = org::PixelBuffer::CreateSharedUnmaterialized(lightingDesc);
-                        lighting->SetName(name);
-                        graph.RegisterResource(id, lighting);
-                    }
-                }
-                if (!br::runtime::renderer_settings::CLodVirtualShadowFrameTelemetryPath().empty()) {
-                    // VSM flicker telemetry: the deferred pass reprojects each pixel's
-                    // shadow outcome against the previous frame's (ping-pong slices).
-                    org::TextureDescription historyDesc;
-                    historyDesc.channels = 4;
-                    historyDesc.format = rhi::Format::R32G32B32A32_UInt;
-                    historyDesc.hasUAV = true;
-                    historyDesc.isArray = true;
-                    historyDesc.arraySize = 2;
-                    historyDesc.imageDimensions.emplace_back(resolution.x, resolution.y, 0, 0);
-                    auto history = org::PixelBuffer::CreateSharedUnmaterialized(historyDesc);
-                    history->SetName("CLod VSM receiver history");
-                    graph.RegisterResource(Builtin::Shadows::CLodReceiverHistory, history);
-                }
-                out.visibilityBuffer = visibilityBuffer;  // attached to the primary view after the build (PublishFrameBuild)
-                CreateCanonicalSurfaceResources(&graph);
-                CreateDebugVisualizationResources(&graph);
-                graph.BuildPass<ClearVisibilityBufferPass>("ClearVisibilityBufferPass");
-                graph.SetPassTechnique("ClearVisibilityBufferPass", "Primary Visibility::Canonical Surface Construction");
-                break;
-            }
-            case VisibilityMaterialBinning:
-                RegisterVisUtilResources(&graph, false);
-                BuildVisibilityMaterialBinningPipeline(&graph, materialEvaluationInputs);
-                break;
-            case TerrainRvt:
-                out.terrainRvt = true;
-                RegisterVisUtilResources(&graph, true, false, &out.terrainRvtResources);
-                BuildTerrainRvtPipeline(&graph);
-                break;
-            case TerrainRegionMaterialEvaluation:
-                BuildTerrainRegionMaterialEvaluationPipeline(&graph, materialEvaluationInputs);
-                break;
-            case MaterialEvaluation:
-                BuildMaterialEvaluationPipeline(&graph, materialEvaluationInputs, terrainRvtEnabled);
-                break;
-            case Gtao:
-                // The screen-space AO slot: ambientOcclusionTechnique picks what fills it.
-                if (br::ambient_occlusion::ReadAmbientOcclusionTechnique() == br::ambient_occlusion::AmbientOcclusionTechnique::XeGTAO) {
-                    RegisterGTAOResources(&graph);
-                    BuildGTAOPipeline(&graph, in.camera ? &*in.camera : nullptr);
-                } else {
-                    RegisterCORTAOResources(&graph);
-                    BuildCORTAOPipeline(&graph);
-                }
-                break;
-            case ClusteredLighting:
-                // Forward runs only when a transparency pass reads them (AVBOIT shading, deep visibility resolve).
-                BuildLightClusteringPipeline(&graph, recipe.Contains<br::pipeline::ClusterLodAlphaTechnique>());
-                break;
-            case PrimaryLighting:
-                BuildPrimaryPass(&graph, nullptr,
-                    in.hasEnvironment || recipe.Bindings().Contains(Builtin::Environment::CurrentCubemap), in.stochasticLightingActive);
-                break;
-            case Reflections: {
-                if (in.rayTracedReflections) BuildRayTracedReflectionPasses(&graph, in.clodSlabs, recipe.Contains<br::pipeline::TerrainRvtTechnique>());
-                else if (in.screenSpaceReflections) BuildSSRPasses(&graph);
-                break;
-            }
-            case PathTracing: {
-                auto pathTraceState = MakePathTraceState();
-                out.pathTraceState = pathTraceState;
-                graph.BuildPass<PathTraceArgsPass>("PathTraceArgsPass", pathTraceState);
-                if (m_lensManager) {
-                    // The lens's focus for this frame's camera rays (manual, or a step toward the last autofocus measurement).
-                    graph.BuildPass<LensFocusPass>("LensFocusPass", m_lensManager);
-                    graph.SetPassTechnique("LensFocusPass", "Ray Tracing::Path Tracing");
-                }
-                graph.SetPassTechnique("PathTraceArgsPass", "Ray Tracing::Path Tracing");
-                graph.BuildPass<PathTracePass>("PathTracePass", pathTraceState, m_clodRayTracingSystem, in.clodSlabs,
-                    recipe.Contains<br::pipeline::TerrainRvtTechnique>(),
-                    in.upscalingMode == UpscalingMode::DLSSRayReconstruction, m_lensManager);
-                graph.SetPassTechnique("PathTracePass", "Ray Tracing::Path Tracing");
-                if (m_lensManager) {
-                    // The primary hits' depth over the autofocus region, for the next frame's focus.
-                    graph.BuildPass<LensAutofocusPass>("LensAutofocusPass", m_lensManager);
-                    graph.SetPassTechnique("LensAutofocusPass", "Ray Tracing::Path Tracing");
-                    graph.BuildPass<LensSelfTestPass>("LensSelfTestPass", m_lensManager);
-                    graph.SetPassTechnique("LensSelfTestPass", "Ray Tracing::Path Tracing");
-                }
-                break;
-            }
-            case Exposure: {
-                auto adapted = CreateIndexedStructuredBuffer(1, sizeof(float), true, false);
-                adapted->SetName("Adapted Luminance");
-                org::memory::SetResourceUsageHint(*adapted, "Post-Processing resources");
-                graph.RegisterResource(Builtin::PostProcessing::AdaptedLuminance, adapted);
-                auto histogram = CreateIndexedStructuredBuffer(256, sizeof(uint32_t), true, false);
-                histogram->SetName("Luminance Histogram Buffer");
-                org::memory::SetResourceUsageHint(*histogram, "Post-Processing resources");
-                graph.RegisterResource(Builtin::PostProcessing::LuminanceHistogram, histogram);
-				auto& histogramBuilder = graph.BuildPass<LuminanceHistogramPass>("luminanceHistogramPass");
-#if BASICRENDERER_HAS_INTEROP_VALIDATION
-				br::validation::SARPInteropValidation::ApplyPassPolicy(
-					"luminanceHistogramPass", histogramBuilder, DeviceManager::GetInstance().GetPeerBackend());
-#endif
-                graph.SetPassTechnique("luminanceHistogramPass", "Post Process::Exposure");
-                graph.BuildPass<LuminanceHistogramAveragePass>("LuminanceAveragePass");
-                graph.SetPassTechnique("LuminanceAveragePass", "Post Process::Exposure");
-                break;
-            }
-            case Upscaling:
-                br::render::UpscalingGenerationService::RegisterRayReconstructionGuides(graph);
-                if (in.upscalingMode == UpscalingMode::DLSS &&
-                    SettingsManager::GetInstance().getSettingGetter<bool>("enableDilatedMotionVectors")()) {
-                    graph.BuildPass<DilateMotionVectorsPass>("DilateMotionVectorsPass");
-                    graph.SetPassTechnique("DilateMotionVectorsPass", "Post Process::Upscaling");
-                }
-                graph.BuildPass<UpscalingPass>("UpscalingPass", in.upscaling);
-                graph.SetPassTechnique("UpscalingPass", "Post Process::Upscaling");
-                // The physical lens's ghost flares, added to the upscaled colour (Ray Reconstruction never sees them) before
-                // bloom and tonemapping. Path traced, with a BVH, their sources' visibility is by ray query.
-                if (m_ghostFlareManager && SettingsManager::GetInstance().getSettingGetter<bool>("lensFlareEnabled")()) {
-                    const auto output = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("outputResolution")();
-                    const bool rayQuery = in.lensFlareRayQuery;
-                    BuildLensFlarePasses(&graph, m_ghostFlareManager, rayQuery ? m_clodRayTracingSystem : nullptr,
-                        rayQuery ? in.clodSlabs : nullptr, output.x, output.y, 2u);
-                }
-                break;
-            case Bloom:
-				BuildBloomPipeline(&graph);
-                break;
-            case Tonemapping:
-                graph.BuildPass<TonemappingPass>(
-                    "TonemappingPass",
-                    recipe.Contains<br::pipeline::BloomTechnique>());
-                graph.SetPassTechnique("TonemappingPass", "Post Process::Tonemapping");
-                break;
-            case DebugOutput: {
-                const auto& debugSnapshots = in.debugSnapshots;
-                const bool skeletons = SettingsManager::GetInstance().getSettingGetter<unsigned int>("outputType")() ==
-                    static_cast<unsigned int>(OutputType::SKELETONS) && DeviceManager::GetInstance().GetMeshShadersSupported();
-                if (skeletons) {
-                    graph.BuildPass<DebugSkeletonPass>("DebugSkeletonPass", debugSnapshots);
-                    graph.SetPassTechnique("DebugSkeletonPass", "Debug::Visualization");
-                }
-                else {
-                    graph.BuildPass<DebugResolvePass>("DebugResolvePass");
-                    graph.SetPassTechnique("DebugResolvePass", "Debug::Visualization");
-                }
-                if (in.drawBoundingSpheres) {
-                    graph.BuildPass<DebugSpherePass>("DebugSpherePass", debugSnapshots);
-                    graph.SetPassTechnique("DebugSpherePass", "Debug::Visualization");
-                }
-                break;
-            }
-            case DebugUi:
-                graph.BuildPass<MenuRenderPass>("MenuRenderPass");
-                graph.SetPassTechnique("MenuRenderPass", "Debug::UI");
-                break;
-            case DepthHistory:
-                BuildLinearDepthHistoryCopyPass(&graph, &m_depthHistory);
-                break;
-            case StochasticDirectLighting:
-                break; // Its passes come from a graph extension (RegisterPipelineExtensions).
-            case Present:
-                graph.BuildPass<PresentationReadyPass>("PresentationReadyPass");
-                graph.SetPassTechnique("PresentationReadyPass", "Frame::Present");
-                graph.SetPresentPass("PresentationReadyPass");
-                break;
-            }
+            // DebugOutput's overlays.
+            if (id == br::pipeline::TechniqueId::DebugOutput)
+                declareIn(br::render::kOverlayEpoch, [&] { DeclareOverlayPasses(declaration, id); });
         });
 
     {
@@ -1043,6 +1731,14 @@ void Renderer::DeclareFramePasses(org::RenderGraph& graph) {
 		entry.technique->Build(buildContext);
 		probeGraphBuildPhase(("DeclareFramePasses after technique " + std::to_string(static_cast<uint32_t>(entry.id))).c_str());
 	}
+    }
+    // Terrain RVT's persistent atlases and tables, which Visibility's RVT passes register and Shading's ray traced passes
+    // (reflections, the path tracer) sample: the same objects in a graph without Visibility. This build's Visibility outputs
+    // hold the renderer's (MakeFrameBuild), with what a Visibility declaration of this build added.
+    if (hostEpoch != br::render::kNoFrameEpoch && hostEpoch != br::render::HostEpochOf(br::render::kVisibilityEpoch)
+        && recipe.Contains<br::pipeline::TerrainRvtTechnique>()) {
+        for (const auto& [name, resource] : frameBuild->Outputs(br::render::kVisibilityEpoch).terrainRvtResources)
+            graph.RegisterResource(name, resource);
     }
 
     probeGraphBuildPhase("DeclareFramePasses before CompileStructural");
@@ -1179,14 +1875,14 @@ void Renderer::MakeFrameExtensions(br::render::FrameBuild& build) {
         m_frameIoService = std::make_shared<br::render::RenderGraphIOService>(*m_pTextureFactory, m_orgRuntime->Uploads(), *m_pMaterialManager);
         m_frameIoService->SetAddsUploadPass(m_useGraphInstance);
     }
+    // Each extension's frame epoch (the M4 design's section 2). The IO extension's only work is its after-execution
+    // readback; readback captures take the epoch of the pass each follows.
+    auto& epochs = in.extensionEpochs;
+    // Its readback copies the texture streaming feedback, which material evaluation (Visibility) and the CLod alpha variant
+    // (Shading) write: Shading's graph, after which it runs.
     ids.push_back("BuiltinIO");
+    epochs["BuiltinIO"] = br::render::kShadingEpoch;
     makers["BuiltinIO"] = [io = m_frameIoService]() -> ExtensionPtr { return std::make_unique<RenderGraphIOExtension>(io); };
-    // Readback captures after a named pass are copy passes this extension places after their anchors. The capture sites
-    // persist in m_readbackCaptures; each graph gets its own extension over them.
-    ids.push_back("ReadbackCaptures");
-    if (m_readbackCaptures) {
-        makers["ReadbackCaptures"] = [captures = m_readbackCaptures]() -> ExtensionPtr { return captures->CreateExtension(); };
-    }
 
     auto& persistent = *m_producerPersistentState;
     if (!persistent.clodStreaming) {
@@ -1195,13 +1891,15 @@ void Renderer::MakeFrameExtensions(br::render::FrameBuild& build) {
     }
     if (!persistent.virtualShadowInvalidations) persistent.virtualShadowInvalidations = std::make_shared<VirtualShadowInvalidationQueue>();
     // This build's casters, over the persistent queue: a caster extension joins it when it is made.
-    build.outputs.virtualShadowCasters = std::make_shared<VirtualShadowCasterRegistry>(persistent.virtualShadowInvalidations);
+    auto& visibilityOutputs = build.Outputs(br::render::kVisibilityEpoch);
+    visibilityOutputs.virtualShadowCasters = std::make_shared<VirtualShadowCasterRegistry>(persistent.virtualShadowInvalidations);
 
     // Recipe extensions may register resources consumed by technique extensions (ProceduralWind visibility is consumed by CLod
     // shadow traversal). Register producers first; structural insertion constraints are resolved only after every extension
     // has been gathered, so this does not require their target passes to have been materialized yet.
     for (const auto& [id, factory] : m_pipelineRecipe.Extensions()) {
         ids.push_back(id);
+        epochs[id] = m_pipelineRecipe.ExtensionEpoch(id);
         if (id == "SARPGrass" && br::runtime::renderer_settings::ReadTruthyEnvironmentFlag("BASICRENDERER_DISABLE_SARP_GRASS_EXTENSION")) {
             spdlog::info("Render-graph isolation: SARPGrass extension disabled");
             continue;
@@ -1212,10 +1910,10 @@ void Renderer::MakeFrameExtensions(br::render::FrameBuild& build) {
             // A virtual shadow caster (SARP grass) joins this build's caster set, which only this graph uses.
             if (auto* caster = dynamic_cast<IVirtualShadowCasterProvider*>(made.get())) {
                 auto* current = br::render::CurrentFrameBuild();
-                if (!current || !current->outputs.virtualShadowCasters) {
+                if (!current || !current->Outputs(br::render::kVisibilityEpoch).virtualShadowCasters) {
                     throw std::logic_error("Pipeline extension " + id + " is a shadow caster made outside a frame build");
                 }
-                current->outputs.virtualShadowCasters->Register(*caster);
+                current->Outputs(br::render::kVisibilityEpoch).virtualShadowCasters->Register(*caster);
             }
             return made;
         };
@@ -1223,6 +1921,8 @@ void Renderer::MakeFrameExtensions(br::render::FrameBuild& build) {
 
     // The technique extensions, in a fixed order: a technique the recipe lacks has no maker.
     for (const char* id : { "CLodOpaque", "CLodRayTracing", "CLodAlpha", "CLodShadow", "StochasticLighting" }) ids.push_back(id);
+    epochs["CLodOpaque"] = epochs["CLodRayTracing"] = epochs["CLodShadow"] = br::render::kVisibilityEpoch;
+    epochs["CLodAlpha"] = epochs["StochasticLighting"] = br::render::kShadingEpoch;
     const auto streaming = persistent.clodStreaming;
     const auto slabs = m_pMeshManager ? m_pMeshManager->GetCLodSlabResourceGroup() : nullptr;
     br::pipeline::PipelineBuildContext extensionContext(
@@ -1311,7 +2011,7 @@ void Renderer::MakeFrameExtensions(br::render::FrameBuild& build) {
                 .voxelRasterWorkCapacity = voxelRasterWorkCapacity,
                 .streamingSystem = streaming,
                 .streamingActiveBranches = streamingActiveBranches,
-                .virtualShadowCasters = build.outputs.virtualShadowCasters,
+                .virtualShadowCasters = visibilityOutputs.virtualShadowCasters,
                 .persistentState = m_producerPersistentState,
                 .directionalVsm = directionalVsm,
                 .slabResourceGroup = slabs,
@@ -1331,7 +2031,7 @@ void Renderer::MakeFrameExtensions(br::render::FrameBuild& build) {
                     .enableVoxelRasterization = false,
                     .voxelRasterWorkCapacity = 0u,
                     .streamingSystem = streaming,
-                    .virtualShadowCasters = build.outputs.virtualShadowCasters,
+                    .virtualShadowCasters = visibilityOutputs.virtualShadowCasters,
                     .persistentState = m_producerPersistentState,
                     .slabResourceGroup = slabs,
                     .rayTracingSystem = rayTracingSystem,
@@ -1348,9 +2048,25 @@ void Renderer::MakeFrameExtensions(br::render::FrameBuild& build) {
     for (const auto& entry : m_pipelineRecipe.Techniques()) {
         entry.technique->RegisterExtensions(extensionContext);
     }
+    // CLod streaming's frame tail, in the last graph that writes the feedback: Shading's (the opaque variant, Visibility's, owns
+    // streaming; the alpha variant, Shading's, writes feedback too), after every CLod variant's passes of its graph.
+    ids.push_back("CLodStreamingTail");
+    epochs["CLodStreamingTail"] = br::render::kShadingEpoch;
+    if (makers.contains("CLodOpaque")) {
+        makers["CLodStreamingTail"] = [streaming]() -> ExtensionPtr { return std::make_unique<CLodStreamingTailExtension>(streaming); };
+    }
+    // Readback captures after a named pass are copy passes this extension places after their anchors. The capture sites
+    // persist in m_readbackCaptures; each graph gets its own extension over them, and keeps the captures whose anchor is one of
+    // its passes (EpochTaggedExtension). Last, so the anchors among the other extensions' passes are tagged when it gathers.
+    ids.push_back("ReadbackCaptures");
+    epochs["ReadbackCaptures"] = br::render::kNoFrameEpoch;
+    if (m_readbackCaptures) {
+        makers["ReadbackCaptures"] = [captures = m_readbackCaptures]() -> ExtensionPtr { return captures->CreateExtension(); };
+    }
 }
 
-void Renderer::RegisterFrameHostExtensions(const std::vector<std::string>& extensionIds) {
+void Renderer::RegisterFrameHostExtensions(const std::vector<std::string>& extensionIds,
+    const std::unordered_map<std::string, uint32_t>& extensionEpochs) {
     if (!m_frameHost) throw std::logic_error("RegisterFrameHostExtensions: no frame graph host");
     // Build order: the renderer's providers, then the pipeline extensions (their PrepareForBuild reads the providers and
     // registers what the renderer's passes read), then the renderer's passes.
@@ -1359,14 +2075,28 @@ void Renderer::RegisterFrameHostExtensions(const std::vector<std::string>& exten
     ids.push_back("BasicRenderer::Providers");
     ids.insert(ids.end(), extensionIds.begin(), extensionIds.end());
     ids.push_back("BasicRenderer::Passes");
-    if (ids == m_frameHostExtensionIds) return;
+    // The host epochs each extension is made into, from its frame epoch. The renderer's providers and passes and the readback
+    // captures (kNoFrameEpoch: each graph keeps the captures after its own passes) are made into every frame host epoch.
+    const auto hostEpochsOf = [&](const std::string& id) -> std::vector<uint32_t> {
+        if (id == "BasicRenderer::Providers" || id == "BasicRenderer::Passes") return br::render::FrameHostEpochs();
+        const auto found = extensionEpochs.find(id);
+        const uint32_t epoch = found == extensionEpochs.end() ? br::render::kVisibilityEpoch : found->second;
+        if (!br::render::IsFrameEpoch(epoch)) return br::render::FrameHostEpochs();
+        return { br::render::HostEpochOf(epoch) };
+    };
+    std::vector<std::vector<uint32_t>> hostEpochs;
+    for (const auto& id : ids) hostEpochs.push_back(hostEpochsOf(id));
+    if (ids == m_frameHostExtensionIds && hostEpochs == m_frameHostExtensionEpochs) return;
 
     for (const auto& id : m_frameHostExtensionIds) m_frameHost->RemoveExtension(id);
     m_frameHostExtensionIds.clear();
-    const auto add = [this](std::string id, org::GraphHost::ExtensionFactory factory) {
-        // The frame epoch only: the upload epoch's graph is the host's upload pass alone.
-        m_frameHost->AddExtension(id, std::move(factory), {kFrameEpoch});
+    m_frameHostExtensionEpochs.clear();
+    const auto add = [&, this](std::string id, org::GraphHost::ExtensionFactory factory) {
+        // Frame epochs only: the upload epoch's graph is the host's upload pass alone.
+        auto epochs = hostEpochsOf(id);
+        m_frameHost->AddExtension(id, std::move(factory), epochs);
         m_frameHostExtensionIds.push_back(std::move(id));
+        m_frameHostExtensionEpochs.push_back(std::move(epochs));
     };
     add("BasicRenderer::Providers", [this] {
         // The extension holds the build's provider copies: its graph keeps pointers to them.
@@ -1384,10 +2114,15 @@ void Renderer::RegisterFrameHostExtensions(const std::vector<std::string>& exten
             if (!build) throw std::logic_error("Frame graph extension " + id + ": made outside a frame build");
             const auto maker = build->inputs.extensionMakers.find(id);
             if (maker == build->inputs.extensionMakers.end() || !maker->second) return nullptr;
-            return maker->second();
+            auto made = maker->second();
+            if (!made) return nullptr;
+            // Its passes are tagged with its frame epoch as it gathers them.
+            return std::make_unique<br::render::EpochTaggedExtension>(std::move(made), build->inputs.ExtensionEpoch(id), build->passEpochs);
         });
     }
+    // It also gathers the passes an earlier host epoch's graph of the build forwarded to its graph.
     add("BasicRenderer::Passes", [this] {
-        return std::make_unique<br::render::DeclarationGraphExtension>([this](org::RenderGraph& graph) { DeclareFramePasses(graph); });
+        return std::make_unique<br::render::DeclarationGraphExtension>([this](org::RenderGraph& graph) { DeclareFramePasses(graph); },
+            br::render::DeclarationGraphExtension::Declare{}, br::render::GatherForwardedPasses);
     });
 }

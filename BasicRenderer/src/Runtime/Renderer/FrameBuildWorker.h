@@ -27,23 +27,29 @@ struct FrameBuildJob {
     std::string reason;
     uint64_t serial = 0;
     bool onRenderThread = false;
-    // The host's count of the frame epoch's rebuild requests when the build started (GraphHost::RebuildRequests). A larger
-    // count at the attach is a request the build does not answer.
-    uint64_t hostRequestsAtStart = 0;
+    // The host's count of each built host epoch's rebuild requests when the build started (GraphHost::RebuildRequests), as
+    // FrameBuild::hostEpochs. A larger count at the attach is a request the build does not answer.
+    std::vector<uint64_t> hostRequestsAtStart;
     std::chrono::steady_clock::time_point started;
     double prepareMs = 0.0;  // render thread: the inputs (MakeFrameBuild) and the host's extensions
     // The publication the build's resolvers are captured against: the render thread's latest manifest when it started, as
     // that frame's preparation would have used (GraphHost::BuildEpochGraph's capture context).
     std::shared_ptr<const org::ResolverCaptureContext> captureContext;
 
-    // Written by the thread that builds.
-    std::unique_ptr<org::GraphHost::EpochGraph> graph;
+    // Written by the thread that builds: one graph per host epoch of the build (FrameBuild::hostEpochs), in that order.
+    struct EpochGraphBuild {
+        uint32_t hostEpoch = 0;
+        std::unique_ptr<org::GraphHost::EpochGraph> graph;
+    };
+    std::vector<EpochGraphBuild> graphs;
     // Built on the render thread by the host's own build point (GraphHost::BuildIfRequested), so already in place: no attach.
     bool installed = false;
     std::vector<std::string> pipelineFailures;
     size_t pipelinesDeclared = 0;
     std::vector<std::string> settingsWritten;
     std::string error;  // a failure outside the host's build (it reports its own through the graph)
+    // Its epoch check waits for its first frame: built in place, it had no schedule yet (Renderer::CheckFrameEpochInterface).
+    bool epochCheckDeferred = false;
     double buildMs = 0.0;          // the whole build, pipeline waits included
     double pipelineWaitMs = 0.0;   // waiting for the build's own pipelines
 };

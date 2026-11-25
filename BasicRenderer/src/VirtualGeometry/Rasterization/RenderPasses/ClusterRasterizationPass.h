@@ -14,6 +14,7 @@
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 namespace org { class RenderGraph; }
+struct UpdateContext;
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
 #include "VirtualGeometry/GraphIntegration/CLodViewTables.h"
 #include "Render/PreparedTablePublisher.h"
@@ -121,6 +122,8 @@ private:
 
     std::vector<CLodViewRasterInfo> m_viewRasterInfos; // Rows without descriptors (change detection).
     std::vector<uint32_t> ViewInputCameras() const;
+    // Takes this frame's views; returns whether what the pass declares changed.
+    bool UpdateViews(const UpdateContext& context);
     // Built by Update from the view snapshot; its descriptors are resolved and
     // the table published when the frame is prepared.
     struct ViewInput {

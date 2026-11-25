@@ -12,11 +12,13 @@ class Buffer;
 class ExternalClient;
 }
 
-// What CLod streaming uses of one frame graph: the feedback buffers its passes write, the queue its uploads go on, and
-// how it submits its after-frame work through the graph. A build makes one (the opaque CLod variant, in its gather) and
-// records it in its FrameBuildOutputs. The renderer attaches it to the persistent streaming service after the build
-// (CLodStreamingSystem::AttachGraph), so a build never changes the service the attached graph runs with. The old graph's
-// passes keep the old binding's buffers alive until that graph retires.
+// What CLod streaming uses of the frame graphs: the feedback buffers their passes write. A build that declares Visibility makes
+// one (the opaque CLod variant owns streaming) and records it in its FrameBuildOutputs. The renderer attaches it to the
+// persistent streaming service after the build (CLodStreamingSystem::AttachGraph), so a build never changes the service the
+// attached graph runs with. The old graph's passes keep the old binding's buffers alive until that graph retires.
+// The buffers cross epochs: Visibility's CLod passes write them and Shading's (the alpha variant, the streaming tail) write
+// and read them. So a Visibility rebuild takes the attached binding's buffers again (CreateSharing) when it can, and
+// Shading's graph keeps working with them (SharesBuffersWith).
 struct CLodStreamingGraphBinding {
     // Written by the CLod passes each frame and copied back by the streaming readback. Aliased: placed by the graph that
     // registers them.
@@ -41,15 +43,6 @@ struct CLodStreamingGraphBinding {
         std::shared_ptr<org::Buffer> reduceScanArgs;
     } sort;
 
-    // The async upload queue in this graph's queue registry. It is made in the opaque variant's Initialize, when the
-    // registry has its primary queues.
-    org::QueueSlotIndex uploadQueueSlot{};
-
-    // Set by the gathers: submit the async uploads (on the upload queue) and the feedback readback through the graph's
-    // external client, after each frame.
-    std::function<void(org::ExternalClient&, org::QueueSlotIndex)> submitAsyncUploads;
-    std::function<void(org::ExternalClient&)> submitStreamingReadback;
-
     // From the shadow map variant, when the graph has one: the upload slots streaming writes page upgrades into, and the
     // fallback dependency list the readback copies back.
     std::vector<std::shared_ptr<org::Buffer>> virtualShadowUpgradeUploadBuffers;
@@ -61,9 +54,19 @@ struct CLodStreamingGraphBinding {
 
     // Makes the buffers above (unmaterialized; nothing is placed until a graph registers them).
     static std::shared_ptr<CLodStreamingGraphBinding> Create();
-
-    void SubmitExternalWork(org::ExternalClient& client) const {
-        if (submitAsyncUploads) submitAsyncUploads(client, uploadQueueSlot);
-        if (submitStreamingReadback) submitStreamingReadback(client);
+    // A binding of a new build over `previous`'s feedback and sort buffers (the same objects); the shadow variant's and the
+    // branches are the new build's to set.
+    static std::shared_ptr<CLodStreamingGraphBinding> CreateSharing(const CLodStreamingGraphBinding& previous);
+    // Whether `other` writes and reads the same feedback buffers (it is this binding or one made by CreateSharing).
+    bool SharesBuffersWith(const CLodStreamingGraphBinding& other) const noexcept { return loadRequests && loadRequests == other.loadRequests; }
+    bool HasVirtualShadowResources() const noexcept {
+        return !virtualShadowUpgradeUploadBuffers.empty() || virtualShadowFallbackDependencies || virtualShadowFallbackDependencyCount;
     }
+};
+
+// The streaming tail's after-execution work in one graph (CLodStreamingSystem::GatherStructuralTailPasses): the async uploads
+// and the feedback readback, submitted through that graph's external client.
+struct CLodStreamingTailWork {
+    std::function<void(org::ExternalClient&, org::QueueSlotIndex)> submitAsyncUploads;
+    std::function<void(org::ExternalClient&)> submitStreamingReadback;
 };

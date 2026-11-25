@@ -9,6 +9,7 @@
 namespace org { class RenderGraph; }
 #include "VirtualGeometry/GraphIntegration/CLodExtensionComponents.h"
 #include <BasicRenderer/Extensions/ProducerPersistentState.h>
+#include "VirtualGeometry/Streaming/CLodStreamingGraphBinding.h"
 
 namespace org { class Buffer; }
 namespace br::render { class CLodRayTracingSystem; }
@@ -50,6 +51,28 @@ struct CLodExtensionOptions {
     // On the primary raster variant, with rayTracingSystem: its culling is also the ray tracing view's (CLOD_UNIFIED_RT).
     // Phase 1 writes the ray tracing view's cluster list, and the scene build follows it. No RT view variant is registered.
     bool unifiedRayTracingCulling = false;
+};
+
+// CLod streaming's frame tail in one frame graph: the feedback sort and the DirectStorage launch, at the end of the graph, and
+// the async uploads (on a copy queue of this graph's) and the feedback readback, submitted after the graph's execution. It runs
+// in the last graph that writes the feedback (Shading's: the opaque variant that owns streaming is Visibility's, the alpha
+// variant Shading's), after every other extension's passes (it is the last CLod extension), over the build's streaming binding
+// or, in a build without Visibility, the attached one. It keeps its after-execution work itself (CLodStreamingTailWork).
+class CLodStreamingTailExtension final : public org::IRenderGraphExtension {
+public:
+    explicit CLodStreamingTailExtension(std::shared_ptr<CLodStreamingSystem> streamingSystem);
+    void PrepareForBuild(org::RenderGraph& rg) override;
+    void Initialize(org::RenderGraph& rg) override;
+    void GatherStructuralPasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& outPasses) override;
+    void AfterExecute(org::RenderGraph& rg) override;
+
+private:
+    std::shared_ptr<CLodStreamingGraphBinding> BuildBinding();
+
+    std::shared_ptr<CLodStreamingSystem> m_streamingSystem;
+    std::shared_ptr<CLodStreamingGraphBinding> m_binding;
+    CLodStreamingTailWork m_work;
+    org::QueueSlotIndex m_uploadQueueSlot{};
 };
 
 // One CLod variant of one frame graph. The renderer makes a new instance for every graph build (Renderer::MakeFrameBuild

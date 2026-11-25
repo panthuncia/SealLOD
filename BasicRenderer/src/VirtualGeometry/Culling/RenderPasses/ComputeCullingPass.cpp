@@ -208,6 +208,8 @@ ComputeCullingShadowViews ComputeCullingPass::DeclareVirtualShadow(org::PassBuil
 
 ComputeCullingBindings ComputeCullingPass::Declare(org::PassBuilder& builder)
 {
+    // A new graph's first declaration: from the views its build started with, as the first Update will see them.
+    if (const auto* seed = br::render::BuildUpdateContext()) (void)UpdateViewTables(*seed);
     const org::ResourceState computeReadState{
         rhi::ResourceAccessType::ShaderResource,
         rhi::ResourceLayout::ShaderResource,
@@ -431,6 +433,15 @@ void ComputeCullingPass::UpdateTraversalDepth(const UpdateContext& context)
     m_traversalDepth = depth;
 }
 
+bool ComputeCullingPass::UpdateViewTables(const UpdateContext& context)
+{
+    bool changed = m_viewRasterInfoLayout.Update(
+        context.Views(), context.ViewCameraBufferSize(), m_config.rasterOutputKind, false);
+    if (m_config.UsesPerViewDepthOcclusion())
+        changed |= m_viewDepthLayout.Update(context.Views(), m_config.isFirstPass);
+    return changed;
+}
+
 void ComputeCullingPass::Update(const org::UpdateExecutionContext& executionContext)
 {
     ZoneScopedN("ComputeCullingPass::Update");
@@ -451,10 +462,7 @@ void ComputeCullingPass::Update(const org::UpdateExecutionContext& executionCont
         }
     }
 
-    m_declaredResourcesChanged = m_viewRasterInfoLayout.Update(
-        context.Views(), context.ViewCameraBufferSize(), m_config.rasterOutputKind, false);
-    if (m_config.UsesPerViewDepthOcclusion())
-        m_declaredResourcesChanged |= m_viewDepthLayout.Update(context.Views(), m_config.isFirstPass);
+    m_declaredResourcesChanged = UpdateViewTables(context);
     UpdateTraversalDepth(context);
 
     br::render::ResetCullingCounter(m_resources.outputs.visibleClustersCounter, upload);

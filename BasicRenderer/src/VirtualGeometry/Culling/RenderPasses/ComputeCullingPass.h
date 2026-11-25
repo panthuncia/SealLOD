@@ -41,6 +41,8 @@ private:
     void ValidatePrograms(const ComputeCullingPrograms& programs, org::BackendInstanceId device) const;
     ComputeCullingShadowViews DeclareVirtualShadow(org::PassBuilder& builder) const;
     void UpdateTraversalDepth(const UpdateContext& context);
+    // Takes this frame's views into the view tables; returns whether what the pass declares changed.
+    bool UpdateViewTables(const UpdateContext& context);
     br::render::CullingUploader Uploader() const;
 
     CullingPassConfig m_config;

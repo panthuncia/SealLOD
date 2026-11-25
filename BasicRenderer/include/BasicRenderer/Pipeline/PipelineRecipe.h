@@ -18,6 +18,7 @@
 
 #include <rhi.h>
 
+#include <BasicRenderer/Extensions/FrameEpochs.h>
 #include <BasicRenderer/Extensions/RenderGraphExtensionRegistration.h>
 #include "Resources/Resource.h"
 #include "Resources/ResourceIdentifier.h"
@@ -373,19 +374,23 @@ public:
     }
 
     bool Contains(TechniqueId id) const;
-    PipelineRecipe& AddExtension(std::string id, RenderGraphExtensionFactory factory);
+    // epoch: the frame epoch the extension's passes belong to (br::render::kVisibilityEpoch, ...; FrameEpochs.h).
+    PipelineRecipe& AddExtension(std::string id, RenderGraphExtensionFactory factory, uint32_t epoch = br::render::kVisibilityEpoch);
     PipelineRecipe& ClearExtensions();
 
     ResourceBindings& Bindings() { return m_bindings; }
     const ResourceBindings& Bindings() const { return m_bindings; }
     const std::vector<TechniqueEntry>& Techniques() const { return m_techniques; }
     const std::vector<std::pair<std::string, RenderGraphExtensionFactory>>& Extensions() const { return m_extensions; }
+    // The frame epoch AddExtension gave the extension (kVisibilityEpoch for an id it does not know).
+    uint32_t ExtensionEpoch(const std::string& id) const;
     PipelineValidationResult Validate() const;
 
 private:
     std::vector<TechniqueEntry> m_techniques;
     ResourceBindings m_bindings;
     std::vector<std::pair<std::string, RenderGraphExtensionFactory>> m_extensions;
+    std::vector<std::pair<std::string, uint32_t>> m_extensionEpochs;
 };
 
 namespace Slots {

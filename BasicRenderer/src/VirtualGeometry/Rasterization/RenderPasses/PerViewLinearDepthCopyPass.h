@@ -9,6 +9,7 @@
 #include <BasicRenderer/Pipeline/PipelineDesc.h>
 
 namespace org { class PixelBuffer; }
+struct UpdateContext;
 
 struct PerViewLinearDepthCopyBindingView {
     org::DeclaredViewToken visibility, linearDepth;
@@ -45,6 +46,8 @@ public:
         org::PassRecordContext& context);
 
 private:
+    // Takes this frame's views; returns whether what the pass declares changed.
+    bool UpdateViews(const UpdateContext& context);
     struct ViewSnapshot {
         std::shared_ptr<org::PixelBuffer> visibility, linearDepth;
         uint32_t width = 0, height = 0;

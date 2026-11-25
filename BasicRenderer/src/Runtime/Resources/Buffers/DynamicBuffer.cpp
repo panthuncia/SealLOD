@@ -33,6 +33,9 @@ size_t TotalAllocationProbeSize(const std::vector<size_t>& counts, size_t elemen
 }
 
 org::DynamicBuffer::~DynamicBuffer() {
+    // Out of both client registries before any member goes: the policy service and the backing resize registry may call it
+    // from another thread until then (a retired graph is destroyed on the runtime's deleter thread).
+    UnregisterUploadPolicyClient();
     UnregisterDeferredBackingResizeClient(this);
 }
 
