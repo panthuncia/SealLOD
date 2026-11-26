@@ -123,6 +123,19 @@ std::string Renderer::DescribeUpscaler() const {
         { "ray_reconstruction_settings_failures", status.rayReconstructionSettingsFailures },
         { "ray_reconstruction_retry_seconds", status.rayReconstructionRetrySeconds },
     };
+    // Upscaler configurations (M5 step 3): the attached graphs' and the latest prepared one.
+    const auto configuration = [&](const UpscalingManager::Status::Configuration& c) {
+        return nlohmann::json{ { "serial", c.serial }, { "viewport", c.viewport }, { "mode", name(c.mode) },
+            { "render_resolution", { c.render.x, c.render.y } }, { "output_resolution", { c.output.x, c.output.y } },
+            { "prepared", c.prepared }, { "allocated_ahead", c.allocatedAhead }, { "prepare_ms", c.prepareMs } };
+    };
+    reply["configuration"] = {
+        { "current", configuration(status.currentConfiguration) },
+        { "latest", configuration(status.latestConfiguration) },
+        { "prepared", status.configurationsPrepared },
+        { "retired", status.configurationsRetired },
+        { "live", status.configurationsLive },
+        { "last_attach_wait_ms", status.lastAttachWaitMs } };
     return reply.dump();
 }
 
@@ -149,6 +162,31 @@ std::string Renderer::DescribeGraphRevisions() const {
     reply["epoch_builds"] = std::move(epochBuilds);
     reply["host_epochs"] = FrameGraphHostEpochs();
     reply["last_build_host_epochs"] = m_lastGraphBuildHostEpochs;
+    // M6 step 3: the kept epochs' runs since the start (GraphHost::SetKeptEpochs): submitted their copy's kept recording, recorded
+    // and kept it, or recorded one that cannot be kept, with why each recorded.
+    {
+        nlohmann::json recordings = nlohmann::json::object();
+        for (const auto& [host, kept] : m_keptRecordingTotals) {
+            nlohmann::json reasons = nlohmann::json::object();
+            for (const auto& [reason, count] : kept.reasons) reasons[reason] = count;
+            nlohmann::json mismatches = nlohmann::json::object();
+            for (const auto& [name, count] : kept.mismatches) mismatches[name] = count;
+            nlohmann::json batchReasons = nlohmann::json::object();
+            for (const auto& [reason, count] : kept.batchReasons) batchReasons[reason] = count;
+            recordings[std::to_string(host)] = { { "runs", kept.runs }, { "reused", kept.reused }, { "recorded", kept.kept },
+                { "unkeepable", kept.unkeepable }, { "reasons", std::move(reasons) },
+                // M6 step 6: staged recordings at their first use.
+                { "staged", { { "reused", kept.stagedReused }, { "recorded", kept.stagedRecorded } } },
+                // M6 step 7: batch reuse (runs partly reused, batches reused and recorded, why batches recorded).
+                { "batches", { { "partial", kept.partial }, { "reused", kept.batchesReused }, { "recorded", kept.batchesRecorded },
+                    { "reasons", std::move(batchReasons) } } },
+                // M6 step 4: the revision audit (BASICRENDERER_KEPT_RECORDING_AUDIT).
+                { "audit", { { "audited", kept.audited }, { "compared", kept.auditCompared }, { "uncomparable", kept.auditUncomparable },
+                    { "mismatches", kept.auditMismatches }, { "passes", std::move(mismatches) } } } };
+        }
+        reply["recordings"] = std::move(recordings);
+        reply["kept_epochs"] = m_frameHost ? m_frameHost->KeptEpochs() : std::vector<uint32_t>{};
+    }
     // M4 step 7: frames checked for a mixed set of builds (CheckFrameBuildSet), and the host's own count of staged sets.
     reply["frame_sets"] = {
         { "frames_checked", m_frameSetCheck.totalFrames },
@@ -157,6 +195,48 @@ std::string Renderer::DescribeGraphRevisions() const {
         { "host_sets_attached", m_frameHost ? m_frameHost->AttachStatsTotal().setsAttached : 0 },
         { "host_staged", m_frameHost ? m_frameHost->AttachStatsTotal().staged : 0 },
     };
+    // M5 step 4: the resolution revision. Requests (window sizes, upscaler settings) recorded, the consolidation points that took
+    // them, and the builds they started; at most one of those is in flight.
+    {
+        const auto& resolution = m_resolutionStats;
+        const auto waiting = m_frameRevisions.PeekResolution();
+        const auto attached = AttachedResolution();
+        reply["resolution"] = {
+            { "requests", m_frameRevisions.ResolutionRequests() },
+            { "pending", waiting.Describe() },
+            { "pending_requests", waiting.requests },
+            { "consumed", resolution.consumed },
+            { "applied", resolution.applied },
+            { "unchanged", resolution.unchanged },
+            { "deferred_frames", resolution.deferredFrames },
+            { "settle_frames", resolution.settleFrames },
+            { "swapchain_resizes", resolution.swapchainResizes },
+            { "swapchain_only_resizes", resolution.swapchainOnlyResizes },
+            { "stale_mode_changes", resolution.staleModeChanges },
+            { "builds", resolution.resolutionBuilds },
+            { "builds_in_flight", resolution.resolutionBuildsInFlight },
+            { "max_builds_in_flight", resolution.maxResolutionBuildsInFlight },
+            { "last_coalesced", resolution.lastCoalesced },
+            { "max_coalesced", resolution.maxCoalesced },
+            { "last_frame", resolution.lastFrame },
+            { "last_reasons", resolution.lastReasons },
+            { "last_apply_ms", resolution.lastApplyMs },
+            { "max_apply_ms", resolution.maxApplyMs },
+            { "last_prepare_ms", resolution.lastPrepareMs },
+            { "max_prepare_ms", resolution.maxPrepareMs },
+            { "switches", resolution.switches },
+            { "last_switch_ms", resolution.lastSwitchMs },
+            { "max_switch_ms", resolution.maxSwitchMs },
+            { "last_swapchain_wait_ms", resolution.lastSwapchainWaitMs },
+            { "max_swapchain_wait_ms", resolution.maxSwapchainWaitMs },
+            { "last_resize_buffers_ms", resolution.lastResizeBuffersMs },
+            { "max_resize_buffers_ms", resolution.maxResizeBuffersMs },
+            { "stall_pipeline_calls", resolution.stallPipelineCalls },
+            { "last_stall_reason", resolution.lastStallReason },
+            { "attached_render", { attached.render.x, attached.render.y } },
+            { "attached_output", { attached.output.x, attached.output.y } },
+        };
+    }
     // M3 step 9: builds run on the build thread and are attached at the consolidation point.
     const auto& stats = m_graphBuildStats;
     const bool inFlight = FrameBuildInFlight();
@@ -192,21 +272,13 @@ void Renderer::ReconfigureUpscalerIfRequested() {
     if (!UpscalingManager::GetInstance().TakeReconfigureRequest()) {
         return;
     }
-    // As a change of upscaling mode does it.
-    m_preFrameDeferredFunctions.defer([this]() {
-        StallPipeline();
-        UpscalingManager::GetInstance().Shutdown();
-        UpscalingManager::GetInstance().InitFFX();
-        UpscalingManager::GetInstance().Setup();
-        FFXManager::GetInstance().Shutdown();
-        FFXManager::GetInstance().InitFFX();
-        CreateTextures();
-        const auto ingestionConfiguration = CaptureSceneIngestionConfiguration();
-        m_sceneRenderBridge.ResyncPrimaryCameraDepth(m_sceneIngestionServices,
-            ingestionConfiguration.renderResolution.x, ingestionConfiguration.renderResolution.y,
-            PrimaryCameraLodHeight(ingestionConfiguration));
-        RequestGraphRebuild("upscaler reconfiguration");
-    });
+    // As a change of upscaling mode does it. A retry that fails again gives the configuration there is: nothing is rebuilt.
+    m_frameRevisions.RequestUpscaler("upscaler reconfiguration");
+}
+
+bool Renderer::RayReconstructionGuidesForNextBuild() const {
+    // The recipe the next build is made from (a replacement waiting for it included), as SyncPipelineTopologySettings announces it.
+    return GetPipelineRecipeForMutation().Contains<br::pipeline::PathTracingTechnique>();
 }
 
 namespace {
@@ -758,7 +830,8 @@ void Renderer::SetSettings() {
         ::ResourceManager::GetInstance().SetOutputType(newValue);
         const bool newOutputTypeRequiresRenderGraphRebuild = OutputTypeRequiresRenderGraphRebuild(newValue);
         if (newOutputTypeRequiresRenderGraphRebuild != outputTypeRequiresRenderGraphRebuild) {
-            RequestGraphRebuild(std::string("setting ") + "outputType", PostOverlayEpochs());
+            // The debug resolve and the skeleton view that replaces it are both Overlay's (M6 step 3).
+            RequestGraphRebuild(std::string("setting ") + "outputType", OverlayEpochs());
         }
         outputTypeRequiresRenderGraphRebuild = newOutputTypeRequiresRenderGraphRebuild;
         }));
@@ -1000,23 +1073,9 @@ void Renderer::SetSettings() {
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<UpscalingMode>("upscalingMode", [this](const UpscalingMode& newValue) {
 
-        m_preFrameDeferredFunctions.defer([newValue, this]() { // Don't do this during a frame
-            StallPipeline(); // Wait for all GPU work before destroying contexts
-            UpscalingManager::GetInstance().Shutdown();
-            UpscalingManager::GetInstance().InitFFX(); // Needs device
-            UpscalingManager::GetInstance().SetUpscalingMode(newValue);
-            UpscalingManager::GetInstance().Setup();
-
-            FFXManager::GetInstance().Shutdown();
-            FFXManager::GetInstance().InitFFX();
-
-            CreateTextures();
-            const auto ingestionConfiguration = CaptureSceneIngestionConfiguration();
-            m_sceneRenderBridge.ResyncPrimaryCameraDepth(m_sceneIngestionServices,
-                ingestionConfiguration.renderResolution.x, ingestionConfiguration.renderResolution.y,
-                PrimaryCameraLodHeight(ingestionConfiguration));
-            RequestGraphRebuild(std::string("setting ") + "upscalingMode");
-            });
+        // A resolution request, consumed at the consolidation point (ApplyResolutionRequest): the guides come from the recipe being
+        // built, and a path tracing toggle replaces it in the same frame (SelectPathTracingUpscaler), so one set has the right upscaler.
+        m_frameRevisions.RequestUpscaler("setting upscalingMode");
 		}));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("rayReconstructionGuidesAvailable", [this](const bool& newValue) {
         // Applied now rather than deferred: the graph rebuild of the pipeline
@@ -1026,38 +1085,12 @@ void Renderer::SetSettings() {
         if (SettingsManager::GetInstance().getSettingGetter<UpscalingMode>("upscalingMode")() != UpscalingMode::DLSSRayReconstruction) {
             return;
         }
-        m_preFrameDeferredFunctions.defer([this]() {
-            StallPipeline();
-            UpscalingManager::GetInstance().Shutdown();
-            UpscalingManager::GetInstance().InitFFX();
-            UpscalingManager::GetInstance().Setup();
-            FFXManager::GetInstance().Shutdown();
-            FFXManager::GetInstance().InitFFX();
-            CreateTextures();
-            const auto ingestionConfiguration = CaptureSceneIngestionConfiguration();
-            m_sceneRenderBridge.ResyncPrimaryCameraDepth(m_sceneIngestionServices,
-                ingestionConfiguration.renderResolution.x, ingestionConfiguration.renderResolution.y,
-                PrimaryCameraLodHeight(ingestionConfiguration));
-            RequestGraphRebuild(std::string("setting ") + "rayReconstructionGuidesAvailable");
-            });
+        // A configuration prepared for the replacement's recipe already has them (ApplyResolutionRequest): then nothing changes.
+        m_frameRevisions.RequestUpscaler("setting rayReconstructionGuidesAvailable");
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<UpscaleQualityMode>("upscalingQualityMode", [this](const UpscaleQualityMode& newValue) {
 
-        m_preFrameDeferredFunctions.defer([newValue, this]() { // Don't do this during a frame
-            StallPipeline(); // Wait for all GPU work before destroying contexts
-            UpscalingManager::GetInstance().SetUpscalingQualityMode(newValue);
-            UpscalingManager::GetInstance().Shutdown();
-            UpscalingManager::GetInstance().InitFFX(); // Recreate FSR context before Setup queries it
-            UpscalingManager::GetInstance().Setup();
-            FFXManager::GetInstance().Shutdown();
-            FFXManager::GetInstance().InitFFX();
-            CreateTextures();
-            const auto ingestionConfiguration = CaptureSceneIngestionConfiguration();
-            m_sceneRenderBridge.ResyncPrimaryCameraDepth(m_sceneIngestionServices,
-                ingestionConfiguration.renderResolution.x, ingestionConfiguration.renderResolution.y,
-                PrimaryCameraLodHeight(ingestionConfiguration));
-            RequestGraphRebuild(std::string("setting ") + "upscalingQualityMode");
-            });
+        m_frameRevisions.RequestUpscaler("setting upscalingQualityMode");
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableDilatedMotionVectors", [this](const bool&) {
         m_preFrameDeferredFunctions.defer([this]() {

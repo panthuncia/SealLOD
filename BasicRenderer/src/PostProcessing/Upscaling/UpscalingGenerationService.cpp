@@ -10,22 +10,26 @@
 
 namespace br::render {
 
-UpscalingGenerationService::UpscalingGenerationService(UpscalingMode mode,
+UpscalingGenerationService::UpscalingGenerationService(std::shared_ptr<const UpscalerConfiguration> configuration, UpscalingMode mode,
     rhi::Backend backend, bool dilatedMotion,
     DirectX::XMUINT2 renderResolution,
     DirectX::XMUINT2 outputResolution) noexcept
-    : m_mode(mode), m_backend(backend), m_dilatedMotion(dilatedMotion),
+    : m_configuration(std::move(configuration)), m_mode(mode), m_backend(backend), m_dilatedMotion(dilatedMotion),
       m_renderResolution(renderResolution), m_outputResolution(outputResolution) {}
 
 std::shared_ptr<UpscalingGenerationService> UpscalingGenerationService::CaptureCurrent() {
-    const auto mode = UpscalingManager::GetInstance().GetCurrentUpscalingMode();
+    auto configuration = UpscalingManager::GetInstance().Latest();
+    if (!configuration) return nullptr; // Prepare runs at the renderer's initialization, before any build.
+    // The build that uses it is starting: its feature is prepared meanwhile.
+    UpscalingManager::GetInstance().RequestPreparation(*configuration);
+    const auto mode = configuration->Mode();
     auto& settings = SettingsManager::GetInstance();
     const bool dilated = mode == UpscalingMode::DLSS
         && settings.getSettingGetter<bool>("enableDilatedMotionVectors")();
+    const auto render = configuration->RenderResolution();
+    const auto output = configuration->OutputResolution();
     return std::shared_ptr<UpscalingGenerationService>(new UpscalingGenerationService(
-        mode, DeviceManager::GetInstance().GetBackend(), dilated,
-        settings.getSettingGetter<DirectX::XMUINT2>("renderResolution")(),
-        settings.getSettingGetter<DirectX::XMUINT2>("outputResolution")()));
+        std::move(configuration), mode, DeviceManager::GetInstance().GetBackend(), dilated, render, output));
 }
 
 void UpscalingGenerationService::RegisterRayReconstructionGuides(org::RenderGraph& graph) {
@@ -59,7 +63,7 @@ void UpscalingGenerationService::MakeRayReconstructionGuides(
 bool UpscalingGenerationService::Evaluate(rhi::CommandList& commands,
     const Components::Camera& camera, std::uint64_t frameNumber,
     double deltaTime, const UpscalingInputs& inputs) const {
-    return UpscalingManager::GetInstance().EvaluateCaptured(m_mode, commands, &camera, frameNumber,
+    return UpscalingManager::GetInstance().Evaluate(*m_configuration, commands, &camera, frameNumber,
         deltaTime, inputs);
 }
 

@@ -10,6 +10,7 @@
 #include "BasicRenderer/Scene/Scene.h"
 #include "PostProcessing/AmbientOcclusion/AmbientOcclusionSettings.h"
 #include <BasicRenderer/Extensions/PipelineDescs.h>
+#include "BasicRenderer/Extensions/PassRevision.h"
 
 struct SpecularIBLBindings {
     br::PipelineState pipeline;
@@ -18,6 +19,7 @@ struct SpecularIBLBindings {
 };
 struct SpecularIBLFrame {
     uint32_t width = 0, height = 0;
+    bool operator==(const SpecularIBLFrame&) const = default;
 };
 
 class SpecularIBLPass : public org::TypedRenderGraphPass<SpecularIBLPass,
@@ -55,8 +57,11 @@ public:
         } else if (m_screenSpaceAOMode == ScreenSpaceAOMode::CORTAO) {
             builder.ShaderResource(Builtin::CORTAO::OutputAO);
         }
-        return {br::render::DeclarePipeline(PipelineDesc()), builder.RenderTarget(org::ResourceIdentifier{Builtin::Color::HDRColorTarget}), m_screenSpaceAOMode};
+        m_pipeline = br::render::DeclarePipeline(PipelineDesc());
+        return {m_pipeline, builder.RenderTarget(org::ResourceIdentifier{Builtin::Color::HDRColorTarget}), m_screenSpaceAOMode};
     }
+    // Kept recordings (M6 step 5): the target's size is the graph's, so only the pipeline's build names the recording.
+    void Revision(std::vector<uint64_t>& out) const { br::render::AppendPipelineRevision(out, m_pipeline); }
 
     void Initialize() {}
 
@@ -81,6 +86,7 @@ public:
 private:
 
     ScreenSpaceAOMode m_screenSpaceAOMode = ScreenSpaceAOMode::Off;
+    br::PipelineState m_pipeline;
 
     static br::GraphicsPipelineDesc PipelineDesc() {
         br::GraphicsPipelineDesc desc;

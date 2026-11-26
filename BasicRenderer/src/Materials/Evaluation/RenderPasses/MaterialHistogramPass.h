@@ -12,6 +12,7 @@
 #include "BasicRenderer/Assets/TechniqueDescriptor.h"
 #include "../shaders/PerPassRootConstants/visUtilRootConstants.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 #include "Materials/Publication/MaterialStateArtifacts.h"
 #include "BasicRenderer/Runtime/Detail/MaterialEvaluationBuildInputs.h"
 
@@ -25,6 +26,7 @@ struct MaterialHistogramBindings {
 struct MaterialHistogramFrame {
     uint32_t voxelMaterialBin = 0xFFFFFFFFu;
     uint32_t groupsX = 0, groupsY = 0;
+    bool operator==(const MaterialHistogramFrame&) const = default;
 };
 
 class MaterialHistogramPass : public org::TypedRenderGraphPass<MaterialHistogramPass, MaterialHistogramFrame, MaterialHistogramBindings> {
@@ -38,8 +40,8 @@ public:
             throw std::invalid_argument("MaterialHistogramPass requires the published visible-cluster resource");
     }
     MaterialHistogramBindings Declare(org::PassBuilder& b) {
-        MaterialHistogramBindings bindings{br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/VisUtil.hlsl", L"MaterialHistogramCS", "MaterialHistogramPSO")),
-            b.ShaderResource(m_visibleClusterResource)};
+        m_pipeline = br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/VisUtil.hlsl", L"MaterialHistogramCS", "MaterialHistogramPSO"));
+        MaterialHistogramBindings bindings{m_pipeline, b.ShaderResource(m_visibleClusterResource)};
         if (m_reyesDiceQueueResource) {
             bindings.reyesDiceQueue = b.ShaderResource(m_reyesDiceQueueResource);
             bindings.hasReyesDiceQueue = true;
@@ -74,6 +76,27 @@ public:
 		b.ConstantBuffer(Builtin::PerFrameBuffer);
         b.PreferQueue(org::QueueKind::Compute);
         return bindings;
+    }
+
+    // Kept recordings (M6 step 7): the voxel material bin and the dispatch follow the published material state and the render
+    // resolution, taken from the frame's host data with no side effect (RenderGraphPass::TakeFrameValues) before Prepare reads
+    // the same.
+    void TakeFrameValues(const org::UpdateExecutionContext& execution) override {
+        m_voxelMaterialBin = 0xFFFFFFFFu;
+        m_renderResolution = {};
+        const auto* update = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr;
+        const auto* render = execution.hostData ? execution.hostData->Get<RenderContext>() : nullptr;
+        if (!update && !render) return;
+        const auto& published = update ? update->publishedRendererState : render->publishedRendererState;
+        const auto materialState = published ? published->materials.payload.Get<br::render::PublishedMaterialState>() : nullptr;
+        if (materialState) (void)materialState->TryGetCompileFlagsSlot(MaterialCompileFlags::MaterialCompileVoxel, m_voxelMaterialBin);
+        m_renderResolution = update ? update->renderResolution : render->renderResolution;
+    }
+    void Revision(std::vector<uint64_t>& out) const {
+        br::render::AppendPipelineRevision(out, m_pipeline);
+        br::render::AppendRevision(out, m_voxelMaterialBin);
+        br::render::AppendRevision(out, m_renderResolution.x);
+        br::render::AppendRevision(out, m_renderResolution.y);
     }
 
     MaterialHistogramFrame Prepare(const MaterialHistogramBindings&, const org::PassPrepareContext& preparation) const {
@@ -127,4 +150,7 @@ private:
     std::shared_ptr<org::GloballyIndexedResource> m_reyesDiceQueueResource;
     std::shared_ptr<org::GloballyIndexedResource> m_sideBandResource;
     uint32_t m_patchVisibilityIndexBase = 0u;
+    br::PipelineState m_pipeline;
+    uint32_t m_voxelMaterialBin = 0xFFFFFFFFu;
+    DirectX::XMUINT2 m_renderResolution{};
 };

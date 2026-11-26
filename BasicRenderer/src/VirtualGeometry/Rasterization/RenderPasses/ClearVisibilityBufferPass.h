@@ -43,6 +43,9 @@ public:
 		return bindings;
 	}
 
+	// Kept recordings (M6 step 8): the clears are the same every run.
+	void Revision(std::vector<uint64_t>&) const {}
+
 	void ShutdownPass() {
 		// Cleanup the render pass
 	}

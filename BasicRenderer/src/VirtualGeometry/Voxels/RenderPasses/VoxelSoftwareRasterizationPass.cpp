@@ -181,6 +181,10 @@ VoxelRasterBindings VoxelSoftwareRasterizationPass::Declare(org::PassBuilder& de
         bindings.dynamicPages = builder->UnorderedAccess(m_virtualShadowDynamicPagesTexture).View();
         bindings.virtualShadow = true;
     }
+    m_pipelines.Clear();
+    m_pipelines.Add(bindings.buildArgs);
+    for (const auto& pipeline : bindings.raster) m_pipelines.Add(pipeline);
+    for (const auto& pipeline : bindings.telemetryRaster) m_pipelines.Add(pipeline);
     return bindings;
 }
 
@@ -199,14 +203,28 @@ bool VoxelSoftwareRasterizationPass::DeclaredResourcesChanged() const
 VoxelRasterFrame VoxelSoftwareRasterizationPass::Prepare(const VoxelRasterBindings& bindings,
     const org::PassPrepareContext& preparation) const
 {
-    VoxelRasterFrame frame{};
-    frame.telemetry = bindings.hasTelemetry && IsCLodWorkGraphTelemetryEnabled();
+    VoxelRasterFrame frame = m_taken;
+    frame.telemetry = bindings.hasTelemetry && m_taken.telemetry;
     frame.viewRasterInfoTable =
         m_viewRasterInfoTable.Publish(preparation, m_viewRasterInfoPublisher, bindings.viewRasterInfoLayout);
-    if (bindings.virtualShadow) {
-        const auto config = CLodVirtualShadowBuildRuntimeResolutionConfig();
-        frame.pageTableResolution = config.pageTableResolution;
-        frame.virtualResolution = config.virtualResolution;
-    }
+    if (!bindings.virtualShadow) frame.pageTableResolution = frame.virtualResolution = 0;
     return frame;
+}
+
+void VoxelSoftwareRasterizationPass::TakeFrameValues(const org::UpdateExecutionContext&)
+{
+    m_taken = {};
+    m_taken.telemetry = IsCLodWorkGraphTelemetryEnabled();
+    if (m_outputKind == CLodRasterOutputKind::VirtualShadow) {
+        const auto config = CLodVirtualShadowBuildRuntimeResolutionConfig();
+        m_taken.pageTableResolution = config.pageTableResolution;
+        m_taken.virtualResolution = config.virtualResolution;
+    }
+}
+
+void VoxelSoftwareRasterizationPass::Revision(std::vector<uint64_t>& out) const
+{
+    m_pipelines.Append(out);
+    out.push_back(m_taken.pageTableResolution | (uint64_t{m_taken.virtualResolution} << 32) | (uint64_t{m_taken.telemetry} << 63));
+    m_viewRasterInfoTable.AppendRevision(out);
 }

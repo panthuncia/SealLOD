@@ -95,7 +95,7 @@ void ::ResourceManager::SetUploadService(std::shared_ptr<org::runtime::IUploadSe
 	m_uploadService = std::move(uploadService);
 }
 
-void ::ResourceManager::UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, UINT sunLightIndex, UINT sunLightSlot, UINT numDirectionalLights, UINT vsmDebugLightIndex, DirectX::XMUINT2 screenRes, const LightGridShape& lightGrid, unsigned int frameIndex) {
+void ::ResourceManager::UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, UINT sunLightIndex, UINT sunLightSlot, UINT numDirectionalLights, UINT vsmDebugLightIndex, DirectX::XMUINT2 screenRes, const LightGridShape& lightGrid, unsigned int frameIndex, float deltaTime) {
 	UpdateDirectionalShadowConstants(perFrameCBData);
 	perFrameCBData.mainCameraIndex = cameraIndex;
 	perFrameCBData.numLights = numLights;
@@ -111,6 +111,7 @@ void ::ResourceManager::UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, U
 	perFrameCBData.lightGridTileSize = lightGrid.tileSize;
 	perFrameCBData.clusterZSplitDepth = 6.0f;
 	perFrameCBData.frameIndex = frameIndex;
+	perFrameCBData.deltaTime = deltaTime;
     perFrameCBData.shadowVirtualSmrtDirectionalCountsPacked = PackDirectionalVirtualShadowSmrtCounts(
         SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodDirectionalVirtualShadowSmrtRayCountDirectionalSettingName)(),
         SettingsManager::GetInstance().getSettingGetter<uint32_t>(CLodDirectionalVirtualShadowSmrtSamplesPerRayDirectionalSettingName)());

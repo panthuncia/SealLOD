@@ -282,7 +282,7 @@ struct PerFrameBuffer {
     float shadowVirtualReceiverTraceUncertaintyScale;
     float shadowVirtualReceiverTraceDepthSafetyScale;
     float shadowVirtualSmrtMaxLateralTexels;
-    uint shadowVirtualReceiverTracePad1;
+    float deltaTime; // the frame's elapsed seconds (PerFrameCB); was shadowVirtualReceiverTracePad1
     uint terrainStochasticSamplingEnabled;
     uint terrainStochasticDiffuseEnabled;
     uint terrainStochasticNormalEnabled;
@@ -310,6 +310,7 @@ struct PerFrameBuffer {
     uint sunLightSlot; // Its position in the active-index list.
     uint vsmDebugLightIndex; // Light buffer index whose virtual shadow map the VSM debug views show (vsmDebugLight).
     uint numDirectionalLights; // Directional lights in the light buffer (PerFrameCB).
+    uint textureImageTableDescriptorIndex; // The frame's texture image table (materialTextureBinding.hlsli); was padding.
 };
 
 static const uint TERRAIN_RVT_CONTENT_HEIGHT = 1u << 0;

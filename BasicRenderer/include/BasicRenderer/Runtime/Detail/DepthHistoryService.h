@@ -20,6 +20,11 @@ public:
         ReserveDepthHistoryPublication(
             std::shared_ptr<const PreparedViewFamilyState> views,
             std::uint64_t producerFrameNumber) = 0;
+    // The views' depth maps as the history from now on, without waiting for a submission: for a caller after the frame's
+    // depth writes were submitted (LinearDepthHistoryCopyPass's Update, in an epoch after them).
+    virtual void PublishDepthHistory(
+        const std::shared_ptr<const PreparedViewFamilyState>& views,
+        std::uint64_t producerFrameNumber) = 0;
 };
 
 // Submission-owned temporal state. ViewManager still produces view resources,
@@ -121,6 +126,24 @@ public:
         };
         return std::make_shared<const org::PreparedOwnedLifecycle<Reservation>>(
             std::move(reservation), submitted, nullptr, abandoned);
+    }
+
+    void PublishDepthHistory(
+        const std::shared_ptr<const PreparedViewFamilyState>& views,
+        std::uint64_t producerFrameNumber) override {
+        if (!views) return;
+        auto dependency = std::make_shared<DepthHistoryDependency>();
+        std::lock_guard lock(m_state->mutex);
+        for (const auto& view : views->views) {
+            if (!view.linearDepthMap) continue;
+            m_state->published[view.id] = DepthHistorySelection{
+                view.linearDepthMap,
+                view.linearDepthMap->GetBackingGeneration(),
+                0,
+                producerFrameNumber,
+                dependency };
+            m_state->pending.erase(view.id);
+        }
     }
 
 private:

@@ -1219,6 +1219,10 @@ void LensManager::NoteCamera(float verticalFov, float aspect) {
 
 LensFocusParameters LensManager::FocusParameters() const {
     m_focusPassPrepares.fetch_add(1, std::memory_order_relaxed);
+    return PeekFocusParameters();
+}
+
+LensFocusParameters LensManager::PeekFocusParameters() const {
     LensFocusParameters parameters;
     const auto published = Published();
     if (!published->Active() || !published->info || !published->prescription) return parameters;

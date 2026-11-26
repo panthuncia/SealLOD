@@ -238,7 +238,9 @@ void SimulateWindBonesCS(uint3 dispatchThreadID : SV_DispatchThreadID)
 #define WT_INVERSE_BIND UintRootConstant10
 #define WT_PLACEMENT_COUNT UintRootConstant11
 #define WT_TYPE_COUNT UintRootConstant12
-#define WT_TRANSFORM_BASE UintRootConstant13
+// This frame's DynamicWindFrameGPU (its descriptor). The palette half and the clock change every frame, so they are
+// read from it rather than baked into root constants: a kept recording of the wind passes stays current (M6 step 9).
+#define WT_FRAME_STATE UintRootConstant13
 #define WT_INVERSE_BASE UintRootConstant14
 #define WT_MATRIX_CAPACITY UintRootConstant15
 #define WT_CAMERA_INDEX UintRootConstant16
@@ -250,7 +252,6 @@ void SimulateWindBonesCS(uint3 dispatchThreadID : SV_DispatchThreadID)
 #define WT_FIELD_X asfloat(UintRootConstant22)
 #define WT_FIELD_Y asfloat(UintRootConstant23)
 #define WT_FIELD_LERP asfloat(UintRootConstant24)
-#define WT_TIME asfloat(UintRootConstant25)
 #define WT_WIND_X asfloat(UintRootConstant26)
 #define WT_WIND_Y asfloat(UintRootConstant27)
 #define WT_STRENGTH asfloat(UintRootConstant28)
@@ -272,6 +273,14 @@ void SimulateWindBonesCS(uint3 dispatchThreadID : SV_DispatchThreadID)
 #define WT_VISIBLE_SKELETON_COUNTER UintRootConstant31
 #define WT_VISIBLE_SKELETON_MEMBERSHIP UintRootConstant32
 #define WT_VISIBLE_SKELETON_CAPACITY UintRootConstant33
+
+DynamicWindFrameGPU WindTransientFrame()
+{
+    StructuredBuffer<DynamicWindFrameGPU> frames = ResourceDescriptorHeap[WT_FRAME_STATE];
+    return frames[0];
+}
+#define WT_TRANSFORM_BASE (WindTransientFrame().transformBaseMatrices)
+#define WT_TIME (WindTransientFrame().currentTime)
 
 static const uint WindTransientSlotBase = 65536u;
 static const uint WindTypeFlag = 2u;

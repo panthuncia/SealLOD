@@ -12,12 +12,14 @@
 #include "Render/ShaderAPI.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 
 namespace org { class Buffer; }
 namespace org { class PixelBuffer; }
 
 struct ReyesSplitFrameData {
     uint32_t viewDepthTableIndex = 0xFFFFFFFFu;
+    bool operator==(const ReyesSplitFrameData&) const = default;
 };
 
 struct ReyesSplitBindings {
@@ -68,10 +70,17 @@ public:
     ReyesSplitBindings Declare(org::PassBuilder& builder);
     void Update(const org::UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override { return m_declaredResourcesChanged; }
+    // Kept recordings (M6 step 8): beyond its bindings and pipelines, Record bakes the index of the view table Prepare
+    // publishes, whose rows follow the views Update took.
+    void Revision(std::vector<uint64_t>& out) const {
+        m_pipelines.Append(out);
+        m_viewDepthTable.AppendRevision(out);
+    }
     ReyesSplitFrameData Prepare(const ReyesSplitBindings&, const org::PassPrepareContext& preparation) const;
     static void Record(const ReyesSplitBindings&, const ReyesSplitFrameData&, org::PassRecordContext&);
 
 private:
+    br::render::DeclaredPipelines m_pipelines;
     std::shared_ptr<org::Buffer> m_visibleClustersBuffer;
     std::shared_ptr<org::Buffer> m_inputSplitQueueBuffer;
     std::shared_ptr<org::Buffer> m_inputSplitQueueCounterBuffer;

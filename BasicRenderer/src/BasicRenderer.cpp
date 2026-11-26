@@ -2416,8 +2416,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         if (wParam != SIZE_MINIMIZED) {
             UINT newWidth = LOWORD(lParam);
             UINT newHeight = HIWORD(lParam);
+            // Recorded only: the renderer resizes once a frame, for the latest size.
             if (renderer.IsInitialized()) {
-                renderer.OnResize(newWidth, newHeight);
+                renderer.RequestOutputSize(newWidth, newHeight);
             }
         }
         break;

@@ -31,12 +31,23 @@ public:
 
     // Render thread (where settings are written): a copy of every setting's value. Install it on a thread with
     // SettingsSnapshotScope to make that thread's getters read it.
-    std::shared_ptr<const SettingsSnapshot> Snapshot() const {
+    std::shared_ptr<SettingsSnapshot> Snapshot() const {
         auto snapshot = std::make_shared<SettingsSnapshot>();
         snapshot->m_values.resize(m_nextSnapshotIndex);
         for (const auto& [name, setting] : settings) snapshot->m_values[setting->snapshotIndex] = setting->copyValue();
         snapshot->m_revision = Revision();
         return snapshot;
+    }
+
+    // Replaces a value in a snapshot before anything reads it, so its readers see `value` whatever the live setting holds (a
+    // build's resolution comes from its upscaler configuration, not from the setting). The live value is not written.
+    template<typename T>
+    void OverrideInSnapshot(SettingsSnapshot& snapshot, const std::string& name, const T& value) {
+        auto& setting = getSettingByName(name);
+        if (setting.getType() != typeid(T)) {
+            throw std::runtime_error("Type mismatch for setting: " + name);
+        }
+        if (void* copy = snapshot.Find(setting.snapshotIndex)) *static_cast<T*>(copy) = value;
     }
 
     // Returns a setter callable for the specified setting by name

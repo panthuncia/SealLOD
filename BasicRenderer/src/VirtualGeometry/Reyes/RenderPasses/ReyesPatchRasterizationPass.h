@@ -14,6 +14,7 @@
 #include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 #include "Resources/PixelBuffer.h"
 
 namespace org { class Buffer; }
@@ -34,6 +35,7 @@ struct ReyesPatchRasterBindings {
 
 struct ReyesPatchRasterFrame {
     uint32_t viewRasterInfoTableIndex = 0xFFFFFFFFu;
+    bool operator==(const ReyesPatchRasterFrame&) const = default;
 };
 
 class ReyesPatchRasterizationPass final : public org::TypedRenderGraphPass<ReyesPatchRasterizationPass,
@@ -59,6 +61,9 @@ public:
     ReyesPatchRasterBindings Declare(org::PassBuilder& builder);
     void Update(const org::UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override;
+    // Kept recordings (M6 step 8): beyond its bindings and pipeline, Record bakes the index of the view table Prepare
+    // publishes, whose rows follow the views Update took.
+    void Revision(std::vector<uint64_t>& out) const;
     ReyesPatchRasterFrame Prepare(const ReyesPatchRasterBindings&,
         const org::PassPrepareContext& preparation) const;
     static void Record(const ReyesPatchRasterBindings& bindings, const ReyesPatchRasterFrame& frame,
@@ -92,4 +97,5 @@ private:
     // Takes this frame's views; returns whether what the pass declares changed.
     bool UpdateViews(const UpdateContext& context);
     bool m_declaredResourcesChanged = true;
+    br::render::DeclaredPipelines m_pipelines;
 };

@@ -257,7 +257,13 @@ void Menu::Initialize(HWND hwnd, rhi::Swapchain swapChain) {
         spdlog::warn("Menu::Initialize: Vulkan renderer backend is not available in this workspace's ImGui integration. UI rendering will stay disabled until a Vulkan ImGui backend is added.");
     }
 
-    ImGui_ImplWin32_EnableDpiAwareness();
+    // The thread takes DPI awareness only when its window has it (the BR demo's). A DPI-unaware window (the SARP host's, M5
+    // decision D3) keeps this thread unaware: otherwise client sizes read on it, and a Vulkan surface's extent, are physical
+    // pixels while the window and its WM_SIZE are logical, and the first Vulkan present reports a mode change (the swapchain
+    // then comes back at the physical size).
+    if (GetAwarenessFromDpiAwarenessContext(GetWindowDpiAwarenessContext(hwnd)) != DPI_AWARENESS_UNAWARE) {
+        ImGui_ImplWin32_EnableDpiAwareness();
+    }
 
     IMGUI_CHECKVERSION();
     ImGuiIO& io = ImGui::GetIO();

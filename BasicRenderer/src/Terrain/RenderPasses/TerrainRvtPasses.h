@@ -18,6 +18,7 @@
 #include "Pipeline/PipelineState/PSOManager.h"
 #include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "Runtime/Settings/SettingsManager.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 #include "Runtime/Device/DeviceManager.h"
 #include "BasicRenderer/Assets/TechniqueDescriptor.h"
 #include "VirtualGeometry/GraphIntegration/CLodExtensionComponents.h"
@@ -253,7 +254,13 @@ namespace TerrainRvt
     struct DispatchFrame {
         uint32_t groupsX = 0;
         uint32_t groupsY = 1;
+        bool operator==(const DispatchFrame&) const = default;
     };
+
+    inline void AppendRevision(std::vector<uint64_t>& out, const DispatchFrame& dispatch)
+    {
+        out.push_back(dispatch.groupsX | (uint64_t{dispatch.groupsY} << 32));
+    }
 
     inline DispatchFrame DispatchForItems(uint32_t itemCount, uint32_t threadsPerGroup)
     {
@@ -265,6 +272,7 @@ namespace TerrainRvt
 struct TerrainRvtFrameResetFrame {
     br::render::MiscConstants constants{};
     TerrainRvt::DispatchFrame dispatch;
+    bool operator==(const TerrainRvtFrameResetFrame&) const = default;
 };
 
 class TerrainRvtFrameResetPass final : public org::TypedRenderGraphPass<TerrainRvtFrameResetPass,
@@ -285,22 +293,39 @@ public:
             Builtin::Terrain::RvtStats);
         b.ShaderResource(Builtin::CameraBuffer, Builtin::Terrain::Sets);
         b.ConstantBuffer(Builtin::PerFrameBuffer);
-        return { br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtFrameResetCS",
-            "TerrainRvt.FrameReset.PSO", TerrainRvt::ShaderDefines())) };
+        m_pipeline = br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtFrameResetCS",
+            "TerrainRvt.FrameReset.PSO", TerrainRvt::ShaderDefines()));
+        return { m_pipeline };
+    }
+
+    // Kept recordings (M6 step 8): the constants and dispatch follow the RVT settings, taken before Update
+    // (RenderGraphPass::TakeFrameValues) and returned by Prepare.
+    void TakeFrameValues(const org::UpdateExecutionContext&) override
+    {
+        m_taken = {};
+        TerrainRvt::FillInfoRootConstants(m_taken.constants.data());
+        m_taken.dispatch = TerrainRvt::DispatchForItems(TerrainRvt::MaxPageTableEntries(), 64u);
+    }
+    void Revision(std::vector<uint64_t>& out) const
+    {
+        br::render::AppendPipelineRevision(out, m_pipeline);
+        br::render::AppendRevisionRows(out, m_taken.constants.data(), m_taken.constants.size());
+        TerrainRvt::AppendRevision(out, m_taken.dispatch);
     }
 
     TerrainRvtFrameResetFrame Prepare(const TerrainRvt::PipelineBindings&, const org::PassPrepareContext&) const
     {
-        TerrainRvtFrameResetFrame frame{};
-        TerrainRvt::FillInfoRootConstants(frame.constants.data());
-        frame.dispatch = TerrainRvt::DispatchForItems(TerrainRvt::MaxPageTableEntries(), 64u);
-        return frame;
+        return m_taken;
     }
 
     static void Record(const TerrainRvt::PipelineBindings& bindings, const TerrainRvtFrameResetFrame& frame,
         org::PassRecordContext& context) {
         br::render::DispatchCompute(context, bindings.pipeline, frame.constants, frame.dispatch.groupsX, frame.dispatch.groupsY);
     }
+
+private:
+    br::PipelineState m_pipeline;
+    TerrainRvtFrameResetFrame m_taken{};
 };
 
 struct TerrainRvtMarkVisibilityMaterialPagesBindings {
@@ -350,8 +375,12 @@ public:
                 Builtin::Terrain::RvtCounters,
                 Builtin::Terrain::RvtStats);
         b.ConstantBuffer(Builtin::PerFrameBuffer);
+        m_pipeline = bindings.pipeline;
         return bindings;
     }
+
+    // Kept recordings (M6 step 8): Record bakes only its bindings and the pipeline's build.
+    void Revision(std::vector<uint64_t>& out) const { br::render::AppendPipelineRevision(out, m_pipeline); }
 
     void Initialize() {}
 
@@ -372,6 +401,7 @@ private:
     std::shared_ptr<org::GloballyIndexedResource> m_visibleClustersResource;
     std::shared_ptr<org::GloballyIndexedResource> m_visibleClustersCounterResource;
     uint32_t m_visibleClusterCapacity = 0u;
+    br::PipelineState m_pipeline;
 };
 
 struct TerrainRvtResolveRequestsBindings {
@@ -382,6 +412,7 @@ struct TerrainRvtResolveRequestsFrame {
     TerrainRvt::DispatchFrame resolve;
     TerrainRvt::DispatchFrame refresh;
     br::render::MiscConstants refreshConstants{};
+    bool operator==(const TerrainRvtResolveRequestsFrame&) const = default;
 };
 
 // Resolve allocates and queues missing pages; the refresh dispatch after it scans resident pages that were short of a
@@ -406,21 +437,37 @@ public:
                 Builtin::Terrain::RvtStats,
                 Builtin::Material::TextureStreamingFeedbackBuffer);
         b.ConstantBuffer(Builtin::PerFrameBuffer);
-        return { br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtClearGenerationCounterCS",
+        m_bindings = { br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtClearGenerationCounterCS",
                      "TerrainRvt.ClearGenerationCounter.PSO", TerrainRvt::ShaderDefines())),
                  br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtResolveRequestsCS",
                      "TerrainRvt.ResolveRequests.PSO", TerrainRvt::ShaderDefines())),
                  br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtRefreshStalePagesCS",
                      "TerrainRvt.RefreshStalePages.PSO", TerrainRvt::ShaderDefines())) };
+        return m_bindings;
+    }
+
+    // Kept recordings (M6 step 8): the dispatches follow the RVT settings, taken before Update
+    // (RenderGraphPass::TakeFrameValues) and returned by Prepare.
+    void TakeFrameValues(const org::UpdateExecutionContext&) override
+    {
+        m_taken = {};
+        m_taken.resolve = TerrainRvt::DispatchForItems(TerrainRvt::MaxGeneratedPagesPerFrame(), 64u);
+        m_taken.refresh = TerrainRvt::DispatchForItems(TerrainRvt::MaxPhysicalPages(), 64u);
+        m_taken.refreshConstants[0] = TerrainRvt::RefreshStalePages() ? 1u : 0u;
+    }
+    void Revision(std::vector<uint64_t>& out) const
+    {
+        br::render::AppendPipelineRevision(out, m_bindings.clear);
+        br::render::AppendPipelineRevision(out, m_bindings.resolve);
+        br::render::AppendPipelineRevision(out, m_bindings.refresh);
+        TerrainRvt::AppendRevision(out, m_taken.resolve);
+        TerrainRvt::AppendRevision(out, m_taken.refresh);
+        out.push_back(m_taken.refreshConstants[0]);
     }
 
     TerrainRvtResolveRequestsFrame Prepare(const TerrainRvtResolveRequestsBindings&, const org::PassPrepareContext&) const
     {
-        TerrainRvtResolveRequestsFrame frame{};
-        frame.resolve = TerrainRvt::DispatchForItems(TerrainRvt::MaxGeneratedPagesPerFrame(), 64u);
-        frame.refresh = TerrainRvt::DispatchForItems(TerrainRvt::MaxPhysicalPages(), 64u);
-        frame.refreshConstants[0] = TerrainRvt::RefreshStalePages() ? 1u : 0u;
-        return frame;
+        return m_taken;
     }
 
     static void Record(const TerrainRvtResolveRequestsBindings& bindings, const TerrainRvtResolveRequestsFrame& frame,
@@ -432,6 +479,10 @@ public:
         context.UavBarrier();
         br::render::DispatchCompute(context, bindings.refresh, frame.refreshConstants, frame.refresh.groupsX, frame.refresh.groupsY);
     }
+
+private:
+    TerrainRvtResolveRequestsBindings m_bindings;
+    TerrainRvtResolveRequestsFrame m_taken{};
 };
 
 class TerrainRvtClearFeedbackRequestsPass final : public org::TypedRenderGraphPass<TerrainRvtClearFeedbackRequestsPass,
@@ -444,19 +495,36 @@ public:
         b.UnorderedAccess(
                 Builtin::Terrain::RvtRequestMasks,
                 Builtin::Terrain::RvtCounters);
-        return { br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtClearFeedbackRequestsCS",
-            "TerrainRvt.ClearFeedbackRequests.PSO", TerrainRvt::ShaderDefines())) };
+        m_pipeline = br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtClearFeedbackRequestsCS",
+            "TerrainRvt.ClearFeedbackRequests.PSO", TerrainRvt::ShaderDefines()));
+        return { m_pipeline };
+    }
+
+    // Kept recordings (M6 step 8): the dispatch follows the RVT settings, taken before Update
+    // (RenderGraphPass::TakeFrameValues) and returned by Prepare.
+    void TakeFrameValues(const org::UpdateExecutionContext&) override
+    {
+        m_taken = TerrainRvt::DispatchForItems(TerrainRvt::MaxPageTableEntries(), 64u);
+    }
+    void Revision(std::vector<uint64_t>& out) const
+    {
+        br::render::AppendPipelineRevision(out, m_pipeline);
+        TerrainRvt::AppendRevision(out, m_taken);
     }
 
     TerrainRvt::DispatchFrame Prepare(const TerrainRvt::PipelineBindings&, const org::PassPrepareContext&) const
     {
-        return TerrainRvt::DispatchForItems(TerrainRvt::MaxPageTableEntries(), 64u);
+        return m_taken;
     }
 
     static void Record(const TerrainRvt::PipelineBindings& bindings, const TerrainRvt::DispatchFrame& frame,
         org::PassRecordContext& context) {
         br::render::DispatchCompute(context, bindings.pipeline, {}, frame.groupsX, frame.groupsY);
     }
+
+private:
+    br::PipelineState m_pipeline;
+    TerrainRvt::DispatchFrame m_taken{};
 };
 
 class TerrainRvtBuildHeightResidentCachePass final : public org::TypedRenderGraphPass<TerrainRvtBuildHeightResidentCachePass,
@@ -472,19 +540,36 @@ public:
             Builtin::Terrain::RvtPageKeys);
         b.UnorderedAccess(Builtin::Terrain::RvtHeightResidentCache);
         b.ConstantBuffer(Builtin::PerFrameBuffer);
-        return { br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtBuildHeightResidentCacheCS",
-            "TerrainRvt.BuildHeightResidentCache.PSO", TerrainRvt::ShaderDefines())) };
+        m_pipeline = br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtBuildHeightResidentCacheCS",
+            "TerrainRvt.BuildHeightResidentCache.PSO", TerrainRvt::ShaderDefines()));
+        return { m_pipeline };
+    }
+
+    // Kept recordings (M6 step 8): the dispatch follows the RVT settings, taken before Update
+    // (RenderGraphPass::TakeFrameValues) and returned by Prepare.
+    void TakeFrameValues(const org::UpdateExecutionContext&) override
+    {
+        m_taken = TerrainRvt::DispatchForItems(TerrainRvt::MaxPageTableEntries(), 64u);
+    }
+    void Revision(std::vector<uint64_t>& out) const
+    {
+        br::render::AppendPipelineRevision(out, m_pipeline);
+        TerrainRvt::AppendRevision(out, m_taken);
     }
 
     TerrainRvt::DispatchFrame Prepare(const TerrainRvt::PipelineBindings&, const org::PassPrepareContext&) const
     {
-        return TerrainRvt::DispatchForItems(TerrainRvt::MaxPageTableEntries(), 64u);
+        return m_taken;
     }
 
     static void Record(const TerrainRvt::PipelineBindings& bindings, const TerrainRvt::DispatchFrame& frame,
         org::PassRecordContext& context) {
         br::render::DispatchCompute(context, bindings.pipeline, {}, frame.groupsX, frame.groupsY);
     }
+
+private:
+    br::PipelineState m_pipeline;
+    TerrainRvt::DispatchFrame m_taken{};
 };
 
 class TerrainRvtBuildGenerateDispatchArgsPass final : public org::TypedRenderGraphPass<TerrainRvtBuildGenerateDispatchArgsPass,
@@ -496,13 +581,20 @@ public:
         b.ShaderResource(Builtin::Terrain::RvtInfo, Builtin::Terrain::RvtCounters);
         b.UnorderedAccess(Builtin::Terrain::RvtGenerateDispatchArgs);
         if (TerrainRvt::CompressionEnabled()) b.UnorderedAccess(Builtin::Terrain::RvtEncodeDispatchArgs);
-        return { br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtBuildGenerateDispatchArgsCS",
-            "TerrainRvt.BuildGenerateDispatchArgs.PSO", TerrainRvt::ShaderDefines())) };
+        m_pipeline = br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtBuildGenerateDispatchArgsCS",
+            "TerrainRvt.BuildGenerateDispatchArgs.PSO", TerrainRvt::ShaderDefines()));
+        return { m_pipeline };
     }
+
+    // Kept recordings (M6 step 8): Record bakes only its bindings and the pipeline's build.
+    void Revision(std::vector<uint64_t>& out) const { br::render::AppendPipelineRevision(out, m_pipeline); }
 
     static void Record(const TerrainRvt::PipelineBindings& bindings, org::PassRecordContext& context) {
         br::render::DispatchCompute(context, bindings.pipeline, {}, 1u);
     }
+
+private:
+    br::PipelineState m_pipeline;
 };
 
 struct TerrainRvtGeneratePagesBindings {
@@ -549,14 +641,20 @@ public:
         }
         const auto arguments = b.IndirectArguments(Builtin::Terrain::RvtGenerateDispatchArgs);
         b.ConstantBuffer(Builtin::PerFrameBuffer);
-        return { br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtGeneratePagesCS",
-            "TerrainRvt.GeneratePages.PSO", TerrainRvt::ShaderDefines())), arguments,
-            br::render::DeclareCommandSignature(br::render::RawDispatchCommandSignature()) };
+        m_pipeline = br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtGeneratePagesCS",
+            "TerrainRvt.GeneratePages.PSO", TerrainRvt::ShaderDefines()));
+        return { m_pipeline, arguments, br::render::DeclareCommandSignature(br::render::RawDispatchCommandSignature()) };
     }
+
+    // Kept recordings (M6 step 8): an indirect dispatch; Record bakes only its bindings and the pipeline's build.
+    void Revision(std::vector<uint64_t>& out) const { br::render::AppendPipelineRevision(out, m_pipeline); }
 
     static void Record(const TerrainRvtGeneratePagesBindings& bindings, org::PassRecordContext& context) {
         br::render::DispatchComputeIndirect(context, bindings.pipeline, {}, bindings.signature, bindings.arguments);
     }
+
+private:
+    br::PipelineState m_pipeline;
 };
 
 // Compressed atlases (TerrainRvt::CompressionEnabled): encodes the tiles TerrainRvtGeneratePagesPass left in the scratch and
@@ -581,14 +679,20 @@ public:
             Builtin::Terrain::RvtNormalAtlas,
             Builtin::Terrain::RvtMaterialAtlas);
         const auto arguments = b.IndirectArguments(Builtin::Terrain::RvtEncodeDispatchArgs);
-        return { br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/TerrainRvtEncode.hlsl", L"TerrainRvtEncodePagesCS",
-            "TerrainRvt.EncodePages.PSO", TerrainRvt::ShaderDefines())), arguments,
-            br::render::DeclareCommandSignature(br::render::RawDispatchCommandSignature()) };
+        m_pipeline = br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/TerrainRvtEncode.hlsl", L"TerrainRvtEncodePagesCS",
+            "TerrainRvt.EncodePages.PSO", TerrainRvt::ShaderDefines()));
+        return { m_pipeline, arguments, br::render::DeclareCommandSignature(br::render::RawDispatchCommandSignature()) };
     }
+
+    // Kept recordings (M6 step 8): an indirect dispatch; Record bakes only its bindings and the pipeline's build.
+    void Revision(std::vector<uint64_t>& out) const { br::render::AppendPipelineRevision(out, m_pipeline); }
 
     static void Record(const TerrainRvtGeneratePagesBindings& bindings, org::PassRecordContext& context) {
         br::render::DispatchComputeIndirect(context, bindings.pipeline, {}, bindings.signature, bindings.arguments);
     }
+
+private:
+    br::PipelineState m_pipeline;
 };
 
 class TerrainRvtFinalizeGeneratedPagesPass final : public org::TypedRenderGraphPass<TerrainRvtFinalizeGeneratedPagesPass,
@@ -606,13 +710,26 @@ public:
                 Builtin::Terrain::RvtPageTable,
                 Builtin::Terrain::RvtPhysicalPageOwner);
         b.ConstantBuffer(Builtin::PerFrameBuffer);
-        return { br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtFinalizeGeneratedPagesCS",
-            "TerrainRvt.FinalizeGeneratedPages.PSO", TerrainRvt::ShaderDefines())) };
+        m_pipeline = br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/TerrainRvt.hlsl", L"TerrainRvtFinalizeGeneratedPagesCS",
+            "TerrainRvt.FinalizeGeneratedPages.PSO", TerrainRvt::ShaderDefines()));
+        return { m_pipeline };
+    }
+
+    // Kept recordings (M6 step 8): the dispatch follows the RVT settings, taken before Update
+    // (RenderGraphPass::TakeFrameValues) and returned by Prepare.
+    void TakeFrameValues(const org::UpdateExecutionContext&) override
+    {
+        m_taken = TerrainRvt::DispatchForItems(TerrainRvt::MaxPhysicalPages(), 64u);
+    }
+    void Revision(std::vector<uint64_t>& out) const
+    {
+        br::render::AppendPipelineRevision(out, m_pipeline);
+        TerrainRvt::AppendRevision(out, m_taken);
     }
 
     TerrainRvt::DispatchFrame Prepare(const TerrainRvt::PipelineBindings&, const org::PassPrepareContext&) const
     {
-        return TerrainRvt::DispatchForItems(TerrainRvt::MaxPhysicalPages(), 64u);
+        return m_taken;
     }
 
     static void Record(const TerrainRvt::PipelineBindings& bindings, const TerrainRvt::DispatchFrame& frame,
@@ -620,4 +737,8 @@ public:
         br::render::DispatchCompute(context, bindings.pipeline, {}, frame.groupsX, frame.groupsY);
         context.UavBarrier();
     }
+
+private:
+    br::PipelineState m_pipeline;
+    TerrainRvt::DispatchFrame m_taken{};
 };

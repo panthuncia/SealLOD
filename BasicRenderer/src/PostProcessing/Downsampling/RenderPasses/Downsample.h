@@ -10,6 +10,7 @@
 #include "Interfaces/IDynamicDeclaredResources.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 #include "BuiltinResources.h"
 #include "Pipeline/PipelineState/PSOManager.h"
 #include <BasicRenderer/Extensions/PipelineDescs.h>
@@ -100,7 +101,20 @@ public:
                 map.dispatchThreadGroupCountXY[1], map.dispatchThreadGroupCountZ};
             bindings.maps.push_back(std::move(binding));
         }
+        m_pipelines = {bindings.standardPipeline, bindings.arrayPipeline};
+        // Declared for the maps just synced; Update asks again each run. Without this, a preparation with no Update before it
+        // (a recording made ahead on the build thread, RecordStagedCopy) would declare the pass again for each copy.
+        m_declaredResourcesChanged = false;
         return bindings;
+    }
+
+    // Kept recordings (M6 step 8): Record bakes only its bindings (fixed per declaration) and the pipelines' builds. The SPD
+    // constants Prepare writes hold the mips' descriptor indices, which change only with the frame's bindings: a kept
+    // recording is not current across a binding change, so the constants a reuse finds are the ones it was recorded with.
+    void Revision(std::vector<uint64_t>& out) const {
+        // Only the variants some map binds: an unused one is a fresh empty handle at each declaration.
+        for (const auto& pipeline : m_pipelines)
+            if (pipeline) br::render::AppendPipelineRevision(out, pipeline);
     }
 
     void Update(const org::UpdateExecutionContext& executionContext) override {
@@ -120,8 +134,7 @@ public:
         m_declaredResourcesChanged = !HaveSameActiveDepthMaps(m_activeDepthMaps, activeDepthMaps);
         for (const auto& [resourceID, map] : activeDepthMaps) {
             const auto previous = m_perMapInfo.find(resourceID);
-            if (previous == m_perMapInfo.end() ||
-                previous->second.sourceBackingGeneration != map->GetBackingGeneration())
+            if (previous == m_perMapInfo.end() || previous->second.sourceShape != ShapeOf(*map))
                 m_declaredResourcesChanged = true;
         }
         if (m_declaredResourcesChanged) {
@@ -184,14 +197,24 @@ private:
 		unsigned int dispatchThreadGroupCountXY[2];
         unsigned int dispatchThreadGroupCountZ;
         std::shared_ptr<org::GloballyIndexedResource> pCounterResource;
-        uint64_t sourceBackingGeneration;
+        // What the declaration depends on (sizes, mips, slices), not the backing: a new backing of the same shape (a placement
+        // at a graph's build or attach) rebinds through the frame's bindings and needs no new declaration (M6 step 9: a
+        // recording made ahead then stays current at its first run).
+        std::array<uint32_t, 7> sourceShape{};
         spdConstants constants{};
     };
+
+    static std::array<uint32_t, 7> ShapeOf(const org::PixelBuffer& map) {
+        const auto& desc = map.GetDescription();
+        return {map.GetInternalWidth(), map.GetInternalHeight(), map.GetWidth(), map.GetHeight(), map.GetNumUAVMipLevels(),
+            GetSliceCount(map), (desc.isArray ? 1u : 0u) | (desc.isCubemap ? 2u : 0u)};
+    }
 	std::unordered_map<uint64_t, PerMapInfo> m_perMapInfo;
     std::unordered_map<uint64_t, std::shared_ptr<org::PixelBuffer>> m_activeDepthMaps;
 
 
     bool m_declaredResourcesChanged = true;
+    std::array<br::PipelineState, 2> m_pipelines;
 
     static std::unordered_map<uint64_t, std::shared_ptr<org::PixelBuffer>> CollectActiveDepthMaps(
         std::span<const PreparedViewFrameData> views)
@@ -221,9 +244,9 @@ private:
                 return false;
             }
 
-            const uint64_t lhsGeneration = depthMap ? depthMap->GetBackingGeneration() : 0;
-            const uint64_t rhsGeneration = rhsIt->second ? rhsIt->second->GetBackingGeneration() : 0;
-            if (lhsGeneration != rhsGeneration) {
+            const auto lhsShape = depthMap ? ShapeOf(*depthMap) : std::array<uint32_t, 7>{};
+            const auto rhsShape = rhsIt->second ? ShapeOf(*rhsIt->second) : std::array<uint32_t, 7>{};
+            if (lhsShape != rhsShape) {
                 return false;
             }
         }
@@ -255,9 +278,9 @@ private:
             return;
         }
 
-        const uint64_t generation = linearDepthMap->GetBackingGeneration();
+        const auto shape = ShapeOf(*linearDepthMap);
         auto existing = m_perMapInfo.find(resourceID);
-        if (existing != m_perMapInfo.end() && existing->second.sourceBackingGeneration == generation) {
+        if (existing != m_perMapInfo.end() && existing->second.sourceShape == shape) {
             return;
         }
 
@@ -294,7 +317,7 @@ private:
         constants.workGroupOffset[0] = workGroupOffset[0];
         constants.workGroupOffset[1] = workGroupOffset[1];
 
-        // A new backing generation gets a new immutable constants allocation.
+        // A new shape gets a new immutable constants allocation.
         auto constantsBuffer = org::LazyDynamicStructuredBuffer<spdConstants>::CreateShared(1, "Downsample map constants");
         auto constantsView = constantsBuffer->Add();
         constantsBuffer->UpdateView(constantsView.get(), &constants);
@@ -310,7 +333,7 @@ private:
         mapInfo.dispatchThreadGroupCountXY[1] = threadGroupCountXY[1];
         mapInfo.dispatchThreadGroupCountZ = GetSliceCount(*linearDepthMap);
         mapInfo.pCounterResource = CreateIndexedStructuredBuffer(1, sizeof(unsigned int) * 6, true);
-        mapInfo.sourceBackingGeneration = generation;
+        mapInfo.sourceShape = shape;
         mapInfo.constants = constants;
 
         m_perMapInfo[resourceID] = std::move(mapInfo);

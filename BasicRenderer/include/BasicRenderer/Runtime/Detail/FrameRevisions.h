@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <map>
 #include <mutex>
@@ -85,10 +86,90 @@ public:
 		return m_topologyRequests;
 	}
 
+	// The resolution revision (M5 step 4): the latest output size the window asked for, and whether the upscaler's
+	// configuration is to be asked again (its mode, quality or guides changed, or it retries Ray Reconstruction). Writers only
+	// record it; the renderer consumes it once a frame at the consolidation point, and not while a graph build is in flight
+	// (one resolution build at a time). Later requests replace earlier ones: the latest size wins.
+	struct ResolutionRequest {
+		bool outputSize = false;  // a window size was asked for
+		uint32_t width = 0;
+		uint32_t height = 0;
+		bool recreateSwapchain = false;  // a present reported a mode change: the swapchain is made again even at the same size
+		bool upscaler = false;  // the upscaler configuration is asked again
+		uint32_t requests = 0;  // requests recorded since the last consumption
+		std::map<std::string, uint32_t> reasons;
+		bool Empty() const noexcept { return !outputSize && !upscaler; }
+		std::string Describe() const {
+			std::string text;
+			for (const auto& [reason, count] : reasons) {
+				if (!text.empty()) text += ", ";
+				text += reason;
+				if (count > 1) text += " (x" + std::to_string(count) + ")";
+			}
+			return text;
+		}
+	};
+	// Any thread. The window's client size, as WM_SIZE, a window preset or a present's mode change report it.
+	void RequestOutputSize(uint32_t width, uint32_t height, std::string_view reason, bool recreateSwapchain = false) {
+		std::scoped_lock lock(m_mutex);
+		m_resolution.outputSize = true;
+		m_resolution.width = width;
+		m_resolution.height = height;
+		m_resolution.recreateSwapchain |= recreateSwapchain;
+		// The settle rule waits for the size to stop changing: a present that reports a mode change every frame at the size the
+		// window kept does not hold it off (M5 step 9).
+		if (!m_sizeRequested || width != m_lastRequestedWidth || height != m_lastRequestedHeight)
+			m_lastOutputSizeRequest = std::chrono::steady_clock::now();
+		m_sizeRequested = true;
+		m_lastRequestedWidth = width;
+		m_lastRequestedHeight = height;
+		++m_resolution.requests;
+		++m_resolution.reasons[std::string(reason)];
+		++m_resolutionRequests;
+	}
+	// Any thread. The upscaler settings changed: the next consumption prepares the configuration they ask for.
+	void RequestUpscaler(std::string_view reason) {
+		std::scoped_lock lock(m_mutex);
+		m_resolution.upscaler = true;
+		++m_resolution.requests;
+		++m_resolution.reasons[std::string(reason)];
+		++m_resolutionRequests;
+	}
+	bool ResolutionPending() const {
+		std::scoped_lock lock(m_mutex);
+		return !m_resolution.Empty();
+	}
+	ResolutionRequest PeekResolution() const {
+		std::scoped_lock lock(m_mutex);
+		return m_resolution;
+	}
+	// Render thread, at the consolidation point.
+	ResolutionRequest ConsumeResolution() {
+		std::scoped_lock lock(m_mutex);
+		ResolutionRequest taken = std::move(m_resolution);
+		m_resolution = {};
+		return taken;
+	}
+	// When the requested window size last changed (RequestOutputSize). A drag's sizes come a few ms apart.
+	std::chrono::steady_clock::time_point LastOutputSizeRequest() const {
+		std::scoped_lock lock(m_mutex);
+		return m_lastOutputSizeRequest;
+	}
+	uint64_t ResolutionRequests() const {
+		std::scoped_lock lock(m_mutex);
+		return m_resolutionRequests;
+	}
+
 private:
 	mutable std::mutex m_mutex;
 	Pending m_pending;
 	uint64_t m_topologyRequests = 0;
+	ResolutionRequest m_resolution;
+	uint64_t m_resolutionRequests = 0;
+	std::chrono::steady_clock::time_point m_lastOutputSizeRequest{};
+	bool m_sizeRequested = false;
+	uint32_t m_lastRequestedWidth = 0;
+	uint32_t m_lastRequestedHeight = 0;
 };
 
 } // namespace br::render

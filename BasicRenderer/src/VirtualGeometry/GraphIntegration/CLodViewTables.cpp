@@ -5,6 +5,7 @@
 #include "Render/PassBuilders.h"
 #include "BasicRenderer/Streaming/ViewStateArtifacts.h"
 #include "Resources/PixelBuffer.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 
 CLodDeclaredViewDepthTable::CLodDeclaredViewDepthTable() : m_rows(CLodMaxViewDepthIndices) {
     for (uint32_t i = 0; i < CLodMaxViewDepthIndices; ++i) m_rows[i].cameraBufferIndex = i;
@@ -47,6 +48,24 @@ uint32_t CLodDeclaredViewDepthTable::Publish(const org::PassPrepareContext& prep
     auto rows = layout.Resolve(preparation, std::span<const CLodViewDepthSRVIndex>(m_rows));
     for (const auto camera : m_withoutHistory) rows[camera].linearDepthSRVIndex = 0;
     return publisher.Publish(preparation, std::span<const CLodViewDepthSRVIndex>(rows));
+}
+
+void CLodDeclaredViewDepthTable::AppendRevision(std::vector<uint64_t>& out) const {
+    out.push_back(m_inputs.size());
+    for (const auto& input : m_inputs) {
+        out.push_back((uint64_t{input.camera} << 32) | input.slice);
+        out.push_back(reinterpret_cast<uintptr_t>(input.depth.get()));
+    }
+    br::render::AppendRevisionRows(out, m_withoutHistory.data(), m_withoutHistory.size());
+}
+
+void CLodDeclaredViewRasterTable::AppendRevision(std::vector<uint64_t>& out) const {
+    br::render::AppendRevisionRows(out, m_rows.data(), m_rows.size());
+    out.push_back(m_inputs.size() | (m_bindVisibility ? 1ull << 63 : 0ull));
+    for (const auto& input : m_inputs) {
+        out.push_back(input.camera);
+        out.push_back(reinterpret_cast<uintptr_t>(input.visibility.get()));
+    }
 }
 
 std::vector<CLodViewRasterInfo> BuildCLodVisibilityViewRasterInfoRows(

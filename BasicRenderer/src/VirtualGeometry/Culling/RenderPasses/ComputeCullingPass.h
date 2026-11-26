@@ -14,6 +14,7 @@
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "VirtualGeometry/Culling/RenderPasses/ComputeCullingCommands.h"
 #include "VirtualGeometry/GraphIntegration/CLodViewTables.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 
 class ComputeCullingPass
     : public org::TypedRenderGraphPass<ComputeCullingPass, ComputeCullingFrame, ComputeCullingBindings>
@@ -31,6 +32,13 @@ public:
     }
     void Update(const org::UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override { return m_declaredResourcesChanged; }
+    // Kept recordings (M6 step 8): the culling settings, the bucket count and what the first pass's workloads come from
+    // (the published indirect workloads and the views), taken from the host data before Update
+    // (RenderGraphPass::TakeFrameValues) and read by Prepare. Revision names them, the pipelines and what Update took
+    // (traversal depth, view tables, the DynamicWind bounds cache generation, which Update advances each run while the cache
+    // exists, so such a pass records every run).
+    void TakeFrameValues(const org::UpdateExecutionContext& execution) override;
+    void Revision(std::vector<uint64_t>& out) const;
     std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override;
     std::vector<org::ResourceIdentifier> GetSupportedKeys() override;
 
@@ -64,4 +72,17 @@ private:
 
     std::vector<uint32_t> m_zeroTelemetryScratch;
     bool m_declaredResourcesChanged = true;
+
+    ComputeCullingPrograms m_programs;
+    struct Taken {
+        br::render::CullingSettings settings;
+        uint32_t cullingFlags = 0u;
+        uint32_t expansionFactor = 1u;
+        uint32_t rasterBucketCount = 0u;
+        // The first pass's workload inputs: the published indirect workloads (immutable per payload) and the views.
+        const void* indirectWorkloads = nullptr;
+        uint64_t viewsHash = 0u;
+        bool hasContext = false;
+    };
+    Taken m_taken;
 };

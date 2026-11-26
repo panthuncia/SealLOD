@@ -14,6 +14,7 @@
 #include <flecs.h>
 
 #include "BasicRenderer/Extensions/FrameEpochs.h"
+#include "BasicRenderer/Extensions/ProducerPersistentState.h"
 #include "Render/RenderGraph/RenderGraphExtension.h"
 #include "BasicRenderer/Runtime/Detail/MaterialEvaluationBuildInputs.h"
 #include "BasicRenderer/Pipeline/UpscalingTypes.h"
@@ -28,6 +29,7 @@ struct UpdateContext;
 
 namespace org {
 class Buffer;
+class DynamicResource;
 class IResourceProvider;
 class PixelBuffer;
 class Resource;
@@ -105,6 +107,31 @@ struct FrameInterface {
     std::vector<const org::Resource*> Objects() const;
 };
 
+// The renderer's objects of one render and output size (M5 step 5): the core colour targets, the presentation surfaces and, for a
+// size the primary view does not have yet, its new depth maps. Made on the render thread when a resolution request is applied
+// (Renderer::ApplyResolutionRequest), passed to the build made for that size, and current from that build's attach
+// (Renderer::PublishFrameBuild), where the swapchain, the view's depth and the presentation surfaces switch to them. The graphs
+// attached before keep theirs until they retire. Persistent ones become versions in M5 step 6.
+struct ResolutionObjects {
+    DirectX::XMUINT2 render{};
+    DirectX::XMUINT2 output{};
+    std::shared_ptr<org::PixelBuffer> hdrColor;
+    std::shared_ptr<org::PixelBuffer> upscaledHdrColor;
+    std::shared_ptr<org::PixelBuffer> dilatedMotionVectors;
+    // One per frame in flight, and the dynamic resource the graphs bind as PresentationColor (pointed at the slot's each frame).
+    std::vector<std::shared_ptr<org::PixelBuffer>> presentationColor;
+    std::shared_ptr<org::DynamicResource> dynamicPresentationColor;
+    // The bloom mip chain at the output size (M6 step 3): Post's bloom writes it and Overlay's tonemapping reads it, so every build
+    // of this size takes this one. Made by the first build that needs it (MakeFrameBuild); unmaterialized, it holds no memory.
+    std::shared_ptr<org::PixelBuffer> bloom;
+    // The primary view's depth maps for this render size, until the attach gives them to the view (its id stays). Unset when the
+    // view has them already: builds then take the camera's.
+    std::optional<Components::DepthMap> primaryDepth;
+    uint32_t primaryLodHeight = 0;
+    // A present reported a mode change: the swapchain is made again at the attach even at the same size.
+    bool recreateSwapchain = false;
+};
+
 // What one frame-graph build reads from the renderer, taken on the render thread before the build starts
 // (Renderer::MakeFrameBuild). The build's declarations (DeclareFrameProviders, DeclareFramePasses) read these instead of
 // live renderer or ECS state, so the build can later run on another thread while the renderer keeps changing
@@ -136,6 +163,9 @@ struct FrameBuildInputs {
     std::shared_ptr<const UpdateContext> lastUpdate;
 
     std::shared_ptr<org::PixelBuffer> brdfLut;
+    // The AMD LPM constants (M6 step 3): Post's exposure writes the tonemapping curve into them and Overlay's tonemapping reads it.
+    // The renderer's one object, which both epochs' graphs register as "FFX::LPMConstants".
+    std::shared_ptr<org::Resource> lpmConstants;
 
     // The environment the graph samples: the current one's cubemaps, or the blank fallback's.
     std::shared_ptr<org::Resource> environmentCubemap;
@@ -151,9 +181,19 @@ struct FrameBuildInputs {
     bool rayTracedReflections = false;
     bool screenSpaceReflections = false;
     bool lensFlareRayQuery = false;
+    // The directional virtual shadow map's renderer-owned resources when the build makes the shadow variant (null otherwise):
+    // the variant binds them in Visibility's graph, and the other epochs' graphs register them for their receivers (M5 step 8).
+    std::shared_ptr<const ProducerPersistentState::DirectionalVsmResources> directionalVsm;
 
     UpscalingMode upscalingMode = UpscalingMode::None;
     std::shared_ptr<UpscalingGenerationService> upscaling;
+    // The render and output sizes the graphs are built for: the latest upscaler configuration's when the build started (M5 step
+    // 4). The build's settings snapshot has these as renderResolution and outputResolution, whatever the live settings hold, and
+    // per-frame values follow them from the attach (Renderer::AttachedResolution).
+    DirectX::XMUINT2 renderResolution{};
+    DirectX::XMUINT2 outputResolution{};
+    // The objects of those sizes (ResolutionObjects): the build registers these, and its attach makes them current.
+    std::shared_ptr<ResolutionObjects> resolution;
 
     std::shared_ptr<DebugSceneSnapshotService> debugSnapshots;
     bool drawBoundingSpheres = false;

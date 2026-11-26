@@ -292,7 +292,8 @@ void Renderer::RunRenderResourceSyncStage() {
             } else if (m_jitter && entity.has<Components::PrimaryCamera>()) {
                 const auto jitterPixelSpace = UpscalingManager::GetInstance().GetJitter(m_totalFramesRendered);
                 camera.jitterPixelSpace = jitterPixelSpace;
-                const auto renderRes = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
+                // The attached graphs' render size (M5 step 4): the jitter is in their pixels.
+                const auto renderRes = AttachedResolution().render;
                 const DirectX::XMFLOAT2 jitterNDC = {
                     (2.0f * jitterPixelSpace.x / renderRes.x),
                     (-2.0f * jitterPixelSpace.y / renderRes.y)

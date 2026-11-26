@@ -87,6 +87,8 @@ ReyesClassifyBindings ReyesClassifyPass::Declare(org::PassBuilder& builder)
     bindings.ownedCapacity = m_ownedClusterCapacity;
     bindings.phase = m_phaseIndex;
     bindings.mode = static_cast<uint32_t>(m_classifyMode);
+    m_pipelines.Clear();
+    m_pipelines.Add(bindings.pipeline);
     return bindings;
 }
 

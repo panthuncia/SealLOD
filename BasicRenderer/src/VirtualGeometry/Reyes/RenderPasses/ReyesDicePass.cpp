@@ -46,6 +46,8 @@ ReyesDiceBindings ReyesDicePass::Declare(org::PassBuilder& builder)
     bindings.telemetry = builder.UnorderedAccess(m_telemetryBuffer);
     bindings.capacity = m_maxDiceQueueEntries;
     bindings.phase = m_phaseIndex;
+    m_pipelines.Clear();
+    m_pipelines.Add(bindings.pipeline);
     return bindings;
 }
 

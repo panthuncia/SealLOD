@@ -39,7 +39,7 @@ ReyesSeedPatchesBindings ReyesSeedPatchesPass::Declare(org::PassBuilder& builder
     if (m_slabResourceGroup) {
         builder.ShaderResource(ResourceGroupResolver(m_slabResourceGroup));
     }
-    return {
+    ReyesSeedPatchesBindings bindings{
         br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/reyesSeedPatches.hlsl",
             L"ReyesSeedPatchesCS", "CLod.ReyesSeedPatches.PSO")),
         br::render::DeclareCommandSignature(br::render::RawDispatchCommandSignature()),
@@ -47,6 +47,9 @@ ReyesSeedPatchesBindings ReyesSeedPatchesPass::Declare(org::PassBuilder& builder
         builder.ShaderResource(m_ownedClustersCounterBuffer), builder.UnorderedAccess(m_splitQueueBuffer),
         builder.UnorderedAccess(m_splitQueueCounterBuffer), builder.UnorderedAccess(m_splitQueueOverflowBuffer),
         builder.IndirectArguments(m_indirectArgsBuffer), m_maxSplitQueueEntries, m_phaseIndex};
+    m_pipelines.Clear();
+    m_pipelines.Add(bindings.pipeline);
+    return bindings;
 }
 
 void ReyesSeedPatchesPass::Update(const org::UpdateExecutionContext& executionContext)

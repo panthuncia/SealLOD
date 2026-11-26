@@ -33,6 +33,7 @@ struct CullingSettings {
     uint32_t softwareRasterThreshold = 0u;
     uint32_t forcedTraversalDepth = 0u;
     uint32_t receiverSubpageMode = CLodVirtualShadowReceiverSubpageModeOff;
+    bool operator==(const CullingSettings&) const = default;
 };
 
 CullingSettings ReadCullingSettings(const CullingPassConfig& config, bool hasReceiverSubpageMask);

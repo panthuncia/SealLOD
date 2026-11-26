@@ -6,6 +6,7 @@
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 #include <BasicRenderer/Pipeline/PipelineDesc.h>
 
 namespace org { class Buffer; }
@@ -37,6 +38,8 @@ public:
     CLodStreamingBeginFrameBindings Declare(org::PassBuilder& builder);
     static void Record(const CLodStreamingBeginFrameBindings& bindings, org::PassRecordContext& context);
     void Update(const org::UpdateExecutionContext& executionContext) override;
+    // Kept recordings (M6 step 8): the clears are the same every run (Update does the frame's streaming work and uploads).
+    void Revision(std::vector<uint64_t>& out) const { br::render::AppendPipelineRevision(out, m_clearUint); }
 
 private:
     std::shared_ptr<org::Buffer> m_loadCounter;
@@ -51,4 +54,5 @@ private:
     std::function<void()> m_processStreamingRequests;
     std::function<org::UploadInstance*()> m_getUploadInstance;
     std::vector<uint32_t> m_nonResidentBitsUploadScratch;
+    br::PipelineState m_clearUint;
 };

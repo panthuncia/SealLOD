@@ -141,6 +141,7 @@ struct LensFocusParameters {
     uint32_t identity = 0;        // the prescription: a change re-initializes the focus at the manual distance
     float pointX = 0.0f, pointY = 0.0f; // lensAutofocusPoint (NDC)
     float region = 0.02f;         // lensAutofocusRegion (fraction of the frame height)
+    bool operator==(const LensFocusParameters&) const = default;
 };
 
 // The focus state the GPU last reported (an asynchronous readback of Builtin::RayTracing::LensFocus), for lens.get and the menu.
@@ -200,6 +201,8 @@ public:
     // The focus passes: this frame's parameters (any thread; the focus passes call it in Prepare, which also tells OnFrame that
     // the focus state is live and can be read back), and the focus state buffer (Builtin::RayTracing::LensFocus).
     LensFocusParameters FocusParameters() const;
+    // The same parameters without counting a focus pass's run: for values a pass takes ahead (a staged recording).
+    LensFocusParameters PeekFocusParameters() const;
     const std::shared_ptr<org::Buffer>& FocusBuffer() const { return m_focusBuffer; }
     // The word PathTracePass adds to its accumulation key for the focus: the manual focus, or in autofocus the focus epoch the
     // GPU last reported. The GPU restarts accumulation itself the frame the focus moves (LensFocusRestart); this only keeps

@@ -1253,7 +1253,7 @@ void StochasticDenoiseTemporalCS(uint3 id : SV_DispatchThreadID, uint3 groupId :
     if ((STOCHASTIC_FLAGS & STOCHASTIC_FLAG_HISTORY_VALID) != 0u)
     {
         Texture2D<float2> motion = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Surface::Motion)];
-        RWTexture2D<uint2> previousSurface = ResourceDescriptorHeap[STOCHASTIC_PREVIOUS_SURFACE_HISTORY_UAV];
+        RWTexture2D<uint2> previousSurface = ResourceDescriptorHeap[STOCHASTIC_DENOISE_PREVIOUS_SURFACE_HISTORY_UAV];
         RWTexture2D<float4> previousHistoryDiffuse = ResourceDescriptorHeap[STOCHASTIC_DENOISE_PREVIOUS_HISTORY_DIFFUSE_UAV];
         RWTexture2D<float4> previousHistorySpecular = ResourceDescriptorHeap[STOCHASTIC_DENOISE_PREVIOUS_HISTORY_SPECULAR_UAV];
         RWTexture2D<float4> previousHistoryMoments = ResourceDescriptorHeap[STOCHASTIC_DENOISE_PREVIOUS_HISTORY_MOMENTS_UAV];

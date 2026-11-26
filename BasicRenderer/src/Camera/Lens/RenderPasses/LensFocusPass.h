@@ -11,6 +11,7 @@
 #include "BasicRenderer/Extensions/PipelineDescs.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 
 // The physical lens's per-frame focus (lensFocus.hlsl, SARP's docs/lens_simulation.md "Focus and autofocus"). LensFocusPass runs
 // before the path tracer and sets this frame's focus in Builtin::RayTracing::LensFocus: the manual distance, or a step of the
@@ -18,9 +19,16 @@
 // only while a lens is published. Nothing comes back to the CPU in the loop; LensManager reads the state back every few frames
 // for lens.get and the menu.
 
+// What Record bakes: the focus parameters, taken by LensFocusPass::Update each run. The frame time is the per-frame buffer's
+// (lensFocus.hlsl), so the pass is recorded ahead and kept (M6 step 9c), and the revision names the parameters.
 struct LensFocusFrameData {
-    br::lens::LensFocusParameters parameters;
-    float deltaTime = 0.0f;
+    br::lens::LensFocusParameters parameters{};
+    bool operator==(const LensFocusFrameData& other) const {
+        const auto& a = parameters;
+        const auto& b = other.parameters;
+        return a.active == b.active && a.mode == b.mode && a.identity == b.identity && a.manualShiftMm == b.manualShiftMm
+            && a.rate == b.rate && a.deadBandMm == b.deadBandMm && a.epsilonMm == b.epsilonMm;
+    }
 };
 
 struct LensFocusBindings {
@@ -39,35 +47,41 @@ public:
         builder.ConstantBuffer(Builtin::PerFrameBuffer);
         builder.ShaderResource(Builtin::CameraBuffer, Builtin::RayTracing::LensData);
         bindings.focus = builder.UnorderedAccess(Builtin::RayTracing::LensFocus).View();
+        m_pipeline = bindings.pipeline;
         return bindings;
     }
 
-    LensFocusFrameData Prepare(const LensFocusBindings&, const org::PassPrepareContext& preparation) const {
-        LensFocusFrameData frame{};
-        frame.parameters = m_lens->FocusParameters();
-        const auto* context = preparation.preparationData ? preparation.preparationData->Get<UpdateContext>() : nullptr;
-        // A frame time of 0 (the statistical sampler's deterministic frames) still moves the spring, at 60 Hz.
-        const float dt = context ? context->deltaTime : 0.0f;
-        frame.deltaTime = dt > 0.0f ? std::min(dt, 0.1f) : 1.0f / 60.0f;
-        return frame;
+    // FocusParameters counts the focus pass's runs (LensManager's readback gate), so it is asked here, once a run.
+    void Update(const org::UpdateExecutionContext&) override { m_frame.parameters = m_lens->FocusParameters(); }
+    // Staged recordings: the parameters without counting a run.
+    void TakeFrameValues(const org::UpdateExecutionContext&) override { m_frame.parameters = m_lens->PeekFocusParameters(); }
+    void Revision(std::vector<uint64_t>& out) const {
+        br::render::AppendPipelineRevision(out, m_pipeline);
+        const auto& p = m_frame.parameters;
+        out.push_back(uint64_t(p.active) | (uint64_t(p.mode) << 1u) | (uint64_t(p.identity) << 32u));
+        for (const float value : { p.manualShiftMm, p.rate, p.deadBandMm, p.epsilonMm }) br::render::AppendRevision(out, value);
     }
 
-    static void Record(const LensFocusBindings& bindings, const LensFocusFrameData& frame, org::PassRecordContext& recording) {
-        if (!frame.parameters.active) return;
+    LensFocusFrameData Prepare(const LensFocusBindings&, const org::PassPrepareContext&) const { return m_frame; }
+
+    static void Record(const LensFocusBindings& bindings, const LensFocusFrameData& data, org::PassRecordContext& recording) {
+        const auto& parameters = data.parameters;
+        if (!parameters.active) return;
         br::render::MiscConstants constants{};
         constants[0] = recording.Index(bindings.focus);
-        constants[1] = frame.parameters.mode;
-        constants[2] = std::bit_cast<uint32_t>(frame.parameters.manualShiftMm);
-        constants[3] = std::bit_cast<uint32_t>(frame.deltaTime);
-        constants[4] = std::bit_cast<uint32_t>(frame.parameters.rate);
-        constants[5] = std::bit_cast<uint32_t>(frame.parameters.deadBandMm);
-        constants[6] = frame.parameters.identity;
-        constants[7] = std::bit_cast<uint32_t>(frame.parameters.epsilonMm);
+        constants[1] = parameters.mode;
+        constants[2] = std::bit_cast<uint32_t>(parameters.manualShiftMm);
+        constants[4] = std::bit_cast<uint32_t>(parameters.rate);
+        constants[5] = std::bit_cast<uint32_t>(parameters.deadBandMm);
+        constants[6] = parameters.identity;
+        constants[7] = std::bit_cast<uint32_t>(parameters.epsilonMm);
         br::render::DispatchCompute(recording, bindings.pipeline, constants, 1u, 1u);
     }
 
 private:
     std::shared_ptr<br::lens::LensManager> m_lens;
+    br::PipelineState m_pipeline;
+    LensFocusFrameData m_frame{};
 };
 
 struct LensAutofocusBindings {
@@ -88,10 +102,22 @@ public:
         builder.ShaderResource(Builtin::CameraBuffer, Builtin::RayTracing::LensData);
         bindings.depth = builder.ShaderResource(Builtin::PrimaryCamera::ProjectedDepthTexture);
         bindings.focus = builder.UnorderedAccess(Builtin::RayTracing::LensFocus).View();
+        m_pipeline = bindings.pipeline;
         return bindings;
     }
 
-    br::lens::LensFocusParameters Prepare(const LensAutofocusBindings&, const org::PassPrepareContext&) const { return m_lens->FocusParameters(); }
+    // Kept recordings (M6 step 5): the parameters (settings and the published lens) are taken each run and named by the revision.
+    // Staged recordings (M6 step 6): taken without counting a focus run (the focus pass's Update counts them).
+    void TakeFrameValues(const org::UpdateExecutionContext&) override { m_parameters = m_lens->PeekFocusParameters(); }
+    void Revision(std::vector<uint64_t>& out) const {
+        br::render::AppendPipelineRevision(out, m_pipeline);
+        const auto& p = m_parameters;
+        out.push_back(uint64_t(p.active) | (uint64_t(p.mode) << 1u) | (uint64_t(p.identity) << 32u));
+        for (const float value : { p.manualShiftMm, p.rate, p.deadBandMm, p.epsilonMm, p.pointX, p.pointY, p.region })
+            br::render::AppendRevision(out, value);
+    }
+
+    br::lens::LensFocusParameters Prepare(const LensAutofocusBindings&, const org::PassPrepareContext&) const { return m_parameters; }
 
     static void Record(const LensAutofocusBindings& bindings, const br::lens::LensFocusParameters& parameters, org::PassRecordContext& recording) {
         if (!parameters.active) return;
@@ -106,4 +132,6 @@ public:
 
 private:
     std::shared_ptr<br::lens::LensManager> m_lens;
+    br::PipelineState m_pipeline;
+    br::lens::LensFocusParameters m_parameters{};
 };

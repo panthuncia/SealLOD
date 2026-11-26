@@ -20,6 +20,7 @@
 #include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
 #include "Render/Runtime/IDescriptorService.h"
 #include "Resources/Buffers/Buffer.h"
+#include "Resources/GloballyIndexedResource.h"
 
 #include <algorithm>
 #include <chrono>
@@ -185,6 +186,8 @@ TextureStreamingManager::TextureStreamingManager()
 			br::render::PublishedResourceUsage::ShaderResource, 0, 0,
 			br::render::kTextureImageTableBufferVariant },
 		m_textureStreamingMetadataBuffer, true);
+	if (const char* lateBound = std::getenv("BASICRENDERER_TEXTURE_TABLE_LATE_BOUND"); !lateBound || std::strcmp(lateBound, "0") != 0)
+		m_textureImageTableResolver->MakeLateBound();
 	m_resources[Builtin::Material::TextureStreamingFeedbackBuffer] = m_textureStreamingFeedbackBuffer;
 }
 
@@ -1781,6 +1784,19 @@ std::shared_ptr<org::Resource> TextureStreamingManager::ResolvePublishedImageTab
 	if (!m_textureImageTableResolver) return {};
 	auto resources = m_textureImageTableResolver->Resolve();
 	return resources.empty() ? std::shared_ptr<org::Resource>{} : std::move(resources.front());
+}
+
+uint32_t TextureStreamingManager::PublishedImageTableDescriptorIndex(
+	const std::shared_ptr<const br::render::PublishedRendererState>& published) const
+{
+	std::shared_ptr<org::Resource> table;
+	if (m_textureImageTableResolver) {
+		auto resources = m_textureImageTableResolver->ResolveFrom(published);
+		if (!resources.empty()) table = std::move(resources.front());
+	}
+	if (!table) table = m_textureStreamingMetadataBuffer;
+	const auto* indexed = dynamic_cast<const org::GloballyIndexedResource*>(table.get());
+	return indexed ? indexed->GetSRVInfo(0).slot.index : UINT32_MAX;
 }
 
 std::shared_ptr<org::Resource> TextureStreamingManager::PublishedImageTableReadbackAnchorForDiagnostics() const

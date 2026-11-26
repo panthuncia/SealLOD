@@ -13,27 +13,6 @@ namespace br::render {
 namespace {
 constexpr std::uint64_t CullingOffset = (sizeof(CameraInfo) + 15u) & ~std::uint64_t{15u};
 constexpr std::uint64_t UploadBytes = CullingOffset + sizeof(CullingCameraInfo);
-
-class CameraUploadLifecycle final : public org::PreparedLifecycleEffect {
-public:
-    explicit CameraUploadLifecycle(std::uint64_t revision) : m_revision(revision) {}
-    void Submitted(org::SubmissionContext) const override {
-        static std::atomic_uint64_t lastSubmittedRevision{0};
-        const auto previous = lastSubmittedRevision.exchange(m_revision, std::memory_order_acq_rel);
-        if (previous != 0 && m_revision < previous)
-            basic_telemetry::AddCounter("SARP.Camera.Upload.RevisionRegression");
-        else if (previous != 0 && m_revision != previous + 1)
-            basic_telemetry::AddCounter("SARP.Camera.Upload.RevisionGap");
-        basic_telemetry::AddCounter("SARP.Camera.Upload.Submitted");
-        basic_telemetry::SetGauge("SARP.Camera.Upload.SubmittedRevision",
-            static_cast<std::int64_t>(m_revision));
-    }
-    void Abandoned(org::AbandonReason) const override {
-        basic_telemetry::AddCounter("SARP.Camera.Upload.Abandoned");
-    }
-private:
-    std::uint64_t m_revision;
-};
 }
 
 PrimaryCameraUploadPass::PrimaryCameraUploadPass(
@@ -55,12 +34,15 @@ PrimaryCameraUploadBindings PrimaryCameraUploadPass::Declare(org::PassBuilder& b
     bindings.cullingDestination = builder.CopyDestination(m_cullingDestination);
     for (const auto& staging : m_staging) bindings.staging.push_back(builder.CopySource(staging));
     builder.PreferQueue(org::QueueKind::Graphics);
+    // The copy takes this run's staging slot (PrimaryCameraUploadRun): recorded at execution, in a batch of its own.
+    builder.RecordAtExecution();
     return bindings;
 }
 
-PreparedPrimaryCameraUpload PrimaryCameraUploadPass::Prepare(
-    const PrimaryCameraUploadBindings&, const org::PassPrepareContext& preparation) const {
-    const auto* inputs = preparation.preparationData->Get<RendererFrameInputs>();
+// Each run, kept recording or not: the frame slot's staging buffer gets this frame's cameras. A frame slot's buffer is not
+// written while a run that copies from it is in flight (frame pacing waits for the slot's last run first).
+void PrimaryCameraUploadPass::Update(const org::UpdateExecutionContext& execution) {
+    const auto* inputs = execution.hostData ? execution.hostData->Get<RendererFrameInputs>() : nullptr;
     if (!inputs || inputs->FrameSlot() >= m_staging.size())
         throw std::logic_error("PrimaryCameraUploadPass requires valid frame-owned inputs");
     const auto& upload = inputs->PrimaryCameraUpload();
@@ -76,15 +58,26 @@ PreparedPrimaryCameraUpload PrimaryCameraUploadPass::Prepare(
         &upload.cullingCamera, sizeof(upload.cullingCamera));
     staging->GetAPIResource().Unmap(0, UploadBytes);
 
-    preparation.Reserve(std::make_shared<CameraUploadLifecycle>(upload.revision));
+    // Revision order of what is uploaded (formerly counted at submission, which a recording made at execution has no
+    // callback for).
+    if (m_run->revision != 0 && upload.revision < m_run->revision)
+        basic_telemetry::AddCounter("SARP.Camera.Upload.RevisionRegression");
+    else if (m_run->revision != 0 && upload.revision != m_run->revision + 1)
+        basic_telemetry::AddCounter("SARP.Camera.Upload.RevisionGap");
+    *m_run = {inputs->FrameSlot(), upload.revision, upload.frameNumber};
     basic_telemetry::AddCounter("SARP.Camera.Upload.Prepared");
     basic_telemetry::SetGauge("SARP.Camera.Upload.PreparedRevision",
         static_cast<std::int64_t>(upload.revision));
-    return {inputs->FrameSlot(), upload.revision, upload.frameNumber};
+}
+
+PreparedPrimaryCameraUpload PrimaryCameraUploadPass::Prepare(
+    const PrimaryCameraUploadBindings&, const org::PassPrepareContext&) const {
+    return {m_run};
 }
 
 void PrimaryCameraUploadPass::Record(const PrimaryCameraUploadBindings& bindings,
-    const PreparedPrimaryCameraUpload& data, org::PassRecordContext& recording) {
+    const PreparedPrimaryCameraUpload& prepared, org::PassRecordContext& recording) {
+    const auto& data = *prepared.run;
     const auto source = recording.Resolve(bindings.staging.at(data.stagingSlot)).GetHandle();
     recording.Commands().CopyBufferRegion(
         recording.Resolve(bindings.cameraDestination).GetHandle(), 0, source, 0, sizeof(CameraInfo));

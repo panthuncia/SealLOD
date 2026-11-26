@@ -9,6 +9,8 @@
 
 #include <spdlog/spdlog.h>
 
+#include "BasicRenderer/Extensions/PassRevision.h"
+
 #include "VirtualGeometry/RayTracing/CLodRayTracingPasses.h"
 #include "Render/Runtime/UploadTypes.h"
 #include "BasicRenderer/Streaming/LightStateArtifacts.h"
@@ -19,8 +21,11 @@
 
 namespace br::render {
 
-struct StochasticSampleFrame {
-    std::shared_ptr<CLodRayTracingSystem> system;
+// One run's constants and flags. Update makes them each run (the frame number, the history parities, the running average's
+// restarts). Since M6 step 9c the passes are recorded ahead and kept: the shaders take the frame number and parity from the
+// per-frame buffer (stochasticLightingRootConstants.h), and the rest is in the frame data and the revision, so a run whose flags
+// or sizes changed (a restart, the first frame's history) records again.
+struct StochasticSampleRun {
     uint32_t width = 0u;
     uint32_t height = 0u;
     uint32_t frame = 0u;
@@ -28,6 +33,15 @@ struct StochasticSampleFrame {
     uint32_t sampleCount = 1u;
     uint32_t parity = 0u;
     uint32_t downsample = 1u;
+    bool operator==(const StochasticSampleRun&) const = default;
+};
+
+// What Record bakes: the run without its frame number and parity, and the ray tracing system's views.
+struct StochasticSampleFrame {
+    std::shared_ptr<CLodRayTracingSystem> system;
+    StochasticSampleRun run{};
+    uint32_t tlasSrv = 0u, clasInfoSrv = 0u, instanceRowsSrv = 0u;
+    bool operator==(const StochasticSampleFrame&) const = default;
 };
 
 // What a running average depends on, and how many frames it holds (docs/stochastic_lighting.md "Reference"). The split
@@ -44,9 +58,9 @@ struct StochasticSampleState {
     uint64_t lastFrame = UINT64_MAX;
     uint64_t lastGuidedFrame = UINT64_MAX;
     uint64_t lastGradientFrame = UINT64_MAX; // ... and with visibility gradients (their records).
-    // The frame the passes sharing this state last prepared, and what they prepared for it.
+    // The frame the passes sharing this state last prepared (in Update), and what they prepared for it.
     uint64_t preparedFrame = UINT64_MAX;
-    StochasticSampleFrame prepared{};
+    StochasticSampleRun prepared{};
 };
 
 enum class StochasticLightingPassMode : uint8_t {
@@ -220,41 +234,53 @@ public:
             }
         }
         builder.PreferQueue(org::QueueKind::Compute);
+        m_pipelines.Clear();
+        m_pipelines.Add(bindings.pipeline);
+        m_pipelines.Add(bindings.argumentsPipeline);
+        m_pipelines.Add(bindings.gradientPipeline);
         return bindings;
     }
 
-    void Update(const org::UpdateExecutionContext&) override {
+    void Update(const org::UpdateExecutionContext& execution) override {
         if (m_kernel == StochasticSampleKernel::Select && m_resources->rayCounter) {
             // Selection appends from zero.
             const uint32_t zero[2] = {};
             UploadBufferData(zero, sizeof(zero), org::runtime::UploadTarget::FromShared(m_resources->rayCounter), 0);
         }
-    }
-
-    StochasticSampleFrame Prepare(const StochasticSampleBindings&, const org::PassPrepareContext& preparation) const {
-        const auto* update = preparation.preparationData->Get<UpdateContext>();
-        if (!update) {
-            return StochasticSampleFrame{ m_system };
-        }
+        const auto* update = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr;
         std::scoped_lock lock(m_state->mutex);
-        // The split passes of one frame share one preparation, so they agree on the flags (and the average restarts once).
+        if (!update) {
+            m_state->prepared = {};
+            m_state->preparedFrame = UINT64_MAX;
+            return;
+        }
+        // The split passes of one frame share one run, so they agree on the flags (and the average restarts once).
         if (m_state->preparedFrame != update->frameNumber) {
             m_state->prepared = PrepareLocked(*update);
             m_state->preparedFrame = update->frameNumber;
         }
-        return m_state->prepared;
+    }
+    // The run as Update made it (Revision is asked after Update), without what the shaders read from the per-frame buffer.
+    void Revision(std::vector<uint64_t>& out) const {
+        m_pipelines.Append(out);
+        const StochasticSampleFrame frame = MakeFrame();
+        out.push_back(reinterpret_cast<uintptr_t>(frame.system.get()));
+        br::render::AppendRevisionRows(out, &frame.run, 1u);
+        out.push_back((uint64_t(frame.tlasSrv) << 32u) | frame.clasInfoSrv);
+        out.push_back(frame.instanceRowsSrv);
     }
 
-    static void Record(const StochasticSampleBindings& bindings, const StochasticSampleFrame& frame, org::PassRecordContext& recording) {
-        if (frame.width == 0u || frame.height == 0u) {
+    StochasticSampleFrame Prepare(const StochasticSampleBindings&, const org::PassPrepareContext&) const { return MakeFrame(); }
+
+    static void Record(const StochasticSampleBindings& bindings, const StochasticSampleFrame& data, org::PassRecordContext& recording) {
+        const StochasticSampleRun& frame = data.run;
+        if (frame.width == 0u || frame.height == 0u || !data.system) {
             return;
         }
-        std::scoped_lock lock(frame.system->FrameOperationMutex());
         br::render::MiscConstants constants{};
-        constants[CLOD_RT_SEC_TLAS_SRV] = frame.system->GetTlasSrv();
-        constants[CLOD_RT_SEC_CLAS_INFO_SRV] = frame.system->GetClasInfoSrv();
-        constants[CLOD_RT_SEC_INSTANCE_ROWS_SRV] = frame.system->GetInstanceRowsSrv();
-        constants[CLOD_RT_SEC_FRAME] = frame.frame;
+        constants[CLOD_RT_SEC_TLAS_SRV] = data.tlasSrv;
+        constants[CLOD_RT_SEC_CLAS_INFO_SRV] = data.clasInfoSrv;
+        constants[CLOD_RT_SEC_INSTANCE_ROWS_SRV] = data.instanceRowsSrv;
         constants[STOCHASTIC_DIFFUSE_UAV] = recording.Index(bindings.diffuse);
         constants[STOCHASTIC_SPECULAR_UAV] = recording.Index(bindings.specular);
         const auto kernel = bindings.kernel;
@@ -273,10 +299,11 @@ public:
         constants[STOCHASTIC_DOWNSAMPLE_FACTOR] = frame.downsample;
         if (bindings.estimator) {
             const auto index = [&](const org::DeclaredViewToken& token) { return token.layout ? recording.Index(token) : 0u; };
-            constants[STOCHASTIC_VISIBLE_LISTS_UAV] = index(bindings.visibleLists[frame.parity]);
-            constants[STOCHASTIC_PREVIOUS_VISIBLE_LISTS_UAV] = index(bindings.visibleLists[frame.parity ^ 1u]);
-            constants[STOCHASTIC_SURFACE_HISTORY_UAV] = index(bindings.surfaceHistory[frame.parity]);
-            constants[STOCHASTIC_PREVIOUS_SURFACE_HISTORY_UAV] = index(bindings.surfaceHistory[frame.parity ^ 1u]);
+            // [0] in this frame's slot and [1] in last frame's: the shaders swap them on odd frames.
+            constants[STOCHASTIC_VISIBLE_LISTS_UAV] = index(bindings.visibleLists[0]);
+            constants[STOCHASTIC_PREVIOUS_VISIBLE_LISTS_UAV] = index(bindings.visibleLists[1]);
+            constants[STOCHASTIC_SURFACE_HISTORY_UAV] = index(bindings.surfaceHistory[0]);
+            constants[STOCHASTIC_PREVIOUS_SURFACE_HISTORY_UAV] = index(bindings.surfaceHistory[1]);
             if (kernel != StochasticSampleKernel::Single) {
                 constants[STOCHASTIC_SLOTS_UAV] = index(bindings.slots);
                 constants[STOCHASTIC_PIXEL_WORDS_UAV] = index(bindings.pixelWords);
@@ -317,10 +344,29 @@ public:
     }
 
 private:
+    // The run Update made, without its frame number and parity, and the system's views.
+    StochasticSampleFrame MakeFrame() const {
+        StochasticSampleFrame frame{};
+        frame.system = m_system;
+        {
+            std::scoped_lock lock(m_state->mutex);
+            frame.run = m_state->prepared;
+        }
+        frame.run.frame = 0u;
+        frame.run.parity = 0u;
+        if (m_system) {
+            std::scoped_lock lock(m_system->FrameOperationMutex());
+            frame.tlasSrv = m_system->GetTlasSrv();
+            frame.clasInfoSrv = m_system->GetClasInfoSrv();
+            frame.instanceRowsSrv = m_system->GetInstanceRowsSrv();
+        }
+        return frame;
+    }
+
     // One frame's constants and flags, with the frame-to-frame bookkeeping (guiding history, the running average's restarts).
     // Called once per frame, under the state's mutex.
-    StochasticSampleFrame PrepareLocked(const UpdateContext& update) const {
-        StochasticSampleFrame frame{ m_system };
+    StochasticSampleRun PrepareLocked(const UpdateContext& update) const {
+        StochasticSampleRun frame{};
         frame.width = update.renderResolution.x;
         frame.height = update.renderResolution.y;
         // The frame number, not frameIndex: that is the frame slot, which repeats every few frames.
@@ -422,6 +468,7 @@ private:
     StochasticLightingPassMode m_mode = StochasticLightingPassMode::Reference;
     bool m_accumulate = true;
     StochasticSampleKernel m_kernel = StochasticSampleKernel::Single;
+    br::render::DeclaredPipelines m_pipelines;
     std::shared_ptr<org::PixelBuffer> m_accumulationDiffuse;
     std::shared_ptr<org::PixelBuffer> m_accumulationSpecular;
 };

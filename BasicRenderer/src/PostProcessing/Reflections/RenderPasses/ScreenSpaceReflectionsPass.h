@@ -5,11 +5,19 @@
 #include "BasicRenderer/Scene/Scene.h"
 #include "PostProcessing/Reflections/ScreenSpaceReflectionsGenerationService.h"
 
-struct ScreenSpaceReflectionsFrameData {
-    std::shared_ptr<const br::render::ScreenSpaceReflectionsGenerationService> service;
+// What FFX SSSR takes per run: the camera and the descriptor heaps. Update writes them each run and Record reads them: the
+// SDK dispatch is recorded at execution (M6 step 5), so a kept recording of Shading records it again at each submission, with
+// the frame data it was prepared with.
+struct ScreenSpaceReflectionsRunValues {
     Components::Camera camera;
     rhi::DescriptorHeapHandle resourceHeap{}, samplerHeap{};
+};
+
+struct ScreenSpaceReflectionsFrameData {
+    std::shared_ptr<const br::render::ScreenSpaceReflectionsGenerationService> service;
+    std::shared_ptr<const ScreenSpaceReflectionsRunValues> run;
     std::shared_ptr<org::PixelBuffer> hdr, depth, normals, motion, environment, brdf, output;
+    bool operator==(const ScreenSpaceReflectionsFrameData&) const = default;
 };
 
 class ScreenSpaceReflectionsPass
@@ -21,6 +29,8 @@ public:
     void Declare(org::PassBuilder& declaration) {
         auto* builder = &declaration;
         builder->PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
+        // The SDK takes this run's camera and constants: recorded at execution, in a batch of its own.
+        declaration.RecordAtExecution();
         builder->LegacyInterop(Builtin::Color::HDRColorTarget,
             Builtin::Surface::Motion,
             Builtin::PrimaryCamera::DepthTexture,
@@ -52,19 +62,26 @@ public:
 		m_pSSSROutput = m_resourceRegistryView->RequestSharedAs<org::PixelBuffer>(Builtin::PostProcessing::ScreenSpaceReflections);
     }
 
-    ScreenSpaceReflectionsFrameData Prepare(const org::PassPrepareContext& preparation) {
-        const auto* context = preparation.preparationData->Get<UpdateContext>();
-        return {.service=m_service, .camera=context->primaryCamera,
-            .resourceHeap=context->textureDescriptorHeap.GetHandle(),
-            .samplerHeap=context->samplerDescriptorHeap.GetHandle(),
+    void Update(const org::UpdateExecutionContext& execution) override {
+        const auto* context = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr;
+        if (!context) return;
+        m_run->camera = context->primaryCamera;
+        m_run->resourceHeap = context->textureDescriptorHeap.GetHandle();
+        m_run->samplerHeap = context->samplerDescriptorHeap.GetHandle();
+    }
+    // Recorded at each run, so only the service it evaluates through names its recording.
+    void Revision(std::vector<uint64_t>& out) const { out.push_back(reinterpret_cast<uintptr_t>(m_service.get())); }
+
+    ScreenSpaceReflectionsFrameData Prepare(const org::PassPrepareContext&) {
+        return {.service=m_service, .run=m_run,
             .hdr=m_pHDRTarget, .depth=m_pDepthTexture, .normals=m_pNormals,
             .motion=m_pMotionVectors, .environment=m_pEnvironmentCubemap,
             .brdf=m_pBRDFLUT, .output=m_pSSSROutput};
     }
     static void Record(const ScreenSpaceReflectionsFrameData& data, org::PassRecordContext& recording) {
-        recording.Commands().SetDescriptorHeaps(data.resourceHeap, data.samplerHeap);
+        recording.Commands().SetDescriptorHeaps(data.run->resourceHeap, data.run->samplerHeap);
         data.service->Evaluate(
-            recording.Commands(), data.camera, data.hdr.get(), data.depth.get(),
+            recording.Commands(), data.run->camera, data.hdr.get(), data.depth.get(),
             data.normals.get(), data.motion.get(),
             data.environment.get(), data.brdf.get(), data.output.get());
         recording.RestoreDescriptorHeaps();
@@ -75,4 +92,5 @@ private:
     std::shared_ptr<org::PixelBuffer> m_pHDRTarget, m_pMotionVectors, m_pDepthTexture,
         m_pNormals, m_pEnvironmentCubemap, m_pBRDFLUT, m_pSSSROutput;
     std::shared_ptr<const br::render::ScreenSpaceReflectionsGenerationService> m_service;
+    std::shared_ptr<ScreenSpaceReflectionsRunValues> m_run = std::make_shared<ScreenSpaceReflectionsRunValues>();
 };

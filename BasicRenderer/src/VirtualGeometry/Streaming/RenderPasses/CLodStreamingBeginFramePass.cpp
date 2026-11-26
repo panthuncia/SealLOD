@@ -53,6 +53,7 @@ CLodStreamingBeginFrameBindings CLodStreamingBeginFramePass::Declare(org::PassBu
         bindings.sourceMismatchCounter = builder.UnorderedAccess(m_sourceGroupMismatchCounter);
         bindings.hasSourceMismatchCounter = true;
     }
+    m_clearUint = bindings.clearUint;
     return bindings;
 }
 

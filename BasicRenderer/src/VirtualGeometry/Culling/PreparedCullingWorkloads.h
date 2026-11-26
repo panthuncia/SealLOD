@@ -37,6 +37,7 @@ struct PreparedCullingWorkload {
     uint32_t dispatchGridX = 0;
     uint32_t dispatchGridY = 1;
     uint32_t dispatchGridZ = 1;
+    bool operator==(const PreparedCullingWorkload&) const = default;
 };
 
 inline std::vector<PreparedCullingWorkload> PrepareCullingWorkloads(

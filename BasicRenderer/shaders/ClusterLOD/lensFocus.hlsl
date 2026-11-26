@@ -7,7 +7,8 @@
 // damped spring, snapped onto it once within 1% of the dead band, so a settled focus stays bit for bit. It flags a restart for
 // accumulation when the focus moved, and computes the frame's sensor frames and 1/K. Then every thread interpolates pupil nodes to
 // the new focus (LENS_FOCUS_ROW_PUPIL), so camera rays read two radius nodes, as with one focus.
-//   0 focus UAV, 1 mode (LENS_FOCUS_MODE_*), 2 asfloat(manual shift mm), 3 asfloat(dt s), 4 asfloat(spring rate 1/s),
+//   0 focus UAV, 1 mode (LENS_FOCUS_MODE_*), 2 asfloat(manual shift mm), 3 unused (the frame time is PerFrameBuffer::deltaTime,
+//   so a kept recording replays; M6 step 9c), 4 asfloat(spring rate 1/s),
 //   5 asfloat(dead band mm), 6 lens identity (a change re-initializes at the manual focus), 7 asfloat(restart epsilon mm).
 //
 // LensAutofocusCS (LensAutofocusPass, after the path tracer): one group. The primary hits' view depth over the autofocus region
@@ -26,7 +27,9 @@ void LensFocusStep(LensHeader header)
     StructuredBuffer<float4> data = LensData();
     const uint mode = UintRootConstant1;
     const float manualShift = clamp(asfloat(UintRootConstant2), header.shiftMin, header.shiftMax);
-    const float dt = asfloat(UintRootConstant3);
+    // A frame time of 0 (the statistical sampler's deterministic frames) still moves the spring, at 60 Hz; at most 0.1 s.
+    ConstantBuffer<PerFrameBuffer> focusPerFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+    const float dt = focusPerFrame.deltaTime > 0.0f ? min(focusPerFrame.deltaTime, 0.1f) : 1.0f / 60.0f;
     const float rate = max(asfloat(UintRootConstant4), 1e-3f);
     const float deadBand = asfloat(UintRootConstant5);
     const uint identity = UintRootConstant6;

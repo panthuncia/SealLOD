@@ -7,6 +7,7 @@
 #include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 
 namespace org { class Buffer; }
 
@@ -47,8 +48,11 @@ public:
 
     ReyesClassifyBindings Declare(org::PassBuilder& builder);
     static void Record(const ReyesClassifyBindings& bindings, org::PassRecordContext& recording);
+    // Kept recordings (M6 step 8): Record bakes only its bindings and its pipelines' builds.
+    void Revision(std::vector<uint64_t>& out) const { m_pipelines.Append(out); }
 
 private:
+    br::render::DeclaredPipelines m_pipelines;
     std::shared_ptr<org::Buffer> m_visibleClustersBuffer;
     std::shared_ptr<org::Buffer> m_visibleClustersCounterBuffer;
     std::shared_ptr<org::Buffer> m_visibleClustersReadBaseCounterBuffer;

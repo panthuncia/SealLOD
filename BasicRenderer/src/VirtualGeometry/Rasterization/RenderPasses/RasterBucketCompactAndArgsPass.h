@@ -5,6 +5,7 @@
 #include <rhi.h>
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 #include <BasicRenderer/Pipeline/PipelineDesc.h>
 
 namespace org { class Buffer; }
@@ -29,6 +30,7 @@ struct RasterBucketCompactAndArgsFrame {
     uint32_t numBuckets = 0;
     bool enabled = false;
     bool telemetryEnabled = false;
+    bool operator==(const RasterBucketCompactAndArgsFrame&) const = default;
 };
 
 class RasterBucketCompactAndArgsPass : public org::TypedRenderGraphPass<RasterBucketCompactAndArgsPass,
@@ -63,8 +65,14 @@ public:
     static void Record(const RasterBucketCompactAndArgsBindings&,
         const RasterBucketCompactAndArgsFrame&, org::PassRecordContext&);
     void Update(const org::UpdateExecutionContext& executionContext) override;
+    // Kept recordings (M6 step 8): the frame's bucket count and software raster mode, taken from the host data before
+    // Update (RenderGraphPass::TakeFrameValues) and returned by Prepare; Revision names them and the pipelines.
+    void TakeFrameValues(const org::UpdateExecutionContext& execution) override;
+    void Revision(std::vector<uint64_t>& out) const;
 
 private:
+    RasterBucketCompactAndArgsFrame m_taken{};
+    br::render::DeclaredPipelines m_pipelines;
     std::shared_ptr<org::Buffer> m_visibleClustersBuffer;
     std::shared_ptr<org::Buffer> m_visibleClusterTransformIndicesBuffer;
     std::shared_ptr<org::Buffer> m_visibleClustersCounterBuffer;
@@ -87,6 +95,7 @@ private:
     bool m_buildSoftwareRasterDispatch = false;
     uint32_t m_softwareRasterClustersPerGroup = 0;
     bool m_runWhenComputeSWRasterEnabledOnly = false;
+    void SizeBuffers(uint32_t numBuckets);
     uint32_t m_numBuckets = 0;
     bool m_enabled = false;
 };

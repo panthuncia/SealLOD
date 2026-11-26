@@ -37,6 +37,8 @@ ReyesCreateDispatchArgsBindings ReyesCreateDispatchArgsPass::Declare(org::PassBu
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
     bindings.threadsPerGroup = m_threadsPerGroup;
     bindings.maxWorkItemCount = m_maxWorkItemCount;
+    m_pipelines.Clear();
+    m_pipelines.Add(bindings.pipeline);
     return bindings;
 }
 

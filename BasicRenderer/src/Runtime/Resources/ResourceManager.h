@@ -30,7 +30,7 @@ public:
     void SetUploadService(std::shared_ptr<org::runtime::IUploadService> uploadService);
     void Cleanup();
 
-    void UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, UINT sunLightIndex, UINT sunLightSlot, UINT numDirectionalLights, UINT vsmDebugLightIndex, DirectX::XMUINT2 screenRes, const LightGridShape& lightGrid, unsigned int frameIndex);
+    void UpdatePerFrameBuffer(UINT cameraIndex, UINT numLights, UINT sunLightIndex, UINT sunLightSlot, UINT numDirectionalLights, UINT vsmDebugLightIndex, DirectX::XMUINT2 screenRes, const LightGridShape& lightGrid, unsigned int frameIndex, float deltaTime);
     
     std::shared_ptr<org::Buffer>& GetPerFrameBuffer() {
 		return m_perFrameBuffer;
@@ -54,6 +54,7 @@ public:
 
 	void SetActiveEnvironmentIndex(unsigned int index) { perFrameCBData.activeEnvironmentIndex = index; }
 	void SetOutputType(unsigned int type) { perFrameCBData.outputType = type; }
+	void SetTextureImageTableDescriptorIndex(unsigned int index) { perFrameCBData.textureImageTableDescriptorIndex = index; }
 
 	rhi::Resource GetUAVCounterReset() { return m_uavCounterReset.Get(); }
     

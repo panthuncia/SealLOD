@@ -45,6 +45,7 @@
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include <BasicRenderer/Streaming/VersionedGpuBuffer.h>
 #include "Runtime/Frame/RendererFrameInputs.h"
+#include "../shaders/PerPassRootConstants/lightCullingRootConstants.h"
 #include <BasicRenderer/Streaming/RendererStateRequestService.h>
 #include "Diagnostics/Telemetry/FrameTaskGraphTelemetry.h"
 #include "Materials/TextureStreaming/TextureImageTableArtifacts.h"
@@ -256,6 +257,9 @@ void Renderer::ConsolidateFrameGraph() {
     if (m_frameBuildWorker) {
         if (auto job = m_frameBuildWorker->TakeFinished()) FinishFrameBuild(std::move(job));
     }
+    // The resolution revision (M5 step 4): window sizes and upscaler settings recorded since the last consumption, taken once a
+    // frame here and only with no build in flight. It requests the build that answers it, started below.
+    ApplyResolutionRequest();
     if (!currentRenderGraph && !m_frameRevisions.TopologyPending() && !FrameBuildInFlight()) RequestGraphRebuild("first build");
     // A graph built in place is checked once it has a schedule. It runs already, so a failure is only reported.
     if (m_frameEpochCheckDeferred && currentRenderGraph && m_frameBuild) {
@@ -342,6 +346,11 @@ void Renderer::DiscardFrameBuildInFlight(std::string_view why) {
     for (auto& outputs : job->build->outputs) outputs.resourceEntityWrites.clear();
     job->graphs.clear();
     ++m_graphBuildStats.discarded;
+    // Its requests are asked again below; a resolution build's are answered by the next build.
+    if (job->resolution) {
+        if (m_resolutionStats.resolutionBuildsInFlight) --m_resolutionStats.resolutionBuildsInFlight;
+        m_resolutionBuildRequested = true;
+    }
     spdlog::info("Renderer: frame graph build {} dropped before its attach ({}); its requests are asked again: {}", job->serial, why,
         job->reason);
     m_frameRevisions.Restore(std::move(job->requests));
@@ -369,7 +378,7 @@ std::shared_ptr<br::render::FrameBuildJob> Renderer::StartFrameBuild(br::render:
     // A graph rebuilt in place (BASICRENDERER_FRAME_GRAPH_INSTANCE) has no old graph to hold its frames' objects: it still waits.
     if (m_useGraphInstance) {
         BT_ZONE_SCOPE("Renderer::StartFrameBuild::StallPipeline");
-        StallPipeline();
+        StallPipeline("a graph rebuilt in place (BASICRENDERER_FRAME_GRAPH_INSTANCE)");
         if (m_readbackCaptures) m_readbackCaptures->ProcessCompleted();
         org::DescriptorHeapManager::GetInstance().DrainDeferredReleasesAfterDeviceIdle();
         PSOManager::GetInstance().DrainRetiredLivePipelinesAfterDeviceIdle();
@@ -427,6 +436,14 @@ std::shared_ptr<br::render::FrameBuildJob> Renderer::StartFrameBuild(br::render:
     job->requests = std::move(requests);
     job->reason = job->requests.Empty() ? std::string("renderer graph rebuild") : job->requests.Describe();
     job->serial = ++m_frameBuildSerial;
+    if (m_resolutionBuildRequested) {
+        m_resolutionBuildRequested = false;
+        job->resolution = true;
+        auto& resolution = m_resolutionStats;
+        ++resolution.resolutionBuilds;
+        ++resolution.resolutionBuildsInFlight;
+        resolution.maxResolutionBuildsInFlight = (std::max)(resolution.maxResolutionBuildsInFlight, resolution.resolutionBuildsInFlight);
+    }
     auto& frameBuild = *job->build;
     frameBuild.inputs.knownPassEpochs = m_knownPassEpochs;
     frameBuild.passEpochs->SetKnown(m_knownPassEpochs);
@@ -441,6 +458,15 @@ std::shared_ptr<br::render::FrameBuildJob> Renderer::StartFrameBuild(br::render:
         // The build reads one snapshot of the settings (M3, docs/frame_graph_composition_plan.md): what it builds is consistent,
         // and it runs on the build thread while the render thread keeps writing the live values.
         auto settings = SettingsManager::GetInstance().Snapshot();
+        // The sizes come from the upscaler configuration the build captures (M5 step 4), as CreateTextures' do: a build never mixes
+        // two sizes, whatever the live settings say (a pipe write of renderResolution, a request recorded since).
+        {
+            const auto resolution = BuildResolution();
+            frameBuild.inputs.renderResolution = resolution.render;
+            frameBuild.inputs.outputResolution = resolution.output;
+            SettingsManager::GetInstance().OverrideInSnapshot(*settings, "renderResolution", resolution.render);
+            SettingsManager::GetInstance().OverrideInSnapshot(*settings, "outputResolution", resolution.output);
+        }
         SettingsSnapshotScope settingsScope(settings);
         MakeFrameBuild(frameBuild, primaryCameraEntity);
         frameBuild.inputs.settings = std::move(settings);
@@ -463,6 +489,30 @@ std::shared_ptr<br::render::FrameBuildJob> Renderer::StartFrameBuild(br::render:
     // Published-state resolvers capture against a manifest lease, as each frame's preparation does (RendererFrameUpdate).
     job->captureContext = std::make_shared<const org::ResolverCaptureContext>(m_context.publishedManifestLease,
         m_context.publishedRendererState ? m_context.publishedRendererState->bindingBundle : nullptr);
+    // Staged recordings (M6 step 6): the frame the kept epochs' copies are recorded for, the build's update values with the last
+    // frame's render values. BASICRENDERER_STAGED_RECORDINGS=0 records none ahead.
+    static const bool stagedRecordings = [] {
+        const char* value = std::getenv("BASICRENDERER_STAGED_RECORDINGS");
+        return !(value && value[0] == '0');
+    }();
+    const auto& lastUpdate = frameBuild.inputs.lastUpdate;
+    if (stagedRecordings && !m_useGraphInstance && lastUpdate && m_lastFrameRender && lastUpdate->frameNumber == m_lastFrameRender->frameNumber
+        && lastUpdate->frameSlot == m_lastFrameRender->frameSlot) {
+        // A build for new sizes (a resize, an upscaler change): its first frames have the build's render and output sizes, and the
+        // light grid of that render size.
+        auto update = std::make_shared<UpdateContext>(*lastUpdate);
+        auto render = std::make_shared<RenderContext>(*m_lastFrameRender);
+        if (const auto& sizes = frameBuild.inputs.resolution; sizes && sizes->render.x && sizes->render.y) {
+            update->renderResolution = render->renderResolution = sizes->render;
+            update->outputResolution = render->outputResolution = sizes->output;
+            auto& settings = SettingsManager::GetInstance();
+            const LightGridShape grid = MakeLightGridShape(sizes->render.x, sizes->render.y,
+                settings.getSettingGetter<uint32_t>(LightGridTileSizeSettingName)(), settings.getSettingGetter<uint32_t>(LightGridSlicesSettingName)());
+            update->lightClusterSize = render->lightClusterSize = { grid.tilesX, grid.tilesY, grid.slices };
+        }
+        job->stagedFrame = std::make_shared<const br::render::RendererFrameInputs>(std::move(update), std::move(render), br::render::PrimaryCameraFrameUpload{});
+        job->stagedDeltaTime = lastUpdate->deltaTime;
+    }
     job->started = std::chrono::steady_clock::now();
     job->prepareMs = std::chrono::duration<double, std::milli>(job->started - begin).count();
     ++m_graphBuildStats.started;
@@ -580,6 +630,22 @@ void Renderer::RunFrameBuild(br::render::FrameBuildJob& job) {
             job.pipelineFailures = declarations.Await();
             job.pipelineWaitMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waitBegin).count();
         }
+        // Staged recordings (M6 step 6, ORG GraphHost::RecordStagedCopies): each kept epoch's copies are recorded here, on the
+        // build's thread, once its pipelines are in, so the first frames after the attach submit kept recordings instead of
+        // recording on the render thread. The host records nothing for an epoch whose passes do not all report revisions
+        // (Visibility, until it converts) and says why. Each copy's first run confirms its recording against its own frame data.
+        if (built && job.stagedFrame && !m_useGraphInstance && !job.installed && job.pipelineFailures.empty()) {
+            BT_ZONE_SCOPE("Renderer::RunFrameBuild::StagedRecordings");
+            org::UpdateExecutionContext frame{};
+            frame.resolverCaptureContext = job.captureContext;
+            frame.hostData = job.stagedFrame.get();
+            frame.ownedHostData = job.stagedFrame;
+            frame.deltaTime = job.stagedDeltaTime;
+            for (auto& entry : job.graphs) {
+                if (!entry.graph || !entry.graph->Built()) continue;
+                job.staged.push_back({ entry.hostEpoch, m_frameHost->RecordStagedCopies(*entry.graph, frame) });
+            }
+        }
     }
     if (auto& writes = br::settings_detail::t_writesUnderSnapshot; !writes.empty()) {
         std::sort(writes.begin(), writes.end());
@@ -594,6 +660,7 @@ void Renderer::FinishFrameBuild(std::shared_ptr<br::render::FrameBuildJob> job) 
     BT_ZONE_SCOPE("Renderer::FinishFrameBuild");
     const auto begin = std::chrono::steady_clock::now();
     auto& frameBuild = *job->build;
+    if (job->resolution && m_resolutionStats.resolutionBuildsInFlight) --m_resolutionStats.resolutionBuildsInFlight;
     // Read only while the build ran; it holds the last frame's published state.
     frameBuild.inputs.lastUpdate.reset();
     if (!job->settingsWritten.empty()) {
@@ -798,6 +865,18 @@ void Renderer::FinishFrameBuild(std::shared_ptr<br::render::FrameBuildJob> job) 
         job->serial, DescribeHostEpochs(attachedHosts), job->buildMs, job->onRenderThread ? "on the render thread" : "on the build thread", job->pipelineWaitMs,
         job->pipelinesDeclared, latencyMs, stats.lastFrames, job->prepareMs, stats.lastAttachMs, job->graphsPlacedAtBuild, job->graphs.size(),
         job->placementMs);
+    // Staged recordings (M6 step 6): per epoch, the copies recorded on the build's thread, and why the rest were not.
+    if (!job->staged.empty()) {
+        std::string staged;
+        for (const auto& entry : job->staged) {
+            const auto& result = entry.result;
+            staged += fmt::format("{}{}: {} of {} in {:.2f} ms{}", staged.empty() ? "" : "; ", entry.hostEpoch, result.recorded, result.copies,
+                result.milliseconds, result.why.empty() ? std::string() : " (" + result.why + ")");
+        }
+        spdlog::info("Renderer: frame graph build {} staged recordings by host epoch: {}", job->serial, staged);
+    } else if (!job->stagedFrame && !m_useGraphInstance) {
+        spdlog::info("Renderer: frame graph build {} recorded nothing ahead (no frame stands in for its first ones)", job->serial);
+    }
     // What crosses the attached graphs, by identity (deferred for a graph built in place: it has no schedule yet).
     if (!m_frameEpochCheckDeferred && !m_useGraphInstance) CheckFrameInterfaceAcrossGraphs(job->serial);
 }
@@ -815,12 +894,29 @@ static std::shared_ptr<const UpdateContext> MakeBuildUpdateContextFrom(const Upd
     if (family->views.size() != liveViews) return nullptr;
     for (auto& view : family->views) {
         const auto* live = views.Get(view.id);
-        if (!live || live->gpu.linearDepthMap != view.linearDepthMap) return nullptr;
+        if (!live) return nullptr;
+        // The primary view's depth maps are the build's (below): an attach since the last frame (a resize's, M5 step 5) changed the
+        // live ones, but the build does not depend on them.
+        const bool primaryDepthFromBuild = view.id == in.primaryViewID && in.depth.linearDepthMap;
+        if (!primaryDepthFromBuild && live->gpu.linearDepthMap != view.linearDepthMap) return nullptr;
         if (view.id == in.primaryViewID && in.frameInterface.visibilityBuffer) {
             view.visibilityBuffer = in.frameInterface.visibilityBuffer;
             view.deepVisibilityHeadPointers = in.frameInterface.visibilityHeadPointers;
         } else if (live->gpu.visibilityBuffer != view.visibilityBuffer) {
             return nullptr;
+        }
+        // A build for a new render size: the primary view gets its depth maps and sizes at the attach (M5 step 5), and a new
+        // linear depth map starts with no history.
+        if (primaryDepthFromBuild && view.linearDepthMap != in.depth.linearDepthMap) {
+            view.linearDepthMap = in.depth.linearDepthMap;
+            view.depthHistory = {};
+            if (in.camera) {
+                view.cameraInfo.numDepthMips = in.camera->info.numDepthMips;
+                view.cameraInfo.depthResX = in.camera->info.depthResX;
+                view.cameraInfo.depthResY = in.camera->info.depthResY;
+                view.cameraInfo.lodResY = in.camera->info.lodResY;
+                view.cameraInfo.uvScaleToNextPowerOfTwo = in.camera->info.uvScaleToNextPowerOfTwo;
+            }
         }
     }
     auto update = std::make_shared<UpdateContext>(last);
@@ -842,8 +938,22 @@ void Renderer::MakeFrameBuild(br::render::FrameBuild& build, flecs::entity prima
     using namespace br::pipeline;
 
     in.primaryViewID = primaryCamera.get<Components::RenderViewRef>().viewID;
-    in.depth = primaryCamera.get<Components::DepthMap>();
+    // The objects of the build's sizes (M5 step 5): the newest, which the attached graphs have unless a resolution request made new
+    // ones since. Their depth maps, until the view takes them at this build's attach (SwitchResolutionObjects).
+    in.resolution = m_buildResolutionObjects;
+    in.depth = in.resolution && in.resolution->primaryDepth ? *in.resolution->primaryDepth : primaryCamera.get<Components::DepthMap>();
     if (const auto* camera = primaryCamera.try_get<Components::Camera>()) in.camera = *camera;
+    if (in.camera && in.resolution && in.resolution->primaryDepth) {
+        // The sizes the camera has from the attach on (as BuildRendererCamera makes them).
+        auto& info = in.camera->info;
+        const auto size = in.resolution->render;
+        info.numDepthMips = NumMips(size.x, size.y);
+        info.depthResX = size.x;
+        info.depthResY = size.y;
+        info.lodResY = in.resolution->primaryLodHeight ? in.resolution->primaryLodHeight : size.y;
+        info.uvScaleToNextPowerOfTwo = { static_cast<float>(size.x) / static_cast<float>(in.depth.linearDepthMap->GetInternalWidth()),
+            static_cast<float>(size.y) / static_cast<float>(in.depth.linearDepthMap->GetInternalHeight()) };
+    }
     in.cameraBuffer = m_pViewManager->GetCameraBuffer();
     in.cullingCameraBuffer = m_pViewManager->GetCullingCameraBuffer();
     // The renderer's cross-epoch objects, made before the views the build's passes declare from (in.lastUpdate).
@@ -852,6 +962,11 @@ void Renderer::MakeFrameBuild(br::render::FrameBuild& build, flecs::entity prima
     in.lastUpdate = MakeBuildUpdateContext(in);
 
     if (m_pipelineRecipe.Contains<BrdfIntegrationTechnique>()) in.brdfLut = EnsureBrdfLut();
+    // Post and Overlay share these (M6 step 3): the LPM constants Post's exposure writes, and the bloom texture of the build's
+    // output size. Made here, on the render thread, before any build of theirs.
+    if (!m_lpmConstants) m_lpmConstants = TonemappingPass::CreateLpmConstants();
+    in.lpmConstants = m_lpmConstants;
+    if (in.resolution && !in.resolution->bloom) in.resolution->bloom = CreateBloomTexture(in.resolution->output);
 
     if (m_pipelineRecipe.Contains<EnvironmentTechnique>()) {
         const auto& bindings = m_pipelineRecipe.Bindings();
@@ -900,8 +1015,9 @@ void Renderer::MakeFrameBuild(br::render::FrameBuild& build, flecs::entity prima
     in.lensFlareRayQuery = m_pipelineRecipe.Contains<PathTracingTechnique>() && m_clodRayTracingSystem
         && m_clodRayTracingSystem->IsInitialized() && rayTracingSupported;
 
-    in.upscalingMode = UpscalingManager::GetInstance().GetCurrentUpscalingMode();
+    // The latest upscaler configuration (M5 step 3): the graphs built now declare its mode and evaluate with it.
     if (m_pipelineRecipe.Contains<UpscalingTechnique>()) in.upscaling = br::render::UpscalingGenerationService::CaptureCurrent();
+    in.upscalingMode = in.upscaling ? in.upscaling->Mode() : UpscalingManager::GetInstance().GetCurrentUpscalingMode();
 
     if (m_pipelineRecipe.Contains<DebugOutputTechnique>()) {
         if (!m_debugSceneSnapshots) {
@@ -1027,6 +1143,14 @@ void Renderer::PublishResourceEntityWrites(br::render::FrameBuild& build) {
 void Renderer::PublishFrameBuild(br::render::FrameBuild& build) {
     BT_ZONE_SCOPE("Renderer::PublishFrameBuild");
     PublishResourceEntityWrites(build);
+    // The objects of the build's sizes become current (M5 step 5): the swapchain, the presentation surfaces, the primary view's
+    // depth maps and the resolution settings, when they are not the attached graphs' already.
+    SwitchResolutionObjects(build.inputs.resolution);
+    // Per-frame values (the render context's resolutions, the light grid shape, jitter) follow the attached graphs' sizes.
+    m_attachedResolution = FrameResolution{ build.inputs.renderResolution, build.inputs.outputResolution };
+    // The upscaler configuration the build's graphs evaluate with is current from their attach (M5 step 3): jitter and the status
+    // follow it. Waits for its preparation if that is still running (the build usually outlasts it).
+    if (build.inputs.upscaling) UpscalingManager::GetInstance().MakeCurrent(build.inputs.upscaling->Configuration());
     // Each epoch's outputs, from the epoch that owns them (FrameBuildOutputs). An epoch the build did not declare keeps what
     // it published before.
     if (build.Declares(br::render::kVisibilityEpoch)) {
@@ -1310,6 +1434,36 @@ void Renderer::DeclareFrameProviders(org::RenderGraph& graph) {
     BT_ZONE_SCOPE("Renderer::DeclareFrameProviders");
     auto* frameBuild = br::render::CurrentFrameBuild();
     if (!frameBuild) throw std::logic_error("DeclareFrameProviders: no frame build in progress");
+    // Testing a failed build (M5 step 8): BASICRENDERER_FAIL_FRAME_BUILD="2,5" fails the 2nd and 5th frame builds of the process in
+    // their Shading graph (or their first graph without one), as a declaration error would.
+    {
+        static const std::vector<uint64_t> failing = [] {
+            std::vector<uint64_t> builds;
+            if (const char* value = std::getenv("BASICRENDERER_FAIL_FRAME_BUILD"))
+                for (const char* p = value; *p;) {
+                    char* end = nullptr;
+                    const auto n = std::strtoull(p, &end, 10);
+                    if (end == p) break;
+                    builds.push_back(n);
+                    p = *end ? end + 1 : end;
+                }
+            return builds;
+        }();
+        if (!failing.empty()) {
+            // A build is its FrameBuild with its settings snapshot (an address alone may come back for a later build).
+            static std::pair<const void*, const void*> last{};
+            static uint64_t count = 0;
+            if (const std::pair<const void*, const void*> current{frameBuild, frameBuild->inputs.settings.get()}; current != last) {
+                last = current;
+                ++count;
+            }
+            const auto& hosts = frameBuild->hostEpochs;
+            const uint32_t shading = br::render::HostEpochOf(br::render::kShadingEpoch);
+            const uint32_t target = std::find(hosts.begin(), hosts.end(), shading) != hosts.end() ? shading : (hosts.empty() ? 0u : hosts.front());
+            if (std::find(failing.begin(), failing.end(), count) != failing.end() && graph.PassEpochFilter() == target)
+                throw std::runtime_error("BASICRENDERER_FAIL_FRAME_BUILD: frame build " + std::to_string(count) + " fails here (test)");
+        }
+    }
     // The managers' copies MakeFrameBuild took (the graph keeps pointers to them: the providers' extension holds them).
     for (const auto& provider : frameBuild->inputs.providers) graph.RegisterProvider(provider.get());
     // The renderer's cross-epoch objects, the same in every epoch's graph (FrameInterface), before any extension declares.
@@ -1325,6 +1479,21 @@ void Renderer::DeclareFrameProviders(org::RenderGraph& graph) {
     }
     if (!br::runtime::renderer_settings::CLodVirtualShadowFrameTelemetryPath().empty() && frameInterface.vsmReceiverHistory)
         graph.RegisterResource(Builtin::Shadows::CLodReceiverHistory, frameInterface.vsmReceiverHistory);
+    // The directional virtual shadow map, which Visibility's shadow variant writes and Shading's receivers (deferred shading, the
+    // alpha variant) read: the renderer's objects, so a graph of another epoch binds what Visibility's graph writes even when it
+    // is rebuilt alone. Visibility's own graph (and the in-place graph, which has the variant) takes them from the variant.
+    const uint32_t hostEpoch = graph.PassEpochFilter();
+    if (in.directionalVsm && hostEpoch != br::render::kNoFrameEpoch && hostEpoch != br::render::HostEpochOf(br::render::kVisibilityEpoch)) {
+        const auto& vsm = *in.directionalVsm;
+        const std::pair<org::ResourceIdentifier, const std::shared_ptr<org::Resource>*> receivers[] = {
+            {Builtin::Shadows::CLodPageTable, &vsm.pageTable}, {Builtin::Shadows::CLodPhysicalPages, &vsm.physicalPages},
+            {Builtin::Shadows::CLodClipmapInfo, &vsm.clipmapInfo}, {Builtin::Shadows::CLodCompactMainCamera, &vsm.mainCamera},
+            {Builtin::Shadows::CLodCompactShadowCameras, &vsm.shadowCameras},
+            {Builtin::Shadows::CLodDirectionalPageViewInfo, &vsm.pageViewInfo}, {Builtin::Shadows::CLodPageMetadata, &vsm.pageMetadata},
+            {Builtin::Shadows::CLodStats, &vsm.stats}};
+        for (const auto& [id, resource] : receivers)
+            if (*resource) graph.RegisterResource(id, *resource);
+    }
 }
 
 namespace br::render {
@@ -1352,9 +1521,11 @@ static uint32_t FrameEpochOfTechnique(br::pipeline::TechniqueId id) {
     case ClusterLodAlpha: case Gtao: case ClusteredLighting: case PrimaryLighting: case Reflections: case PathTracing:
     case StochasticDirectLighting:
         return br::render::kShadingEpoch;
-    case Exposure: case Upscaling: case Bloom: case Tonemapping: case DebugOutput: case DepthHistory:
+    case Exposure: case Upscaling: case Bloom: case DepthHistory:
         return br::render::kPostEpoch;
-    case DebugUi: case Present:
+    // Tonemapping and the debug resolve write PresentationColor, the frame slot's surface, which another object binds each frame. In
+    // Overlay, which records every frame anyway, Post's recording does not depend on it (M6 step 3, decision D3).
+    case Tonemapping: case DebugOutput: case DebugUi: case Present:
         return br::render::kOverlayEpoch;
     }
     return br::render::kNoFrameEpoch;
@@ -1368,9 +1539,9 @@ static bool IsSharedRegistrationTechnique(br::pipeline::TechniqueId id) {
 }
 
 // The host epochs a recipe replacement changes (M4 step 5): the epochs of the techniques it adds, removes or configures again
-// (an entry whose technique object differs), and of the extensions whose ids or epochs differ. A technique of several epochs'
-// passes (DebugOutput) or a shared registration (made in every graph) names every epoch it is in; path tracing also changes
-// whether the lens flares trace (Post).
+// (an entry whose technique object differs), and of the extensions whose ids or epochs differ. A shared registration (made in
+// every graph) names every epoch; path tracing also changes whether the lens flares trace (Post), and bloom whether
+// tonemapping (Overlay) reads its texture.
 uint32_t Renderer::RecipeChangeHostEpochs(const br::pipeline::PipelineRecipe& before, const br::pipeline::PipelineRecipe& after) {
     uint32_t mask = 0;
     const auto touch = [&](br::pipeline::TechniqueId id) {
@@ -1383,8 +1554,8 @@ uint32_t Renderer::RecipeChangeHostEpochs(const br::pipeline::PipelineRecipe& be
         const auto epoch = FrameEpochOfTechnique(id);
         if (br::render::IsFrameEpoch(epoch)) mask |= br::render::HostEpochMaskOf({ epoch });
         else mask = br::render::FrameRevisions::kAllEpochs;
-        if (id == DebugOutput) mask |= br::render::HostEpochMaskOf({ br::render::kPostEpoch, br::render::kOverlayEpoch });
         if (id == PathTracing) mask |= br::render::HostEpochMaskOf({ br::render::kPostEpoch });
+        if (id == Bloom) mask |= br::render::HostEpochMaskOf({ br::render::kOverlayEpoch });
     };
     const auto find = [](const br::pipeline::PipelineRecipe& recipe, br::pipeline::TechniqueId id) -> const br::pipeline::TechniqueEntry* {
         for (const auto& entry : recipe.Techniques()) if (entry.id == id) return &entry;
@@ -1444,7 +1615,7 @@ void Renderer::DeclareVisibilityPasses(const br::render::FramePassDeclaration& d
             depth.projectedDepthMap);
         graph.RegisterResource(Builtin::Backbuffer, m_dynamicBackbuffer);
         graph.SetSwapchainResource(m_dynamicBackbuffer);
-        graph.RegisterResource(Builtin::PresentationColor, m_dynamicPresentationColor);
+        graph.RegisterResource(Builtin::PresentationColor, in.resolution ? in.resolution->dynamicPresentationColor : m_dynamicPresentationColor);
         graph.RegisterResource(Builtin::PerFrameBuffer, ::ResourceManager::GetInstance().GetPerFrameBuffer());
         break;
     case BrdfIntegration:
@@ -1592,6 +1763,8 @@ void Renderer::DeclarePostPasses(const br::render::FramePassDeclaration& d, br::
         histogram->SetName("Luminance Histogram Buffer");
         org::memory::SetResourceUsageHint(*histogram, "Post-Processing resources");
         graph.RegisterResource(Builtin::PostProcessing::LuminanceHistogram, histogram);
+        // The luminance average writes the tonemapping curve into the constants Overlay's tonemapping reads.
+        if (in.lpmConstants) graph.RegisterResource(org::ResourceIdentifier{ "FFX::LPMConstants" }, in.lpmConstants);
 		auto& histogramBuilder = graph.BuildPass<LuminanceHistogramPass>("luminanceHistogramPass");
 #if BASICRENDERER_HAS_INTEROP_VALIDATION
 		br::validation::SARPInteropValidation::ApplyPassPolicy(
@@ -1623,21 +1796,10 @@ void Renderer::DeclarePostPasses(const br::render::FramePassDeclaration& d, br::
         }
         break;
     case Bloom:
-		BuildBloomPipeline(&graph);
+        // The output size's texture, which Overlay's tonemapping reads.
+		BuildBloomPipeline(&graph, in.resolution ? in.resolution->bloom : nullptr);
         break;
-    case Tonemapping:
-        graph.BuildPass<TonemappingPass>(
-            "TonemappingPass",
-            recipe.Contains<br::pipeline::BloomTechnique>());
-        graph.SetPassTechnique("TonemappingPass", "Post Process::Tonemapping");
-        break;
-    case DebugOutput:
-        // The resolve is Post's; the skeleton view (which replaces it) and the bounding spheres are Overlay's.
-        if (!DebugSkeletonsShown()) {
-            graph.BuildPass<DebugResolvePass>("DebugResolvePass");
-            graph.SetPassTechnique("DebugResolvePass", "Debug::Visualization");
-        }
-        break;
+    // Tonemapping and the debug resolve are Overlay's (DeclareOverlayPasses).
     case DepthHistory:
         BuildLinearDepthHistoryCopyPass(&graph, &m_depthHistory);
         break;
@@ -1650,8 +1812,24 @@ void Renderer::DeclareOverlayPasses(const br::render::FramePassDeclaration& d, b
     BT_ZONE_SCOPE("Renderer::DeclareOverlayPasses");
     auto& graph = d.graph;
     const auto& in = d.in;
+    const auto& recipe = d.recipe;
     using enum br::pipeline::TechniqueId;
     switch (id) {
+    case Tonemapping: {
+        // In Overlay since M6 step 3 (D3): it writes PresentationColor. It reads Post's upscaled colour, the LPM constants Post's
+        // exposure wrote, and Post's bloom texture: the same objects in both graphs (the core provider's, FrameBuildInputs's,
+        // ResolutionObjects's).
+        const bool bloom = recipe.Contains<br::pipeline::BloomTechnique>();
+        if (in.lpmConstants) graph.RegisterResource(org::ResourceIdentifier{ "FFX::LPMConstants" }, in.lpmConstants);
+        if (bloom) {
+            if (!in.resolution || !in.resolution->bloom)
+                throw std::logic_error("DeclareOverlayPasses: tonemapping reads bloom, but the build has no bloom texture of its output size");
+            graph.RegisterResource(Builtin::PostProcessing::BloomTexture, in.resolution->bloom);
+        }
+        graph.BuildPass<TonemappingPass>("TonemappingPass", bloom, in.lpmConstants);
+        graph.SetPassTechnique("TonemappingPass", "Post Process::Tonemapping");
+        break;
+    }
     case DebugUi:
         graph.BuildPass<MenuRenderPass>("MenuRenderPass");
         graph.SetPassTechnique("MenuRenderPass", "Debug::UI");
@@ -1662,6 +1840,12 @@ void Renderer::DeclareOverlayPasses(const br::render::FramePassDeclaration& d, b
         graph.SetPresentPass("PresentationReadyPass");
         break;
     case DebugOutput:
+        // The debug resolve (in Overlay since M6 step 3, as tonemapping), or the skeleton view that replaces it, then the bounding
+        // spheres.
+        if (!DebugSkeletonsShown()) {
+            graph.BuildPass<DebugResolvePass>("DebugResolvePass");
+            graph.SetPassTechnique("DebugResolvePass", "Debug::Visualization");
+        }
         if (DebugSkeletonsShown()) {
             graph.BuildPass<DebugSkeletonPass>("DebugSkeletonPass", in.debugSnapshots);
             graph.SetPassTechnique("DebugSkeletonPass", "Debug::Visualization");
@@ -1759,9 +1943,6 @@ void Renderer::DeclareFramePasses(org::RenderGraph& graph) {
             default:
                 throw std::logic_error("DeclareFramePasses: technique " + std::to_string(static_cast<uint32_t>(id)) + " has no frame epoch");
             }
-            // DebugOutput's overlays.
-            if (id == br::pipeline::TechniqueId::DebugOutput)
-                declareIn(br::render::kOverlayEpoch, [&] { DeclareOverlayPasses(declaration, id); });
         });
 
     {
@@ -1837,6 +2018,14 @@ void Renderer::LoadPipeline(HWND hwnd, UINT x_res, UINT y_res) {
 	auto device = DeviceManager::GetInstance().GetDevice();
 
     auto result = device.CreateSwapchain(hwnd, x_res, y_res, rhi::Format::R8G8B8A8_UNorm, m_numFramesInFlight, m_allowTearing, m_swapChain);
+    // The size the swapchain got, which a Vulkan surface decides (its extent is the window's): the output resolution, so the first
+    // present is no mode change (M5 step 8, decision D3).
+    if (uint32_t width = 0, height = 0; m_swapChain && m_swapChain->Extent(width, height) && width && height && (width != x_res || height != y_res)) {
+        spdlog::info("Renderer: the swapchain is {}x{}, not the requested {}x{}; that is the output resolution", width, height, x_res, y_res);
+        x_res = width;
+        y_res = height;
+        SettingsManager::GetInstance().getSettingSetter<DirectX::XMUINT2>("outputResolution")({ x_res, y_res });
+    }
 
     UpscalingManager::GetInstance().InitializeAdapter();
 
@@ -1990,6 +2179,8 @@ void Renderer::MakeFrameExtensions(br::render::FrameBuild& build) {
                 // The atlas is the renderer's, shared by every graph that binds it (R1: the largest VRAM item).
                 CLodShadowVariant::EnsureDirectionalVsmAtlas(persistent);
                 directionalVsm = std::make_shared<const ProducerPersistentState::DirectionalVsmResources>(persistent.directionalVsm);
+                // The other epochs' graphs register the same objects for their receivers (DeclareFrameProviders).
+                in.directionalVsm = directionalVsm;
                 break;
             case br::pipeline::TechniqueId::StochasticDirectLighting:
                 if (in.stochasticLightingActive) {

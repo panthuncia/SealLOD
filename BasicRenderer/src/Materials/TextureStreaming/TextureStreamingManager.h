@@ -83,6 +83,12 @@ public:
 	void AcknowledgePublishedImageTable(
 		const std::shared_ptr<const br::render::PublishedRendererState>& published);
 	std::shared_ptr<org::Resource> ResolvePublishedImageTableResourceForDiagnostics() const;
+	// The descriptor index of the image table `published` selects (its fallback without one). The frame writes it into the
+	// per-frame buffer (PerFrameCB::textureImageTableDescriptorIndex), which is where shaders read the table: its resolver is
+	// late bound (PublishedStateResourceResolver::MakeLateBound), so a publication does not change the graph's bindings and
+	// kept recordings stay current (M6 step 5). BASICRENDERER_TEXTURE_TABLE_LATE_BOUND=0 binds it as before.
+	uint32_t PublishedImageTableDescriptorIndex(
+		const std::shared_ptr<const br::render::PublishedRendererState>& published) const;
 	std::shared_ptr<org::Resource> PublishedImageTableReadbackAnchorForDiagnostics() const;
 	bool RequestExternalMaterialTextureReadback(
 		const std::shared_ptr<org::PixelBuffer>& image,

@@ -936,9 +936,9 @@ inline void BuildPrimaryPass(org::RenderGraph* graph, Environment* currentEnviro
     // final opaque-depth classification, avoiding a second full-screen pass.
 }
 
-inline void BuildBloomPipeline(org::RenderGraph* graph) {
-	auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("outputResolution")();
-
+// The bloom mip chain at the output size. Post's bloom passes write it and Overlay's tonemapping reads it, so every build of one
+// output size takes the same object (ResolutionObjects::bloom).
+inline std::shared_ptr<org::PixelBuffer> CreateBloomTexture(DirectX::XMUINT2 resolution) {
     org::TextureDescription bloomDesc;
     bloomDesc.arraySize = 1;
     bloomDesc.channels = 4;
@@ -954,6 +954,13 @@ inline void BuildBloomPipeline(org::RenderGraph* graph) {
     auto bloomTexture = org::PixelBuffer::CreateSharedUnmaterialized(bloomDesc);
     bloomTexture->SetName("Bloom Texture");
     org::memory::SetResourceUsageHint(*bloomTexture, "Post-Processing resources");
+    return bloomTexture;
+}
+
+// bloomTexture: the build's (ResolutionObjects::bloom), or null for one of the graph's own.
+inline void BuildBloomPipeline(org::RenderGraph* graph, std::shared_ptr<org::PixelBuffer> bloomTexture = nullptr) {
+	auto resolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("outputResolution")();
+    if (!bloomTexture) bloomTexture = CreateBloomTexture(resolution);
     graph->RegisterResource(Builtin::PostProcessing::BloomTexture, bloomTexture);
 
     // Calculate max mips

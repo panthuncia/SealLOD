@@ -20,6 +20,18 @@
 #include "../shaders/PerPassRootConstants/clodClearUintBufferRootConstants.h"
 #include "../shaders/PerPassRootConstants/clodCompactionRootConstants.h"
 
+namespace {
+// The frame's raster bucket count; `enabled` is false without buckets or while the pass is gated off (software raster in
+// compute only).
+uint32_t TakeRasterBucketCount(const org::UpdateExecutionContext& execution, bool computeSoftwareRasterOnly, bool& enabled) {
+    const auto* context = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr;
+    const uint32_t numBuckets = context ? context->preparedRasterBucketCount : 0u;
+    enabled = numBuckets != 0u && (!computeSoftwareRasterOnly || CLodSoftwareRasterUsesCompute(
+        SettingsManager::GetInstance().getSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)()));
+    return numBuckets;
+}
+}
+
 RasterBucketCompactAndArgsPass::RasterBucketCompactAndArgsPass(
     std::shared_ptr<org::Buffer> visibleClustersBuffer,
     std::shared_ptr<org::Buffer> visibleClusterTransformIndicesBuffer,
@@ -67,6 +79,12 @@ RasterBucketCompactAndArgsPass::RasterBucketCompactAndArgsPass(
 }
 
 RasterBucketCompactAndArgsBindings RasterBucketCompactAndArgsPass::Declare(org::PassBuilder& builder) {
+    // Sized for the build's bucket count (br::render::BuildUpdateContext) as the first Update would size them: the graph then
+    // places them at that size, so a recording of the new graph made ahead (staged, M6 step 9) still binds them at its first
+    // run.
+    if (const auto* seed = br::render::BuildUpdateContext(); seed && (!m_runWhenComputeSWRasterEnabledOnly ||
+        CLodSoftwareRasterUsesCompute(SettingsManager::GetInstance().getSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)())))
+        SizeBuffers(seed->preparedRasterBucketCount);
     RasterBucketCompactAndArgsBindings bindings{
         br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/ClusterLOD/clodUtil.hlsl",
             L"ClearUintStructuredBufferCSMain", "CLod_RasterBucketsClearUintPSO")),
@@ -114,16 +132,15 @@ RasterBucketCompactAndArgsBindings RasterBucketCompactAndArgsPass::Declare(org::
     bindings.hasReadBaseCount = static_cast<bool>(m_readBaseCounterBuffer);
     bindings.hasReyesOwnership = static_cast<bool>(m_reyesOwnershipBitsetBuffer);
     bindings.hasTelemetry = static_cast<bool>(m_telemetryBuffer);
+    m_pipelines.Clear();
+    m_pipelines.Add(bindings.clearPipeline);
+    m_pipelines.Add(bindings.compactPipeline);
     return bindings;
 }
 
 
 RasterBucketCompactAndArgsFrame RasterBucketCompactAndArgsPass::Prepare(
     const RasterBucketCompactAndArgsBindings& bindings, const org::PassPrepareContext& preparation) const {
-    const auto* context = preparation.preparationData->Get<UpdateContext>();
-    const uint32_t numBuckets = context->preparedRasterBucketCount;
-    const bool enabled = numBuckets != 0u && (!m_runWhenComputeSWRasterEnabledOnly ||
-        CLodSoftwareRasterUsesCompute(SettingsManager::GetInstance().getSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)()));
     // The UAV and indirect-argument reference must resolve from the same
     // declaration snapshot. The wrapper may rotate to a newer allocation after
     // this frame has been accepted; consulting it here would report a
@@ -144,7 +161,18 @@ RasterBucketCompactAndArgsFrame RasterBucketCompactAndArgsPass::Prepare(
         BT_PLOT("CLod.RasterArgs.PrimaryWriterResourceGeneration", static_cast<int64_t>(indirectArgsHandle.generation));
         BT_PLOT("CLod.RasterArgs.PrimaryWriterDescriptorIndex", indirectArgsDescriptor);
     }
-    return {numBuckets, enabled, IsCLodWorkGraphTelemetryEnabled()};
+    return m_taken;
+}
+
+void RasterBucketCompactAndArgsPass::TakeFrameValues(const org::UpdateExecutionContext& execution) {
+    bool enabled = false;
+    const uint32_t numBuckets = TakeRasterBucketCount(execution, m_runWhenComputeSWRasterEnabledOnly, enabled);
+    m_taken = {numBuckets, enabled, IsCLodWorkGraphTelemetryEnabled()};
+}
+
+void RasterBucketCompactAndArgsPass::Revision(std::vector<uint64_t>& out) const {
+    m_pipelines.Append(out);
+    out.push_back(m_taken.numBuckets | (uint64_t{m_taken.enabled} << 32) | (uint64_t{m_taken.telemetryEnabled} << 33));
 }
 
 void RasterBucketCompactAndArgsPass::Record(const RasterBucketCompactAndArgsBindings& bindings,
@@ -186,6 +214,16 @@ void RasterBucketCompactAndArgsPass::Record(const RasterBucketCompactAndArgsBind
         bindings.indirectCommand);
 }
 
+// A resize swaps the buffers' backings. The declaration is unchanged, so the graph rebinds them without a rebuild.
+void RasterBucketCompactAndArgsPass::SizeBuffers(uint32_t numBuckets) {
+    if (m_writeCursorBuffer->GetSize() < static_cast<size_t>(numBuckets) * sizeof(uint32_t)) {
+        m_writeCursorBuffer->ResizeStructured(numBuckets);
+    }
+    if (m_indirectArgsBuffer->GetSize() < static_cast<size_t>(numBuckets) * sizeof(RasterizeClustersCommand)) {
+        m_indirectArgsBuffer->ResizeStructured(numBuckets);
+    }
+}
+
 void RasterBucketCompactAndArgsPass::Update(const org::UpdateExecutionContext& executionContext) {
     const bool nextEnabled = !m_runWhenComputeSWRasterEnabledOnly ||
         CLodSoftwareRasterUsesCompute(SettingsManager::GetInstance().getSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)());
@@ -199,13 +237,7 @@ void RasterBucketCompactAndArgsPass::Update(const org::UpdateExecutionContext& e
     const uint32_t nextBucketCount = context.preparedRasterBucketCount;
     m_numBuckets = nextBucketCount;
 
-    // A resize swaps the buffers' backings. The declaration is unchanged, so the graph rebinds them without a rebuild.
-    if (m_writeCursorBuffer->GetSize() < static_cast<size_t>(m_numBuckets) * sizeof(uint32_t)) {
-        m_writeCursorBuffer->ResizeStructured(m_numBuckets);
-    }
-    if (m_indirectArgsBuffer->GetSize() < static_cast<size_t>(m_numBuckets) * sizeof(RasterizeClustersCommand)) {
-        m_indirectArgsBuffer->ResizeStructured(m_numBuckets);
-    }
+    SizeBuffers(m_numBuckets);
     BT_PLOT("CLod.RasterArgs.UpdateBucketCount", static_cast<int64_t>(m_numBuckets));
     BT_PLOT("CLod.RasterArgs.UpdateBackingBytes", static_cast<int64_t>(m_indirectArgsBuffer->GetSize()));
 

@@ -10,6 +10,8 @@
 #include "BasicRenderer/Scene/SceneIngestionServices.h"
 #include "BasicRenderer/Scene/Scene.h"
 
+namespace Components { struct DepthMap; }
+
 namespace br::render {
 class SceneSourceStateStore;
 
@@ -33,7 +35,9 @@ public:
     bool HasPrimaryCamera() const;
     flecs::entity GetSceneRoot() const;
     flecs::entity GetPrimaryCameraEntity() const;
-    void ResyncPrimaryCameraDepth(const SceneIngestionServices& services,
+    // Gives the primary camera's view depth maps of a new render size, made ahead (M5 step 5: at the attach of the graphs built for
+    // it). The view stays the same one (its id and camera slot); only its depth maps and its camera's sizes change.
+    void ReplacePrimaryCameraDepth(const SceneIngestionServices& services, const Components::DepthMap& depthMap,
         uint32_t renderWidth, uint32_t renderHeight, uint32_t primaryLodHeight);
 
 private:

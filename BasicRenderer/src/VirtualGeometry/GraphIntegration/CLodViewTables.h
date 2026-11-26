@@ -29,6 +29,9 @@ public:
         const org::DeclaredTableLayout<CLodViewDepthSRVIndex>& layout) const;
     org::DeclaredTableLayout<CLodViewDepthSRVIndex> Layout() const { return m_layout; }
     std::span<const CLodViewDepthSRVIndex> Rows() const { return m_rows; }
+    // What Publish's rows depend on beyond the frame's bindings (kept recordings: a pass's Revision): which depth each
+    // camera reads and which cameras have no history yet.
+    void AppendRevision(std::vector<uint64_t>& out) const;
 private:
     struct Input {
         uint32_t camera = 0, slice = 0;
@@ -73,6 +76,8 @@ public:
         const CLodViewRasterDeclaration& declared) const;
     // Whether a current view can run against `declared`.
     bool Admits(const CLodViewRasterDeclaration& declared, uint32_t camera) const;
+    // What Publish's rows depend on beyond the frame's bindings (kept recordings: a pass's Revision).
+    void AppendRevision(std::vector<uint64_t>& out) const;
 private:
     struct Input {
         uint32_t camera = 0;

@@ -8,6 +8,7 @@
 #include "BasicRenderer/Runtime/Detail/SceneSourceStateStore.h"
 #include "BasicRenderer/Scene/Components.h"
 
+namespace Components { struct DepthMap; }
 class LightManager;
 class ObjectManager;
 class ViewManager;
@@ -37,6 +38,10 @@ public:
     void MaterializeCamera(flecs::entity entity, const Components::Camera& camera,
         bool primary, std::uint32_t width, std::uint32_t height,
         std::uint32_t lodHeight) const;
+    // The camera's view keeps its id and takes depthMap (of width x height) and the sizes that go with it; the camera's view and
+    // projection history stay. A camera with no view yet is materialized as MaterializeCamera does.
+    void ReplaceCameraDepth(flecs::entity entity, const Components::Camera& camera, bool primary,
+        const Components::DepthMap& depthMap, std::uint32_t width, std::uint32_t height, std::uint32_t lodHeight) const;
     void SelectCurrentCamera(flecs::entity entity) const;
     void MaterializeLight(flecs::entity entity, const Components::Light& light,
         const Components::FrustumPlanes* frustumPlanes,

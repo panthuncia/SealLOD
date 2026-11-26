@@ -10,6 +10,7 @@
 #include "BasicRenderer/Extensions/PipelineDescs.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 #include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Runtime/Settings/SettingsManager.h"
@@ -23,13 +24,33 @@ enum class StochasticDenoiseStage : uint8_t {
     Spatial, // Edge-stopped sparse filter of the history; remodulates into StochasticLighting::Diffuse and ::Specular.
 };
 
-struct StochasticDenoiseFrame {
+// One run's values, made by Update each run. Since M6 step 9c the passes are recorded ahead and kept: the shaders take the frame
+// number and parity from the per-frame buffer (stochasticLightingRootConstants.h), and the rest is the frame data and the revision.
+struct StochasticDenoiseRun {
     uint32_t width = 0u;
     uint32_t height = 0u;
     uint32_t frame = 0u;
     uint32_t flags = 0u;
     uint32_t parity = 0u;
     uint32_t downsample = 1u; // The noisy inputs' (docs/stochastic_lighting.md "Reduced resolution").
+    bool operator==(const StochasticDenoiseRun&) const = default;
+};
+
+// What the history validity depends on, and this run's values (under the mutex).
+struct StochasticDenoiseState {
+    std::mutex mutex;
+    uint64_t lastFrame = UINT64_MAX;
+    bool lastNormalize = false;
+    bool lastPaired = false;
+    bool lastMixture = false;
+    bool lastGradient = false;
+    StochasticDenoiseRun run{};
+};
+
+// What Record bakes: the run without its frame number and parity.
+struct StochasticDenoiseFrame {
+    StochasticDenoiseRun run{};
+    bool operator==(const StochasticDenoiseFrame&) const = default;
 };
 
 struct StochasticDenoiseBindings {
@@ -44,7 +65,7 @@ class StochasticDenoisePass
     : public org::TypedRenderGraphPass<StochasticDenoisePass, StochasticDenoiseFrame, StochasticDenoiseBindings> {
 public:
     StochasticDenoisePass(std::shared_ptr<StochasticLightingResources> resources, StochasticDenoiseStage stage)
-        : m_resources(std::move(resources)), m_stage(stage), m_state(std::make_shared<State>()) {
+        : m_resources(std::move(resources)), m_stage(stage), m_state(std::make_shared<StochasticDenoiseState>()) {
     }
 
     StochasticDenoiseBindings Declare(org::PassBuilder& builder) {
@@ -108,15 +129,41 @@ public:
             bindings.outputSpecular = builder.UnorderedAccess(Builtin::StochasticLighting::Specular).View();
         }
         builder.PreferQueue(org::QueueKind::Compute);
+        m_pipeline = bindings.pipeline;
         return bindings;
     }
 
-    StochasticDenoiseFrame Prepare(const StochasticDenoiseBindings&, const org::PassPrepareContext& preparation) const {
+    void Update(const org::UpdateExecutionContext& execution) override {
+        const auto* update = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr;
+        StochasticDenoiseRun frame{};
+        if (update) frame = MakeRun(*update);
+        std::scoped_lock lock(m_state->mutex);
+        m_state->run = frame;
+    }
+    // The run as Update made it (Revision is asked after Update), without what the shaders read from the per-frame buffer.
+    void Revision(std::vector<uint64_t>& out) const {
+        br::render::AppendPipelineRevision(out, m_pipeline);
+        const StochasticDenoiseFrame frame = MakeFrame();
+        br::render::AppendRevisionRows(out, &frame.run, 1u);
+    }
+
+    StochasticDenoiseFrame Prepare(const StochasticDenoiseBindings&, const org::PassPrepareContext&) const { return MakeFrame(); }
+
+private:
+    StochasticDenoiseFrame MakeFrame() const {
         StochasticDenoiseFrame frame{};
-        const auto* update = preparation.preparationData->Get<UpdateContext>();
-        if (!update) {
-            return frame;
+        {
+            std::scoped_lock lock(m_state->mutex);
+            frame.run = m_state->run;
         }
+        frame.run.frame = 0u;
+        frame.run.parity = 0u;
+        return frame;
+    }
+
+    StochasticDenoiseRun MakeRun(const UpdateContext& context) const {
+        const auto* update = &context;
+        StochasticDenoiseRun frame{};
         frame.width = update->renderResolution.x;
         frame.height = update->renderResolution.y;
         frame.frame = static_cast<uint32_t>(update->frameNumber);
@@ -155,14 +202,17 @@ public:
         return frame;
     }
 
-    static void Record(const StochasticDenoiseBindings& bindings, const StochasticDenoiseFrame& frame, org::PassRecordContext& recording) {
+public:
+    static void Record(const StochasticDenoiseBindings& bindings, const StochasticDenoiseFrame& data, org::PassRecordContext& recording) {
+        const StochasticDenoiseRun& frame = data.run;
         if (frame.width == 0u || frame.height == 0u) {
             return;
         }
-        const uint32_t current = frame.parity;
-        const uint32_t previous = frame.parity ^ 1u;
+        // Each pair's [0] in this frame's slot and [1] in last frame's (the shaders swap them on odd frames). The surface
+        // history's [1] goes in slot 22 (stochasticLightingRootConstants.h), and both stages bind every pair they read.
+        const uint32_t current = 0u;
+        const uint32_t previous = 1u;
         br::render::MiscConstants constants{};
-        constants[STOCHASTIC_FRAME] = frame.frame;
         constants[STOCHASTIC_FLAGS] = frame.flags;
         constants[STOCHASTIC_DOWNSAMPLE_FACTOR] = frame.downsample;
         constants[STOCHASTIC_DENOISE_HISTORY_DIFFUSE_UAV] = recording.Index(bindings.historyDiffuse[current]);
@@ -179,16 +229,21 @@ public:
             constants[STOCHASTIC_DENOISE_PREVIOUS_HISTORY_SPECULAR_UAV] = recording.Index(bindings.historySpecular[previous]);
             constants[STOCHASTIC_DENOISE_PREVIOUS_HISTORY_MOMENTS_UAV] = recording.Index(bindings.historyMoments[previous]);
             constants[STOCHASTIC_DENOISE_PREVIOUS_HISTORY_CHANGE_UAV] = recording.Index(bindings.historyChange[previous]);
-            constants[STOCHASTIC_PREVIOUS_SURFACE_HISTORY_UAV] = recording.Index(bindings.surfaceHistory[previous]);
+            constants[STOCHASTIC_DENOISE_SURFACE_HISTORY_UAV] = recording.Index(bindings.surfaceHistory[current]);
             constants[STOCHASTIC_DENOISE_SIGNATURE_SRV] = recording.Index(bindings.signature);
             constants[STOCHASTIC_DENOISE_MIXTURE_UAV] = recording.Index(bindings.mixtureHistory[current]);
             constants[STOCHASTIC_DENOISE_PREVIOUS_MIXTURE_UAV] = recording.Index(bindings.mixtureHistory[previous]);
+            constants[kSurfaceHistoryOddSlot] = recording.Index(bindings.surfaceHistory[previous]);
             if (bindings.gradient.layout) {
                 constants[STOCHASTIC_DENOISE_GRADIENT_UAV] = recording.Index(bindings.gradient);
             }
         }
         else {
             constants[STOCHASTIC_DENOISE_SURFACE_HISTORY_UAV] = recording.Index(bindings.surfaceHistory[current]);
+            constants[kSurfaceHistoryOddSlot] = recording.Index(bindings.surfaceHistory[previous]);
+            constants[STOCHASTIC_DENOISE_PREVIOUS_HISTORY_DIFFUSE_UAV] = recording.Index(bindings.historyDiffuse[previous]);
+            constants[STOCHASTIC_DENOISE_PREVIOUS_HISTORY_SPECULAR_UAV] = recording.Index(bindings.historySpecular[previous]);
+            constants[STOCHASTIC_DENOISE_PREVIOUS_HISTORY_CHANGE_UAV] = recording.Index(bindings.historyChange[previous]);
             constants[STOCHASTIC_DIFFUSE_UAV] = recording.Index(bindings.outputDiffuse);
             constants[STOCHASTIC_SPECULAR_UAV] = recording.Index(bindings.outputSpecular);
         }
@@ -199,17 +254,13 @@ public:
     }
 
 private:
-    struct State {
-        std::mutex mutex;
-        uint64_t lastFrame = UINT64_MAX;
-        bool lastNormalize = false;
-        bool lastPaired = false;
-        bool lastMixture = false;
-        bool lastGradient = false;
-    };
+    // The surface history's [1] (the shaders' STOCHASTIC_DENOISE_SURFACE_HISTORY_UAV pair, stochasticLightingRootConstants.h).
+    static constexpr uint32_t kSurfaceHistoryOddSlot = 22u;
+
     std::shared_ptr<StochasticLightingResources> m_resources;
     StochasticDenoiseStage m_stage = StochasticDenoiseStage::Temporal;
-    std::shared_ptr<State> m_state;
+    std::shared_ptr<StochasticDenoiseState> m_state;
+    br::PipelineState m_pipeline;
 };
 
 } // namespace br::render

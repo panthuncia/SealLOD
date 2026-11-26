@@ -679,10 +679,34 @@ void CLodShadowVariant::EnsureDirectionalVsmAtlas(ProducerPersistentState& persi
         org::memory::SetResourceUsageHint(*staticPhysicalPages, "Cluster LOD virtual shadow maps");
         atlas.physicalPages = std::move(physicalPages);
         atlas.staticPhysicalPages = std::move(staticPhysicalPages);
+        // The page metadata describes the physical pages: made again with them.
+        auto pageMetadata = CreateAliasedUnmaterializedStructuredBuffer(
+            physicalPageCount, sizeof(CLodVirtualShadowPhysicalPageMeta), true, false, false, false);
+        pageMetadata->SetName(MakeVariantResourceName(traits, "Virtual Shadow Page Metadata Buffer"));
+        org::memory::SetResourceUsageHint(*pageMetadata, "Cluster LOD virtual shadow maps");
+        atlas.pageMetadata = std::move(pageMetadata);
         atlas.backingResolution = backingResolution;
         atlas.physicalPageCount = physicalPageCount;
         ++atlas.generation;
     }
+    // What receivers in other epochs' graphs read (Shading's deferred shading, the alpha variant): the same objects in every
+    // graph, so a graph built without Visibility's binds what the running Visibility graph writes. Fixed sizes, made once.
+    const auto makeBuffer = [&](std::shared_ptr<org::Resource>& slot, uint32_t elements, uint32_t stride, const char* name) {
+        if (slot) return;
+        auto buffer = CreateAliasedUnmaterializedStructuredBuffer(elements, stride, true, false, false, false);
+        buffer->SetName(MakeVariantResourceName(traits, name));
+        org::memory::SetResourceUsageHint(*buffer, "Cluster LOD virtual shadow maps");
+        slot = std::move(buffer);
+    };
+    // Slice rows, then view rows (CLodVirtualShadowClipInfoRowCount).
+    makeBuffer(atlas.clipmapInfo, CLodVirtualShadowClipInfoRowCount, sizeof(CLodVirtualShadowClipmapInfo), "Virtual Shadow Clipmap Info Buffer");
+    makeBuffer(atlas.mainCamera, 1, sizeof(CLodVirtualShadowMainCameraInfo), "Virtual Shadow Compact Main Camera Buffer");
+    // One per slice; both slices of a local face hold that face's camera.
+    makeBuffer(atlas.shadowCameras, CLodVirtualShadowMaxSliceCount, sizeof(CLodVirtualShadowCompactShadowCameraInfo),
+        "Virtual Shadow Compact Shadow Camera Buffer");
+    makeBuffer(atlas.pageViewInfo, CLodVirtualShadowMaxDirectionalPageViewInfoEntryCount(), sizeof(float) * 4u,
+        "Virtual Shadow Directional Page View Info Buffer");
+    makeBuffer(atlas.stats, 1, sizeof(CLodVirtualShadowStats), "Virtual Shadow Stats Buffer");
     if (atlas.upgradeUploadSlots.size() != UpgradeUploadSlotCount()) {
         atlas.upgradeUploadSlots.clear();
         for (uint32_t slotIndex = 0u; slotIndex < UpgradeUploadSlotCount(); ++slotIndex) {
@@ -777,14 +801,21 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
     }
     PublishCLodResource(traits, extension.m_shadowStaticPhysicalPagesTexture);
 
-    extension.m_shadowPageMetadataBuffer = CreateAliasedUnmaterializedStructuredBuffer(
-        maxShadowPhysicalPageCount,
-        sizeof(CLodVirtualShadowPhysicalPageMeta),
-        true,
-        false,
-        false,
-        false);
-    extension.m_shadowPageMetadataBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Page Metadata Buffer"));
+    // The receiver-side buffers are the atlas's too (EnsureDirectionalVsmAtlas), or this graph's own without one.
+    const auto atlasBuffer = [&](const std::shared_ptr<org::Resource>& resource) {
+        return atlasMatches ? std::dynamic_pointer_cast<org::Buffer>(resource) : nullptr;
+    };
+    extension.m_shadowPageMetadataBuffer = atlas ? atlasBuffer(atlas->pageMetadata) : nullptr;
+    if (!extension.m_shadowPageMetadataBuffer) {
+        extension.m_shadowPageMetadataBuffer = CreateAliasedUnmaterializedStructuredBuffer(
+            maxShadowPhysicalPageCount,
+            sizeof(CLodVirtualShadowPhysicalPageMeta),
+            true,
+            false,
+            false,
+            false);
+        extension.m_shadowPageMetadataBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Page Metadata Buffer"));
+    }
     PublishCLodResource<CLodVirtualShadowPageMetadataTag>(traits, extension.m_shadowPageMetadataBuffer);
 
     extension.m_shadowInvalidationInputsBuffer = CreateAliasedUnmaterializedStructuredBuffer(
@@ -1028,14 +1059,17 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
     PublishCLodResource<CLodVirtualShadowDirtyHierarchyTag>(traits, extension.m_shadowDirtyPageHierarchyTexture);
 
     // Slice rows, then view rows (CLodVirtualShadowClipInfoRowCount).
-    extension.m_shadowClipmapInfoBuffer = CreateAliasedUnmaterializedStructuredBuffer(
-        CLodVirtualShadowClipInfoRowCount,
-        sizeof(CLodVirtualShadowClipmapInfo),
-        true,
-        false,
-        false,
-        false);
-    extension.m_shadowClipmapInfoBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Clipmap Info Buffer"));
+    extension.m_shadowClipmapInfoBuffer = atlas ? atlasBuffer(atlas->clipmapInfo) : nullptr;
+    if (!extension.m_shadowClipmapInfoBuffer) {
+        extension.m_shadowClipmapInfoBuffer = CreateAliasedUnmaterializedStructuredBuffer(
+            CLodVirtualShadowClipInfoRowCount,
+            sizeof(CLodVirtualShadowClipmapInfo),
+            true,
+            false,
+            false,
+            false);
+        extension.m_shadowClipmapInfoBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Clipmap Info Buffer"));
+    }
     PublishCLodResource<CLodVirtualShadowClipmapInfoTag>(traits, extension.m_shadowClipmapInfoBuffer);
 
     extension.m_shadowMarkClipmapDataBuffer = CreateAliasedUnmaterializedStructuredBuffer(
@@ -1048,41 +1082,53 @@ void CLodShadowVariant::InitializeResources(CLodExtension& extension)
     extension.m_shadowMarkClipmapDataBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Mark Clipmap Data Buffer"));
     PublishCLodResource(traits, extension.m_shadowMarkClipmapDataBuffer);
 
-    extension.m_shadowCompactMainCameraBuffer = CreateAliasedUnmaterializedStructuredBuffer(
-        1,
-        sizeof(CLodVirtualShadowMainCameraInfo),
-        true,
-        false,
-        false,
-        false);
-    extension.m_shadowCompactMainCameraBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Compact Main Camera Buffer"));
+    extension.m_shadowCompactMainCameraBuffer = atlas ? atlasBuffer(atlas->mainCamera) : nullptr;
+    if (!extension.m_shadowCompactMainCameraBuffer) {
+        extension.m_shadowCompactMainCameraBuffer = CreateAliasedUnmaterializedStructuredBuffer(
+            1,
+            sizeof(CLodVirtualShadowMainCameraInfo),
+            true,
+            false,
+            false,
+            false);
+        extension.m_shadowCompactMainCameraBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Compact Main Camera Buffer"));
+    }
 
     // One per slice; both slices of a local face hold that face's camera.
-    extension.m_shadowCompactShadowCameraBuffer = CreateAliasedUnmaterializedStructuredBuffer(
-        CLodVirtualShadowMaxSliceCount,
-        sizeof(CLodVirtualShadowCompactShadowCameraInfo),
-        true,
-        false,
-        false,
-        false);
-    extension.m_shadowCompactShadowCameraBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Compact Shadow Camera Buffer"));
+    extension.m_shadowCompactShadowCameraBuffer = atlas ? atlasBuffer(atlas->shadowCameras) : nullptr;
+    if (!extension.m_shadowCompactShadowCameraBuffer) {
+        extension.m_shadowCompactShadowCameraBuffer = CreateAliasedUnmaterializedStructuredBuffer(
+            CLodVirtualShadowMaxSliceCount,
+            sizeof(CLodVirtualShadowCompactShadowCameraInfo),
+            true,
+            false,
+            false,
+            false);
+        extension.m_shadowCompactShadowCameraBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Compact Shadow Camera Buffer"));
+    }
 
-    extension.m_shadowDirectionalPageViewInfoBuffer = CreateAliasedUnmaterializedStructuredBuffer(
-        CLodVirtualShadowMaxDirectionalPageViewInfoEntryCount(),
-        sizeof(float) * 4u,
-        true,
-        false,
-        false,
-        false);
-    extension.m_shadowDirectionalPageViewInfoBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Directional Page View Info Buffer"));
+    extension.m_shadowDirectionalPageViewInfoBuffer = atlas ? atlasBuffer(atlas->pageViewInfo) : nullptr;
+    if (!extension.m_shadowDirectionalPageViewInfoBuffer) {
+        extension.m_shadowDirectionalPageViewInfoBuffer = CreateAliasedUnmaterializedStructuredBuffer(
+            CLodVirtualShadowMaxDirectionalPageViewInfoEntryCount(),
+            sizeof(float) * 4u,
+            true,
+            false,
+            false,
+            false);
+        extension.m_shadowDirectionalPageViewInfoBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Directional Page View Info Buffer"));
+    }
     PublishCLodResource<CLodVirtualShadowDirectionalPageViewInfoTag>(traits, extension.m_shadowDirectionalPageViewInfoBuffer);
 
     extension.m_shadowRuntimeStateBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodVirtualShadowRuntimeState), true, false, false);
     extension.m_shadowRuntimeStateBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Runtime State Buffer"));
     PublishCLodResource<CLodVirtualShadowRuntimeStateTag>(traits, extension.m_shadowRuntimeStateBuffer);
 
-    extension.m_shadowStatsBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodVirtualShadowStats), true, false, false, true);
-    extension.m_shadowStatsBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Stats Buffer"));
+    extension.m_shadowStatsBuffer = atlas ? atlasBuffer(atlas->stats) : nullptr;
+    if (!extension.m_shadowStatsBuffer) {
+        extension.m_shadowStatsBuffer = CreateAliasedUnmaterializedStructuredBuffer(1, sizeof(CLodVirtualShadowStats), true, false, false, true);
+        extension.m_shadowStatsBuffer->SetName(MakeVariantResourceName(traits, "Virtual Shadow Stats Buffer"));
+    }
     PublishCLodResource<CLodVirtualShadowStatsTag>(traits, extension.m_shadowStatsBuffer);
 
     extension.m_vsmExpandedVisibleClustersBuffer = CreateAliasedUnmaterializedRawBuffer(

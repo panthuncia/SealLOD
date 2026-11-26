@@ -645,17 +645,13 @@ uint32_t CLodExtension::GetVisibleClusterCapacity() const
 
 void CLodExtension::AppendRayTracingPasses(const CLodVariantTraits& traits, std::vector<org::ExternalPassDesc>& outPasses)
 {
-    // The scene build's three stages, one after another: each one's scratch is live only in its pass, so they share it.
+    // The scene build's three stages, one after another: each one's scratch is live only in its pass, so they share it. Kept
+    // (CLodRayTracingSceneRecordingMode), the micromap uploads come first and the readback last, in passes recorded at execution.
     std::string previous = MakeVariantPassName(traits, "HierarchicalCullingPass1");
-    for (const auto& [stage, name] : { std::pair{ CLodRayTracingSceneStage::Clas, "SceneClasPass" },
-             std::pair{ CLodRayTracingSceneStage::Blas, "SceneBlasPass" }, std::pair{ CLodRayTracingSceneStage::Tlas, "SceneTlasPass" } }) {
+    const auto mode = CLodRayTracingSceneRecordingMode();
+    const auto append = [&](const char* name, std::shared_ptr<org::RenderPass> pass) {
         const std::string passName = MakeVariantPassName(traits, name);
-        const bool unified = m_rtVisibleClustersBuffer != nullptr;
-        auto sceneDesc = org::ExternalPassDesc::Compute(passName, std::make_shared<CLodRayTracingScenePass>(
-            m_options.rayTracingSystem, stage, unified ? m_rtVisibleClustersBuffer : m_visibleClustersBuffer,
-            unified ? m_rtVisibleClusterTransformIndicesBuffer : m_visibleClusterTransformIndicesBuffer,
-            unified ? m_rtVisibleClustersCounterBuffer : m_visibleClustersCounterBuffer,
-            m_options.slabResourceGroup, unified ? m_rtVisibleClusterCapacity : m_visibleClusterCapacity));
+        auto sceneDesc = org::ExternalPassDesc::Compute(passName, std::move(pass));
         auto sceneInsertPoint = org::ExternalInsertPoint::After(previous);
         if (m_options.pathTraced) {
             sceneInsertPoint.AlsoBefore("PathTraceArgsPass");
@@ -663,7 +659,23 @@ void CLodExtension::AppendRayTracingPasses(const CLodVariantTraits& traits, std:
         sceneDesc.At(std::move(sceneInsertPoint));
         outPasses.push_back(std::move(sceneDesc));
         previous = passName;
+    };
+    if (mode == CLodRayTracingSceneRecording::Kept) append("SceneOmmPass", std::make_shared<CLodRayTracingSceneOmmPass>(m_options.rayTracingSystem));
+    for (const auto& [stage, name] : { std::pair{ CLodRayTracingSceneStage::Clas, "SceneClasPass" },
+             std::pair{ CLodRayTracingSceneStage::Blas, "SceneBlasPass" }, std::pair{ CLodRayTracingSceneStage::Tlas, "SceneTlasPass" } }) {
+        const bool unified = m_rtVisibleClustersBuffer != nullptr;
+        const auto makeScenePass = [&]<CLodRayTracingSceneRecording Mode>() -> std::shared_ptr<org::RenderPass> {
+            return std::make_shared<CLodRayTracingScenePassT<Mode>>(
+                m_options.rayTracingSystem, stage, unified ? m_rtVisibleClustersBuffer : m_visibleClustersBuffer,
+                unified ? m_rtVisibleClusterTransformIndicesBuffer : m_visibleClusterTransformIndicesBuffer,
+                unified ? m_rtVisibleClustersCounterBuffer : m_visibleClustersCounterBuffer,
+                m_options.slabResourceGroup, unified ? m_rtVisibleClusterCapacity : m_visibleClusterCapacity);
+        };
+        append(name, mode == CLodRayTracingSceneRecording::Kept ? makeScenePass.template operator()<CLodRayTracingSceneRecording::Kept>()
+            : mode == CLodRayTracingSceneRecording::AtExecution ? makeScenePass.template operator()<CLodRayTracingSceneRecording::AtExecution>()
+            : makeScenePass.template operator()<CLodRayTracingSceneRecording::Ahead>());
     }
+    if (mode == CLodRayTracingSceneRecording::Kept) append("SceneEndPass", std::make_shared<CLodRayTracingSceneEndPass>(m_options.rayTracingSystem));
 
     // Ray traced primary visibility writes into the opaque variant's list, which that variant put in the build's Visibility
     // outputs in its PrepareForBuild (it runs before any gather). Both variants are Visibility's.

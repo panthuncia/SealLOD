@@ -39,20 +39,18 @@ struct TonemappingFrame {
 class TonemappingPass : public org::TypedRenderGraphPass<
     TonemappingPass, TonemappingFrame, TonemappingBindings> {
 public:
-	explicit TonemappingPass(bool bloomEnabled = false)
-        : m_bloomEnabled(bloomEnabled) {
-        m_pLPMConstants = org::LazyDynamicStructuredBuffer<LPMConstants>::CreateShared(1, "AMD LPM constants", 1, true);
-	}
+    // The AMD LPM constants: the luminance average pass (Post) writes the curve into them each frame, and tonemapping (Overlay, M6
+    // step 3) reads them. The renderer makes one for every build (FrameBuildInputs::lpmConstants), which both epochs' graphs
+    // register as "FFX::LPMConstants".
+    static std::shared_ptr<org::Resource> CreateLpmConstants() {
+        return org::LazyDynamicStructuredBuffer<LPMConstants>::CreateShared(1, "AMD LPM constants", 1, true);
+    }
 
-    std::shared_ptr<org::Resource> ProvideResource(org::ResourceIdentifier const& key) override {
-        if (key == m_providedResources[0]) {
-			return m_pLPMConstants;
-        }
-		return nullptr;
-    }
-    std::vector<org::ResourceIdentifier> GetSupportedKeys() override {
-		return m_providedResources;
-    }
+	explicit TonemappingPass(bool bloomEnabled = false, std::shared_ptr<org::Resource> lpmConstants = nullptr)
+        : m_bloomEnabled(bloomEnabled) {
+        m_pLPMConstants = std::dynamic_pointer_cast<org::LazyDynamicStructuredBuffer<LPMConstants>>(lpmConstants);
+        if (!m_pLPMConstants) m_pLPMConstants = org::LazyDynamicStructuredBuffer<LPMConstants>::CreateShared(1, "AMD LPM constants", 1, true);
+	}
 
     TonemappingBindings Declare(org::PassBuilder& builder) {
         builder.ShaderResource(Builtin::PostProcessing::UpscaledHDR, Builtin::CameraBuffer);
@@ -82,10 +80,11 @@ public:
         lpmConstants.clip = true;
         lpmConstants.scaleOnly = false;
 
-        // Rest will be filled in by the luminanceHistogramAverage shader
-
-        UploadBufferData(&lpmConstants, sizeof(LPMConstants),
-            org::runtime::UploadTarget::FromShared(m_pLPMConstants), 0);
+        // Rest will be filled in by the luminanceHistogramAverage shader. Only the flags and what follows them are written: the
+        // buffer is shared with Post's graph, whose luminance pass may have written the curve (u_ctl) already this frame.
+        constexpr size_t offset = offsetof(LPMConstants, shoulder);
+        UploadBufferData(reinterpret_cast<const std::byte*>(&lpmConstants) + offset, sizeof(LPMConstants) - offset,
+            org::runtime::UploadTarget::FromShared(m_pLPMConstants), offset);
     }
 
 	TonemappingFrame Prepare(const TonemappingBindings&,
@@ -115,10 +114,6 @@ private:
     std::shared_ptr<org::LazyDynamicStructuredBuffer<LPMConstants>> m_pLPMConstants;
 
     bool m_bloomEnabled = false;
-
-    std::vector<org::ResourceIdentifier> m_providedResources = {
-		"FFX::LPMConstants"
-	};
 
     static br::GraphicsPipelineDesc PipelineDesc() {
         br::GraphicsPipelineDesc desc;

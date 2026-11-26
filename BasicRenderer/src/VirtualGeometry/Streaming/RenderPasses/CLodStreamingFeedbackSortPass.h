@@ -2,6 +2,7 @@
 
 #include <array>
 #include <memory>
+#include <vector>
 
 #include <rhi.h>
 
@@ -37,6 +38,8 @@ public:
         std::shared_ptr<org::Buffer> reduceScanArgs);
 
     StreamingFeedbackSortBindings Declare(org::PassBuilder& builder);
+    // Kept recordings (M6 step 5): a fixed sort; only its pipelines' builds name the recording.
+    void Revision(std::vector<uint64_t>& out) const;
     static void Record(const StreamingFeedbackSortBindings& bindings, org::PassRecordContext& context);
 
 private:
@@ -50,4 +53,5 @@ private:
     std::shared_ptr<org::Buffer> m_constants;
     std::shared_ptr<org::Buffer> m_countScatterArgs;
     std::shared_ptr<org::Buffer> m_reduceScanArgs;
+    std::array<br::PipelineState, 6> m_pipelines;
 };

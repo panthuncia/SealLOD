@@ -227,6 +227,7 @@ ComputeCullingBindings ComputeCullingPass::Declare(org::PassBuilder& builder)
     ComputeCullingBindings bindings{};
     bindings.programs = DeclarePrograms(builder);
     bindings.programs.dispatchSignature = br::render::DeclareCommandSignature(br::render::RawDispatchCommandSignature());
+    m_programs = bindings.programs;
     bindings.maxVisibleClusters = m_config.maxVisibleClusters;
     bindings.isFirstPass = m_config.isFirstPass;
     bindings.perViewDepthOcclusion = m_config.UsesPerViewDepthOcclusion();
@@ -381,16 +382,13 @@ ComputeCullingFrame ComputeCullingPass::Prepare(
         m_voxelQueueTable.Upload(descriptors, Uploader());
     }
 
-    auto& settings = SettingsManager::GetInstance();
     ComputeCullingFrame frame;
     frame.active = true;
-    frame.settings = br::render::ReadCullingSettings(m_config, m_resources.virtualShadow.receiverSubpageMask != nullptr);
-    frame.cullingFlags = br::render::BuildCullingFlags(m_config, frame.settings);
+    frame.settings = m_taken.settings;
+    frame.cullingFlags = m_taken.cullingFlags;
     frame.traversalDepth = m_traversalDepth;
-    frame.expansionFactor = CLodNormalizePureComputePhase2ExpansionFactor(settings.getSettingGetter<uint32_t>(
-        m_config.isFirstPass ? CLodPureComputePhase2ExpansionFactorSettingName
-                             : CLodPureComputeReplayExpansionFactorSettingName)());
-    frame.rasterBucketCount = renderContext->preparedRasterBucketCount;
+    frame.expansionFactor = m_taken.expansionFactor;
+    frame.rasterBucketCount = m_taken.rasterBucketCount;
     frame.viewRasterInfoTable =
         m_viewRasterInfoLayout.Publish(preparation, m_viewRasterInfoTable, declared.viewRasterInfoLayout);
     if (m_config.UsesPerViewDepthOcclusion())
@@ -418,6 +416,59 @@ ComputeCullingFrame ComputeCullingPass::Prepare(
             static_cast<std::int64_t>(frame.workloads.size()));
     }
     return frame;
+}
+
+void ComputeCullingPass::TakeFrameValues(const org::UpdateExecutionContext& execution)
+{
+    m_taken = {};
+    // The published traversal depth is a value of the frame, not of the pass's declarations: taken here rather than in Update,
+    // so a recording made ahead (staged, M6 step 9) names the depth its frame publishes.
+    if (const auto* update = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr) UpdateTraversalDepth(*update);
+    const auto* renderContext = execution.hostData ? execution.hostData->Get<RenderContext>() : nullptr;
+    if (!renderContext) return;
+    m_taken.hasContext = true;
+    m_taken.settings = br::render::ReadCullingSettings(m_config, m_resources.virtualShadow.receiverSubpageMask != nullptr);
+    m_taken.cullingFlags = br::render::BuildCullingFlags(m_config, m_taken.settings);
+    m_taken.expansionFactor = CLodNormalizePureComputePhase2ExpansionFactor(SettingsManager::GetInstance().getSettingGetter<uint32_t>(
+        m_config.isFirstPass ? CLodPureComputePhase2ExpansionFactorSettingName
+                             : CLodPureComputeReplayExpansionFactorSettingName)());
+    m_taken.rasterBucketCount = renderContext->preparedRasterBucketCount;
+    if (!m_config.isFirstPass) return;
+    // PrepareCullingWorkloads reads the published indirect workloads for the views it admits (each view's id, slot and kind).
+    const auto& published = renderContext->publishedRendererState;
+    m_taken.indirectWorkloads = published
+        ? static_cast<const void*>(published->indirectWorkloads.payload.Get<br::render::PublishedIndirectState>().get()) : nullptr;
+    std::vector<uint64_t> views;
+    for (const auto& view : renderContext->Views()) {
+        views.push_back(view.id);
+        views.push_back(view.cameraBufferIndex | (uint64_t{view.primary} << 32) | (uint64_t{view.shadow} << 33)
+            | (uint64_t{view.cascade} << 34) | (uint64_t{static_cast<uint32_t>(view.lightType)} << 40));
+    }
+    std::vector<uint64_t> hashed;
+    br::render::AppendRevisionRows(hashed, views.data(), views.size());
+    m_taken.viewsHash = hashed[0] ^ (hashed[1] << 48);
+}
+
+void ComputeCullingPass::Revision(std::vector<uint64_t>& out) const
+{
+    out.push_back(m_taken.hasContext ? 1u : 0u);
+    if (!m_taken.hasContext) return;
+    for (const auto* pipeline : {&m_programs.clearCounter, &m_programs.createRasterBucketCommand, &m_programs.buildDispatchArgs,
+             &m_programs.buildDualDispatchArgs, &m_programs.buildReplayDispatchArgs, &m_programs.clearTraversalCounters,
+             &m_programs.objectCull, &m_programs.seedReplayNodes, &m_programs.seedReplayClusters, &m_programs.traverseNodes,
+             &m_programs.traverseLeaves, &m_programs.cullClusters})
+        br::render::AppendPipelineRevision(out, *pipeline);
+    const auto& s = m_taken.settings;
+    out.push_back((s.telemetry ? 1u : 0u) | (s.occlusion ? 2u : 0u) | (s.predictiveInvalidation ? 4u : 0u)
+        | (s.frustumCulling ? 8u : 0u) | (uint64_t{s.softwareRasterThreshold} << 32));
+    out.push_back(s.forcedTraversalDepth | (uint64_t{s.receiverSubpageMode} << 32));
+    out.push_back(m_taken.cullingFlags | (uint64_t{m_taken.expansionFactor} << 32));
+    out.push_back(m_taken.rasterBucketCount | (uint64_t{m_traversalDepth} << 32));
+    out.push_back(reinterpret_cast<uintptr_t>(m_taken.indirectWorkloads));
+    out.push_back(m_taken.viewsHash);
+    out.push_back(m_windCache.entryCount | (uint64_t{m_windCache.generation} << 32));
+    m_viewRasterInfoLayout.AppendRevision(out);
+    if (m_config.UsesPerViewDepthOcclusion()) m_viewDepthLayout.AppendRevision(out);
 }
 
 void ComputeCullingPass::UpdateTraversalDepth(const UpdateContext& context)
@@ -463,7 +514,6 @@ void ComputeCullingPass::Update(const org::UpdateExecutionContext& executionCont
     }
 
     m_declaredResourcesChanged = UpdateViewTables(context);
-    UpdateTraversalDepth(context);
 
     br::render::ResetCullingCounter(m_resources.outputs.visibleClustersCounter, upload);
     if (m_config.rtVisibleClustersCounter) {

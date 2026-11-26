@@ -87,6 +87,9 @@ ReyesQueueResetBindings ReyesQueueResetPass::Declare(org::PassBuilder& declarati
     bindings.clearDiceQueueCounter = m_clearDiceQueueCounter;
 
     builder->ConstantBuffer(Builtin::PerFrameBuffer);
+    m_pipelines.Clear();
+    m_pipelines.Add(bindings.clearCountersPipeline);
+    m_pipelines.Add(bindings.clearOwnershipBitsetPipeline);
     return bindings;
 }
 

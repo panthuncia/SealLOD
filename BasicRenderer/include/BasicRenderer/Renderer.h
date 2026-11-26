@@ -87,6 +87,7 @@ struct FrameBuildOutputs;
 class FrameBuildWorker;
 struct FrameInterface;
 struct FramePassDeclaration;
+struct ResolutionObjects;
 class DebugSceneSnapshotService;
 class RendererFrameInputs;
 class TextureJobGraph;
@@ -182,7 +183,11 @@ public:
     // this thread. Does nothing when BASICRENDERER_DISABLE_STREAMLINE is set.
     static void PrewarmStreamline();
     void Initialize(HWND hwnd, UINT x_res, UINT y_res, br::pipeline::PipelineRecipe recipe);
-    void OnResize(UINT newWidth, UINT newHeight);
+    // Any thread (a window procedure's WM_SIZE): records the window's client size. The swapchain, the textures and the graphs
+    // follow at the next frame's consolidation point, once for however many sizes arrived (M5 step 4).
+    void RequestOutputSize(UINT newWidth, UINT newHeight);
+    // The same as RequestOutputSize (kept for hosts that call it from WM_SIZE).
+    void OnResize(UINT newWidth, UINT newHeight) { RequestOutputSize(newWidth, newHeight); }
     void Update(float elapsedSeconds);
     void Render();
     void Cleanup();
@@ -305,6 +310,8 @@ private:
 	std::vector<rhi::ResourceHandle> renderTargets;
 	std::vector<std::shared_ptr<org::ExternalTextureResource>> m_backbufferResources;
 	std::shared_ptr<org::DynamicResource> m_dynamicBackbuffer;
+	// The attached graphs' presentation surfaces (the attached ResolutionObjects'), which Update points the dynamic one at and the
+	// presentation copy reads.
 	std::vector<std::shared_ptr<org::PixelBuffer>> m_presentationColorResources;
 	std::shared_ptr<org::DynamicResource> m_dynamicPresentationColor;
     //ComPtr<ID3D12DescriptorHeap> dsvHeap;
@@ -349,6 +356,8 @@ private:
     // The frame graphs' host. It builds the graph from extension factories (the renderer's declarations and its pipeline
     // extensions, FrameGraphExtensions.h), and prepares and submits each frame (ExecuteFrame).
     std::unique_ptr<org::GraphHost> m_frameHost;
+    // The AMD LPM constants every build shares (FrameBuildInputs::lpmConstants), made by the first build.
+    std::shared_ptr<org::Resource> m_lpmConstants;
     // Diagnostics (BASICRENDERER_FRAME_GRAPH_INSTANCE=1): the frame graph adopted by a GraphInstance instead, as before GraphHost.
     std::unique_ptr<org::GraphInstance> m_frameInstance;
     bool m_useGraphInstance = false;
@@ -534,7 +543,66 @@ private:
     FrameTimer m_frameTimer;
 
     void LoadPipeline(HWND hwnd, UINT x_res, UINT y_res);
-    void CreateTextures();
+    // The core colour targets and the presentation surfaces, for the render and output sizes of the upscaler configuration the
+    // next build captures (M5 step 4: never the live settings, so the build and these agree). New objects every call: the attached
+    // graphs keep theirs (M5 step 5). The core provider (which builds snapshot) takes them at once.
+    std::shared_ptr<br::render::ResolutionObjects> CreateTextures(DirectX::XMUINT2 renderResolution, DirectX::XMUINT2 outputResolution);
+    // The objects the next build registers (the newest size's), and the attached graphs' (current from their build's attach).
+    std::shared_ptr<br::render::ResolutionObjects> m_buildResolutionObjects;
+    std::shared_ptr<br::render::ResolutionObjects> m_attachedResolutionObjects;
+    // At an attach whose build was made for other objects than the attached ones: the swapchain (when the output size changed),
+    // the presentation surfaces, the primary view's depth maps and the resolution settings switch to them (PublishFrameBuild).
+    void SwitchResolutionObjects(const std::shared_ptr<br::render::ResolutionObjects>& objects);
+    // The render and output sizes the next build is made for: the latest upscaler configuration's.
+    struct FrameResolution {
+        DirectX::XMUINT2 render{};
+        DirectX::XMUINT2 output{};
+    };
+    FrameResolution BuildResolution() const;
+    // The sizes the attached graphs were built for (PublishFrameBuild), which per-frame values follow; the build's sizes before
+    // the first attach.
+    FrameResolution AttachedResolution() const;
+    std::optional<FrameResolution> m_attachedResolution;
+    // The resolution revision's consumption, for renderer.revisions (M5 step 4).
+    struct ResolutionStatistics {
+        uint64_t consumed = 0;          // consolidation points that took a request
+        uint64_t applied = 0;           // of those, the ones that changed a size or the upscaler configuration
+        uint64_t unchanged = 0;         // the ones that asked for what was there (nothing built)
+        uint64_t deferredFrames = 0;    // frames a request waited for a build in flight
+        uint64_t settleFrames = 0;      // frames a window size waited for the size to settle (M5 step 6)
+        uint64_t swapchainResizes = 0;
+        uint64_t swapchainOnlyResizes = 0;   // a present's mode change at the same size: the swapchain made again, nothing built
+        uint64_t staleModeChanges = 0;       // mode changes a swapchain made since then answered (dropped)
+        uint64_t resolutionBuilds = 0;  // builds started for an applied request
+        uint64_t resolutionBuildsInFlight = 0;
+        uint64_t maxResolutionBuildsInFlight = 0;
+        uint32_t maxCoalesced = 0;      // the most requests one consumption answered
+        uint32_t lastCoalesced = 0;
+        uint64_t lastFrame = 0;
+        double lastApplyMs = 0.0;       // render thread: the swapchain, the configuration, the textures and the depth resync
+        double maxApplyMs = 0.0;
+        double lastPrepareMs = 0.0;     // of that, UpscalingManager::Prepare (its render-size query)
+        double maxPrepareMs = 0.0;
+        // At the attach (M5 step 5): the switch to a build's ResolutionObjects, and of it the wait for the frames that used the
+        // backbuffers and ResizeBuffersAfterFrames itself.
+        uint64_t switches = 0;
+        double lastSwitchMs = 0.0;
+        double maxSwitchMs = 0.0;
+        double lastSwapchainWaitMs = 0.0;
+        double maxSwapchainWaitMs = 0.0;
+        double lastResizeBuffersMs = 0.0;
+        double maxResizeBuffersMs = 0.0;
+        // Every StallPipeline (a device idle wait): shutdown and shader reload only, since M5 step 5.
+        uint64_t stallPipelineCalls = 0;
+        std::string lastStallReason;
+        std::string lastReasons;
+    } m_resolutionStats;
+    // A request was applied and the build that answers it has not started yet.
+    bool m_resolutionBuildRequested = false;
+    // Counts the swapchain's (re)creations (ResizeSwapChain), and the count when a present last reported a mode change: a mode
+    // change reported by a swapchain made again since is answered already (M5 step 8).
+    uint64_t m_swapchainGeneration = 0;
+    uint64_t m_modeChangeSwapchainGeneration = 0;
 	void TagDLSSResources(ID3D12Resource* pDepthTexture);
     void MoveForward();
     void SetupInputHandlers();
@@ -565,6 +633,8 @@ private:
     std::shared_ptr<const UpdateContext> MakeBuildUpdateContext(const br::render::FrameBuildInputs& in);
     // The last accepted frame's update values, for MakeBuildUpdateContext (m_frameInputs is cleared when a frame starts).
     std::shared_ptr<const UpdateContext> m_lastFrameUpdate;
+    // Its render values, with which a build's staged recordings stand in for the first frames after its attach (M6 step 6).
+    std::shared_ptr<const RenderContext> m_lastFrameRender;
     // Render thread, after a successful build: hands its outputs to the renderer.
     void PublishFrameBuild(br::render::FrameBuild& build);
     // Render thread: makes the ECS writes a build recorded, in order (FrameBuildOutputs::resourceEntityWrites of each epoch).
@@ -627,9 +697,41 @@ private:
         // This frame's, for the slow-frame line: each epoch's time and phases, and the consolidation point's time before it.
         std::string frameEpochs;
         double consolidationMs = 0.0;
+        // Per host epoch (M6 step 2): the render thread's time by stage, summed over the frames (GraphHost::LastFrameTimings), and
+        // the currency probe's counts (BASICRENDERER_CURRENCY_PROBE=1).
+        static constexpr size_t kStages = 14;
+        std::vector<std::array<double, kStages>> stageMs;
+        struct Probe {
+            uint32_t runs = 0, firstRuns = 0, publication = 0, publicationBound = 0, bindings = 0, perFrame = 0, versions = 0, backings = 0,
+                placement = 0, any = 0, anyByIdentity = 0;
+            std::map<std::string, uint32_t> names;
+        };
+        std::vector<Probe> probes;
+        // Per host epoch (M6 step 3): what its runs did with their kept copies (GraphHost::SetKeptEpochs), and why the ones that
+        // recorded did (GraphHost::TakeKeptStats).
+        struct Kept {
+            uint64_t runs = 0, reused = 0, kept = 0, unkeepable = 0;
+            std::map<std::string, uint64_t> reasons;
+            // The revision audit (M6 step 4, BASICRENDERER_KEPT_RECORDING_AUDIT): reused runs audited, passes compared, passes
+            // that cannot be compared, and the passes whose frame data differed while their revision was the same, by name.
+            uint64_t audited = 0, auditCompared = 0, auditUncomparable = 0, auditMismatches = 0;
+            std::map<std::string, uint64_t> mismatches;
+            // Staged recordings (M6 step 6) at their first use: submitted, or recorded again ("staged: ..." reasons).
+            uint64_t stagedReused = 0, stagedRecorded = 0;
+            // Batch reuse (M6 step 7, GraphHost::SetKeptBatchReuse): runs that submitted some batches of the kept recording and
+            // recorded the rest, the batches submitted again and recorded, and why the recorded ones recorded.
+            uint64_t partial = 0, batchesReused = 0, batchesRecorded = 0;
+            std::map<std::string, uint64_t> batchReasons;
+        };
+        std::vector<Kept> kept;
     } m_frameGraphExecutionTiming;
+    // The same since the start, by host epoch, for renderer.revisions' "recordings".
+    std::map<uint32_t, FrameGraphExecutionTiming::Kept> m_keptRecordingTotals;
     // Frames since the latest attach of frame graphs (FinishFrameBuild), for the first frames' line. UINT32_MAX: none yet.
     uint32_t m_framesSinceFrameGraphAttach = UINT32_MAX;
+    // The frame placement version at the last frame's end, and the frames logged since it changed (diagnostic, M5 step 7).
+    uint64_t m_lastFramePlacementId = 0;
+    uint32_t m_framesSinceFramePlacementChange = UINT32_MAX;
     // No mixed frames (M4 step 7): each frame, before its first ExecuteFrame, every host epoch's attached graph (GraphHost::
     // BuildGeneration) is mapped back to the build that attached it. A frame is mixed when an epoch runs an older build than
     // another epoch's build attached together with it (a build's set must run whole). Counted per 600 frames and in total.
@@ -692,10 +794,22 @@ private:
     void MaybeRequestObjectReyesAtlasTelemetry();
     void MaybeRequestTerrainRvtTelemetry();
     void ApplyWindowResolutionPreset(WindowResolutionPreset preset);
-    // Sets the upscaler up again and rebuilds the graph when UpscalingManager asks: a Ray Reconstruction retry.
+    // Asks for the upscaler configuration again when UpscalingManager asks: a Ray Reconstruction retry.
     void ReconfigureUpscalerIfRequested();
+    // The consolidation point's resolution step (M5 step 4): consumes the resolution revision once a frame, unless a build is in
+    // flight. Prepares the upscaler configuration the latest window size and the settings ask for (M5 step 3), makes the objects
+    // of its sizes and starts the build for them, unless the latest configuration fits. Nothing the attached graphs use changes:
+    // the swapchain and the rest switch at that build's attach (M5 step 5).
+    void ApplyResolutionRequest();
+    // The swapchain part of a resize, at the attach of the graphs built for the new size: waits for the frames that used the
+    // backbuffers (their fences; not the device), ResizeBuffersAfterFrames, outputResolution, the frame slots and the backbuffer
+    // views. False when the swapchain could not be resized.
+    bool ResizeSwapChain(UINT newWidth, UINT newHeight);
+    // Whether the recipe the next build is made from writes Ray Reconstruction's guides.
+    bool RayReconstructionGuidesForNextBuild() const;
 
-    void StallPipeline();
+    // Waits for every frame slot and for the device to go idle. Shutdown, shader reload and the in-place graph only (M5 step 5).
+    void StallPipeline(std::string_view reason);
 
 	void RunBeforeNextFrame(std::function<void()> fn) {
 		m_preFrameDeferredFunctions.defer(fn);

@@ -10,6 +10,7 @@
 #include "Render/PassBuilders.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Resources/Buffers/Buffer.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 #include "../shaders/PerPassRootConstants/clodStreamingFeedbackSortRootConstants.h"
 
 CLodStreamingFeedbackSortPass::CLodStreamingFeedbackSortPass(
@@ -58,7 +59,12 @@ StreamingFeedbackSortBindings CLodStreamingFeedbackSortPass::Declare(org::PassBu
     bindings.reduceScanUav = declaration.UnorderedAccess(m_reduceScanArgs);
     bindings.countScatterIndirect = declaration.IndirectArguments(m_countScatterArgs);
     bindings.reduceScanIndirect = declaration.IndirectArguments(m_reduceScanArgs);
+    m_pipelines = bindings.pipelines;
     return bindings;
+}
+
+void CLodStreamingFeedbackSortPass::Revision(std::vector<uint64_t>& out) const {
+    for (const auto& pipeline : m_pipelines) br::render::AppendPipelineRevision(out, pipeline);
 }
 
 void CLodStreamingFeedbackSortPass::Record(const StreamingFeedbackSortBindings& bindings,

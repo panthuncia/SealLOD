@@ -104,7 +104,18 @@ skipped for GPU memory pressure), `consecutive_failures`, `last_failed_frame`,
 `fallback` (what failed frames showed: `input_copies`, `dlss_sr`, `cleared`),
 and `ray_reconstruction_settings_failed`, `ray_reconstruction_settings_failures`
 and `ray_reconstruction_retry_seconds` (Ray Reconstruction's optimal settings
-failed, so graphs use DLSS until a retry). `upscaler.set` takes optional
+failed, so graphs use DLSS until a retry), and `configuration`: the upscaler
+configurations (`current`, the attached graphs'; `latest`, what a graph built now
+uses; each with `serial`, `viewport`, `mode`, `render_resolution`,
+`output_resolution`, `prepared`, `allocated_ahead` and `prepare_ms`), with the
+`prepared`, `retired` and `live` counts and `last_attach_wait_ms`. A change of
+upscaler mode, quality or output size makes a new configuration ahead of the
+build that uses it (UpscalingManager::Prepare: its DLSS feature allocated or
+its FSR context made on a thread of its own); it becomes current at that build's
+attach, and the old one is released when its last graph retires.
+`BASICRENDERER_UPSCALER_ALLOCATE_AHEAD=0` leaves the DLSS feature to its first
+evaluation, as before, and `BASICRHI_STREAMLINE_LOG=1` forwards Streamline's
+verbose log. `upscaler.set` takes optional
 `quality` (0 DLAA to 4 Ultra Performance) and `ray_reconstruction` (bool), as the
 menu sets them. `upscaler.simulate_failure` takes `out_of_memory_frames` and
 `settings_failures` and makes that many evaluations or settings requests fail;

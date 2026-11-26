@@ -1829,6 +1829,13 @@ CLodStreamingTailWork CLodStreamingSystem::GatherStructuralTailPasses(
         }
         return reservation;
     };
+    launchInputs.launchWanted = [wakeState = m_streamingWakeState]() {
+        std::lock_guard lock(wakeState->mutex);
+        auto* owner = wakeState->owner;
+        return owner && owner->m_directStorageLaunchFenceHandle.IsValid()
+            && owner->m_directStorageArmedLaunchFenceValue.load(std::memory_order_acquire) == 0u
+            && owner->m_directStorageLaunchRequested.load(std::memory_order_acquire);
+    };
 
     outPasses.push_back(
         org::ExternalPassDesc::Copy(

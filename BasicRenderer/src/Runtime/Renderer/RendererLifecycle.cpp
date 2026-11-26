@@ -98,16 +98,18 @@ void Renderer::AdvanceFrameIndex() {
     m_totalFramesRendered += 1;
 }
 
-void Renderer::StallPipeline() {
-    // A frame build in flight was made from what the caller is about to replace (a resize, an upscaler restart): it is dropped,
-    // and the next build runs on the render thread, so the attached graph renders no frame against the replaced resources.
+void Renderer::StallPipeline(std::string_view reason) {
+    ++m_resolutionStats.stallPipelineCalls;
+    m_resolutionStats.lastStallReason = std::string(reason);
+    // A frame build in flight was made from what the caller is about to replace (shader reload's pipelines): it is dropped, and the
+    // next build runs on the render thread, so the attached graph renders no frame against the replaced resources.
     DiscardFrameBuildInFlight("a GPU idle wait");
     m_nextFrameBuildSynchronous = true;
     for (uint8_t i = 0; i < m_numFramesInFlight; ++i) {
         WaitForFrame(i);
     }
     auto& devices = DeviceManager::GetInstance();
-    spdlog::info("Renderer::StallPipeline waiting for all initialized devices idle");
+    spdlog::info("Renderer::StallPipeline ({}) waiting for all initialized devices idle", reason);
     if (rhi::Failed(devices.GetDevice().WaitIdle()))
         throw std::runtime_error("Primary device idle wait failed; GPU ownership must be retained");
     if (devices.IsMultiRHIEnabled()) {
@@ -128,7 +130,7 @@ void Renderer::Cleanup() {
         if (auto* graph = FrameGraph(host)) graph->StopFrameProduction();
     // Wait for all GPU frames to complete
 	spdlog::info("Stalling pipeline for cleanup");
-	StallPipeline();
+	StallPipeline("shutdown");
     // The streaming service outlives the graphs' extension instances; it stops here, before the graphs and their buffers go.
     if (m_producerPersistentState && m_producerPersistentState->clodStreaming) m_producerPersistentState->clodStreaming->DetachGraph();
     // It holds the path tracer's accumulation buffer and dispatch arguments, which must go before the allocator does.
@@ -207,7 +209,7 @@ void Renderer::Cleanup() {
     if (m_frameHost) {
         // Publication and texture-streaming producers have now stopped. Cover
         // submissions made after the first wait before cleaning their services.
-        StallPipeline();
+        StallPipeline("shutdown, after the producers stopped");
         if (auto* uploadService = m_orgRuntime->Uploads().get()) {
             uploadService->Cleanup();
         }
@@ -280,13 +282,17 @@ void Renderer::Cleanup() {
     m_context = {};
     m_frameInputs.reset();
     m_lastFrameUpdate.reset();
+    m_lastFrameRender.reset();
     m_materialEvaluationInputs = {};
     m_openPBRLookupResources = {};
     m_blueNoiseTexture.reset();
+    m_lpmConstants.reset();
     m_brdfLut.reset();
     m_dynamicBackbuffer.reset();
     m_dynamicPresentationColor.reset();
     m_presentationColorResources.clear();
+    m_buildResolutionObjects.reset();
+    m_attachedResolutionObjects.reset();
     m_backbufferResources.clear();
     renderTargets.clear();
     m_commandLists.clear();
@@ -592,6 +598,37 @@ void Renderer::Initialize(
         hostDesc.reportStaleAliasPlacements = m_framePlacement;
         m_frameHost = std::make_unique<org::GraphHost>(std::move(hostDesc));
         m_frameHost->SetExplicitBuilds(true);
+        // M6 step 3: kept recordings for the frame's synchronous epochs (GraphHost::SetKeptEpochs). Visibility, Shading and Post keep
+        // theirs; Overlay records every frame (the menu changes every frame). A run submits its copy's kept recording while it is
+        // current, and records and keeps a new one otherwise. Until passes report revisions (M6 steps 4 on) every recording is
+        // uncheckable, so nothing is reused. Passes recorded at execution are recorded inline, at each submission. Kept lists
+        // carry their own pass timestamps. BASICRENDERER_KEPT_RECORDINGS=0 turns keeping off; so does an NVPerf capture
+        // (BASICRENDERER_NVPERF_CAPTURE), whose pass ranges are recorded into the lists.
+        m_frameHost->SetInlineAtExecution(true);
+        if (!m_useGraphInstance && !br::runtime::renderer_settings::ReadFalsyEnvironmentFlag("BASICRENDERER_KEPT_RECORDINGS")
+            && !br::runtime::renderer_settings::ReadTruthyEnvironmentFlag("BASICRENDERER_NVPERF_CAPTURE")) {
+            std::vector<uint32_t> kept;
+            const uint32_t overlay = br::render::HostEpochOf(br::render::kOverlayEpoch);
+            for (const auto host : br::render::FrameHostEpochs())
+                if (host != overlay) kept.push_back(host);
+            m_frameHost->SetKeptEpochs(std::move(kept));
+            m_frameHost->SetRecordingTimestamps(true);
+            // M6 step 7, batch reuse (O-M6-6): each batch of a kept recording is checked on its own, so an epoch with passes that
+            // report no revision yet (Visibility, until it converts) still submits its other batches again and records only the
+            // batches with such passes. BASICRENDERER_KEPT_BATCH_REUSE=0 checks and reuses whole recordings, as before.
+            const bool batchReuse = !br::runtime::renderer_settings::ReadFalsyEnvironmentFlag("BASICRENDERER_KEPT_BATCH_REUSE");
+            m_frameHost->SetKeptBatchReuse(batchReuse);
+            spdlog::info("Renderer: kept recordings on for {} host epoch(s) (BASICRENDERER_KEPT_RECORDINGS), batch reuse {} (BASICRENDERER_KEPT_BATCH_REUSE)",
+                m_frameHost->KeptEpochs().size(), batchReuse ? "on" : "off");
+            // M6 step 4, the revision audit (O-M6-7; decision D7: off unless set): BASICRENDERER_KEPT_RECORDING_AUDIT=N prepares a
+            // kept epoch anyway at every N-th reuse of a copy and reports the passes whose frame data differs while their revision
+            // is the same (the 600-frame log's "kept recording audit" line, renderer.revisions' recordings.audit).
+            if (const char* audit = std::getenv("BASICRENDERER_KEPT_RECORDING_AUDIT"); audit && *audit) {
+                const auto every = static_cast<uint32_t>(std::strtoul(audit, nullptr, 10));
+                m_frameHost->SetKeptRecordingAudit(every);
+                if (every) spdlog::info("Renderer: kept recording audit every {} reuses of a copy (BASICRENDERER_KEPT_RECORDING_AUDIT)", every);
+            }
+        }
         // Pass timestamps per retired run: with several epochs a frame, only the host knows which run index a completion read.
         m_frameHost->SetCompletedFrameCallback([this](uint64_t hostFrame, const org::runtime::IStatisticsService& stats) {
             OnFrameHostRunCompleted(hostFrame, stats);
@@ -609,6 +646,11 @@ void Renderer::Initialize(
             // A rebuilt graph's new version keeps the running graphs' resources where they are (M4 step 9). =0 packs every new
             // version from scratch, and the running graphs place again (step 8).
             placement.keepRunning = !br::runtime::renderer_settings::ReadFalsyEnvironmentFlag("BASICRENDERER_FRAME_PLACEMENT_KEEP");
+            // A staged set's graphs publish their usage summaries before the first of them places (M5 step 6). =0: each with its plan.
+            placement.summariesFirst = !br::runtime::renderer_settings::ReadFalsyEnvironmentFlag("BASICRENDERER_FRAME_PLACEMENT_SUMMARIES_FIRST");
+            // The worker's settled and trimmed versions are published once every graph prepared its re-placement on a worker (M5 step
+            // 7). =0: each graph re-places at its preparation, on the render thread.
+            placement.prepareReplacements = !br::runtime::renderer_settings::ReadFalsyEnvironmentFlag("BASICRENDERER_FRAME_PLACEMENT_PREPARED");
             m_frameHost->SetFramePlacement(placement);
             spdlog::info("Renderer: ORG frame placement on (BASICRENDERER_FRAME_PLACEMENT)");
         }
@@ -726,12 +768,20 @@ void Renderer::Initialize(
     }
 
     spdlog::info("Renderer initialization: initializing upscaling managers");
-    UpscalingManager::GetInstance().InitFFX(); // Needs device and must precede Setup for FSR queries.
-    UpscalingManager::GetInstance().Setup();
-    FFXManager::GetInstance().InitFFX();
+    {
+        // The first upscaler configuration (M5 step 3). Streamline refuses to allocate a feature before the first frame, so this one's
+        // is made at its first evaluation; later ones ahead of their attach. SSSR contexts are made by the builds that use them.
+        auto& upscaling = UpscalingManager::GetInstance();
+        upscaling.MakeCurrent(upscaling.Prepare(upscaling.MakeRequest(RayReconstructionGuidesForNextBuild(),
+            SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("outputResolution")())));
+    }
     ProbeGraphicsCommandListCreation(DeviceManager::GetInstance().GetDevice(), "after UpscalingManager::Setup");
 
-    CreateTextures();
+    {
+        // The first size's objects are current at once: nothing renders yet.
+        const auto resolution = BuildResolution();
+        SwitchResolutionObjects(CreateTextures(resolution.render, resolution.output));
+    }
     ProbeGraphicsCommandListCreation(DeviceManager::GetInstance().GetDevice(), "after CreateTextures");
 
     // Initialize GPU resource managers

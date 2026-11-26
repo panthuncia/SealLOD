@@ -12,6 +12,7 @@
 #include "Render/PreparedTablePublisher.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 #include "Resources/PixelBuffer.h"
 #include <BasicRenderer/Pipeline/PipelineDesc.h>
 
@@ -34,6 +35,7 @@ struct VoxelRasterFrame {
     uint32_t viewRasterInfoTable = 0;
     uint32_t pageTableResolution = 0, virtualResolution = 0;
     bool telemetry = false;
+    bool operator==(const VoxelRasterFrame&) const = default;
 };
 
 class VoxelSoftwareRasterizationPass
@@ -62,6 +64,11 @@ public:
     VoxelRasterBindings Declare(org::PassBuilder& builder);
     void Update(const org::UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override;
+    // Kept recordings (M6 step 8): the telemetry and virtual shadow settings, taken before Update
+    // (RenderGraphPass::TakeFrameValues) and read by Prepare; Revision names them, the pipelines and the view rows Update
+    // took.
+    void TakeFrameValues(const org::UpdateExecutionContext& execution) override;
+    void Revision(std::vector<uint64_t>& out) const;
     VoxelRasterFrame Prepare(const VoxelRasterBindings&, const org::PassPrepareContext& preparation) const;
     static void Record(const VoxelRasterBindings& bindings, const VoxelRasterFrame& frame,
         org::PassRecordContext& context);
@@ -85,4 +92,6 @@ private:
     CLodRasterOutputKind m_outputKind = CLodRasterOutputKind::VisibilityBuffer;
     uint32_t m_voxelWorkCapacity = 0u;
     bool m_declaredResourcesChanged = true;
+    br::render::DeclaredPipelines m_pipelines;
+    VoxelRasterFrame m_taken{};
 };

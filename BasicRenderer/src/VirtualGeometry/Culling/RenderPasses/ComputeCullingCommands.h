@@ -113,6 +113,15 @@ struct ComputeCullingFrame {
     uint32_t windGeneration = 1u;
     // False when the frame has no render snapshot: nothing is recorded.
     bool active = false;
+    // The revision audit's comparison: everything Record reads. `publication` only keeps the workloads' published tables
+    // alive while the packet is, and a newer publication with the same indirect workloads records the same commands.
+    bool operator==(const ComputeCullingFrame& other) const {
+        return workloads == other.workloads && settings == other.settings && cullingFlags == other.cullingFlags
+            && traversalDepth == other.traversalDepth && expansionFactor == other.expansionFactor
+            && rasterBucketCount == other.rasterBucketCount && viewRasterInfoTable == other.viewRasterInfoTable
+            && viewDepthTable == other.viewDepthTable && windEntryCount == other.windEntryCount
+            && windGeneration == other.windGeneration && active == other.active;
+    }
 };
 
 void RecordComputeCulling(const ComputeCullingBindings& bindings, const ComputeCullingFrame& frame,

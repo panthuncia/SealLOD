@@ -7,11 +7,18 @@
 #include "PostProcessing/Upscaling/UpscalingGenerationService.h"
 #include "Render/PreparedPass.h"
 
-struct UpscalingFrameData {
-    std::shared_ptr<const br::render::UpscalingGenerationService> service;
+// What the upscaler's SDK takes per run: the camera (matrices, jitter), the frame's number and elapsed time. Update writes them
+// each run, and Record reads them when the pass is recorded at execution, after Update in the same run: a kept recording of
+// Post records this pass again at each submission with the frame data it was prepared with (M6 step 4).
+struct UpscalingRunValues {
     Components::Camera camera;
     uint64_t frameNumber = 0;
     double deltaTime = 0;
+};
+
+struct UpscalingFrameData {
+    std::shared_ptr<const br::render::UpscalingGenerationService> service;
+    std::shared_ptr<const UpscalingRunValues> run;
     std::shared_ptr<org::PixelBuffer> hdr;
     std::shared_ptr<org::PixelBuffer> output;
     std::shared_ptr<org::PixelBuffer> depth;
@@ -20,6 +27,7 @@ struct UpscalingFrameData {
     std::shared_ptr<org::PixelBuffer> specularAlbedo;
     std::shared_ptr<org::PixelBuffer> normalRoughness;
     std::shared_ptr<org::PixelBuffer> specularHitDistance;
+    bool operator==(const UpscalingFrameData&) const = default;
 };
 
 class UpscalingPass
@@ -31,6 +39,8 @@ public:
 
     void Declare(org::PassBuilder& declaration) {
         auto* builder = &declaration;
+        // The SDK evaluation takes this run's values (UpscalingRunValues): recorded at execution, in a batch of its own.
+        declaration.RecordAtExecution();
         // Upscalers produce only the full-resolution image in mip 0. Keep the
         // interop contract explicit so it remains correct if this output is
         // replaced by an external resource with additional subresources.
@@ -114,13 +124,20 @@ public:
         }
     }
 
-    UpscalingFrameData Prepare(const org::PassPrepareContext& preparation) {
-        const auto* context = preparation.preparationData->Get<UpdateContext>();
+    // This run's values (UpscalingRunValues). The frame number counts the graph's runs, as the preparation's does.
+    void Update(const org::UpdateExecutionContext& execution) override {
+        const auto* context = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr;
+        if (context) m_runValues->camera = context->primaryCamera;
+        m_runValues->frameNumber = ++m_runs;
+        m_runValues->deltaTime = execution.deltaTime;
+    }
+    // Recorded at each run, so only the service it evaluates through names its recording.
+    void Revision(std::vector<uint64_t>& out) const { out.push_back(reinterpret_cast<uintptr_t>(m_service.get())); }
+
+    UpscalingFrameData Prepare(const org::PassPrepareContext&) {
         return UpscalingFrameData{
             .service = m_service,
-            .camera = context->primaryCamera,
-            .frameNumber = preparation.frameNumber,
-            .deltaTime = preparation.deltaTime,
+            .run = m_runValues,
             .hdr = m_pHDRTarget,
             .output = m_pUpscaledHDRTarget,
             .depth = m_pDepthTexture,
@@ -142,8 +159,9 @@ public:
             .normalRoughness = data.normalRoughness.get(),
             .specularHitDistance = data.specularHitDistance.get(),
         };
-        const bool written = data.service->Evaluate(recording.Commands(), data.camera,
-            data.frameNumber, data.deltaTime, inputs);
+        const auto& run = *data.run;
+        const bool written = data.service->Evaluate(recording.Commands(), run.camera,
+            run.frameNumber, run.deltaTime, inputs);
         recording.RestoreDescriptorHeaps();
         if (!written && data.service->Backend() == rhi::Backend::D3D12 && data.output) {
             ClearOutput(recording.Commands(), *data.output);
@@ -189,5 +207,7 @@ private:
     std::shared_ptr<org::PixelBuffer> m_pSpecularHitDistance;
 
     std::shared_ptr<const br::render::UpscalingGenerationService> m_service;
+    std::shared_ptr<UpscalingRunValues> m_runValues = std::make_shared<UpscalingRunValues>();
+    uint64_t m_runs = 0;
 
 };

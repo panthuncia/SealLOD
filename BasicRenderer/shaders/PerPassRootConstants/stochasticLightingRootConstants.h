@@ -285,3 +285,56 @@ float StochasticMixtureOverlap(float4 lowA, float4 highA, float4 lowB, float4 hi
     return saturate(dot(min(lowA, lowB) + min(highA, highB), 1.0f) / max(totalA, totalB));
 }
 #endif
+
+#ifndef __cplusplus
+// The run's frame number and history parity (M6 step 9c). The passes are recorded once and replayed (kept recordings), so their
+// root constants are the same every run: the frame number comes from the per-frame buffer (PerFrameBuffer::frameIndex is the
+// frame number), and each ping-ponged pair's descriptors are recorded as [0] in the "this frame" slot and [1] in the "last
+// frame" slot, which the shaders swap on odd frames. The sampling kernels' pairs use the slots above; the denoiser's are below.
+uint StochasticRunFrame()
+{
+    ConstantBuffer<PerFrameBuffer> stochasticPerFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+    return stochasticPerFrame.frameIndex;
+}
+// even on even frames, odd on odd frames.
+#define STOCHASTIC_PARITY_PICK(even, odd) (((StochasticRunFrame() & 1u) != 0u) ? (odd) : (even))
+#undef STOCHASTIC_FRAME
+#define STOCHASTIC_FRAME StochasticRunFrame()
+#ifdef CLOD_RT_SEC_FRAME
+#undef CLOD_RT_SEC_FRAME
+#define CLOD_RT_SEC_FRAME StochasticRunFrame()
+#endif
+#undef STOCHASTIC_VISIBLE_LISTS_UAV
+#undef STOCHASTIC_PREVIOUS_VISIBLE_LISTS_UAV
+#undef STOCHASTIC_SURFACE_HISTORY_UAV
+#undef STOCHASTIC_PREVIOUS_SURFACE_HISTORY_UAV
+#define STOCHASTIC_VISIBLE_LISTS_UAV STOCHASTIC_PARITY_PICK(UintRootConstant9, UintRootConstant10)
+#define STOCHASTIC_PREVIOUS_VISIBLE_LISTS_UAV STOCHASTIC_PARITY_PICK(UintRootConstant10, UintRootConstant9)
+#define STOCHASTIC_SURFACE_HISTORY_UAV STOCHASTIC_PARITY_PICK(UintRootConstant11, UintRootConstant12)
+#define STOCHASTIC_PREVIOUS_SURFACE_HISTORY_UAV STOCHASTIC_PARITY_PICK(UintRootConstant12, UintRootConstant11)
+// The denoiser's pairs: [0] in the slot named above, [1] in the previous slot (the moments' [1] in 13, the change history's in 16,
+// the mixture's in 20), and the surface history's [0] in 12 and [1] in 22. Both stages are recorded with the same slots.
+#undef STOCHASTIC_DENOISE_HISTORY_DIFFUSE_UAV
+#undef STOCHASTIC_DENOISE_HISTORY_SPECULAR_UAV
+#undef STOCHASTIC_DENOISE_HISTORY_MOMENTS_UAV
+#undef STOCHASTIC_DENOISE_HISTORY_CHANGE_UAV
+#undef STOCHASTIC_DENOISE_MIXTURE_UAV
+#undef STOCHASTIC_DENOISE_PREVIOUS_HISTORY_DIFFUSE_UAV
+#undef STOCHASTIC_DENOISE_PREVIOUS_HISTORY_SPECULAR_UAV
+#undef STOCHASTIC_DENOISE_PREVIOUS_HISTORY_MOMENTS_UAV
+#undef STOCHASTIC_DENOISE_PREVIOUS_HISTORY_CHANGE_UAV
+#undef STOCHASTIC_DENOISE_PREVIOUS_MIXTURE_UAV
+#undef STOCHASTIC_DENOISE_SURFACE_HISTORY_UAV
+#define STOCHASTIC_DENOISE_HISTORY_DIFFUSE_UAV STOCHASTIC_PARITY_PICK(UintRootConstant6, UintRootConstant9)
+#define STOCHASTIC_DENOISE_HISTORY_SPECULAR_UAV STOCHASTIC_PARITY_PICK(UintRootConstant7, UintRootConstant10)
+#define STOCHASTIC_DENOISE_HISTORY_MOMENTS_UAV STOCHASTIC_PARITY_PICK(UintRootConstant8, UintRootConstant13)
+#define STOCHASTIC_DENOISE_HISTORY_CHANGE_UAV STOCHASTIC_PARITY_PICK(UintRootConstant11, UintRootConstant16)
+#define STOCHASTIC_DENOISE_MIXTURE_UAV STOCHASTIC_PARITY_PICK(UintRootConstant19, UintRootConstant20)
+#define STOCHASTIC_DENOISE_PREVIOUS_HISTORY_DIFFUSE_UAV STOCHASTIC_PARITY_PICK(UintRootConstant9, UintRootConstant6)
+#define STOCHASTIC_DENOISE_PREVIOUS_HISTORY_SPECULAR_UAV STOCHASTIC_PARITY_PICK(UintRootConstant10, UintRootConstant7)
+#define STOCHASTIC_DENOISE_PREVIOUS_HISTORY_MOMENTS_UAV STOCHASTIC_PARITY_PICK(UintRootConstant13, UintRootConstant8)
+#define STOCHASTIC_DENOISE_PREVIOUS_HISTORY_CHANGE_UAV STOCHASTIC_PARITY_PICK(UintRootConstant16, UintRootConstant11)
+#define STOCHASTIC_DENOISE_PREVIOUS_MIXTURE_UAV STOCHASTIC_PARITY_PICK(UintRootConstant20, UintRootConstant19)
+#define STOCHASTIC_DENOISE_SURFACE_HISTORY_UAV STOCHASTIC_PARITY_PICK(UintRootConstant12, UintRootConstant22)
+#define STOCHASTIC_DENOISE_PREVIOUS_SURFACE_HISTORY_UAV STOCHASTIC_PARITY_PICK(UintRootConstant22, UintRootConstant12)
+#endif

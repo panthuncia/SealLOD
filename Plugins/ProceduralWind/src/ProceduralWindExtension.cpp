@@ -26,6 +26,7 @@
 #include "Resources/PixelBuffer.h"
 #include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
 #include "BasicRenderer/Extensions/ShaderBuffers.h"
+#include <BasicRenderer/Extensions/PassRevision.h>
 
 #include <fmt/format.h>
 #include <tracy/Tracy.hpp>
@@ -174,7 +175,8 @@ struct WindTransientConstants {
     std::uint32_t types, bones, activeInstances, typeCounters;
     std::uint32_t counters, placements, indirectCommands, skinningInfo;
     std::uint32_t forwardSkin, inverseSkin, inverseBind, placementCount;
-    std::uint32_t typeCount, transformBase, inverseBase, matrixCapacity;
+    // frameState: the DynamicWindFrameGPU's descriptor; the shaders read the palette half and the clock from it.
+    std::uint32_t typeCount, frameState, inverseBase, matrixCapacity;
     std::uint32_t cameraIndex, phaseAndDepthDescriptor, fieldSlice0, fieldSlice1;
     std::uint32_t fieldDimensions;
     float fieldCellSize, fieldOriginX, fieldOriginY;
@@ -188,11 +190,23 @@ struct WindTransientConstants {
 	float capacityTarget;
 	float lateReserve;
 	std::uint32_t allocationRecords;
+	bool operator==(const WindTransientConstants&) const = default;
 };
 
 static_assert(sizeof(WindBoneGPU) == 256u);
 static_assert(sizeof(WindTypeGPU) == 80u);
 static_assert(sizeof(WindActiveInstanceGPU) == 32u);
+
+// The packed size of each slice of the runtime's resident field pair (UpdateFieldPair), at least one element.
+std::array<std::uint32_t, 2> ResidentFieldSliceCapacities(const ProceduralWindRuntime& runtime)
+{
+    const auto pair = runtime.SnapshotResidentPair();
+    std::array<std::uint32_t, 2> capacities{ 1u, 1u };
+    if (!pair.valid) return capacities;
+    for (std::size_t slice = 0; slice < 2u; ++slice)
+        capacities[slice] = (std::max)(1u, static_cast<std::uint32_t>((pair.rgba16f[slice].size() + 1u) / 2u));
+    return capacities;
+}
 
 struct WindSharedResources {
     std::shared_ptr<org::GloballyIndexedResource> inverseBindResource;
@@ -224,13 +238,21 @@ struct WindSharedResources {
         if (!placementVersion || !activePlacementVersion) return;
         skinnedPlacements = placementVersion->resource;
         activeSkinnedPlacements = activePlacementVersion->resource;
+        // The membership table follows the resident transforms whether or not any wind type is registered: sized here as the
+        // first UpdateTypes would, so a recording of the new graph made ahead (staged, M6 step 9) still binds its backing.
+        visibleSkeletonMembership->EnsureSize((std::max)(1u, static_cast<std::uint32_t>(publishedObjects->residentTransformCount)));
     }
     bool seeded = false;
     explicit WindSharedResources(std::shared_ptr<ProceduralWindRuntime> runtimeIn, br::ReadbackCaptureService* readbackServiceIn)
+        : WindSharedResources(runtimeIn, readbackServiceIn, ResidentFieldSliceCapacities(*runtimeIn)) {}
+    // The field slices are made at the resident pair's size: the first UpdateFieldPair of a new graph then fills them in place,
+    // so a recording of the graph made ahead (staged, M6 step 9) still binds their backings at its first run.
+    WindSharedResources(std::shared_ptr<ProceduralWindRuntime> runtimeIn, br::ReadbackCaptureService* readbackServiceIn,
+        std::array<std::uint32_t, 2> fieldSliceCapacities)
         : runtime(std::move(runtimeIn))
 		, readbackService(readbackServiceIn)
-        , fieldSlices{ DynamicStructuredBuffer<std::uint32_t>::CreateShared(1u, "ProceduralWind.FieldSlice0"),
-                       DynamicStructuredBuffer<std::uint32_t>::CreateShared(1u, "ProceduralWind.FieldSlice1") }
+        , fieldSlices{ DynamicStructuredBuffer<std::uint32_t>::CreateShared(fieldSliceCapacities[0], "ProceduralWind.FieldSlice0"),
+                       DynamicStructuredBuffer<std::uint32_t>::CreateShared(fieldSliceCapacities[1], "ProceduralWind.FieldSlice1") }
 		, frameState(DynamicStructuredBuffer<DynamicWindFrameGPU>::CreateShared(1u, "ProceduralWind.FrameState"))
         , boneEntries(DynamicStructuredBuffer<WindBoneGPU>::CreateShared(1u, "ProceduralWind.BoneEntries"))
 		, boneRemaps(DynamicStructuredBuffer<std::uint32_t>::CreateShared(1u, "ProceduralWind.BoneRemaps"))
@@ -387,6 +409,8 @@ struct WindSharedResources {
 		frame.windY = state.directionToWS.y;
 		frame.gustStrength = state.gustStrength;
 		frame.treeDisplacementScale = displacementScale;
+		frame.transformBaseMatrices = transientRegion.transformBaseMatrices;
+		frame.previousTransformBaseMatrices = transientRegion.previousTransformBaseMatrices;
 		frameState->ReplaceData({ frame });
 	}
 
@@ -863,23 +887,17 @@ public:
         m_resources->inverseBindResource = m_resourceRegistryView->RequestSharedAs<org::GloballyIndexedResource>(
             Builtin::SkeletonResources::InverseBindMatrices);
     }
+    // Records nothing; its Update uploads the field pair.
+    void Revision(std::vector<uint64_t>&) const {}
     static void Record(org::PassRecordContext&) {}
 private:
     std::shared_ptr<WindSharedResources> m_resources;
 };
 
-const ProceduralWindFrameSettings& WindFrameSettings(
-    const org::PassPrepareContext& preparation)
-{
-    static const ProceduralWindFrameSettings defaults{};
-    const auto* context = preparation.preparationData->Get<UpdateContext>();
-    return context ? context->proceduralWind : defaults;
-}
-
 struct WindTransientViews {
     org::DeclaredViewToken types, bones, activeInstances, typeCounters, counters, placements;
     org::DeclaredViewToken indirectCommands, skinningInfo, forwardSkin, inverseSkin, inverseBind;
-    org::DeclaredViewToken allocationRecords, fieldSlice0, fieldSlice1;
+    org::DeclaredViewToken allocationRecords, fieldSlice0, fieldSlice1, frameState;
     bool hasPlacements = false;
 };
 
@@ -916,6 +934,7 @@ WindTransientViews DeclareWindTransientViews(org::PassBuilder& builder, const Wi
     views.allocationRecords = builder.UnorderedAccess(resources.allocationRecords).View();
     views.fieldSlice0 = builder.ShaderResource(resources.fieldSlices[0]).View();
     views.fieldSlice1 = builder.ShaderResource(resources.fieldSlices[1]).View();
+    views.frameState = builder.ShaderResource(resources.frameState).View();
     return views;
 }
 
@@ -927,7 +946,6 @@ WindTransientConstants MakeTransientConstants(const WindSharedResources& resourc
     WindTransientConstants c{};
     c.placementCount = resources.residentPlacementCount;
     c.typeCount = resources.typeCount;
-    c.transformBase = resources.transientRegion.transformBaseMatrices;
     c.inverseBase = resources.transientRegion.inverseSkinBaseMatrices;
     c.matrixCapacity = resources.transientRegion.capacityMatrices;
     c.phaseAndDepthDescriptor = 0u;
@@ -937,7 +955,8 @@ WindTransientConstants MakeTransientConstants(const WindSharedResources& resourc
     c.fieldOriginX = resident.metadata.origin.x;
     c.fieldOriginY = resident.metadata.origin.y;
     c.fieldInterpolation = resident.bracket.interpolation;
-    c.elapsedSeconds = resources.elapsedSeconds;
+    // The clock and the palette half change every frame: the shaders read them from the frame state (frameState).
+    c.elapsedSeconds = 0.0f;
     c.windX = resources.state.directionToWS.x;
     c.windY = resources.state.directionToWS.y;
     c.strength = resources.state.strength * resources.displacementScale;
@@ -979,6 +998,7 @@ void ResolveTransientViews(WindTransientConstants& c, const org::PassRecordConte
 	c.allocationRecords = recording.Index(views.allocationRecords);
     c.fieldSlice0 = recording.Index(views.fieldSlice0);
     c.fieldSlice1 = recording.Index(views.fieldSlice1);
+    c.frameState = recording.Index(views.frameState);
 }
 
 br::render::MiscConstants PackTransientConstants(const WindTransientConstants& constants)
@@ -1029,13 +1049,56 @@ struct WindDispatchFrame {
     WindTransientConstants constants{};
     uint32_t groups = 0;
     bool useDepth = false;
+    bool operator==(const WindDispatchFrame&) const = default;
 };
 
 struct WindIndirectFrame {
     WindTransientConstants constants{};
     uint32_t maximumCount = 0;
     bool enabled = false;
+    bool operator==(const WindIndirectFrame&) const = default;
 };
+
+// Kept recordings (M6 step 9). What a wind pass's Prepare reads from the frame, taken before Update
+// (RenderGraphPass::TakeFrameValues). The rest of its frame comes from the shared resources, which the reset pass's Update
+// rewrites each run before any Revision is asked. Each pass's Revision names the frame its Prepare returns: the clock and the
+// palette half are not in it (the shaders read them from the frame state), so it changes only with the wind's events,
+// settings and residency.
+struct WindPassInputs {
+    ProceduralWindFrameSettings settings{};
+    std::uint32_t cameraIndex = 0u;
+    bool depthHistory = false;
+    bool hasContext = false;
+
+    void Take(const org::UpdateExecutionContext& execution) {
+        const auto* context = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr;
+        hasContext = context != nullptr;
+        cameraIndex = 0u;
+        depthHistory = false;
+        if (!context) {
+            settings = ProceduralWindFrameSettings{};
+            return;
+        }
+        settings = context->proceduralWind;
+        const auto view = std::ranges::find(context->Views(), context->primaryViewID, &PreparedViewFrameData::id);
+        if (view != context->Views().end()) {
+            cameraIndex = view->cameraBufferIndex;
+            depthHistory = static_cast<bool>(view->depthHistory);
+        }
+    }
+};
+
+void AppendWindRevision(std::vector<uint64_t>& out, const br::PipelineState& pipeline, const WindDispatchFrame& frame) {
+    br::render::AppendPipelineRevision(out, pipeline);
+    br::render::AppendRevisionRows(out, &frame.constants, 1);
+    out.push_back(frame.groups | (uint64_t{frame.useDepth} << 32));
+}
+
+void AppendWindRevision(std::vector<uint64_t>& out, const br::PipelineState& pipeline, const WindIndirectFrame& frame) {
+    br::render::AppendPipelineRevision(out, pipeline);
+    br::render::AppendRevisionRows(out, &frame.constants, 1);
+    out.push_back(frame.maximumCount | (uint64_t{frame.enabled} << 32));
+}
 
 class WindResetPass final : public org::TypedRenderGraphPass<WindResetPass, WindDispatchFrame, WindPassBindings>,
     public org::IDynamicDeclaredResources {
@@ -1056,23 +1119,18 @@ public:
         builder.ShaderResource(m_resources->baseTypeLookup,
             Builtin::SkinnedAssemblyPlacements, Builtin::ActiveSkinnedAssemblyPlacements);
         builder.UnorderedAccess(m_resources->deferredEntries);
+        m_pipeline = bindings.pipeline;
+        m_inverseBind = static_cast<bool>(bindings.views.inverseBind.layout);
         return bindings;
     }
     void Initialize() {}
+    void TakeFrameValues(const org::UpdateExecutionContext& execution) override { m_inputs.Take(execution); }
     void Update(const org::UpdateExecutionContext& context) override { m_resources->UpdateTypes(context); }
     bool DeclaredResourcesChanged() const override {
         return m_declared != m_resources->Declared();
     }
-    WindDispatchFrame Prepare(const WindPassBindings& bindings, const org::PassPrepareContext& preparation) const
-    {
-        WindDispatchFrame frame{};
-        if (!m_resources->transientRegion.valid || !bindings.views.inverseBind.layout) return frame;
-        frame.constants = MakeTransientConstants(*m_resources, WindFrameSettings(preparation));
-        frame.constants.placementCount = m_resources->residentTransformCount;
-        SetVisibleSkeletonCount(frame.constants, m_resources->residentPlacementCount);
-        frame.groups = ((std::max)({m_resources->residentTransformCount, frame.constants.typeCount, 64u}) + 63u) / 64u;
-        return frame;
-    }
+    void Revision(std::vector<uint64_t>& out) const { AppendWindRevision(out, m_pipeline, Make()); }
+    WindDispatchFrame Prepare(const WindPassBindings&, const org::PassPrepareContext&) const { return Make(); }
     static void Record(const WindPassBindings& bindings, const WindDispatchFrame& frame, org::PassRecordContext& recording) {
         if (!frame.groups) return;
         auto constants = frame.constants;
@@ -1083,8 +1141,21 @@ public:
         br::render::DispatchCompute(recording, bindings.pipeline, PackTransientConstants(constants), frame.groups);
     }
 private:
+    WindDispatchFrame Make() const
+    {
+        WindDispatchFrame frame{};
+        if (!m_resources->transientRegion.valid || !m_inverseBind) return frame;
+        frame.constants = MakeTransientConstants(*m_resources, m_inputs.settings);
+        frame.constants.placementCount = m_resources->residentTransformCount;
+        SetVisibleSkeletonCount(frame.constants, m_resources->residentPlacementCount);
+        frame.groups = ((std::max)({m_resources->residentTransformCount, frame.constants.typeCount, 64u}) + 63u) / 64u;
+        return frame;
+    }
     std::shared_ptr<WindSharedResources> m_resources;
     WindSharedResources::DeclaredState m_declared{};
+    br::PipelineState m_pipeline;
+    WindPassInputs m_inputs;
+    bool m_inverseBind = false;
 };
 
 class WindActivatePass final : public org::TypedRenderGraphPass<WindActivatePass, WindDispatchFrame, WindPassBindings>,
@@ -1116,38 +1187,18 @@ public:
         builder.ShaderResource(Builtin::SkinnedAssemblyPlacements, Builtin::ActiveSkinnedAssemblyPlacements,
             Builtin::PerInstanceTransformBuffer, Builtin::CameraBuffer);
         builder.ConstantBuffer(Builtin::PerFrameBuffer);
+        m_pipeline = bindings.pipeline;
+        m_inverseBind = static_cast<bool>(bindings.views.inverseBind.layout);
+        m_hasDepth = bindings.hasDepth;
         return bindings;
     }
     void Initialize() {}
+    void TakeFrameValues(const org::UpdateExecutionContext& execution) override { m_inputs.Take(execution); }
     bool DeclaredResourcesChanged() const override {
         return m_declared != m_resources->Declared();
     }
-    WindDispatchFrame Prepare(const WindPassBindings& bindings, const org::PassPrepareContext& preparation) const
-    {
-        WindDispatchFrame frame{};
-        if (!m_resources->residentPlacementCount || !bindings.views.inverseBind.layout) return frame;
-        const auto* context = preparation.preparationData->Get<UpdateContext>();
-        auto& constants = frame.constants;
-        constants = MakeTransientConstants(*m_resources, WindFrameSettings(preparation));
-        bool depthReady = m_latePhase;
-        if (context) {
-            const auto view = std::ranges::find(context->Views(),
-                context->primaryViewID, &PreparedViewFrameData::id);
-            if (view != context->Views().end()) {
-                constants.cameraIndex = view->cameraBufferIndex;
-                depthReady = depthReady || static_cast<bool>(view->depthHistory);
-            }
-        }
-        constants.capacityTarget = (std::max)(0.0f,
-            context ? context->proceduralWind.innerRadius : 0.0f);
-        constants.lateReserve = (std::max)(constants.capacityTarget,
-            context ? context->proceduralWind.outerRadius : 0.0f);
-        constants.phaseAndDepthDescriptor = m_latePhase ? kLatePhaseBit : 0u;
-        frame.useDepth = bindings.hasDepth && depthReady && context && context->proceduralWind.occlusionCullingEnabled;
-        constants.allocationRecords = m_resources->baseTypeLookup->Size();
-        frame.groups = (constants.placementCount + 63u) / 64u;
-        return frame;
-    }
+    void Revision(std::vector<uint64_t>& out) const { AppendWindRevision(out, m_pipeline, Make()); }
+    WindDispatchFrame Prepare(const WindPassBindings&, const org::PassPrepareContext&) const { return Make(); }
     static void Record(const WindPassBindings& bindings, const WindDispatchFrame& frame, org::PassRecordContext& recording) {
         if (!frame.groups) return;
         auto constants = frame.constants;
@@ -1162,9 +1213,29 @@ public:
         br::render::DispatchCompute(recording, bindings.pipeline, PackTransientConstants(constants), frame.groups);
     }
 private:
+    WindDispatchFrame Make() const
+    {
+        WindDispatchFrame frame{};
+        if (!m_resources->residentPlacementCount || !m_inverseBind) return frame;
+        auto& constants = frame.constants;
+        constants = MakeTransientConstants(*m_resources, m_inputs.settings);
+        constants.cameraIndex = m_inputs.cameraIndex;
+        const bool depthReady = m_latePhase || m_inputs.depthHistory;
+        constants.capacityTarget = (std::max)(0.0f, m_inputs.settings.innerRadius);
+        constants.lateReserve = (std::max)(constants.capacityTarget, m_inputs.settings.outerRadius);
+        constants.phaseAndDepthDescriptor = m_latePhase ? kLatePhaseBit : 0u;
+        frame.useDepth = m_hasDepth && depthReady && m_inputs.hasContext && m_inputs.settings.occlusionCullingEnabled;
+        constants.allocationRecords = m_resources->baseTypeLookup->Size();
+        frame.groups = (constants.placementCount + 63u) / 64u;
+        return frame;
+    }
     std::shared_ptr<WindSharedResources> m_resources;
     WindSharedResources::DeclaredState m_declared{};
+    br::PipelineState m_pipeline;
+    WindPassInputs m_inputs;
     bool m_latePhase = false;
+    bool m_inverseBind = false;
+    bool m_hasDepth = false;
 };
 
 class WindBuildCommandsPass final : public org::TypedRenderGraphPass<WindBuildCommandsPass, WindDispatchFrame, WindPassBindings>,
@@ -1183,21 +1254,18 @@ public:
         bindings.diagnostics = b.UnorderedAccess(m_resources->diagnostics).View();
         bindings.processedCounts = b.UnorderedAccess(m_resources->processedTypeCounts).View();
         b.PreferQueue(org::QueueKind::Compute);
+        m_pipeline = bindings.pipeline;
+        m_inverseBind = static_cast<bool>(bindings.views.inverseBind.layout);
         return bindings;
     }
     void Initialize() {}
+    void TakeFrameValues(const org::UpdateExecutionContext& execution) override { m_inputs.Take(execution); }
     void Update(const org::UpdateExecutionContext&) override {}
     bool DeclaredResourcesChanged() const override {
         return m_declared != m_resources->Declared();
     }
-    WindDispatchFrame Prepare(const WindPassBindings& bindings, const org::PassPrepareContext& preparation) const {
-        WindDispatchFrame frame{};
-        if (!m_resources->typeCount || !bindings.views.inverseBind.layout) return frame;
-        frame.constants = MakeTransientConstants(*m_resources, WindFrameSettings(preparation));
-        frame.constants.phaseAndDepthDescriptor = m_latePhase ? kLatePhaseBit : 0u;
-        frame.groups = 1u;
-        return frame;
-    }
+    void Revision(std::vector<uint64_t>& out) const { AppendWindRevision(out, m_pipeline, Make()); }
+    WindDispatchFrame Prepare(const WindPassBindings&, const org::PassPrepareContext&) const { return Make(); }
     static void Record(const WindPassBindings& bindings, const WindDispatchFrame& frame, org::PassRecordContext& recording) {
         if (!frame.groups) return;
         auto constants = frame.constants;
@@ -1206,7 +1274,19 @@ public:
         constants.fieldSlice0 = recording.Index(bindings.processedCounts);
         br::render::DispatchCompute(recording, bindings.pipeline, PackTransientConstants(constants), frame.groups);
     }
-private: std::shared_ptr<WindSharedResources> m_resources; WindSharedResources::DeclaredState m_declared{}; bool m_latePhase = false;
+private:
+    WindDispatchFrame Make() const {
+        WindDispatchFrame frame{};
+        if (!m_resources->typeCount || !m_inverseBind) return frame;
+        frame.constants = MakeTransientConstants(*m_resources, m_inputs.settings);
+        frame.constants.phaseAndDepthDescriptor = m_latePhase ? kLatePhaseBit : 0u;
+        frame.groups = 1u;
+        return frame;
+    }
+    std::shared_ptr<WindSharedResources> m_resources; WindSharedResources::DeclaredState m_declared{}; bool m_latePhase = false;
+    br::PipelineState m_pipeline;
+    WindPassInputs m_inputs;
+    bool m_inverseBind = false;
 };
 
 class WindFinalizeAllocationsPass final : public org::TypedRenderGraphPass<WindFinalizeAllocationsPass, WindDispatchFrame, WindPassBindings>,
@@ -1226,21 +1306,18 @@ public:
         bindings.diagnostics = builder.UnorderedAccess(m_resources->diagnostics).View();
         bindings.boneRemaps = builder.ShaderResource(m_resources->boneRemaps).View();
         builder.PreferQueue(org::QueueKind::Compute);
+        m_pipeline = bindings.pipeline;
+        m_inverseBind = static_cast<bool>(bindings.views.inverseBind.layout);
 		return bindings;
 	}
 	void Initialize() {}
+	void TakeFrameValues(const org::UpdateExecutionContext& execution) override { m_inputs.Take(execution); }
 	void Update(const org::UpdateExecutionContext&) override {}
 	bool DeclaredResourcesChanged() const override {
         return m_declared != m_resources->Declared();
     }
-	WindDispatchFrame Prepare(const WindPassBindings& bindings, const org::PassPrepareContext& preparation) const {
-		WindDispatchFrame frame{};
-		if (!m_resources->typeCount || !m_resources->residentPlacementCount || !bindings.views.inverseBind.layout) return frame;
-		frame.constants = MakeTransientConstants(*m_resources, WindFrameSettings(preparation));
-		SetVisibleSkeletonCount(frame.constants, m_resources->residentPlacementCount);
-		frame.groups = (m_resources->residentPlacementCount + kThreadsPerGroup - 1u) / kThreadsPerGroup;
-		return frame;
-	}
+	void Revision(std::vector<uint64_t>& out) const { AppendWindRevision(out, m_pipeline, Make()); }
+	WindDispatchFrame Prepare(const WindPassBindings&, const org::PassPrepareContext&) const { return Make(); }
 	static void Record(const WindPassBindings& bindings, const WindDispatchFrame& frame, org::PassRecordContext& recording) {
 		if (!frame.groups) return;
 		auto constants = frame.constants;
@@ -1251,8 +1328,19 @@ public:
 		br::render::DispatchCompute(recording, bindings.pipeline, PackTransientConstants(constants), frame.groups);
 	}
 private:
+	WindDispatchFrame Make() const {
+		WindDispatchFrame frame{};
+		if (!m_resources->typeCount || !m_resources->residentPlacementCount || !m_inverseBind) return frame;
+		frame.constants = MakeTransientConstants(*m_resources, m_inputs.settings);
+		SetVisibleSkeletonCount(frame.constants, m_resources->residentPlacementCount);
+		frame.groups = (m_resources->residentPlacementCount + kThreadsPerGroup - 1u) / kThreadsPerGroup;
+		return frame;
+	}
 	std::shared_ptr<WindSharedResources> m_resources;
     WindSharedResources::DeclaredState m_declared{};
+    br::PipelineState m_pipeline;
+    WindPassInputs m_inputs;
+    bool m_inverseBind = false;
 };
 
 class WindIndirectSimulatePass final : public org::TypedRenderGraphPass<WindIndirectSimulatePass, WindIndirectFrame, WindPassBindings>,
@@ -1278,22 +1366,18 @@ public:
         bindings.argumentsBinding = b.IndirectArguments(m_resources->indirectCommands);
         bindings.countBinding = b.IndirectArguments(m_resources->allocationCounters);
         b.PreferQueue(org::QueueKind::Compute);
+        m_pipeline = bindings.pipeline;
+        m_inverseBind = static_cast<bool>(bindings.views.inverseBind.layout);
         return bindings;
     }
     void Initialize() {}
+    void TakeFrameValues(const org::UpdateExecutionContext& execution) override { m_inputs.Take(execution); }
     void Update(const org::UpdateExecutionContext&) override {}
     bool DeclaredResourcesChanged() const override {
         return m_declared != m_resources->Declared();
     }
-    WindIndirectFrame Prepare(const WindPassBindings& bindings, const org::PassPrepareContext& preparation) const {
-        WindIndirectFrame frame{};
-        if (!m_resources->typeCount || !bindings.views.inverseBind.layout) return frame;
-        frame.constants = MakeTransientConstants(*m_resources, WindFrameSettings(preparation));
-        frame.constants.phaseAndDepthDescriptor = m_latePhase ? kLatePhaseBit : 0u;
-        frame.maximumCount = m_resources->typeCount;
-        frame.enabled = true;
-        return frame;
-    }
+    void Revision(std::vector<uint64_t>& out) const { AppendWindRevision(out, m_pipeline, Make()); }
+    WindIndirectFrame Prepare(const WindPassBindings&, const org::PassPrepareContext&) const { return Make(); }
     static void Record(const WindPassBindings& bindings, const WindIndirectFrame& frame, org::PassRecordContext& recording) {
         if (!frame.enabled) return;
         auto constants = frame.constants;
@@ -1302,7 +1386,20 @@ public:
         br::render::DispatchComputeIndirect(recording, bindings.pipeline, PackTransientConstants(constants),
             bindings.signature, bindings.argumentsBinding, 0, frame.maximumCount, bindings.countBinding, sizeof(uint32_t));
     }
-private: std::shared_ptr<WindSharedResources> m_resources; WindSharedResources::DeclaredState m_declared{}; bool m_latePhase = false;
+private:
+    WindIndirectFrame Make() const {
+        WindIndirectFrame frame{};
+        if (!m_resources->typeCount || !m_inverseBind) return frame;
+        frame.constants = MakeTransientConstants(*m_resources, m_inputs.settings);
+        frame.constants.phaseAndDepthDescriptor = m_latePhase ? kLatePhaseBit : 0u;
+        frame.maximumCount = m_resources->typeCount;
+        frame.enabled = true;
+        return frame;
+    }
+    std::shared_ptr<WindSharedResources> m_resources; WindSharedResources::DeclaredState m_declared{}; bool m_latePhase = false;
+    br::PipelineState m_pipeline;
+    WindPassInputs m_inputs;
+    bool m_inverseBind = false;
 };
 
 struct WindSkeletonDebugFrameData {

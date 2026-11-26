@@ -10,6 +10,7 @@
 #include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 
 namespace org { class Buffer; }
 namespace org { class ResourceGroup; }
@@ -28,6 +29,7 @@ struct ReyesBuildRasterWorkBindings {
 
 struct ReyesBuildRasterWorkFrame {
     uint32_t viewDepthTableIndex = 0xFFFFFFFFu;
+    bool operator==(const ReyesBuildRasterWorkFrame&) const = default;
 };
 
 class ReyesBuildRasterWorkPass final : public org::TypedRenderGraphPass<ReyesBuildRasterWorkPass,
@@ -56,12 +58,19 @@ public:
     ReyesBuildRasterWorkBindings Declare(org::PassBuilder& builder);
     void Update(const org::UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override { return m_declaredResourcesChanged; }
+    // Kept recordings (M6 step 8): beyond its bindings and pipelines, Record bakes the index of the view table Prepare
+    // publishes, whose rows follow the views Update took.
+    void Revision(std::vector<uint64_t>& out) const {
+        m_pipelines.Append(out);
+        m_viewDepthTable.AppendRevision(out);
+    }
     ReyesBuildRasterWorkFrame Prepare(const ReyesBuildRasterWorkBindings&,
         const org::PassPrepareContext& preparation) const;
     static void Record(const ReyesBuildRasterWorkBindings& bindings, const ReyesBuildRasterWorkFrame& frame,
         org::PassRecordContext& recording);
 
 private:
+    br::render::DeclaredPipelines m_pipelines;
     std::shared_ptr<org::Buffer> m_diceQueueBuffer;
     std::shared_ptr<org::Buffer> m_diceQueueCounterBuffer;
     std::shared_ptr<org::Buffer> m_diceQueueReadOffsetBuffer;

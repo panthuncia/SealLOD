@@ -18,6 +18,18 @@
 #include "../shaders/PerPassRootConstants/clodClearUintBufferRootConstants.h"
 #include "../shaders/PerPassRootConstants/clodHistogramRootConstants.h"
 
+namespace {
+// The frame's raster bucket count; `enabled` is false without buckets or while the pass is gated off (software raster in
+// compute only).
+uint32_t TakeRasterBucketCount(const org::UpdateExecutionContext& execution, bool computeSoftwareRasterOnly, bool& enabled) {
+    const auto* context = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr;
+    const uint32_t numBuckets = context ? context->preparedRasterBucketCount : 0u;
+    enabled = numBuckets != 0u && (!computeSoftwareRasterOnly || CLodSoftwareRasterUsesCompute(
+        SettingsManager::GetInstance().getSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)()));
+    return numBuckets;
+}
+}
+
 RasterBucketHistogramPass::RasterBucketHistogramPass(
     std::shared_ptr<org::Buffer> visibleClustersBuffer,
     std::shared_ptr<org::Buffer> visibleClustersCounterBuffer,
@@ -47,6 +59,12 @@ RasterBucketHistogramPass::RasterBucketHistogramPass(
 RasterBucketHistogramPass::~RasterBucketHistogramPass() = default;
 
 RasterBucketHistogramBindings RasterBucketHistogramPass::Declare(org::PassBuilder& builder) {
+    // Sized for the build's bucket count (br::render::BuildUpdateContext) as the first Update would size them: the graph then
+    // places them at that size, so a recording of the new graph made ahead (staged, M6 step 9) still binds them at its first
+    // run.
+    if (const auto* seed = br::render::BuildUpdateContext(); seed && (!m_runWhenComputeSWRasterEnabledOnly ||
+        CLodSoftwareRasterUsesCompute(SettingsManager::GetInstance().getSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)())))
+        SizeBuffers(seed->preparedRasterBucketCount);
     RasterBucketHistogramBindings bindings{
         br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
             L"ClearUintStructuredBufferCSMain", "ClearUintStructuredBufferCSMain")),
@@ -84,16 +102,27 @@ RasterBucketHistogramBindings RasterBucketHistogramPass::Declare(org::PassBuilde
     bindings.hasReyesOwnership = static_cast<bool>(m_reyesOwnershipBitsetBuffer);
     bindings.hasTelemetry = static_cast<bool>(m_telemetryBuffer);
     bindings.hasReadBaseCounter = static_cast<bool>(m_readBaseCounterBuffer);
+    m_pipelines.Clear();
+    m_pipelines.Add(bindings.clearPipeline);
+    m_pipelines.Add(bindings.histogramPipeline);
     return bindings;
 }
 
 RasterBucketHistogramFrame RasterBucketHistogramPass::Prepare(
     const RasterBucketHistogramBindings&, const org::PassPrepareContext& preparation) const {
-    const auto* context = preparation.preparationData->Get<UpdateContext>();
-    const uint32_t numBuckets = context->preparedRasterBucketCount;
-    const bool enabled = numBuckets != 0u && (!m_runWhenComputeSWRasterEnabledOnly ||
-        CLodSoftwareRasterUsesCompute(SettingsManager::GetInstance().getSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)()));
-    return {numBuckets, enabled, IsCLodWorkGraphTelemetryEnabled()};
+    (void)preparation;
+    return m_taken;
+}
+
+void RasterBucketHistogramPass::TakeFrameValues(const org::UpdateExecutionContext& execution) {
+    bool enabled = false;
+    const uint32_t numBuckets = TakeRasterBucketCount(execution, m_runWhenComputeSWRasterEnabledOnly, enabled);
+    m_taken = {numBuckets, enabled, IsCLodWorkGraphTelemetryEnabled()};
+}
+
+void RasterBucketHistogramPass::Revision(std::vector<uint64_t>& out) const {
+    m_pipelines.Append(out);
+    out.push_back(m_taken.numBuckets | (uint64_t{m_taken.enabled} << 32) | (uint64_t{m_taken.telemetryEnabled} << 33));
 }
 
 void RasterBucketHistogramPass::Record(const RasterBucketHistogramBindings& bindings,
@@ -136,10 +165,11 @@ void RasterBucketHistogramPass::Update(const org::UpdateExecutionContext& execut
     auto* updateContext = executionContext.hostData->Get<UpdateContext>();
     auto& context = *updateContext;
 
-    const uint32_t numBuckets = context.preparedRasterBucketCount;
+    SizeBuffers(context.preparedRasterBucketCount);
+}
 
+void RasterBucketHistogramPass::SizeBuffers(uint32_t numBuckets) {
     if (m_histogramBuffer->GetSize() < static_cast<size_t>(numBuckets) * sizeof(uint32_t)) {
         m_histogramBuffer->ResizeStructured(numBuckets);
     }
-
 }

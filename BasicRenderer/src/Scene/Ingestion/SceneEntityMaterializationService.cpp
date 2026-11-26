@@ -210,6 +210,23 @@ Components::Camera BuildRendererCamera(
     return rendererCamera;
 }
 
+// Preserve view/projection history maintained by RunRenderResourceSyncStage.
+// The scene camera does not maintain these — its view stays at identity.
+Components::Camera KeepCameraHistory(Components::Camera rendererCamera, const Components::Camera& existing) {
+    rendererCamera.info.view = existing.info.view;
+    rendererCamera.info.viewInverse = existing.info.viewInverse;
+    rendererCamera.info.prevView = existing.info.prevView;
+    rendererCamera.info.jitteredProjection = existing.info.jitteredProjection;
+    rendererCamera.info.prevJitteredProjection = existing.info.prevJitteredProjection;
+    rendererCamera.info.prevUnjitteredProjection = existing.info.prevUnjitteredProjection;
+    rendererCamera.info.viewProjection = existing.info.viewProjection;
+    rendererCamera.info.projectionInverse = existing.info.projectionInverse;
+    rendererCamera.info.positionWorldSpace = existing.info.positionWorldSpace;
+    rendererCamera.jitterPixelSpace = existing.jitterPixelSpace;
+    rendererCamera.jitterNDC = existing.jitterNDC;
+    return rendererCamera;
+}
+
 void SyncCameraDerivedState(
     flecs::entity dst,
     const Components::Camera& sceneCamera,
@@ -236,24 +253,34 @@ void SyncCameraDerivedState(
         dst.set<Components::DepthMap>(depthMap);
         dst.set<CameraResourceSignature>(newSignature);
     } else {
-        const auto existing = dst.get<Components::Camera>();
         const auto depthMap = dst.get<Components::DepthMap>();
-        auto rendererCamera = BuildRendererCamera(sceneCamera, depthMap, renderWidth, renderHeight, lodHeight);
-        // Preserve view/projection history maintained by RunRenderResourceSyncStage.
-        // The scene camera does not maintain these — its view stays at identity.
-        rendererCamera.info.view = existing.info.view;
-        rendererCamera.info.viewInverse = existing.info.viewInverse;
-        rendererCamera.info.prevView = existing.info.prevView;
-        rendererCamera.info.jitteredProjection = existing.info.jitteredProjection;
-        rendererCamera.info.prevJitteredProjection = existing.info.prevJitteredProjection;
-        rendererCamera.info.prevUnjitteredProjection = existing.info.prevUnjitteredProjection;
-        rendererCamera.info.viewProjection = existing.info.viewProjection;
-        rendererCamera.info.projectionInverse = existing.info.projectionInverse;
-        rendererCamera.info.positionWorldSpace = existing.info.positionWorldSpace;
-        rendererCamera.jitterPixelSpace = existing.jitterPixelSpace;
-        rendererCamera.jitterNDC = existing.jitterNDC;
-        dst.set<Components::Camera>(rendererCamera);
+        dst.set<Components::Camera>(KeepCameraHistory(BuildRendererCamera(sceneCamera, depthMap, renderWidth, renderHeight, lodHeight),
+            dst.get<Components::Camera>()));
     }
+}
+
+// The view keeps its id: only its depth maps and its camera's sizes change (M5 step 5, a resize's attach).
+void ReplaceCameraDepthState(
+    flecs::entity dst,
+    const Components::Camera& sceneCamera,
+    bool isPrimary,
+    ViewManager& viewManager,
+    const Components::DepthMap& depthMap,
+    uint32_t renderWidth,
+    uint32_t renderHeight,
+    uint32_t lodHeight) {
+    const auto* view = dst.try_get<Components::RenderViewRef>();
+    if (!view || !dst.has<CameraResourceSignature>() || !dst.has<Components::Camera>()) {
+        SyncCameraDerivedState(dst, sceneCamera, isPrimary, viewManager, renderWidth, renderHeight, lodHeight);
+        return;
+    }
+    auto rendererCamera = KeepCameraHistory(BuildRendererCamera(sceneCamera, depthMap, renderWidth, renderHeight, lodHeight),
+        dst.get<Components::Camera>());
+    viewManager.AttachDepth(view->viewID, depthMap.depthMap, depthMap.linearDepthMap);
+    viewManager.UpdateCamera(view->viewID, rendererCamera.info);
+    dst.set<Components::Camera>(rendererCamera);
+    dst.set<Components::DepthMap>(depthMap);
+    dst.set<CameraResourceSignature>({ renderWidth, renderHeight, isPrimary });
 }
 
 LightResourceSignature BuildLightSignature(const Components::Light& light, uint16_t shadowResolution, uint8_t directionalCascadeCount, bool hasPrimaryCamera) {
@@ -405,6 +432,11 @@ void SceneEntityMaterializationService::MaterializeCamera(flecs::entity entity,
     const Components::Camera& camera, bool primary, std::uint32_t width,
     std::uint32_t height, std::uint32_t lodHeight) const {
     SyncCameraDerivedState(entity, camera, primary, *m_views, width, height, lodHeight);
+}
+
+void SceneEntityMaterializationService::ReplaceCameraDepth(flecs::entity entity, const Components::Camera& camera, bool primary,
+    const Components::DepthMap& depthMap, std::uint32_t width, std::uint32_t height, std::uint32_t lodHeight) const {
+    ReplaceCameraDepthState(entity, camera, primary, *m_views, depthMap, width, height, lodHeight);
 }
 
 void SceneEntityMaterializationService::SelectCurrentCamera(flecs::entity entity) const {

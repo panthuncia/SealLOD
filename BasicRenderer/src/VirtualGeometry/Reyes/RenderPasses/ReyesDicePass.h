@@ -7,6 +7,7 @@
 #include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 
 namespace org { class Buffer; }
 
@@ -38,8 +39,11 @@ public:
 
     ReyesDiceBindings Declare(org::PassBuilder& builder);
     static void Record(const ReyesDiceBindings& bindings, org::PassRecordContext& recording);
+    // Kept recordings (M6 step 8): Record bakes only its bindings and its pipelines' builds.
+    void Revision(std::vector<uint64_t>& out) const { m_pipelines.Append(out); }
 
 private:
+    br::render::DeclaredPipelines m_pipelines;
     std::shared_ptr<org::Buffer> m_diceQueueBuffer;
     std::shared_ptr<org::Buffer> m_diceQueueCounterBuffer;
     std::shared_ptr<org::Buffer> m_diceQueueReadOffsetBuffer;

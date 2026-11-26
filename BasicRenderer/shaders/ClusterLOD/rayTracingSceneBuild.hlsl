@@ -17,6 +17,25 @@
 #include "include/clodRayTracingAlpha.hlsli"
 #include "PerPassRootConstants/clodRayTracingSetupRootConstants.h"
 
+// The frame's transient arena slice and CLAS IDs, and the BLAS cache's frame number, from the per-frame buffer's frame number
+// (M6 step 9c): the scene build is recorded once and replayed, so its root constants are the same every frame. They hold slice
+// 0's arena unit and ID base; a frame takes slice frame % (CLOD_RT_CACHE_PROTECTED_FRAMES + 1), the system's transient slices.
+uint CLodRtSceneFrameNumber()
+{
+    ConstantBuffer<PerFrameBuffer> scenePerFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+    return scenePerFrame.frameIndex;
+}
+uint CLodRtSceneArenaSlot()
+{
+    return CLodRtSceneFrameNumber() % (CLOD_RT_CACHE_PROTECTED_FRAMES + 1u);
+}
+#undef CLOD_RT_CACHE_TRANSIENT_ARENA_UNIT
+#define CLOD_RT_CACHE_TRANSIENT_ARENA_UNIT (UintRootConstant46 + CLodRtSceneArenaSlot() * CLOD_RT_CACHE_TRANSIENT_ARENA_UNITS)
+#undef CLOD_RT_CACHE_TRANSIENT_ID_BASE
+#define CLOD_RT_CACHE_TRANSIENT_ID_BASE (UintRootConstant41 + CLodRtSceneArenaSlot() * CLOD_RT_CACHE_BUDGET)
+#undef CLOD_RT_BC_FRAME
+#define CLOD_RT_BC_FRAME CLodRtSceneFrameNumber()
+
 [numthreads(256, 1, 1)]
 void CLodRtClearCS(uint3 id : SV_DispatchThreadID)
 {

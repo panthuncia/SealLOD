@@ -323,6 +323,12 @@ void ClusterSoftwareRasterizationPass::Update(const org::UpdateExecutionContext&
     auto* updateContext = executionContext.hostData->Get<UpdateContext>();
     auto& context = *updateContext;
     m_declaredResourcesChanged = m_viewRasterInfoTable.Update(context.Views(), context.ViewCameraBufferSize(), m_outputKind);
+    // The skin cache's generation for this run (it runs with virtual shadow output and buckets).
+    if (m_taken.active && m_dynamicWindSkinCacheHashBuffer && m_outputKind == CLodRasterOutputKind::VirtualShadow
+        && m_taken.bucketCount != 0u) {
+        if (++m_dynamicWindSkinCacheGeneration == 0 || m_dynamicWindSkinCacheGeneration >= 0x7FFFFFFFu)
+            m_dynamicWindSkinCacheGeneration = 1;
+    }
     // Outside virtual shadows the pass touches the telemetry buffer only while requested.
     const bool telemetryWanted = m_outputKind != CLodRasterOutputKind::VirtualShadow && IsCLodWorkGraphTelemetryEnabled();
     if (telemetryWanted != m_telemetryDeclared) {
@@ -335,47 +341,72 @@ bool ClusterSoftwareRasterizationPass::DeclaredResourcesChanged() const {
     return m_declaredResourcesChanged;
 }
 
-ClusterSoftwareRasterFrame ClusterSoftwareRasterizationPass::Prepare(
-    const ClusterSoftwareRasterBindings& bindings, const org::PassPrepareContext& preparation) const {
-    ClusterSoftwareRasterFrame frame{};
+void ClusterSoftwareRasterizationPass::TakeFrameValues(const org::UpdateExecutionContext& execution) {
+    m_taken = {};
     if (m_runWhenComputeSWRasterEnabledOnly && !CLodSoftwareRasterUsesCompute(
         SettingsManager::GetInstance().getSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)()))
-        return frame;
+        return;
     if (m_outputKind == CLodRasterOutputKind::VisibilityBuffer &&
         SettingsManager::GetInstance().getSettingGetter<bool>(CLodDisableNonVoxelVisibilitySettingName)())
-        return frame;
-    const auto* context = preparation.preparationData
-        ? preparation.preparationData->Get<UpdateContext>() : nullptr;
-    if (!context) throw std::logic_error("CLod software-raster preparation requires the owned render snapshot");
-    frame.enabled = true;
-    frame.viewRasterInfoTable =
-        m_viewRasterInfoTable.Publish(preparation, m_viewRasterInfoPublisher, bindings.viewRasterInfoLayout);
-    if (bindings.virtualShadow) {
+        return;
+    const auto* context = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr;
+    if (!context) return;
+    m_taken.active = true;
+    if (m_outputKind == CLodRasterOutputKind::VirtualShadow) {
         const auto config = CLodVirtualShadowBuildRuntimeResolutionConfig();
-        frame.pageTableResolution = config.pageTableResolution;
-        frame.virtualResolution = config.virtualResolution;
+        m_taken.pageTableResolution = config.pageTableResolution;
+        m_taken.virtualResolution = config.virtualResolution;
     }
     const auto numBuckets = context->preparedRasterBucketCount;
-    frame.bucketCount = numBuckets;
-    BT_PLOT("CLod.RasterArgs.PreparedSoftwareBucketCount", static_cast<int64_t>(numBuckets));
-    BT_PLOT("CLod.RasterArgs.PreparedSoftwareBackingBytes", static_cast<int64_t>(m_rasterBucketsIndirectArgsBuffer->GetSize()));
+    m_taken.bucketCount = numBuckets;
     // Validate the whole input before selecting any pipeline.
     constexpr uint64_t stride = sizeof(RasterizeClustersCommand);
     if (numBuckets > context->preparedRasterBucketFlags.size())
         throw std::out_of_range("Software raster bucket flags are incomplete");
-    if (numBuckets > m_rasterBucketsIndirectArgsBuffer->GetSize() / stride)
-        throw std::out_of_range("Software raster arguments are incomplete");
-    frame.steps.reserve(numBuckets);
-    for (uint32_t bucket = 0; bucket < numBuckets; ++bucket) {
+    // The arguments buffer is sized by the compaction pass's Update, which in a run comes before this pass's values are taken.
+    // A staged recording (RecordStagedCopy) takes the values without any Update, so there the new graph's buffer can still be
+    // short: only the buckets it holds are recorded, and its capacity is in the revision, so the copy's first run records
+    // again, named (M6 step 9).
+    m_taken.argumentCapacity = static_cast<uint32_t>(m_rasterBucketsIndirectArgsBuffer->GetSize() / stride);
+    const uint32_t recordedBuckets = (std::min)(numBuckets, m_taken.argumentCapacity);
+    m_taken.steps.reserve(recordedBuckets);
+    for (uint32_t bucket = 0; bucket < recordedBuckets; ++bucket) {
         const auto* pso = PSOManager::GetInstance().TryGetClusterLODSoftwareRasterPSO(
             context->preparedRasterBucketFlags[bucket], m_outputKind);
-        if (pso) frame.steps.push_back({*pso, uint64_t{bucket} * stride});
+        if (pso) m_taken.steps.push_back({*pso, uint64_t{bucket} * stride});
     }
+}
+
+void ClusterSoftwareRasterizationPass::Revision(std::vector<uint64_t>& out) const {
+    out.push_back(m_taken.active ? 1u : 0u);
+    if (!m_taken.active) return;
+    out.push_back(m_taken.bucketCount | (uint64_t{m_taken.argumentCapacity} << 32));
+    for (const auto& step : m_taken.steps) {
+        br::render::AppendPipelineRevision(out, step.pipeline);
+        out.push_back(step.argumentsOffset);
+    }
+    out.push_back(m_taken.pageTableResolution | (uint64_t{m_taken.virtualResolution} << 32));
+    out.push_back(m_dynamicWindSkinCacheGeneration);
+    m_viewRasterInfoTable.AppendRevision(out);
+}
+
+ClusterSoftwareRasterFrame ClusterSoftwareRasterizationPass::Prepare(
+    const ClusterSoftwareRasterBindings& bindings, const org::PassPrepareContext& preparation) const {
+    ClusterSoftwareRasterFrame frame{};
+    if (!m_taken.active) return frame;
+    frame.enabled = true;
+    frame.viewRasterInfoTable =
+        m_viewRasterInfoTable.Publish(preparation, m_viewRasterInfoPublisher, bindings.viewRasterInfoLayout);
+    if (bindings.virtualShadow) {
+        frame.pageTableResolution = m_taken.pageTableResolution;
+        frame.virtualResolution = m_taken.virtualResolution;
+    }
+    const auto numBuckets = m_taken.bucketCount;
+    frame.bucketCount = numBuckets;
+    BT_PLOT("CLod.RasterArgs.PreparedSoftwareBucketCount", static_cast<int64_t>(numBuckets));
+    BT_PLOT("CLod.RasterArgs.PreparedSoftwareBackingBytes", static_cast<int64_t>(m_rasterBucketsIndirectArgsBuffer->GetSize()));
+    frame.steps = m_taken.steps;
     frame.hasSkinCache = bindings.hasSkinCache && numBuckets != 0u;
-    if (frame.hasSkinCache) {
-        if (++m_dynamicWindSkinCacheGeneration == 0 || m_dynamicWindSkinCacheGeneration >= 0x7FFFFFFFu)
-            m_dynamicWindSkinCacheGeneration = 1;
-        frame.skinCacheGeneration = m_dynamicWindSkinCacheGeneration;
-    }
+    if (frame.hasSkinCache) frame.skinCacheGeneration = m_dynamicWindSkinCacheGeneration;
     return frame;
 }

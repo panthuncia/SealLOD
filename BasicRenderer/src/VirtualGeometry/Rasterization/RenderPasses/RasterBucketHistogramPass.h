@@ -5,6 +5,7 @@
 #include <rhi.h>
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 #include <BasicRenderer/Pipeline/PipelineDesc.h>
 
 namespace org { class Buffer; }
@@ -26,6 +27,7 @@ struct RasterBucketHistogramFrame {
     uint32_t numBuckets = 0;
     bool enabled = false;
     bool telemetryEnabled = false;
+    bool operator==(const RasterBucketHistogramFrame&) const = default;
 };
 
 class RasterBucketHistogramPass : public org::TypedRenderGraphPass<RasterBucketHistogramPass,
@@ -50,10 +52,16 @@ public:
     static void Record(const RasterBucketHistogramBindings&,
         const RasterBucketHistogramFrame&, org::PassRecordContext&);
     void Update(const org::UpdateExecutionContext& executionContext) override;
+    // Kept recordings (M6 step 8): the frame's bucket count and software raster mode, taken from the host data before
+    // Update (RenderGraphPass::TakeFrameValues) and returned by Prepare; Revision names them and the pipelines.
+    void TakeFrameValues(const org::UpdateExecutionContext& execution) override;
+    void Revision(std::vector<uint64_t>& out) const;
     // Per-visible-cluster (transform, palette index): roots bin clusters by their own material's raster bucket.
     void SetVisibleClusterSideBand(std::shared_ptr<org::Buffer> sideBand) { m_sideBandBuffer = std::move(sideBand); }
 
 private:
+    RasterBucketHistogramFrame m_taken{};
+    br::render::DeclaredPipelines m_pipelines;
     std::shared_ptr<org::Buffer> m_sideBandBuffer;
     std::shared_ptr<org::Buffer> m_visibleClustersBuffer;
     std::shared_ptr<org::Buffer> m_visibleClustersCounterBuffer;
@@ -66,4 +74,5 @@ private:
     uint32_t m_visibleClustersCapacity = 0u;
     bool m_runWhenComputeSWRasterEnabledOnly = false;
     bool m_enabled = false;
+    void SizeBuffers(uint32_t numBuckets);
 };

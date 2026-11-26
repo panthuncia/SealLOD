@@ -124,6 +124,8 @@ ReyesBuildRasterWorkBindings ReyesBuildRasterWorkPass::Declare(org::PassBuilder&
     bindings.phase = m_phaseIndex;
     bindings.replayCapacity = m_replayDiceQueueCapacity;
     bindings.useAabbOcclusion = SettingsManager::GetInstance().getSettingGetter<bool>(CLodReyesUseAabbOcclusionSettingName)();
+    m_pipelines.Clear();
+    m_pipelines.Add(bindings.pipeline);
     return bindings;
 }
 

@@ -29,6 +29,7 @@
 #include "Runtime/GraphIntegration/Resolvers/ResourceGroupResolver.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "Materials/Evaluation/RenderPasses/ResolveMaterialTextureDescriptorsPass.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 
 struct EvaluateMaterialGroupsBindings {
     org::DeclaredViewToken visibleClusters, visibleClusterTransformIndices;
@@ -46,6 +47,7 @@ struct MaterialEvaluationRecordingConfiguration {
     float terrainNormalBlend = 0;
     uint32_t terrainNormalMipBias = 0;
     float objectNormalMapBlend = 0;
+    bool operator==(const MaterialEvaluationRecordingConfiguration&) const = default;
 };
 
 struct MaterialEvaluationFrame {
@@ -53,10 +55,12 @@ struct MaterialEvaluationFrame {
     struct Step {
         std::shared_ptr<const org::PipelineStatePayload> program;
         uint64_t argumentsOffset = 0;
+        bool operator==(const Step&) const = default;
     };
     std::shared_ptr<const rhi::CommandSignaturePtr> signature;
     std::vector<Step> steps;
     MaterialEvaluationRecordingConfiguration configuration;
+    bool operator==(const MaterialEvaluationFrame&) const = default;
 };
 
 class EvaluateMaterialGroupsPass : public org::TypedRenderGraphPass<EvaluateMaterialGroupsPass,
@@ -238,9 +242,44 @@ public:
     }
 
 
+    // Kept recordings (M6 step 7): Record bakes the active material programs (their pipelines, which land asynchronously), their
+    // argument offsets, the command signature and the Reyes normal settings. The run takes the frame Prepare will make, from the
+    // frame's host data with no side effect (RenderGraphPass::TakeFrameValues), and its revision names it; a program that lands
+    // between that and Prepare is recorded, and found in the next run's revision, which records again.
+    void TakeFrameValues(const org::UpdateExecutionContext& execution) override {
+        m_takenFrame = {};
+        m_hasTakenFrame = false;
+        const auto* context = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr;
+        if (!context) return;
+        m_takenFrame = MakeFrame(*context);
+        m_terrainEvaluation = context->terrainRegionMaterialEvaluationEnabled;
+        m_outputType = context->outputType;
+        m_hasTakenFrame = true;
+    }
+    void Revision(std::vector<uint64_t>& out) const {
+        br::render::AppendRevision(out, m_hasTakenFrame);
+        br::render::AppendRevision(out, m_terrainEvaluation);
+        br::render::AppendRevision(out, m_outputType);
+        br::render::AppendRevision(out, m_takenFrame.signature.get());
+        for (const auto& step : m_takenFrame.steps) {
+            br::render::AppendRevision(out, step.program.get());
+            br::render::AppendRevision(out, step.argumentsOffset);
+        }
+        const auto& configuration = m_takenFrame.configuration;
+        br::render::AppendRevision(out, configuration.useNormalMaps);
+        br::render::AppendRevision(out, configuration.terrainNormalBlend);
+        br::render::AppendRevision(out, configuration.terrainNormalMipBias);
+        br::render::AppendRevision(out, configuration.objectNormalMapBlend);
+    }
+
     MaterialEvaluationFrame Prepare(const EvaluateMaterialGroupsBindings&,
         const org::PassPrepareContext& preparation) const {
         const auto* context = preparation.preparationData->Get<UpdateContext>();
+        return MakeFrame(*context);
+    }
+
+    MaterialEvaluationFrame MakeFrame(const UpdateContext& frameContext) const {
+        const auto* context = &frameContext;
         const auto materialState = context->publishedRendererState
             ? context->publishedRendererState->materials.payload.Get<br::render::PublishedMaterialState>() : nullptr;
         if (!materialState) return {};
@@ -282,6 +321,11 @@ public:
 private:
     MaterialEvaluationBuildInputs m_inputs;
     bool m_terrainRvtEnabled = false;
+    // The frame TakeFrameValues took for the revision (M6 step 7).
+    MaterialEvaluationFrame m_takenFrame;
+    bool m_hasTakenFrame = false;
+    bool m_terrainEvaluation = false;
+    uint32_t m_outputType = 0;
     org::Resource* m_materialEvalCmds;
     std::shared_ptr<org::ResourceGroup> m_slabResourceGroup;
     std::shared_ptr<org::GloballyIndexedResource> m_visibleClusterResource;

@@ -11,10 +11,13 @@
 // fallback while the texture has no image (MaterialTextureFallbacks). Only an unstreamed texture (ID 0) is current
 // through the material's index alone, so every sampler of a material texture resolves through the row first.
 
+// The table is read through the per-frame buffer's index, not a declared binding: a publication of the table then changes no
+// recording (M6 step 5). Passes still declare Builtin::Material::TextureStreamingMetadataBuffer, for the table's upload waits.
 TextureStreamingGPUInfo LoadTextureStreamingInfo(uint streamingTextureID)
 {
+    ConstantBuffer<PerFrameBuffer> textureTablePerFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
     StructuredBuffer<TextureStreamingGPUInfo> textureStreamingMetadataBuffer =
-        ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Material::TextureStreamingMetadataBuffer)];
+        ResourceDescriptorHeap[textureTablePerFrame.textureImageTableDescriptorIndex];
     return textureStreamingMetadataBuffer[streamingTextureID];
 }
 

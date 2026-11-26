@@ -29,6 +29,9 @@ public:
             builder.CopyDestination(m_destCounterBuffer)};
     }
 
+    // Kept recordings (M6 step 7): the copy is the same every run.
+    void Revision(std::vector<uint64_t>&) const {}
+
     static void Record(const ReyesCounterCopyBindings& data,
         org::PassRecordContext& recording)
     {

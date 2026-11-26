@@ -3,6 +3,7 @@
 #include "Interfaces/IDynamicDeclaredResources.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 #include <array>
 #include <memory>
 #include <vector>
@@ -27,8 +28,12 @@ struct PerViewLinearDepthCopyBindings {
 // Per declared view, this frame's size and projection: they change without the declared resources changing (a
 // resize keeps the buffer, a new projection keeps everything). A declared view that's gone has width 0.
 struct PerViewLinearDepthCopyFrame {
-    struct View { uint32_t width = 0, height = 0; std::array<uint32_t, 2> projection{}; };
+    struct View {
+        uint32_t width = 0, height = 0; std::array<uint32_t, 2> projection{};
+        bool operator==(const View&) const = default;
+    };
     std::vector<View> views;
+    bool operator==(const PerViewLinearDepthCopyFrame&) const = default;
 };
 
 class PerViewLinearDepthCopyPass : public org::TypedRenderGraphPass<PerViewLinearDepthCopyPass,
@@ -40,6 +45,9 @@ public:
     void Initialize();
     void Update(const org::UpdateExecutionContext&) override;
     bool DeclaredResourcesChanged() const override;
+    // Kept recordings (M6 step 8): Prepare reads only the views Update took (sizes, projections), which Revision names
+    // with the pipeline.
+    void Revision(std::vector<uint64_t>& out) const;
     PerViewLinearDepthCopyFrame Prepare(const PerViewLinearDepthCopyBindings& bindings,
         const org::PassPrepareContext& preparation) const;
     static void Record(const PerViewLinearDepthCopyBindings& bindings, const PerViewLinearDepthCopyFrame& frame,
@@ -58,4 +66,5 @@ private:
     std::vector<ViewSnapshot> m_views;
     bool m_declaredResourcesChanged = true;
     bool m_writeProjectedDepth = true;
+    br::PipelineState m_pipeline;
 };

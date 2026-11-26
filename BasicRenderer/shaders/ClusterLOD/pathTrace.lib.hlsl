@@ -179,7 +179,8 @@ void PathTraceRayGen()
 
     const uint flags = CLOD_RT_PT_FLAGS;
     const uint2 pixel = DispatchRaysIndex().xy;
-    PathRng rng = PathRngCreate(pixel, CLOD_RT_SEC_FRAME, 0u);
+    // The frame number from the per-frame buffer, not CLOD_RT_SEC_FRAME: PathTracePass is recorded ahead and kept (M6 step 9c).
+    PathRng rng = PathRngCreate(pixel, perFrame.frameIndex, 0u);
 
     // Nothing else jitters when accumulating without an upscaler, and every sample must land somewhere new in the pixel.
     const float2 subpixel = (flags & CLOD_RT_PT_FLAG_ACCUMULATE) != 0u ? PathRngNext2(rng) : 0.5f.xx;

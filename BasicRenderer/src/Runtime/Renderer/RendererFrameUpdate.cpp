@@ -154,6 +154,9 @@ void Renderer::Update(float elapsedSeconds) {
 	}
 	PSOManager::GetInstance().PublishPendingLivePipelines(std::move(pipelineRetirementPoints));
 	PSOManager::GetInstance().CollectRetiredLivePipelines();
+	// Upscaler configurations and SSSR contexts whose last graph retired (M5 step 3).
+	UpscalingManager::GetInstance().CollectRetired();
+	FFXManager::GetInstance().CollectRetired();
     // Readbacks whose copies completed, every Update: some complete work a frame waits for (BC7 texture compression
     // feeds material publication, which gates the frame), so they cannot wait for a frame to be presented.
     if (m_readbackCaptures) m_readbackCaptures->ProcessCompleted();
@@ -198,7 +201,7 @@ void Renderer::Update(float elapsedSeconds) {
         runCapturedStage("ShaderReload", [&]() {
             BT_ZONE_SCOPE("Renderer::Update::ShaderReload");
             spdlog::info("Renderer: draining GPU work before shader reload.");
-            StallPipeline();
+            StallPipeline("shader reload");
             std::string rebuildError;
             if (PSOManager::GetInstance().RebuildAllPipelines(rebuildError)) {
                 RequestGraphRebuild("shader reload");
@@ -533,7 +536,9 @@ void Renderer::Update(float elapsedSeconds) {
     }
 
     auto& resourceManager = ::ResourceManager::GetInstance();
-    auto res = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
+    // The attached graphs' sizes (M5 step 4): their light grid and passes were built for these.
+    const auto attachedResolution = AttachedResolution();
+    auto res = attachedResolution.render;
     runCapturedStage("PerFrameBuffer", [&]() {
         BT_ZONE_SCOPE("Renderer::Update::PerFrameBuffer");
         const SunLightSelection sun = m_pLightManager->GetSunLight();
@@ -556,6 +561,10 @@ void Renderer::Update(float elapsedSeconds) {
                 spdlog::info("VSM debug light choice: {}", label);
             }
         }
+        // The frame's texture image table, which shaders read through the per-frame buffer (M6 step 5).
+        if (const auto* textureStreaming = m_pMaterialManager ? m_pMaterialManager->GetTextureStreamingManager() : nullptr)
+            resourceManager.SetTextureImageTableDescriptorIndex(
+                textureStreaming->PublishedImageTableDescriptorIndex(m_context.publishedRendererState));
         const uint32_t requestedDebugLight = settings.getSettingGetter<uint32_t>(CLodVirtualShadowDebugLightSettingName)();
         const uint32_t vsmDebugLightIndex =
             std::ranges::find(debugLightIndices, requestedDebugLight) != debugLightIndices.end() ? requestedDebugLight : sun.lightIndex;
@@ -563,15 +572,15 @@ void Renderer::Update(float elapsedSeconds) {
             m_pLightManager->GetNumDirectionalLights(), vsmDebugLightIndex, { res.x, res.y },
             MakeLightGridShape(res.x, res.y, settings.getSettingGetter<uint32_t>(LightGridTileSizeSettingName)(),
                 settings.getSettingGetter<uint32_t>(LightGridSlicesSettingName)()),
-            static_cast<uint32_t>(m_totalFramesRendered));
+            static_cast<uint32_t>(m_totalFramesRendered), elapsedSeconds);
     });
 
     static const basic_telemetry::Callsite captureFrameInputsCallsite("Renderer::Update::CaptureFrameInputs");
     std::optional<basic_telemetry::Scope> captureFrameInputsScope;
     captureFrameInputsScope.emplace(captureFrameInputsCallsite);
     const Components::DrawStats& drawStats = world.get<Components::DrawStats>();
-    auto renderRes = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
-    auto outputRes = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("outputResolution")();
+    auto renderRes = attachedResolution.render;
+    auto outputRes = attachedResolution.output;
     UpdateContext updateData{};
     updateData.publishedRendererState = m_context.publishedRendererState;
     updateData.publishedManifestLease = m_context.publishedManifestLease;
@@ -978,6 +987,28 @@ void Renderer::Update(float elapsedSeconds) {
             lastBackpressureLog = now;
             spdlog::info("Renderer: frame waits for publications: material={} lights={} poses={}",
                 static_cast<bool>(publishedMaterialState), static_cast<bool>(updateData.lightTables), static_cast<bool>(updateData.poses));
+            // A material root that never publishes stops every frame (an intermittent Vulkan start stall, M5 step 8): after 5 s,
+            // say where the root waits.
+            static auto materialWaitSince = std::chrono::steady_clock::time_point{};
+            if (publishedMaterialState) {
+                materialWaitSince = {};
+            } else if (materialWaitSince == std::chrono::steady_clock::time_point{}) {
+                materialWaitSince = now;
+            } else if (now - materialWaitSince > std::chrono::seconds(5) && m_rendererStateRequests) {
+                const auto diagnostic = m_rendererStateRequests->Diagnose({ br::render::ArtifactKind::MaterialTable, 0, 0 });
+                spdlog::warn("Renderer: the material table root is not published: desiredRevision={} revision={} readiness={} "
+                    "stateAge={} ms blockers={} error='{}' chain='{}'",
+                    diagnostic.desiredRevision, diagnostic.artifact.revision, static_cast<unsigned>(diagnostic.artifact.readiness),
+                    diagnostic.stateAge.count() / 1000, diagnostic.blockers.size(), diagnostic.error, diagnostic.blockerChain);
+                for (const auto& blocker : diagnostic.blockers) {
+                    const auto current = m_rendererStateRequests->Diagnose(blocker.key);
+                    spdlog::warn("Renderer: material table root blocker kind={} primary={} variant={} requiredRevision={} "
+                        "requiredReadiness={} currentRevision={} currentReadiness={} desiredRevision={} error='{}' chain='{}'",
+                        static_cast<unsigned>(blocker.key.kind), blocker.key.primaryID, blocker.key.variantID, blocker.minimumRevision,
+                        static_cast<unsigned>(blocker.requiredReadiness), current.artifact.revision,
+                        static_cast<unsigned>(current.artifact.readiness), current.desiredRevision, current.error, current.blockerChain);
+                }
+            }
         }
         m_frameInputs.reset();
         // The publications may wait for uploads only a frame's upload pass submits: submit them without the frame.
@@ -994,6 +1025,7 @@ void Renderer::Update(float elapsedSeconds) {
         std::move(immutableUpdate),
         std::make_shared<const RenderContext>(std::move(renderSnapshot)),
         primaryCameraUpload);
+    m_lastFrameRender = m_frameInputs->Render();
 
     org::UpdateExecutionContext context{};
     context.resolverCaptureContext = std::make_shared<const org::ResolverCaptureContext>(m_context.publishedManifestLease,
@@ -1562,7 +1594,7 @@ void Renderer::Update(float elapsedSeconds) {
                                 requestMetadata << "requested=1\n";
                             }
                         };
-                        requestTexture("hdr", m_coreResourceProvider.m_HDRColorTarget);
+                        requestTexture("hdr", m_attachedResolutionObjects ? m_attachedResolutionObjects->hdrColor : nullptr);
                         if (const auto* primaryView = m_pViewManager
                                 ? m_pViewManager->Get(m_context.primaryViewID) : nullptr) {
                             requestTexture("visibility", primaryView->gpu.visibilityBuffer);

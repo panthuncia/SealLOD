@@ -24,9 +24,15 @@ struct DynamicWindFrameGPU {
     float windY = 0.0f;
     float gustStrength = 0.0f;
     float treeDisplacementScale = 0.0f;
+    // This frame's half of the transient wind palette (SkeletonManager flips the halves every frame). The wind passes read
+    // it here rather than from root constants, so a kept recording of them stays current (M6 step 9).
+    std::uint32_t transformBaseMatrices = 0u;
+    std::uint32_t previousTransformBaseMatrices = 0u;
+    std::uint32_t pad0 = 0u;
+    std::uint32_t pad1 = 0u;
 };
 
-static_assert(sizeof(DynamicWindFrameGPU) == 64u);
+static_assert(sizeof(DynamicWindFrameGPU) == 80u);
 
 inline constexpr const char* DynamicWindFieldSlice0ResourceName =
     "Builtin::DynamicWind::FieldSlice0";

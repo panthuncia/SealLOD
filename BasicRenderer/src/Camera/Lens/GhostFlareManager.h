@@ -77,6 +77,7 @@ struct GhostFlareFrame {
     float testDistance = 0.0f;    // metres, 0 at infinity
     std::array<float, 3> testIrradiance{};
     uint32_t InstanceCount() const { return sourceSlots * ghostSlots * wavelengthSlots; }
+    bool operator==(const GhostFlareFrame&) const = default;
 };
 
 // Physically based ghost flares for the physical camera lens (SARP's docs/lens_simulation.md "Ghost flares"; Hullin et al.

@@ -19,6 +19,11 @@ struct DynamicWindFrameGPU
 	float windY;
 	float gustStrength;
 	float treeDisplacementScale;
+	// This frame's half of the transient wind palette (ProceduralWind's passes read it here, not from root constants).
+	uint transformBaseMatrices;
+	uint previousTransformBaseMatrices;
+	uint pad0;
+	uint pad1;
 };
 
 float DynamicWindPhase(uint seed)

@@ -13,6 +13,8 @@
 #include "BasicRenderer/Pipeline/RenderPhase.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
+#include "BasicRenderer/Extensions/RenderContext.h"
 namespace org { class RenderGraph; }
 struct UpdateContext;
 #include "BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h"
@@ -55,6 +57,9 @@ struct ClusterRasterBindings {
 struct ClusterRasterStep {
     br::PipelineState pipeline;
     uint64_t argumentsOffset = 0;
+    bool operator==(const ClusterRasterStep& other) const {
+        return pipeline.PeekPayload() == other.pipeline.PeekPayload() && argumentsOffset == other.argumentsOffset;
+    }
 };
 struct ClusterRasterFrame {
     std::vector<ClusterRasterStep> steps;
@@ -67,6 +72,7 @@ struct ClusterRasterFrame {
     bool shadows = false, punctualLights = false;
     bool telemetryEnabled = false;
     bool phase1VisibilityDiagnostics = false;
+    bool operator==(const ClusterRasterFrame& other) const;
 };
 
 class ClusterRasterizationPass
@@ -113,6 +119,11 @@ public:
     ClusterRasterFrame Prepare(const ClusterRasterBindings&, const org::PassPrepareContext& preparation) const;
     static void Record(const ClusterRasterBindings& bindings, const ClusterRasterFrame& frame,
         org::PassRecordContext& context);
+    // Kept recordings (M6 step 8): the frame's buckets and their pipelines, settings and lighting values, taken from the
+    // host data before Update (RenderGraphPass::TakeFrameValues) and read by Prepare. Revision names them with what Update
+    // took (the views, the pass size).
+    void TakeFrameValues(const org::UpdateExecutionContext& execution) override;
+    void Revision(std::vector<uint64_t>& out) const;
 
 private:
     bool m_wireframe = false;
@@ -174,4 +185,19 @@ private:
     std::function<bool()> m_getShadowsEnabled;
 
     RenderPhase m_renderPhase;
+
+    // What TakeFrameValues took for this run.
+    struct Taken {
+        std::vector<ClusterRasterStep> steps;
+        uint32_t bucketCount = 0;
+        uint32_t missingPrograms = 0;
+        uint32_t virtualShadowPageTableResolution = 0, virtualShadowVirtualResolution = 0;
+        uint32_t globalPSOFlags = 0;
+        ShadowingMode shadowingMode = ShadowingMode::None;
+        bool punctualLights = false;
+        bool telemetryEnabled = false;
+        bool disabled = false;
+    };
+    Taken m_taken;
+    bool m_declaredSingleViewVisibility = false;
 };

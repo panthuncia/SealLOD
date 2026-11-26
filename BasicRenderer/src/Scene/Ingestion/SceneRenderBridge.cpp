@@ -1034,7 +1034,7 @@ flecs::entity SceneRenderBridge::GetPrimaryCameraEntity() const {
     return flecs::entity{ renderWorld, m_primaryCameraEntityId };
 }
 
-void SceneRenderBridge::ResyncPrimaryCameraDepth(const SceneIngestionServices& services,
+void SceneRenderBridge::ReplacePrimaryCameraDepth(const SceneIngestionServices& services, const Components::DepthMap& depthMap,
     uint32_t renderWidth, uint32_t renderHeight, uint32_t primaryLodHeight) {
     if (m_primaryCameraEntityId == 0) return;
     if (!m_sourceStore || !m_sourceStore->Available()) return;
@@ -1046,8 +1046,8 @@ void SceneRenderBridge::ResyncPrimaryCameraDepth(const SceneIngestionServices& s
     const uint32_t lodHeight = entity.has<Components::PrimaryCamera>() && primaryLodHeight != 0u
         ? primaryLodHeight : renderHeight;
     if (!services.sceneEntities || !services.sceneEntities->Available()) return;
-    services.sceneEntities->MaterializeCamera(entity, camera,
-        entity.has<Components::PrimaryCamera>(), renderWidth, renderHeight, lodHeight);
+    services.sceneEntities->ReplaceCameraDepth(entity, camera,
+        entity.has<Components::PrimaryCamera>(), depthMap, renderWidth, renderHeight, lodHeight);
 }
 
 } // namespace br::render

@@ -72,9 +72,7 @@ float CLodRtSampleAlpha(uint textureIndex, uint samplerIndex, uint streamingText
     }
 #endif
     if (streamingTextureID != 0u) {
-        StructuredBuffer<TextureStreamingGPUInfo> streaming =
-            ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::Material::TextureStreamingMetadataBuffer)];
-        const uint streamedImage = streaming[streamingTextureID].imageDescriptorIndex;
+        const uint streamedImage = LoadTextureStreamingInfo(streamingTextureID).imageDescriptorIndex;
         if (streamedImage != 0xFFFFFFFFu) {
             textureIndex = streamedImage;
         }

@@ -36,7 +36,7 @@ ReyesReplayMergeBindings ReyesReplayMergePass::Declare(org::PassBuilder& builder
 {
     builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
-    return {
+    ReyesReplayMergeBindings bindings{
         br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/clodUtil.hlsl",
             m_kind == ReyesReplayMergeKind::Split ? L"MergeReyesReplaySplitQueueCSMain" : L"MergeReyesReplayDiceQueueCSMain",
             m_kind == ReyesReplayMergeKind::Split ? "CLod.ReyesReplayMergeSplit.PSO" : "CLod.ReyesReplayMergeDice.PSO")),
@@ -45,6 +45,9 @@ ReyesReplayMergeBindings ReyesReplayMergePass::Declare(org::PassBuilder& builder
         builder.UnorderedAccess(m_destQueueBuffer), builder.UnorderedAccess(m_destQueueCounterBuffer),
         builder.UnorderedAccess(m_destQueueOverflowBuffer), builder.IndirectArguments(m_indirectArgsBuffer),
         builder.UnorderedAccess(m_telemetryBuffer), m_destQueueCapacity};
+    m_pipelines.Clear();
+    m_pipelines.Add(bindings.pipeline);
+    return bindings;
 }
 
 void ReyesReplayMergePass::Update(const org::UpdateExecutionContext& executionContext)

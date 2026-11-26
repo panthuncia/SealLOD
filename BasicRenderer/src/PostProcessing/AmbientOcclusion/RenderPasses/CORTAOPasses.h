@@ -30,6 +30,7 @@
 #include "Utilities/Utilities.h"
 #include "ThirdParty/CORTAO/CORTAOParameters.h"
 #include <BasicRenderer/Extensions/PipelineDescs.h>
+#include "BasicRenderer/Extensions/PassRevision.h"
 
 namespace br::ambient_occlusion {
 
@@ -102,6 +103,7 @@ inline br::ComputePipelineDesc CortaoPipeline(const wchar_t* path, const wchar_t
 
 struct CORTAOPrepassFrame {
     uint32_t groupsX = 0, groupsY = 0;
+    bool operator==(const CORTAOPrepassFrame&) const = default;
 };
 struct CORTAOPrepassBindings {
     br::PipelineState pipeline;
@@ -116,6 +118,10 @@ public:
         m_constantsHandle = m_resourceRegistryView->RequestHandle(Builtin::CORTAO::ConstantsBuffer);
     }
 
+    // Staged recordings (M6 step 6): the values the revision names, taken without side effects (RenderGraphPass::TakeFrameValues).
+    void TakeFrameValues(const org::UpdateExecutionContext& execution) override {
+        if (const auto* update = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr) m_renderResolution = update->renderResolution;
+    }
     void Update(const org::UpdateExecutionContext& updateExecutionContext) override {
         const auto* update = updateExecutionContext.hostData->Get<UpdateContext>();
         if (update == nullptr || !update->hasPrimaryCamera) {
@@ -175,7 +181,14 @@ public:
         for (uint32_t mip = 0; mip < bindings.mipCount; ++mip) views[mip].mip = mip;
         auto packed = builder.UnorderedAccess(Builtin::CORTAO::PackedData, std::span<const org::UavView>(views.data(), bindings.mipCount));
         for (uint32_t mip = 0; mip < bindings.mipCount; ++mip) bindings.packedMips[mip] = packed.View(mip);
+        m_pipeline = bindings.pipeline;
         return bindings;
+    }
+
+    // Kept recordings (M6 step 5): the dispatch follows the render resolution. The per-frame constants are uploaded by Update.
+    void Revision(std::vector<uint64_t>& out) const {
+        br::render::AppendPipelineRevision(out, m_pipeline);
+        out.push_back((uint64_t(m_renderResolution.x) << 32u) | m_renderResolution.y);
     }
 
     CORTAOPrepassFrame Prepare(const CORTAOPrepassBindings&, const org::PassPrepareContext& preparation) const {
@@ -196,6 +209,8 @@ public:
 
 private:
     org::ResourceRegistry::RegistryHandle m_constantsHandle;
+    br::PipelineState m_pipeline;
+    DirectX::XMUINT2 m_renderResolution{};
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -204,6 +219,7 @@ private:
 
 struct CORTAOMainFrame {
     uint32_t groupsX = 0, groupsY = 0;
+    bool operator==(const CORTAOMainFrame&) const = default;
 };
 struct CORTAOMainBindings {
     br::PipelineState pipeline;
@@ -223,6 +239,10 @@ public:
         m_bentNormalTable->SetName("CORTAO bent normal lookup table");
     }
 
+    // Staged recordings (M6 step 6): the values the revision names, taken without side effects (RenderGraphPass::TakeFrameValues).
+    void TakeFrameValues(const org::UpdateExecutionContext& execution) override {
+        if (const auto* update = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr) m_renderResolution = update->renderResolution;
+    }
     void Update(const org::UpdateExecutionContext&) override {
         if (m_tablesUploaded) return;
         const auto occluderWords = CortaoOccluderLookupTableWords();
@@ -249,7 +269,12 @@ public:
         bindings.occluderTable = builder.ShaderResource(m_occluderTable).View();
         bindings.bentNormalTable = builder.ShaderResource(m_bentNormalTable).View();
         bindings.output = builder.UnorderedAccess(Builtin::CORTAO::WorkingAO).View();
+        m_pipeline = bindings.pipeline;
         return bindings;
+    }
+    void Revision(std::vector<uint64_t>& out) const {
+        br::render::AppendPipelineRevision(out, m_pipeline);
+        out.push_back((uint64_t(m_renderResolution.x) << 32u) | m_renderResolution.y);
     }
 
     CORTAOMainFrame Prepare(const CORTAOMainBindings&, const org::PassPrepareContext& preparation) const {
@@ -273,6 +298,8 @@ private:
     std::shared_ptr<org::Buffer> m_occluderTable;
     std::shared_ptr<org::Buffer> m_bentNormalTable;
     bool m_tablesUploaded = false;
+    br::PipelineState m_pipeline;
+    DirectX::XMUINT2 m_renderResolution{};
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -282,6 +309,7 @@ private:
 struct CORTAOFilterFrame {
     bool largeKernel = false;
     uint32_t groupsX = 0, groupsY = 0;
+    bool operator==(const CORTAOFilterFrame&) const = default;
 };
 struct CORTAOFilterBindings {
     br::PipelineState smallPipeline, largePipeline;
@@ -309,14 +337,29 @@ public:
         bindings.packed = builder.ShaderResource(Builtin::CORTAO::PackedData).View();
         bindings.working = builder.ShaderResource(Builtin::CORTAO::WorkingAO).View();
         bindings.output = builder.UnorderedAccess(Builtin::CORTAO::OutputAO).View();
+        m_smallPipeline = bindings.smallPipeline;
+        m_largePipeline = bindings.largePipeline;
         return bindings;
+    }
+
+    // The resolution and the kernel (whether an upscaler accumulates), taken each run.
+    // Staged recordings (M6 step 6): the values the revision names, taken without side effects (RenderGraphPass::TakeFrameValues).
+    void TakeFrameValues(const org::UpdateExecutionContext& execution) override {
+        if (const auto* update = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr) m_renderResolution = update->renderResolution;
+        m_largeKernel = !CortaoTemporalUpscalerActive();
+    }
+    void Revision(std::vector<uint64_t>& out) const {
+        br::render::AppendPipelineRevision(out, m_smallPipeline);
+        br::render::AppendPipelineRevision(out, m_largePipeline);
+        out.push_back((uint64_t(m_renderResolution.x) << 32u) | m_renderResolution.y);
+        out.push_back(m_largeKernel ? 1u : 0u);
     }
 
     CORTAOFilterFrame Prepare(const CORTAOFilterBindings&, const org::PassPrepareContext& preparation) const {
         const auto* update = preparation.preparationData->Get<UpdateContext>();
         // Thread t writes the 2x2 block ending at pixel 2t + 1, so res / 2 + 1 threads cover a dimension.
         CORTAOFilterFrame frame{};
-        frame.largeKernel = !CortaoTemporalUpscalerActive();
+        frame.largeKernel = m_largeKernel;
         frame.groupsX = (update->renderResolution.x / 2u + 1u + 7u) / 8u;
         frame.groupsY = (update->renderResolution.y / 2u + 1u + 7u) / 8u;
         return frame;
@@ -334,6 +377,9 @@ public:
 
 private:
     uint32_t m_borderSampler = 0;
+    br::PipelineState m_smallPipeline, m_largePipeline;
+    DirectX::XMUINT2 m_renderResolution{};
+    bool m_largeKernel = false;
 };
 
 }

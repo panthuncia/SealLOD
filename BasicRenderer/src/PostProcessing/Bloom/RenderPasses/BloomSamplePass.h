@@ -2,6 +2,7 @@
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 #include "Runtime/Device/DeviceManager.h"
 #include "Pipeline/PipelineState/PSOManager.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
@@ -27,6 +28,7 @@ struct BloomSampleBindings {
 struct BloomSampleFrame {
     uint32_t width = 0, height = 0;
     uint32_t sourceWidth = 0, sourceHeight = 0;
+    bool operator==(const BloomSampleFrame&) const = default;
 };
 
 class BloomSamplePass : public org::TypedRenderGraphPass<BloomSamplePass,
@@ -40,15 +42,16 @@ public:
         const auto targetMip = inputs.mipIndex + (inputs.isUpsample ? 0u : 1u);
         const auto sourceMip = !inputs.isUpsample && inputs.mipIndex == 0
             ? 0u : inputs.mipIndex + (inputs.isUpsample ? 1u : 0u);
+        m_pipeline = br::render::DeclarePipeline(PipelineDesc(inputs.isUpsample));
         if (!inputs.isUpsample) {
             const auto source = inputs.mipIndex == 0
                 ? Subresources(Builtin::PostProcessing::UpscaledHDR, org::Mip{ 0, 1 })
                 : Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{ inputs.mipIndex, 1 });
-            return {br::render::DeclarePipeline(PipelineDesc(false)), builder.ShaderResource(source, {UINT32_MAX, sourceMip}),
+            return {m_pipeline, builder.ShaderResource(source, {UINT32_MAX, sourceMip}),
                 builder.RenderTarget(Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{targetMip, 1}), {UINT32_MAX, targetMip}),
                 sourceMip, targetMip, false};
         }
-        return {br::render::DeclarePipeline(PipelineDesc(true)), builder.ShaderResource(Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{sourceMip, 1}), {UINT32_MAX, sourceMip}),
+        return {m_pipeline, builder.ShaderResource(Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{sourceMip, 1}), {UINT32_MAX, sourceMip}),
             builder.RenderTarget(Subresources(Builtin::PostProcessing::BloomTexture, org::Mip{targetMip, 1}), {UINT32_MAX, targetMip}),
             sourceMip, targetMip, true};
     }
@@ -66,6 +69,9 @@ public:
     void ShutdownPass() {
         // Cleanup the render pass
     }
+
+    // Kept recordings (M6 step 4): the sizes follow the bloom texture's, which only a new resource changes (a binding).
+    void Revision(std::vector<uint64_t>& out) const { br::render::AppendPipelineRevision(out, m_pipeline); }
 
     static void Record(const BloomSampleBindings& bindings, const BloomSampleFrame& frame,
         org::PassRecordContext& context) {
@@ -135,4 +141,6 @@ private:
         desc.topology = rhi::PrimitiveTopology::TriangleStrip;
         return desc;
     }
+
+    br::PipelineState m_pipeline;
 };

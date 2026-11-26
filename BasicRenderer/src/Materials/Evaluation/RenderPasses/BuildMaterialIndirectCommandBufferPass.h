@@ -6,12 +6,14 @@
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "Materials/Publication/MaterialStateArtifacts.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 
 struct BuildMaterialIndirectCommandBufferBindings {
     br::PipelineState pipeline;
 };
 struct BuildMaterialIndirectCommandBufferFrame {
     uint32_t slotsUsed = 0;
+    bool operator==(const BuildMaterialIndirectCommandBufferFrame&) const = default;
 };
 
 // Runs after histogram + prefix sum + pixel list build.
@@ -27,8 +29,25 @@ public:
         b.UnorderedAccess("Builtin::IndirectCommandBuffers::MaterialEvaluationCommandBuffer");
 		b.ConstantBuffer(Builtin::PerFrameBuffer);
         b.PreferQueue(org::QueueKind::Compute);
-        return {br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/VisUtil.hlsl", L"BuildEvaluateIndirectArgsCS",
-            "VisUtil_BuildEvaluateIndirectArgsPSO"))};
+        m_pipeline = br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/VisUtil.hlsl", L"BuildEvaluateIndirectArgsCS",
+            "VisUtil_BuildEvaluateIndirectArgsPSO"));
+        return {m_pipeline};
+    }
+
+    // Kept recordings (M6 step 7): the dispatch follows the published material state's slot count, taken from the frame's host
+    // data with no side effect (RenderGraphPass::TakeFrameValues) before Prepare reads the same.
+    void TakeFrameValues(const org::UpdateExecutionContext& execution) override {
+        m_slotsUsed = 0;
+        const auto* update = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr;
+        const auto* render = execution.hostData ? execution.hostData->Get<RenderContext>() : nullptr;
+        if (!update && !render) return;
+        const auto& published = update ? update->publishedRendererState : render->publishedRendererState;
+        const auto materialState = published ? published->materials.payload.Get<br::render::PublishedMaterialState>() : nullptr;
+        m_slotsUsed = materialState ? materialState->compileFlagSlotsUsed : 0u;
+    }
+    void Revision(std::vector<uint64_t>& out) const {
+        br::render::AppendPipelineRevision(out, m_pipeline);
+        br::render::AppendRevision(out, m_slotsUsed);
     }
 
     BuildMaterialIndirectCommandBufferFrame Prepare(const BuildMaterialIndirectCommandBufferBindings&,
@@ -49,4 +68,8 @@ public:
         constants[0] = frame.slotsUsed;
         br::render::DispatchCompute(context, bindings.pipeline, constants, (frame.slotsUsed + 63u) / 64u);
     }
+
+private:
+    br::PipelineState m_pipeline;
+    uint32_t m_slotsUsed = 0;
 };

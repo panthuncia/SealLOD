@@ -10,11 +10,13 @@
 #include "Resources/Buffers/Buffer.h"
 #include "BasicRenderer/Extensions/PipelineDescs.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 #include "../shaders/Include/lens/lensDataLayout.h"
 
 struct LensSelfTestFrameData {
     uint64_t sequence = 0; // 0: nothing asked for, no dispatch
     const br::PipelineState* pipeline = nullptr;
+    bool operator==(const LensSelfTestFrameData&) const = default;
 };
 
 struct LensSelfTestBindings {
@@ -36,15 +38,25 @@ public:
         return bindings;
     }
 
-    LensSelfTestFrameData Prepare(const LensSelfTestBindings&, const org::PassPrepareContext&) const {
+    // Kept recordings (M6 step 5): a pending self-test (a one-shot request) and its pipeline are taken each run, and the
+    // revision names them, so a request records Shading once.
+    void TakeFrameValues(const org::UpdateExecutionContext&) override {
         LensSelfTestFrameData frame{ m_lens->PendingSelfTest() };
-        if (frame.sequence == 0u) return frame;
-        const auto published = m_lens->Published();
-        frame.pipeline = PSOManager::GetInstance().TryGetComputePipeline(L"Shaders/ClusterLOD/lensSelfTest.hlsl", L"LensSelfTestCS",
-            br::lens::LensManager::ShaderDefines(*published), "Lens.SelfTest.PSO");
-        if (!frame.pipeline) frame.sequence = 0u;
-        return frame;
+        if (frame.sequence != 0u) {
+            const auto published = m_lens->Published();
+            frame.pipeline = PSOManager::GetInstance().TryGetComputePipeline(L"Shaders/ClusterLOD/lensSelfTest.hlsl", L"LensSelfTestCS",
+                br::lens::LensManager::ShaderDefines(*published), "Lens.SelfTest.PSO");
+            if (!frame.pipeline) frame.sequence = 0u;
+        }
+        m_frame = frame;
     }
+    void Revision(std::vector<uint64_t>& out) const {
+        out.push_back(m_frame.sequence);
+        if (m_frame.pipeline) br::render::AppendPipelineRevision(out, *m_frame.pipeline);
+        else out.push_back(0u);
+    }
+
+    LensSelfTestFrameData Prepare(const LensSelfTestBindings&, const org::PassPrepareContext&) const { return m_frame; }
 
     static void Record(const LensSelfTestBindings& bindings, const LensSelfTestFrameData& frame, org::PassRecordContext& recording) {
         if (frame.sequence == 0u || !frame.pipeline) return;
@@ -58,4 +70,5 @@ public:
 
 private:
     std::shared_ptr<br::lens::LensManager> m_lens;
+    LensSelfTestFrameData m_frame{};
 };

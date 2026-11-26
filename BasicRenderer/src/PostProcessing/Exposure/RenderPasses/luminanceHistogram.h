@@ -7,12 +7,14 @@
 #include "../shaders/PerPassRootConstants/luminanceHistogramRootConstants.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 #include <BasicRenderer/Extensions/PipelineDescs.h>
+#include "BasicRenderer/Extensions/PassRevision.h"
 
 struct LuminanceHistogramBindings {
     br::PipelineState pipeline;
 };
 struct LuminanceHistogramFrame {
     uint32_t groupsX = 0, groupsY = 0;
+    bool operator==(const LuminanceHistogramFrame&) const = default;
 };
 
 class LuminanceHistogramPass : public org::TypedRenderGraphPass<LuminanceHistogramPass, LuminanceHistogramFrame, LuminanceHistogramBindings> {
@@ -21,9 +23,21 @@ public:
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
         builder.ShaderResource(Builtin::Color::HDRColorTarget);
         builder.UnorderedAccess(Builtin::PostProcessing::LuminanceHistogram);
-        return {br::render::DeclarePipeline(br::ComputePipelineDesc{
+        m_pipeline = br::render::DeclarePipeline(br::ComputePipelineDesc{
             .shader = {L"shaders/PostProcessing/LuminanceHistogram.hlsl", L"CSMain"},
-            .name = "LuminanceHistogramPassCS"})};
+            .name = "LuminanceHistogramPassCS"});
+        return {m_pipeline};
+    }
+
+    // Kept recordings (M6 step 4): the dispatch follows the render resolution, which Update takes from the frame.
+    // Staged recordings (M6 step 6): the values the revision names, taken without side effects (RenderGraphPass::TakeFrameValues).
+    void TakeFrameValues(const org::UpdateExecutionContext& execution) override {
+        if (const auto* context = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr) m_renderResolution = context->renderResolution;
+    }
+    void Revision(std::vector<uint64_t>& out) const {
+        br::render::AppendPipelineRevision(out, m_pipeline);
+        br::render::AppendRevision(out, m_renderResolution.x);
+        br::render::AppendRevision(out, m_renderResolution.y);
     }
 
     void Initialize() {
@@ -49,4 +63,8 @@ public:
     void ShutdownPass() {
         // Cleanup if necessary
     }
+
+private:
+    br::PipelineState m_pipeline;
+    DirectX::XMUINT2 m_renderResolution{};
 };

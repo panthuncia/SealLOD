@@ -17,6 +17,7 @@
 #include "BasicRenderer/Extensions/PipelineDescs.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 #include "../shaders/Include/lens/lensGhostLayout.h"
 #include "../shaders/PerPassRootConstants/clodRayTracingSetupRootConstants.h"
 
@@ -25,6 +26,25 @@
 // lens is on or its ghosts aren't built yet. The graph has them only while lensFlareEnabled is on.
 
 inline constexpr std::string_view kLensFlareTargetName = "Builtin::LensFlare::Target";
+
+// Kept recordings (M6 step 4): each pass takes the frame's configuration in Update, and its revision names every value of it,
+// so a kept recording of Post is current while the configuration is (a lens, its ghosts, the settings, a self-test or a test
+// source change it).
+inline void AppendLensFlareRevision(std::vector<uint64_t>& out, const br::lens::GhostFlareFrame& config) {
+    out.push_back(config.active ? 1u : 0u);
+    out.push_back((uint64_t(config.sourceSlots) << 32) | config.ghostSlots);
+    out.push_back((uint64_t(config.wavelengthSlots) << 32) | config.grid);
+    br::render::AppendRevision(out, config.intensity);
+    out.push_back(config.selfTest);
+    out.push_back(config.testSource ? 1u : 0u);
+    for (const float value : config.testDirection) br::render::AppendRevision(out, value);
+    br::render::AppendRevision(out, config.testDistance);
+    for (const float value : config.testIrradiance) br::render::AppendRevision(out, value);
+}
+inline br::lens::GhostFlareFrame LensFlareFrameConfig(br::lens::GhostFlareManager& manager, const org::UpdateExecutionContext& execution) {
+    const auto* context = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr;
+    return context ? manager.FrameConfig(context->frameNumber) : br::lens::GhostFlareFrame{};
+}
 
 struct LensFlareSourcesBindings {
     br::PipelineState pipeline;
@@ -36,6 +56,7 @@ struct LensFlareSourcesFrame {
     br::lens::GhostFlareFrame config;
     std::shared_ptr<br::render::CLodRayTracingSystem> system;
     uint32_t targetWidth = 0, targetHeight = 0;
+    bool operator==(const LensFlareSourcesFrame&) const = default;
 };
 
 // The sources and sensor frame (lensFlareSources.hlsl). With a ray tracing system (path traced), visibility is by ray query.
@@ -71,14 +92,34 @@ public:
         builder.ShaderResource(Builtin::RayTracing::LensFocus);
         builder.ShaderResource(org::ResourceIdentifier{ br::lens::kLensFlareGhostsName });
         bindings.sources = builder.UnorderedAccess(org::ResourceIdentifier{ br::lens::kLensFlareSourcesName }).View();
+        m_pipeline = bindings.pipeline;
         return bindings;
+    }
+
+    // Staged recordings (M6 step 6): the values the revision names, taken without side effects (RenderGraphPass::TakeFrameValues).
+    void TakeFrameValues(const org::UpdateExecutionContext& execution) override {
+        m_config = LensFlareFrameConfig(*m_manager, execution);
+        const auto* context = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr;
+        m_frameSystem = context ? context->clodRayTracingSystem : nullptr;
+    }
+    // With a ray query, Record also bakes the system's TLAS, cluster and instance-row views, and whether it has a TLAS yet.
+    void Revision(std::vector<uint64_t>& out) const {
+        br::render::AppendPipelineRevision(out, m_pipeline);
+        AppendLensFlareRevision(out, m_config);
+        out.push_back(reinterpret_cast<uintptr_t>(m_frameSystem.get()));
+        if (m_system && m_frameSystem) {
+            std::scoped_lock lock(m_frameSystem->FrameOperationMutex());
+            out.push_back(m_frameSystem->HasTlas() ? 1u : 0u);
+            out.push_back((uint64_t(m_frameSystem->GetTlasSrv()) << 32) | m_frameSystem->GetClasInfoSrv());
+            out.push_back(m_frameSystem->GetInstanceRowsSrv());
+        }
     }
 
     LensFlareSourcesFrame Prepare(const LensFlareSourcesBindings&, const org::PassPrepareContext& preparation) const {
         LensFlareSourcesFrame frame{};
         const auto* context = preparation.preparationData ? preparation.preparationData->Get<UpdateContext>() : nullptr;
         if (!context) return frame;
-        frame.config = m_manager->FrameConfig(context->frameNumber);
+        frame.config = m_config;
         frame.system = context->clodRayTracingSystem;
         frame.targetWidth = m_targetWidth;
         frame.targetHeight = m_targetHeight;
@@ -127,6 +168,9 @@ private:
     std::shared_ptr<br::render::CLodRayTracingSystem> m_system;
     std::shared_ptr<org::ResourceGroup> m_slabs;
     uint32_t m_targetWidth = 0, m_targetHeight = 0;
+    br::PipelineState m_pipeline;
+    br::lens::GhostFlareFrame m_config;
+    std::shared_ptr<br::render::CLodRayTracingSystem> m_frameSystem;
 };
 
 struct LensFlareTraceBindings {
@@ -136,6 +180,7 @@ struct LensFlareTraceBindings {
 
 struct LensFlareTraceFrame {
     br::lens::GhostFlareFrame config;
+    bool operator==(const LensFlareTraceFrame&) const = default;
 };
 
 // The lattice of rays per source, ghost and wavelength (lensFlareTrace.hlsl).
@@ -150,16 +195,17 @@ public:
         builder.ShaderResource(org::ResourceIdentifier{ br::lens::kLensFlareGhostsName });
         builder.ShaderResource(org::ResourceIdentifier{ br::lens::kLensFlareSourcesName });
         bindings.vertices = builder.UnorderedAccess(m_manager->EnsureVertexBuffer()).View();
+        m_pipeline = bindings.pipeline;
         return bindings;
     }
 
-    LensFlareTraceFrame Prepare(const LensFlareTraceBindings&, const org::PassPrepareContext& preparation) const {
-        LensFlareTraceFrame frame{};
-        if (const auto* context = preparation.preparationData ? preparation.preparationData->Get<UpdateContext>() : nullptr) {
-            frame.config = m_manager->FrameConfig(context->frameNumber);
-        }
-        return frame;
+    void TakeFrameValues(const org::UpdateExecutionContext& execution) override { m_config = LensFlareFrameConfig(*m_manager, execution); }
+    void Revision(std::vector<uint64_t>& out) const {
+        br::render::AppendPipelineRevision(out, m_pipeline);
+        AppendLensFlareRevision(out, m_config);
     }
+
+    LensFlareTraceFrame Prepare(const LensFlareTraceBindings&, const org::PassPrepareContext&) const { return {m_config}; }
 
     static void Record(const LensFlareTraceBindings& bindings, const LensFlareTraceFrame& frame, org::PassRecordContext& recording) {
         const auto& config = frame.config;
@@ -177,6 +223,8 @@ public:
 
 private:
     std::shared_ptr<br::lens::GhostFlareManager> m_manager;
+    br::PipelineState m_pipeline;
+    br::lens::GhostFlareFrame m_config;
 };
 
 struct LensFlareDrawBindings {
@@ -187,6 +235,7 @@ struct LensFlareDrawBindings {
 struct LensFlareDrawFrame {
     br::lens::GhostFlareFrame config;
     uint32_t width = 0, height = 0;
+    bool operator==(const LensFlareDrawFrame&) const = default;
 };
 
 // The lattice cells as quads, added into the flare target (lensFlareDraw.hlsl).
@@ -200,14 +249,20 @@ public:
         builder.ShaderResource(org::ResourceIdentifier{ br::lens::kLensFlareSourcesName });
         bindings.vertices = builder.ShaderResource(m_manager->EnsureVertexBuffer()).View();
         bindings.target = builder.RenderTarget(org::ResourceIdentifier{ kLensFlareTargetName });
+        m_pipeline = bindings.pipeline;
         return bindings;
+    }
+
+    void TakeFrameValues(const org::UpdateExecutionContext& execution) override { m_config = LensFlareFrameConfig(*m_manager, execution); }
+    // The target's size changes only with a new resource (a binding).
+    void Revision(std::vector<uint64_t>& out) const {
+        br::render::AppendPipelineRevision(out, m_pipeline);
+        AppendLensFlareRevision(out, m_config);
     }
 
     LensFlareDrawFrame Prepare(const LensFlareDrawBindings& bindings, const org::PassPrepareContext& preparation) const {
         LensFlareDrawFrame frame{};
-        if (const auto* context = preparation.preparationData ? preparation.preparationData->Get<UpdateContext>() : nullptr) {
-            frame.config = m_manager->FrameConfig(context->frameNumber);
-        }
+        frame.config = m_config;
         const auto& description = preparation.Describe(bindings.target);
         frame.width = description.texture.width;
         frame.height = description.texture.height;
@@ -273,6 +328,8 @@ private:
     }
 
     std::shared_ptr<br::lens::GhostFlareManager> m_manager;
+    br::PipelineState m_pipeline;
+    br::lens::GhostFlareFrame m_config;
 };
 
 struct LensFlareCompositeBindings {
@@ -283,6 +340,7 @@ struct LensFlareCompositeBindings {
 struct LensFlareCompositeFrame {
     bool active = false;
     uint32_t width = 0, height = 0;
+    bool operator==(const LensFlareCompositeFrame&) const = default;
 };
 
 // Adds the flare target into the upscaled HDR colour (lensFlareComposite.hlsl), before bloom and tonemapping.
@@ -295,14 +353,19 @@ public:
         bindings.pipeline = br::render::DeclarePipeline(PipelineDesc());
         bindings.flare = builder.ShaderResource(org::ResourceIdentifier{ kLensFlareTargetName }).View();
         bindings.target = builder.RenderTarget(Subresources(Builtin::PostProcessing::UpscaledHDR, org::Mip{ 0, 1 }));
+        m_pipeline = bindings.pipeline;
         return bindings;
+    }
+
+    void TakeFrameValues(const org::UpdateExecutionContext& execution) override { m_active = LensFlareFrameConfig(*m_manager, execution).active; }
+    void Revision(std::vector<uint64_t>& out) const {
+        br::render::AppendPipelineRevision(out, m_pipeline);
+        out.push_back(m_active ? 1u : 0u);
     }
 
     LensFlareCompositeFrame Prepare(const LensFlareCompositeBindings& bindings, const org::PassPrepareContext& preparation) const {
         LensFlareCompositeFrame frame{};
-        if (const auto* context = preparation.preparationData ? preparation.preparationData->Get<UpdateContext>() : nullptr) {
-            frame.active = m_manager->FrameConfig(context->frameNumber).active;
-        }
+        frame.active = m_active;
         const auto& description = preparation.Describe(bindings.target);
         frame.width = description.texture.width;
         frame.height = description.texture.height;
@@ -350,6 +413,8 @@ private:
     }
 
     std::shared_ptr<br::lens::GhostFlareManager> m_manager;
+    br::PipelineState m_pipeline;
+    bool m_active = false;
 };
 
 // Builds the four passes after the upscaler: the flare target is `divisor` times smaller than the output (the ghosts are

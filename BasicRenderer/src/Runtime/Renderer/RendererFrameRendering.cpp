@@ -154,9 +154,70 @@ void Renderer::RecordFrameGraphExecution(size_t index, double milliseconds, doub
         timing.executeMs += executeMs;
         const auto& hosts = br::render::FrameHostEpochs();
         const auto& last = m_frameHost->LastFrameTimings();
+        {
+            if (timing.stageMs.size() <= index) timing.stageMs.resize(index + 1, {});
+            const auto& e = last.execute;
+            const auto& u = last.update;
+            const double parts[FrameGraphExecutionTiming::kStages] = {last.buildUs, last.waitUs, last.releaseUs + last.beforePrepareUs,
+                u.passUpdatesUs, u.beforeCompileUs, u.prepareUs, e.retireUs, e.admissionUs, e.acquireUs, e.recordUs, e.submitUs, e.commitUs,
+                last.executeUs - (e.retireUs + e.admissionUs + e.acquireUs + e.recordUs + e.submitUs + e.commitUs), last.signalUs};
+            auto& stages = timing.stageMs[index];
+            for (size_t stage = 0; stage < FrameGraphExecutionTiming::kStages; ++stage) stages[stage] += parts[stage] / 1000.0;
+            if (last.probed) {
+                if (timing.probes.size() <= index) timing.probes.resize(index + 1);
+                auto& probe = timing.probes[index];
+                const auto& p = last.probe;
+                probe.runs += p.runs;
+                probe.firstRuns += p.firstRuns;
+                probe.publication += p.publication;
+                probe.publicationBound += p.publicationBound;
+                probe.bindings += p.bindings;
+                probe.perFrame += p.perFrame;
+                probe.versions += p.versions;
+                probe.backings += p.backings;
+                probe.placement += p.placement;
+                probe.any += p.any;
+                probe.anyByIdentity += p.anyByIdentity;
+                for (const auto& [name, count] : p.names) probe.names[name] += count;
+            }
+            // Kept recordings (M6 step 3): what the epoch's run did with its kept copy, and why it recorded.
+            if (last.kept != org::RenderGraph::KeptRunOutcome::None) {
+                if (timing.kept.size() <= index) timing.kept.resize(index + 1);
+                const uint32_t host = index < hosts.size() ? hosts[index] : 0u;
+                const auto stats = m_frameHost->TakeKeptStats(host);
+                for (auto* into : { &timing.kept[index], &m_keptRecordingTotals[host] }) {
+                    into->runs += stats.runs;
+                    into->reused += stats.reused;
+                    into->kept += stats.kept;
+                    into->unkeepable += stats.unkeepable;
+                    for (const auto& [reason, count] : stats.reasons)
+                        if (into->reasons.size() < 64 || into->reasons.contains(reason)) into->reasons[reason] += count;
+                    into->audited += stats.audited;
+                    into->auditCompared += stats.auditCompared;
+                    into->auditUncomparable += stats.auditUncomparable;
+                    into->auditMismatches += stats.auditMismatches;
+                    into->stagedReused += stats.stagedReused;
+                    into->stagedRecorded += stats.stagedRecorded;
+                    into->partial += stats.partial;
+                    into->batchesReused += stats.batchesReused;
+                    into->batchesRecorded += stats.batchesRecorded;
+                    for (const auto& [reason, count] : stats.batchReasons)
+                        if (into->batchReasons.size() < 64 || into->batchReasons.contains(reason)) into->batchReasons[reason] += count;
+                    for (const auto& [name, count] : stats.mismatches)
+                        if (into->mismatches.size() < 64 || into->mismatches.contains(name)) into->mismatches[name] += count;
+                }
+            }
+        }
         timing.frameEpochs += fmt::format("{}{}: {:.2f} (build {:.2f}, wait {:.2f}, update {:.2f}, execute {:.2f})",
             timing.frameEpochs.empty() ? "" : ", ", index < hosts.size() ? hosts[index] : 0u, milliseconds, last.buildUs / 1000.0, waitMs,
             updateMs, executeMs);
+        // A long execute: where it went (diagnostic, M5 step 8).
+        if (executeMs > 8.0) {
+            const auto& e = last.execute;
+            timing.frameEpochs += fmt::format(" [execute: retire {:.2f}, admission {:.2f}, acquire {:.2f}, record {:.2f}, submit {:.2f}, "
+                "commit {:.2f}; {} batches]", e.retireUs / 1000.0, e.admissionUs / 1000.0, e.acquireUs / 1000.0, e.recordUs / 1000.0,
+                e.submitUs / 1000.0, e.commitUs / 1000.0, e.batches);
+        }
         return;
     }
     timing.totalMs += milliseconds;
@@ -165,6 +226,17 @@ void Renderer::RecordFrameGraphExecution(size_t index, double milliseconds, doub
     // consolidation point before it.
     const bool afterAttach = m_framesSinceFrameGraphAttach < 2;
     if (m_framesSinceFrameGraphAttach != UINT32_MAX) ++m_framesSinceFrameGraphAttach;
+    // The frames around a new frame placement version (a trim, the settled layout): the one it was published in, and the first that
+    // places from it, where every graph re-places (diagnostic, M5 step 7).
+    if (const auto placement = m_frameHost->CurrentFramePlacementId(); placement != m_lastFramePlacementId) {
+        if (m_lastFramePlacementId) m_framesSinceFramePlacementChange = 0;
+        m_lastFramePlacementId = placement;
+    }
+    if (m_framesSinceFramePlacementChange < 2)
+        spdlog::info("Renderer: frame {} {} frame placement {}: consolidation {:.2f} ms, frame graph {:.2f} ms; per host epoch {}", m_totalFramesRendered,
+            m_framesSinceFramePlacementChange == 0 ? "published" : "first on", m_lastFramePlacementId, timing.consolidationMs, milliseconds,
+            timing.frameEpochs);
+    if (m_framesSinceFramePlacementChange != UINT32_MAX) ++m_framesSinceFramePlacementChange;
     if (milliseconds + timing.consolidationMs > 16.0 || afterAttach)
         spdlog::info("Renderer: {} {}: consolidation {:.2f} ms, frame graph {:.2f} ms; per host epoch {}",
             afterAttach ? (m_framesSinceFrameGraphAttach == 1 ? "first frame after an attach," : "second frame after an attach,") : "slow frame",
@@ -181,6 +253,62 @@ void Renderer::RecordFrameGraphExecution(size_t index, double milliseconds, doub
         "update {:.3f}, execute {:.3f}); per host epoch {}; build sets: {} frames checked, {} mixed, {} unknown", timing.frames,
         timing.totalMs / timing.frames, timing.worstMs, timing.waitMs / timing.frames, timing.updateMs / timing.frames,
         timing.executeMs / timing.frames, epochs, sets.frames, sets.mixed, sets.unknown);
+    // Per epoch by stage (M6 step 2): build, pacing wait, releases and inputs, pass updates, before compile, preparation, then
+    // Execute's retire, admission, acquire, record, submit, commit, its rest, and the completion points.
+    static constexpr const char* kStageNames[FrameGraphExecutionTiming::kStages] = {"build", "wait", "inputs", "updates", "beforeCompile",
+        "prepare", "retire", "admission", "acquire", "record", "submit", "commit", "executeRest", "signal"};
+    for (size_t epoch = 0; epoch < timing.stageMs.size(); ++epoch) {
+        std::string stages;
+        for (size_t stage = 0; stage < FrameGraphExecutionTiming::kStages; ++stage)
+            stages += fmt::format("{}{} {:.3f}", stages.empty() ? "" : ", ", kStageNames[stage], timing.stageMs[epoch][stage] / timing.frames);
+        spdlog::info("Renderer: frame graph stages over {} frames, host epoch {}: {}", timing.frames, epoch < hosts.size() ? hosts[epoch] : 0u, stages);
+    }
+    // The currency probe: of the runs compared with the epoch's previous one, how many changed what a kept recording is keyed on.
+    for (size_t epoch = 0; epoch < timing.probes.size(); ++epoch) {
+        const auto& probe = timing.probes[epoch];
+        std::vector<std::pair<uint32_t, std::string>> names;
+        for (const auto& [name, count] : probe.names) names.emplace_back(count, name);
+        std::sort(names.begin(), names.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+        std::string top;
+        for (size_t i = 0; i < names.size() && i < 12; ++i) top += fmt::format("{}{} {}", top.empty() ? "" : ", ", names[i].second, names[i].first);
+        spdlog::info("Renderer: currency probe over {} frames, host epoch {}: runs {} (first {}), stale {} (by identity {}); publication {} "
+            "(in a bound slot {}), bindings {}, per-frame {}, versions {}, backings {}, placement {}; changed: {}", timing.frames,
+            epoch < hosts.size() ? hosts[epoch] : 0u, probe.runs, probe.firstRuns, probe.any, probe.anyByIdentity, probe.publication,
+            probe.publicationBound, probe.bindings, probe.perFrame, probe.versions, probe.backings, probe.placement, top.empty() ? "none" : top);
+    }
+    // Kept recordings (M6 step 3, BASICRENDERER_KEPT_RECORDINGS): runs that submitted their copy's kept recording, runs that recorded
+    // and kept it, runs whose recording cannot be kept, and why each recorded.
+    for (size_t epoch = 0; epoch < timing.kept.size(); ++epoch) {
+        const auto& kept = timing.kept[epoch];
+        if (!kept.runs) continue;
+        std::vector<std::pair<uint64_t, std::string>> reasons;
+        for (const auto& [reason, count] : kept.reasons) reasons.emplace_back(count, reason);
+        std::sort(reasons.begin(), reasons.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+        std::string top;
+        for (size_t i = 0; i < reasons.size() && i < 6; ++i) top += fmt::format("{}{} x{}", top.empty() ? "" : "; ", reasons[i].second, reasons[i].first);
+        spdlog::info("Renderer: kept recordings over {} frames, host epoch {}: runs {}, reused {}, partly reused {}, recorded and kept {}, not "
+            "keepable {}; staged recordings reused {}, recorded again {}; why recorded: {}", timing.frames, epoch < hosts.size() ? hosts[epoch] : 0u,
+            kept.runs, kept.reused, kept.partial, kept.kept, kept.unkeepable, kept.stagedReused, kept.stagedRecorded, top.empty() ? "none" : top);
+        // Batch reuse (M6 step 7): the batches submitted from kept recordings and recorded, and why the recorded ones recorded.
+        if (kept.batchesReused || kept.batchesRecorded) {
+            std::vector<std::pair<uint64_t, std::string>> batchReasons;
+            for (const auto& [reason, count] : kept.batchReasons) batchReasons.emplace_back(count, reason);
+            std::sort(batchReasons.begin(), batchReasons.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+            std::string batches;
+            for (size_t i = 0; i < batchReasons.size() && i < 12; ++i)
+                batches += fmt::format("{}{} x{}", batches.empty() ? "" : "; ", batchReasons[i].second, batchReasons[i].first);
+            spdlog::info("Renderer: kept batches over {} frames, host epoch {}: reused {}, recorded {}; why recorded: {}", timing.frames,
+                epoch < hosts.size() ? hosts[epoch] : 0u, kept.batchesReused, kept.batchesRecorded, batches.empty() ? "none" : batches);
+        }
+        // The revision audit (M6 step 4): what the audited reuses compared, and the passes whose revision missed an input.
+        if (kept.audited) {
+            std::string names;
+            for (const auto& [name, count] : kept.mismatches) names += fmt::format("{}{} x{}", names.empty() ? "" : "; ", name, count);
+            spdlog::info("Renderer: kept recording audit over {} frames, host epoch {}: audited {}, passes compared {}, not comparable {}, "
+                "mismatches {}{}{}", timing.frames, epoch < hosts.size() ? hosts[epoch] : 0u, kept.audited, kept.auditCompared,
+                kept.auditUncomparable, kept.auditMismatches, names.empty() ? "" : ": ", names);
+        }
+    }
     timing = {};
     sets.frames = sets.mixed = sets.unknown = 0;
 }
@@ -304,8 +432,10 @@ void Renderer::ExecuteFrameGraph(const org::UpdateExecutionContext& frameContext
 
     auto& world = RendererECSManager::GetInstance().GetWorld();
 	const Components::DrawStats& drawStats = world.get<Components::DrawStats>();
-    auto renderRes = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution")();
-    auto outputRes = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("outputResolution")();
+    // The attached graphs' sizes (M5 step 4).
+    const auto attachedResolution = AttachedResolution();
+    auto renderRes = attachedResolution.render;
+    auto outputRes = attachedResolution.output;
 
     auto& deviceManager = DeviceManager::GetInstance();
 
@@ -439,6 +569,9 @@ void Renderer::ExecuteFrameGraph(const org::UpdateExecutionContext& frameContext
             org::UpdateExecutionContext laterEpochs = frameContext;
             laterEpochs.beforeCompileFrame = {};
             (void)CheckFrameBuildSet();
+            // The currency probe (diagnostic, M6 step 2): off unless BASICRENDERER_CURRENCY_PROBE is set.
+            static const bool currencyProbe = br::runtime::renderer_settings::ReadTruthyEnvironmentFlag("BASICRENDERER_CURRENCY_PROBE");
+            m_frameHost->SetCurrencyProbe(currencyProbe);
             for (size_t index = 0; index < hosts.size(); ++index) {
                 const auto epochBegin = std::chrono::steady_clock::now();
                 m_frameHost->ExecuteFrame(index == 0 ? frameContext : laterEpochs, {}, hosts[index], m_frameInputs);
@@ -628,6 +761,13 @@ void Renderer::Render() {
                 sourceRegion.texture = presentationSource->GetAPIResource().GetHandle();
                 rhi::TextureCopyRegion destinationRegion{};
                 destinationRegion.texture = currentBackbufferResource->GetHandle();
+                // A backbuffer of another size than the presentation surface (a swapchain the RHI made again at present, before
+                // the graphs for its size attach): the copy takes the part both have.
+                if (currentBackbufferResource->GetWidth() != presentationSource->GetWidth()
+                    || currentBackbufferResource->GetHeight() != presentationSource->GetHeight()) {
+                    sourceRegion.width = destinationRegion.width = (std::min)(currentBackbufferResource->GetWidth(), presentationSource->GetWidth());
+                    sourceRegion.height = destinationRegion.height = (std::min)(currentBackbufferResource->GetHeight(), presentationSource->GetHeight());
+                }
                 list.CopyTextureRegion(destinationRegion, sourceRegion);
 
                 auto backbufferToPresent = backbufferToCopy;
@@ -656,23 +796,56 @@ void Renderer::Render() {
         presentResult = m_swapChain->Present(!m_allowTearing);
     });
 	if (presentResult == rhi::Result::ModeChanged) {
+		// The client extent in the window's own DPI awareness, as its WM_SIZE reports it: the thread may be DPI aware (ImGui's
+		// EnableDpiAwareness) while a DPI-unaware window (the SARP host's) gets logical sizes, which a query in the thread's
+		// awareness would scale to physical pixels (M5 step 8).
 		RECT clientRect{};
-		if (m_hwnd && GetClientRect(m_hwnd, &clientRect)) {
+		bool clientKnown = false;
+		if (m_hwnd) {
+			const DPI_AWARENESS_CONTEXT previous = SetThreadDpiAwarenessContext(GetWindowDpiAwarenessContext(m_hwnd));
+			clientKnown = GetClientRect(m_hwnd, &clientRect) != FALSE;
+			if (previous) SetThreadDpiAwarenessContext(previous);
+		}
+		if (clientKnown) {
 			const UINT clientWidth = static_cast<UINT>((std::max)(clientRect.right - clientRect.left, 0L));
 			const UINT clientHeight = static_cast<UINT>((std::max)(clientRect.bottom - clientRect.top, 0L));
 			if (clientWidth != 0 && clientHeight != 0) {
 				spdlog::info(
-					"Renderer: presentation reported mode change; rebuilding swapchain for client extent {}x{}",
+					"Renderer: presentation reported mode change; the swapchain is made again for client extent {}x{} at the next "
+					"consolidation point",
 					clientWidth,
 					clientHeight);
-				OnResize(clientWidth, clientHeight);
-				return;
+				// A resolution request as WM_SIZE's (M5 step 4), made even at the same size. The frame was submitted: it is
+				// signalled and the frame index advances as for any other.
+				m_modeChangeSwapchainGeneration = m_swapchainGeneration;
+				m_frameRevisions.RequestOutputSize(clientWidth, clientHeight, "presentation mode change", true);
+				// The RHI made the swapchain again (Vulkan: out of date, at the surface's extent, which is the client's): its
+				// images are new. The backbuffer wrappers take them now, and the presentation copy clips to the smaller size until
+				// the graphs built for the window's size attach (M5 step 8).
+				bool remade = false;
+				for (UINT n = 0; n < m_numFramesInFlight && n < renderTargets.size(); ++n) {
+					const auto image = m_swapChain->Image(n);
+					if (image.index != renderTargets[n].index || image.generation != renderTargets[n].generation) remade = true;
+				}
+				if (remade) {
+					uint32_t width = clientWidth, height = clientHeight;
+					(void)m_swapChain->Extent(width, height);
+					SettingsManager::GetInstance().getSettingSetter<DirectX::XMUINT2>("outputResolution")({ width, height });
+					CreateRTVs();
+					++m_swapchainGeneration;
+					++m_resolutionStats.swapchainResizes;
+					spdlog::info("Renderer: the swapchain was made again at present ({}x{}); the backbuffers follow", width, height);
+				}
+			}
+			else {
+				spdlog::warn("Renderer: presentation reported mode change but no non-zero client extent is available");
 			}
 		}
-		spdlog::warn("Renderer: presentation reported mode change but no non-zero client extent is available");
-		return;
+		else {
+			spdlog::warn("Renderer: presentation reported mode change but no non-zero client extent is available");
+		}
 	}
-	if (presentResult != rhi::Result::Ok) {
+	if (presentResult != rhi::Result::Ok && presentResult != rhi::Result::ModeChanged) {
 		spdlog::error("Renderer: swapchain presentation failed with {}", rhi::ResultName(presentResult));
 		return;
 	}

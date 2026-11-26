@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cstring>
 #include <limits>
 
 #include <BasicTelemetry/Telemetry.h>
@@ -231,6 +232,7 @@ ClusterRasterBindings ClusterRasterizationPass::Declare(org::PassBuilder& builde
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
     bindings.avboitShading = m_outputKind == CLodRasterOutputKind::AVBOITShading;
     bindings.singleViewVisibility = m_outputKind == CLodRasterOutputKind::VisibilityBuffer && m_viewInputs.size() == 1u;
+    m_declaredSingleViewVisibility = bindings.singleViewVisibility;
     return bindings;
 }
 
@@ -383,11 +385,84 @@ bool ClusterRasterizationPass::DeclaredResourcesChanged() const {
     return m_declaredResourcesChanged;
 }
 
+bool ClusterRasterFrame::operator==(const ClusterRasterFrame& other) const {
+    return steps == other.steps
+        && std::memcmp(colorClears.data(), other.colorClears.data(), sizeof(colorClears)) == 0
+        && std::memcmp(&depthClear, &other.depthClear, sizeof(depthClear)) == 0
+        && width == other.width && height == other.height && viewRasterInfoTable == other.viewRasterInfoTable
+        && deepVisibilityNodeCapacity == other.deepVisibilityNodeCapacity
+        && virtualShadowPageTableResolution == other.virtualShadowPageTableResolution
+        && virtualShadowVirtualResolution == other.virtualShadowVirtualResolution
+        && shadows == other.shadows && punctualLights == other.punctualLights
+        && telemetryEnabled == other.telemetryEnabled && phase1VisibilityDiagnostics == other.phase1VisibilityDiagnostics;
+}
+
+void ClusterRasterizationPass::TakeFrameValues(const org::UpdateExecutionContext& execution) {
+    m_taken = {};
+    const auto* context = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr;
+    if (!context) return;
+    m_taken.disabled = m_outputKind == CLodRasterOutputKind::VisibilityBuffer &&
+        SettingsManager::GetInstance().getSettingGetter<bool>(CLodDisableNonVoxelVisibilitySettingName)();
+    if (m_taken.disabled) return;
+    m_taken.telemetryEnabled = IsCLodWorkGraphTelemetryEnabled();
+    if (m_outputKind == CLodRasterOutputKind::VirtualShadow) {
+        const auto config = CLodVirtualShadowBuildRuntimeResolutionConfig();
+        m_taken.virtualShadowPageTableResolution = config.pageTableResolution;
+        m_taken.virtualShadowVirtualResolution = config.virtualResolution;
+    }
+    m_taken.shadowingMode = context->lighting.shadowingMode;
+    m_taken.punctualLights = context->lighting.punctualLightingEnabled;
+    m_taken.globalPSOFlags = context->globalPSOFlags;
+    // One step per bucket whose pipeline exists: an asynchronous build landing adds a step (a new revision).
+    const auto numBuckets = context->preparedRasterBucketCount;
+    m_taken.bucketCount = numBuckets;
+    m_taken.steps.reserve(numBuckets);
+    for (uint32_t i = 0; i < numBuckets; ++i) {
+        const auto flags = context->preparedRasterBucketFlags.at(i);
+        const br::PipelineState* pso = m_outputKind == CLodRasterOutputKind::VisibilityBuffer
+            ? PSOManager::GetInstance().TryGetClusterLODRasterPSO(flags, m_wireframe, m_declaredSingleViewVisibility)
+            : m_outputKind == CLodRasterOutputKind::VirtualShadow
+                ? PSOManager::GetInstance().TryGetClusterLODVirtualShadowRasterPSO(flags, m_wireframe)
+            : m_outputKind == CLodRasterOutputKind::AVBOITOccupancy
+                ? PSOManager::GetInstance().TryGetClusterLODAVBOITOccupancyPSO(flags, m_wireframe)
+            : m_outputKind == CLodRasterOutputKind::AVBOIT
+                ? PSOManager::GetInstance().TryGetClusterLODAVBOITRasterPSO(flags, m_wireframe)
+            : m_outputKind == CLodRasterOutputKind::AVBOITShading
+                ? PSOManager::GetInstance().TryGetClusterLODAVBOITShadePSO(flags, m_wireframe, context->globalPSOFlags)
+            : PSOManager::GetInstance().TryGetClusterLODDeepVisibilityRasterPSO(flags, m_wireframe);
+        if (!pso) {
+            ++m_taken.missingPrograms;
+            continue;
+        }
+        m_taken.steps.push_back({*pso, static_cast<uint64_t>(i) * sizeof(RasterizeClustersCommand)});
+    }
+}
+
+void ClusterRasterizationPass::Revision(std::vector<uint64_t>& out) const {
+    out.push_back(m_taken.disabled ? 1u : 0u);
+    if (m_taken.disabled) return;
+    out.push_back(m_taken.bucketCount | (uint64_t{m_taken.missingPrograms} << 32));
+    for (const auto& step : m_taken.steps) {
+        br::render::AppendPipelineRevision(out, step.pipeline);
+        out.push_back(step.argumentsOffset);
+    }
+    out.push_back(m_taken.virtualShadowPageTableResolution | (uint64_t{m_taken.virtualShadowVirtualResolution} << 32));
+    out.push_back(m_taken.globalPSOFlags | (uint64_t{static_cast<uint32_t>(m_taken.shadowingMode)} << 32));
+    out.push_back((m_taken.punctualLights ? 1u : 0u) | (m_taken.telemetryEnabled ? 2u : 0u) | (m_declaredShadowsEnabled ? 4u : 0u));
+    // Taken by Update: the pass size, the deep visibility capacity and the view rows Prepare publishes.
+    out.push_back(m_passWidth | (uint64_t{m_passHeight} << 32));
+    out.push_back(m_deepVisibilityNodeCapacity);
+    br::render::AppendRevisionRows(out, m_viewRasterInfos.data(), m_viewRasterInfos.size());
+    for (const auto& view : m_viewInputs) {
+        out.push_back(view.camera);
+        out.push_back(reinterpret_cast<uintptr_t>(view.visibility.get()));
+        out.push_back(reinterpret_cast<uintptr_t>(view.headPointers.get()));
+    }
+}
+
 ClusterRasterFrame ClusterRasterizationPass::Prepare(
     const ClusterRasterBindings& bindings, const org::PassPrepareContext& preparation) const {
-    if (m_outputKind == CLodRasterOutputKind::VisibilityBuffer &&
-        SettingsManager::GetInstance().getSettingGetter<bool>(CLodDisableNonVoxelVisibilitySettingName)())
-        return {};
+    if (m_taken.disabled) return {};
     const auto* context = preparation.preparationData
         ? preparation.preparationData->Get<UpdateContext>() : nullptr;
     if (!context) throw std::logic_error("CLod raster preparation requires the owned render snapshot");
@@ -414,8 +489,8 @@ ClusterRasterFrame ClusterRasterizationPass::Prepare(
     }
     if (bindings.avboitShading) {
         // Only with the shadow map's resources declared: in stochastic mode it doesn't exist, and lights are unshadowed here.
-        frame.shadows = m_declaredShadowsEnabled && context->lighting.shadowingMode == ShadowingMode::VirtualShadowMaps;
-        frame.punctualLights = context->lighting.punctualLightingEnabled;
+        frame.shadows = m_declaredShadowsEnabled && m_taken.shadowingMode == ShadowingMode::VirtualShadowMaps;
+        frame.punctualLights = m_taken.punctualLights;
     }
     // The view table and the single-view visibility UAV are resolved against
     // this frame's bindings (see CLodViewTables.h).
@@ -446,38 +521,22 @@ ClusterRasterFrame ClusterRasterizationPass::Prepare(
                 static_cast<int64_t>(resourceHeap.generation));
         }
     }
-    frame.telemetryEnabled = IsCLodWorkGraphTelemetryEnabled();
+    frame.telemetryEnabled = m_taken.telemetryEnabled;
     if (bindings.virtualShadow) {
-        const auto config = CLodVirtualShadowBuildRuntimeResolutionConfig();
-        frame.virtualShadowPageTableResolution = config.pageTableResolution;
-        frame.virtualShadowVirtualResolution = config.virtualResolution;
+        frame.virtualShadowPageTableResolution = m_taken.virtualShadowPageTableResolution;
+        frame.virtualShadowVirtualResolution = m_taken.virtualShadowVirtualResolution;
     }
     frame.deepVisibilityNodeCapacity = m_deepVisibilityNodeCapacity;
-    const auto numBuckets = context->preparedRasterBucketCount;
+    const auto numBuckets = m_taken.bucketCount;
     BT_PLOT("CLod.RasterArgs.PreparedBucketCount", static_cast<int64_t>(numBuckets));
     BT_PLOT("CLod.RasterArgs.PreparedBackingBytes", static_cast<int64_t>(m_rasterBucketsIndirectArgsBuffer->GetSize()));
-    frame.steps.reserve(numBuckets);
-    uint32_t missingPrograms = 0u;
+    // The pipelines TakeFrameValues found (the pass's revision names them).
+    frame.steps = m_taken.steps;
+    const uint32_t missingPrograms = m_taken.missingPrograms;
     uint32_t commandLayoutMismatches = 0u;
     const auto commandLayout = PSOManager::GetInstance().GetRootSignature().GetHandle();
-    for (uint32_t i = 0; i < numBuckets; ++i) {
-        const auto flags = context->preparedRasterBucketFlags.at(i);
-        const br::PipelineState* pso = m_outputKind == CLodRasterOutputKind::VisibilityBuffer
-            ? PSOManager::GetInstance().TryGetClusterLODRasterPSO(flags, m_wireframe, bindings.singleViewVisibility)
-            : m_outputKind == CLodRasterOutputKind::VirtualShadow
-                ? PSOManager::GetInstance().TryGetClusterLODVirtualShadowRasterPSO(flags, m_wireframe)
-            : m_outputKind == CLodRasterOutputKind::AVBOITOccupancy
-                ? PSOManager::GetInstance().TryGetClusterLODAVBOITOccupancyPSO(flags, m_wireframe)
-            : m_outputKind == CLodRasterOutputKind::AVBOIT
-                ? PSOManager::GetInstance().TryGetClusterLODAVBOITRasterPSO(flags, m_wireframe)
-            : m_outputKind == CLodRasterOutputKind::AVBOITShading
-                ? PSOManager::GetInstance().TryGetClusterLODAVBOITShadePSO(flags, m_wireframe, context->globalPSOFlags)
-            : PSOManager::GetInstance().TryGetClusterLODDeepVisibilityRasterPSO(flags, m_wireframe);
-        if (!pso) {
-            ++missingPrograms;
-            continue;
-        }
-        if (const auto payload = pso->GetPayload()) {
+    for (const auto& step : frame.steps) {
+        if (const auto payload = step.pipeline.GetPayload()) {
             if (payload->layout.index != commandLayout.index ||
                 payload->layout.generation != commandLayout.generation) {
                 ++commandLayoutMismatches;
@@ -493,7 +552,6 @@ ClusterRasterFrame ClusterRasterizationPass::Prepare(
                     static_cast<int64_t>(payload->layout.generation));
             }
         }
-        frame.steps.push_back({*pso, static_cast<uint64_t>(i) * sizeof(RasterizeClustersCommand)});
     }
     BT_PLOT("CLod.RasterArgs.PreparedHardwareSteps",
         static_cast<int64_t>(frame.steps.size()));

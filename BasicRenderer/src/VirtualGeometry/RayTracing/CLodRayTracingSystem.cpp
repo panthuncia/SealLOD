@@ -793,11 +793,13 @@ void CLodRayTracingSystem::DeclareSceneBlas(org::RenderPassBuilder& builder) con
     }
 }
 
-org::DeclaredViewToken CLodRayTracingSystem::DeclareSceneTlas(org::RenderPassBuilder& builder) const {
-    // Write instances, the readback, the coarse cut's clear, the end of frame.
-    for (const GraphBuffer* buffer : { &m_counters, &m_instanceBlas, &m_instanceRows, &m_shareTable, &m_blasOmmKeys, &m_cacheCtrl, &m_ommWanted,
-             &m_ommRelease, &m_ommRebuild, &m_coarseCut }) {
+org::DeclaredViewToken CLodRayTracingSystem::DeclareSceneTlas(org::RenderPassBuilder& builder, bool kept) const {
+    // Write instances; unless kept, the readback, the coarse cut's clear and the end of frame too (DeclareSceneEnd).
+    for (const GraphBuffer* buffer : { &m_counters, &m_instanceBlas, &m_instanceRows, &m_shareTable, &m_blasOmmKeys, &m_cacheCtrl }) {
         builder.UnorderedAccess(buffer->buffer);
+    }
+    if (!kept) {
+        for (const GraphBuffer* buffer : { &m_ommWanted, &m_ommRelease, &m_ommRebuild, &m_coarseCut }) builder.UnorderedAccess(buffer->buffer);
     }
     builder.ShaderResource(m_blasAddresses.buffer);
     const org::DeclaredViewToken rows = builder.UnorderedAccess(m_tlasInstances).View();
@@ -805,15 +807,17 @@ org::DeclaredViewToken CLodRayTracingSystem::DeclareSceneTlas(org::RenderPassBui
     builder.AccelerationStructureRead(m_blasResult);
     builder.AccelerationStructureBuild(m_tlasStorage.buffer);
     builder.AccelerationStructureBuildOutput(m_tlasScratch);
-    builder.CopyDestination(m_readback.buffer);
+    if (!kept) builder.CopyDestination(m_readback.buffer);
     builder.InternalTransition(m_tlasInstances, kLeftAsBuildInput);
     if (m_tlasOps) { // Written by the instance passes, then read by the build.
         builder.UnorderedAccess(m_tlasOps.buffer);
-        builder.InternalTransition(m_tlasOps.buffer, kLeftAsCopySource); // Read by the build, then copied for the stats.
+        // Read by the build, then copied for the stats (here, or by the end pass, which takes it as the build left it).
+        builder.InternalTransition(m_tlasOps.buffer, kept ? kLeftAsBuildInput : kLeftAsCopySource);
         for (const GraphBuffer* buffer : { &m_ptlasKeySlots, &m_ptlasSlots, &m_ptlasSlotRows, &m_ptlasRing, &m_ptlasCells, &m_ptlasFill }) {
             builder.UnorderedAccess(buffer->buffer);
         }
     }
+    if (kept) return rows;
     if (m_bcEnabled) { // Copied for the stats.
         builder.UnorderedAccess(m_bcCtrl.buffer);
         builder.InternalTransition(m_bcCtrl.buffer, kLeftAsCopySource);
@@ -822,6 +826,38 @@ org::DeclaredViewToken CLodRayTracingSystem::DeclareSceneTlas(org::RenderPassBui
         builder.InternalTransition(buffer->buffer, kLeftAsCopySource);
     }
     return rows;
+}
+
+void CLodRayTracingSystem::DeclareSceneOmm(org::RenderPassBuilder& builder) const {
+    // As the CLAS pass declares them (RecordOmmUploads copies into the table, the rebuild list and the index pool, and builds
+    // micromap arrays from the upload heap).
+    builder.UnorderedAccess(m_ommTable.buffer);
+    builder.UnorderedAccess(m_ommRebuild.buffer);
+    builder.AccelerationStructureBuild(ResourceGroupResolver(m_ommArrays));
+    builder.AccelerationStructureBuildInput(ResourceGroupResolver(m_ommIndices));
+    if (m_ommUpload) {
+        builder.CopySource(m_ommUpload.buffer);
+        builder.AccelerationStructureBuildOutput(m_ommScratch);
+    }
+}
+
+void CLodRayTracingSystem::DeclareSceneEnd(org::RenderPassBuilder& builder) const {
+    // The readback, the coarse cut's clear, the end of frame: what the TLAS pass declares for them when not kept.
+    for (const GraphBuffer* buffer : { &m_counters, &m_cacheCtrl, &m_ommWanted, &m_ommRelease, &m_ommRebuild, &m_coarseCut }) {
+        builder.UnorderedAccess(buffer->buffer);
+    }
+    builder.CopyDestination(m_readback.buffer);
+    if (m_tlasOps) {
+        builder.AccelerationStructureBuildInput(m_tlasOps.buffer); // As the TLAS pass left it.
+        builder.InternalTransition(m_tlasOps.buffer, kLeftAsCopySource);
+    }
+    if (m_bcEnabled) {
+        builder.UnorderedAccess(m_bcCtrl.buffer);
+        builder.InternalTransition(m_bcCtrl.buffer, kLeftAsCopySource);
+    }
+    for (const GraphBuffer* buffer : { &m_counters, &m_ommWanted, &m_ommRelease }) {
+        builder.InternalTransition(buffer->buffer, kLeftAsCopySource);
+    }
 }
 
 void CLodRayTracingSystem::DeclareVisibility(org::RenderPassBuilder& builder, bool readStats) const {
@@ -1537,7 +1573,9 @@ MiscConstants CLodRayTracingSystem::CacheConstants() const {
     cache[CLOD_RT_CACHE_POOL_LOW] = Low(m_clasPool.address);
     cache[CLOD_RT_CACHE_POOL_HIGH] = High(m_clasPool.address);
     cache[CLOD_RT_CACHE_BUDGET] = m_limits.clusterBuildBudget;
-    cache[CLOD_RT_CACHE_TRANSIENT_ARENA_UNIT] = static_cast<uint32_t>((uint64_t(m_pageCount) * kPageBytes + uint64_t(ArenaSlot()) * m_transientSliceBytes) / CLOD_RT_CACHE_UNIT_BYTES);
+    // Slice 0's transient arena and CLAS IDs: a frame's slice is frame % (CLOD_RT_CACHE_PROTECTED_FRAMES + 1) of the per-frame
+    // buffer's frame number, which the shaders add (rayTracingSceneBuild.hlsl), so the constants are the same every frame.
+    cache[CLOD_RT_CACHE_TRANSIENT_ARENA_UNIT] = static_cast<uint32_t>(uint64_t(m_pageCount) * kPageBytes / CLOD_RT_CACHE_UNIT_BYTES);
     cache[CLOD_RT_CACHE_TRANSIENT_ARENA_UNITS] = static_cast<uint32_t>(m_transientSliceBytes / CLOD_RT_CACHE_UNIT_BYTES);
     cache[CLOD_RT_CACHE_PROTECTED_FRAMES] = m_protectedFrames;
     cache[CLOD_RT_CACHE_PAGE_COUNT] = m_pageCount;
@@ -1556,7 +1594,7 @@ MiscConstants CLodRayTracingSystem::CacheConstants() const {
     cache[CLOD_RT_CACHE_OMM_REBUILD_UAV] = m_ommRebuild.uav;
     cache[CLOD_RT_CACHE_OMM_RELEASE_UAV] = m_ommRelease.uav;
     cache[CLOD_RT_CACHE_OMM_RETIRE_WINDOW] = m_ommEnabled && m_ommPressure ? CLOD_RT_OMM_RETIRE_WINDOW_MAX : 0u;
-    cache[CLOD_RT_CACHE_TRANSIENT_ID_BASE] = m_chunkCount * CLOD_RT_CACHE_CHUNK_IDS + ArenaSlot() * m_limits.clusterBuildBudget;
+    cache[CLOD_RT_CACHE_TRANSIENT_ID_BASE] = m_chunkCount * CLOD_RT_CACHE_CHUNK_IDS;
     cache[CLOD_RT_CACHE_MAX_KEEP_AGE] = m_limits.maxKeepAge;
     // Two frames of 4,096 cluster builds at 3 KiB a cluster: a usual frame's need, not a burst's.
     cache[CLOD_RT_CACHE_WATERMARK_PAGES] = std::min<uint32_t>(m_pageCount / 4u, 4096u * 2u * 24u / CLOD_RT_CACHE_PAGE_UNITS);
@@ -1625,8 +1663,10 @@ void CLodRayTracingSystem::RecordSceneClear(org::RecordingContext& recording, co
     recording.Commands().Dispatch((words + kUavClearDispatchWidth - 1u) / kUavClearDispatchWidth, 1u, 1u);
 }
 
+// The stamps go to the first frame's queries every frame, so a kept recording replays them: the stages and the readback that
+// resolves them run in order on one queue, so a frame's stamps are resolved before the next frame writes them.
 void CLodRayTracingSystem::SceneStamp(rhi::CommandList& commands, uint32_t index) {
-    if (m_timers) commands.WriteTimestamp(m_timers->GetHandle(), (m_frame % m_framesInFlight) * kSceneTimers + index, rhi::Stage::Bottom);
+    if (m_timers) commands.WriteTimestamp(m_timers->GetHandle(), index, rhi::Stage::Bottom);
 }
 
 // The stages are separate passes. The graph handles the buffers it owns between them (scratch, arena, BLAS data, TLAS
@@ -1658,7 +1698,7 @@ void CLodRayTracingSystem::RecordSceneClas(org::RecordingContext& recording, con
         PushMiscConstants(recording, init);
         commands.Dispatch((std::max({ m_pageCount, m_chunkCount, m_limits.maxEntries }) + 255u) / 256u, 1u, 1u);
         GlobalUavBarrier(commands);
-        m_tablesCleared = true;
+        if (!inputs.kept) m_tablesCleared = true; // Kept: RecordSceneEnd, once the frame is submitted.
     }
     else {
         // Clean up after last frame while the counters still say how much it touched.
@@ -1671,7 +1711,7 @@ void CLodRayTracingSystem::RecordSceneClas(org::RecordingContext& recording, con
             clear(m_drawTable, m_drawTable.bytes);
             GlobalUavBarrier(commands);
         }
-        RecordOmmUploads(commands);
+        if (!inputs.kept) RecordOmmUploads(commands); // Kept: RecordSceneOmm, before this pass.
     }
 
     // ---- Group selected clusters by instance
@@ -1719,7 +1759,9 @@ void CLodRayTracingSystem::RecordSceneBlas(org::RecordingContext& recording, con
     commands.Dispatch(clusterGroups, 1u, 1u);
     if (m_bcEnabled) {
         GlobalUavBarrier(commands);
+        const bool initialized = m_bcInitialized;
         RecordBlasCache(recording, pipelines);
+        if (inputs.kept) m_bcInitialized = initialized; // Kept: RecordSceneEnd sets it, once the frame is submitted.
         return;
     }
     SceneStamp(commands, 4u);
@@ -1763,7 +1805,7 @@ void CLodRayTracingSystem::RecordBlasCache(org::RecordingContext& recording, con
     bc[CLOD_RT_BC_IMPLICIT_MAP_UAV] = m_bcBatchMap.uav;
     bc[CLOD_RT_BC_IMPLICIT_ADDRESSES_UAV] = m_bcBatchAddresses.uav;
     bc[CLOD_RT_BC_ENTRY_CAPACITY] = m_bcEntries;
-    bc[CLOD_RT_BC_FRAME] = m_frame;
+    bc[CLOD_RT_BC_FRAME] = 0u; // The per-frame buffer's frame number (rayTracingSceneBuild.hlsl), so a kept recording replays.
     bc[CLOD_RT_BC_KEEP_FRAMES] = m_bcKeepFrames;
     bc[CLOD_RT_BC_BLAS_CAPACITY] = m_limits.maxBlases;
     bc[CLOD_RT_BC_POOL_LOW] = Low(m_bcPool.address);
@@ -1828,7 +1870,6 @@ void CLodRayTracingSystem::RecordBlasCache(org::RecordingContext& recording, con
 
 void CLodRayTracingSystem::RecordSceneTlas(org::RecordingContext& recording, const ScenePipelines& pipelines, const SceneInputs& inputs) {
     auto& commands = recording.Commands();
-    const uint32_t sliceIndex = m_frame % m_framesInFlight;
     const MiscConstants scene = SceneConstants(inputs);
 
     // ---- TLAS: the rows are written, then the build's input, and stay that way (DeclareSceneTlas).
@@ -1840,7 +1881,6 @@ void CLodRayTracingSystem::RecordSceneTlas(org::RecordingContext& recording, con
         tlasScene[CLOD_RT_SCENE_TLAS_ROWS_LOW] = Low(rowsAddress);
         tlasScene[CLOD_RT_SCENE_TLAS_ROWS_HIGH] = High(rowsAddress);
         tlasScene[CLOD_RT_SCENE_TLAS_INSTANCE_COUNT] = m_tlasInstanceCount;
-        m_stats.tlasBuildRows = m_stats.instances;
         const uint32_t slotGroups = (m_limits.maxInstances + 63u) / 64u;
         const auto run = [&](const br::PipelineState& pipeline, uint32_t groups) {
             recording.BindComputePipeline(pipeline);
@@ -1877,14 +1917,11 @@ void CLodRayTracingSystem::RecordSceneTlas(org::RecordingContext& recording, con
         ptlas.partitionedTopLevel.srcInfos = { m_tlasOps.Handle(), 0u };
         ptlas.partitionedTopLevel.srcInfosCount = { m_tlasOps.Handle(), CLOD_RT_TLAS_OPS_COUNT_OFFSET };
         commands.ExecuteIndirectRtasOperations(&ptlas, 1u);
-        m_ptlasBuilt = true;
     }
     else {
         recording.BindComputePipeline(pipelines.writeInstances);
         PushMiscConstants(recording, scene);
-        const uint32_t buildRows = m_tlasBuildCount;
-        m_sliceTlasBuildCount[sliceIndex] = buildRows;
-        m_stats.tlasBuildRows = buildRows;
+        const uint32_t buildRows = m_tlasBuildCount; // In the kept stages' revision.
         commands.Dispatch((buildRows + 63u) / 64u, 1u, 1u);
         Transition(commands, { m_tlasInstances->GetAPIResource().GetHandle() }, kUav, kBuildInput);
         SceneStamp(commands, 6u);
@@ -1903,8 +1940,33 @@ void CLodRayTracingSystem::RecordSceneTlas(org::RecordingContext& recording, con
         build.scratch = { m_tlasScratch->GetAPIResource().GetHandle(), 0u, m_tlasScratch->GetSize() };
         commands.BuildAccelerationStructures(&build, 1u);
     }
-    m_tlasBuilt = true;
     SceneStamp(commands, 7u);
+    if (inputs.kept) return; // RecordSceneEnd, at execution.
+    RecordSceneEnd(recording, pipelines);
+}
+
+void CLodRayTracingSystem::RecordSceneOmm(org::RecordingContext& recording) {
+    if (!SceneOmmPending()) return;
+    ++m_sceneOmmSerial;
+    RecordOmmUploads(recording.Commands());
+}
+
+void CLodRayTracingSystem::AppendSceneRevision(std::vector<uint64_t>& out) const {
+    out.push_back(uint64_t(m_tablesCleared) | (uint64_t(m_bcInitialized) << 1u) | (uint64_t(m_ptlasBuilt) << 2u)
+        | (uint64_t(m_stats.droppedInstances != 0u) << 3u) | (uint64_t(OpacityMicromapsActive()) << 4u)
+        | (uint64_t(m_ommEnabled && m_ommPressure) << 5u) | (uint64_t(m_tlasBuilt) << 6u));
+    out.push_back((uint64_t(m_tlasBuildCount) << 32u) | m_tlasInstanceCount);
+}
+
+void CLodRayTracingSystem::RecordSceneEnd(org::RecordingContext& recording, const ScenePipelines& pipelines) {
+    auto& commands = recording.Commands();
+    const uint32_t sliceIndex = m_frame % m_framesInFlight;
+    if (!m_partitionedTlas) m_sliceTlasBuildCount[sliceIndex] = m_tlasBuildCount;
+    m_stats.tlasBuildRows = m_partitionedTlas ? m_stats.instances : m_tlasBuildCount;
+    m_tlasBuilt = true;
+    if (m_partitionedTlas) m_ptlasBuilt = true;
+    if (m_bcEnabled) m_bcInitialized = true;
+    m_tablesCleared = true;
 
     // ---- What the CPU reads back next time this slice comes around. Left as copy sources, but the control words, which
     // the end of frame writes.
@@ -1923,7 +1985,7 @@ void CLodRayTracingSystem::RecordSceneTlas(org::RecordingContext& recording, con
         commands.CopyBufferRegion(m_readback.Handle(), readbackBase + m_readbackPtlasOffset, m_tlasOps.Handle(), 0u, CLOD_RT_PTLAS_CTRL_BYTES);
     }
     if (m_timers) {
-        commands.ResolveQueryData(m_timers->GetHandle(), sliceIndex * kSceneTimers, kSceneTimers, m_readback.Handle(), readbackBase + kReadbackTimers);
+        commands.ResolveQueryData(m_timers->GetHandle(), 0u, kSceneTimers, m_readback.Handle(), readbackBase + kReadbackTimers);
     }
     m_sliceHasReadback[sliceIndex] = 1u;
     m_sliceHasStats[sliceIndex] = 0u;

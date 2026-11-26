@@ -23,6 +23,8 @@
 #include "BasicRenderer/Extensions/PipelineDescs.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
+#include <cstring>
 #include "../shaders/PerPassRootConstants/clodRayTracingSetupRootConstants.h"
 
 // The state object, its shader table and the dispatch arguments. The two passes share them: PathTraceArgsPass writes the
@@ -126,6 +128,10 @@ inline std::shared_ptr<PathTraceState> MakePathTraceState() {
 
 struct PathTraceArgsFrameData {
     std::optional<rhi::RayTracingDispatchRaysArguments> arguments;
+    bool operator==(const PathTraceArgsFrameData& other) const {
+        if (arguments.has_value() != other.arguments.has_value()) return false;
+        return !arguments || std::memcmp(&*arguments, &*other.arguments, sizeof(rhi::RayTracingDispatchRaysArguments)) == 0;
+    }
 };
 
 struct PathTraceArgsBindings {
@@ -145,18 +151,34 @@ public:
         bindings.pipeline = br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/pathTraceDispatchArgs.hlsl",
             L"PathTraceDispatchArgsCS", "PathTrace.DispatchArgs.PSO"));
         bindings.output = builder.UnorderedAccess(m_state->arguments).View();
+        m_pipeline = bindings.pipeline;
         return bindings;
     }
 
-    PathTraceArgsFrameData Prepare(const PathTraceArgsBindings&, const org::PassPrepareContext& preparation) const {
+    // Kept recordings (M6 step 5): the frame's table is chosen here, each run (CurrentTable keeps it for the frame, so the
+    // trace pass's Update gets the same one), and the arguments the revision names are made from it.
+    // Staged recordings (M6 step 6): the values the revision names, taken without side effects (RenderGraphPass::TakeFrameValues).
+    void TakeFrameValues(const org::UpdateExecutionContext& execution) override {
         PathTraceArgsFrameData frame{};
-        const auto* context = preparation.preparationData ? preparation.preparationData->Get<UpdateContext>() : nullptr;
-        if (!context) return frame;
-        if (const auto table = m_state->CurrentTable(context->frameNumber)) {
-            frame.arguments = table->DispatchArguments(context->renderResolution.x, context->renderResolution.y);
+        const auto* context = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr;
+        m_table.reset();
+        if (context) {
+            m_table = m_state->CurrentTable(context->frameNumber);
+            if (m_table) frame.arguments = m_table->DispatchArguments(context->renderResolution.x, context->renderResolution.y);
         }
-        return frame;
+        m_frame = frame;
     }
+    void Revision(std::vector<uint64_t>& out) const {
+        br::render::AppendPipelineRevision(out, m_pipeline);
+        out.push_back(reinterpret_cast<uintptr_t>(m_table.get()));
+        if (!m_frame.arguments) return;
+        constexpr size_t kWords = sizeof(rhi::RayTracingDispatchRaysArguments) / sizeof(uint64_t);
+        std::array<uint64_t, kWords> words{};
+        std::memcpy(words.data(), &*m_frame.arguments, sizeof(words));
+        out.insert(out.end(), words.begin(), words.end());
+    }
+
+    PathTraceArgsFrameData Prepare(const PathTraceArgsBindings&, const org::PassPrepareContext&) const { return m_frame; }
 
     static void Record(const PathTraceArgsBindings& bindings, const PathTraceArgsFrameData& frame, org::PassRecordContext& recording) {
         if (!frame.arguments) return;
@@ -176,15 +198,32 @@ public:
 
 private:
     std::shared_ptr<PathTraceState> m_state;
+    br::PipelineState m_pipeline;
+    std::shared_ptr<const br::render::CLodRtShaderTable> m_table;
+    PathTraceArgsFrameData m_frame{};
 };
 
-struct PathTraceFrameData {
+// One run's values. Update makes them each run (the frame number, the accumulation restart, the table).
+struct PathTraceRun {
     std::shared_ptr<br::render::CLodRayTracingSystem> system;
     std::shared_ptr<const br::lens::LensPublishedState> lens; // The physical lens this frame traces through; inactive is a pinhole.
     std::shared_ptr<const br::render::CLodRtShaderTable> table;
     uint32_t frame = 0u;
     uint32_t maxBounces = 2u;
     uint32_t flags = 0u;
+};
+
+// What Record bakes (M6 step 9c: the pass is recorded ahead and kept). The frame number is the per-frame buffer's
+// (pathTrace.lib.hlsl), and the accumulation restart is in the flags only when the pass accumulates, so a still camera replays
+// an accumulating trace and any camera replays the default one. The revision names the rest.
+struct PathTraceFrameData {
+    std::shared_ptr<br::render::CLodRayTracingSystem> system;
+    std::shared_ptr<const br::render::CLodRtShaderTable> table;
+    uint32_t maxBounces = 0u;
+    uint32_t flags = 0u;
+    bool hasTlas = false;
+    uint32_t tlasSrv = 0u, clasInfoSrv = 0u, instanceRowsSrv = 0u, watchUav = 0u, watchBright = 0u;
+    bool operator==(const PathTraceFrameData&) const = default;
 };
 
 struct PathTraceBindings {
@@ -258,7 +297,10 @@ public:
         bindings.baseColor = builder.UnorderedAccess(Builtin::Surface::BaseColorOpacity).View();
         bindings.normalRoughness = builder.UnorderedAccess(Builtin::Surface::NormalRoughness).View();
         bindings.motion = builder.UnorderedAccess(Builtin::Surface::Motion).View();
-        bindings.projectedDepth = builder.UnorderedAccess(Builtin::PrimaryCamera::ProjectedDepthTexture).View();        if (m_accumulation) {
+        bindings.projectedDepth = builder.UnorderedAccess(Builtin::PrimaryCamera::ProjectedDepthTexture).View();
+        // With the pixel watch, Record copies it to a readback slice per frame: recorded at execution then.
+        if (m_system && m_system->HasPixelWatch()) builder.RecordAtExecution();
+        if (m_accumulation) {
             bindings.accumulation = builder.UnorderedAccess(m_accumulation).View();
             bindings.hasAccumulation = true;
         }
@@ -270,10 +312,47 @@ public:
         return bindings;
     }
 
-    PathTraceFrameData Prepare(const PathTraceBindings&, const org::PassPrepareContext& preparation) const {
+    void Update(const org::UpdateExecutionContext& execution) override {
+        const auto* context = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr;
+        *m_run = context ? MakeRun(*context) : PathTraceRun{};
+    }
+    // The frame Update made (Revision is asked after Update).
+    void Revision(std::vector<uint64_t>& out) const {
+        const PathTraceFrameData frame = MakeFrame();
+        out.push_back(reinterpret_cast<uintptr_t>(frame.system.get()));
+        out.push_back(reinterpret_cast<uintptr_t>(frame.table.get()));
+        out.push_back((uint64_t(frame.maxBounces) << 32u) | frame.flags);
+        out.push_back((uint64_t(frame.hasTlas) << 32u) | frame.instanceRowsSrv);
+        out.push_back((uint64_t(frame.tlasSrv) << 32u) | frame.clasInfoSrv);
+        out.push_back((uint64_t(frame.watchUav) << 32u) | frame.watchBright);
+    }
+
+    PathTraceFrameData Prepare(const PathTraceBindings&, const org::PassPrepareContext&) const { return MakeFrame(); }
+
+    PathTraceFrameData MakeFrame() const {
         PathTraceFrameData frame{};
-        const auto* context = preparation.preparationData ? preparation.preparationData->Get<UpdateContext>() : nullptr;
-        if (!context) return frame;
+        const PathTraceRun& run = *m_run;
+        frame.system = run.system;
+        frame.table = run.table;
+        frame.maxBounces = run.maxBounces;
+        frame.flags = run.flags;
+        // The restart only matters to the accumulation (pathTrace.lib.hlsl).
+        if (!m_accumulation) frame.flags &= ~CLOD_RT_PT_FLAG_RESTART_ACCUMULATION;
+        if (frame.system) {
+            std::scoped_lock lock(frame.system->FrameOperationMutex());
+            frame.hasTlas = frame.system->HasTlas();
+            frame.tlasSrv = frame.system->GetTlasSrv();
+            frame.clasInfoSrv = frame.system->GetClasInfoSrv();
+            frame.instanceRowsSrv = frame.system->GetInstanceRowsSrv();
+            frame.watchUav = frame.system->GetPixelWatchUav();
+            frame.watchBright = std::bit_cast<uint32_t>(frame.system->GetPixelWatchBright());
+        }
+        return frame;
+    }
+
+    PathTraceRun MakeRun(const UpdateContext& update) const {
+        const auto* context = &update;
+        PathTraceRun frame{};
         frame.system = context->clodRayTracingSystem;
         frame.table = m_state->CurrentTable(context->frameNumber);
         frame.frame = static_cast<uint32_t>(context->frameNumber);
@@ -331,15 +410,13 @@ public:
     }
 
     static void Record(const PathTraceBindings& bindings, const PathTraceFrameData& frame, org::PassRecordContext& recording) {
-        if (!frame.system || !frame.table) return;
-        std::scoped_lock lock(frame.system->FrameOperationMutex());
-        if (!frame.system->HasTlas()) return;
+        if (!frame.system || !frame.table || !frame.hasTlas) return;
+        std::scoped_lock lock(frame.system->FrameOperationMutex()); // The pixel watch's begin and end.
         br::render::MiscConstants constants{};
-        constants[CLOD_RT_SEC_TLAS_SRV] = frame.system->GetTlasSrv();
-        constants[CLOD_RT_SEC_CLAS_INFO_SRV] = frame.system->GetClasInfoSrv();
-        constants[CLOD_RT_SEC_INSTANCE_ROWS_SRV] = frame.system->GetInstanceRowsSrv();
+        constants[CLOD_RT_SEC_TLAS_SRV] = frame.tlasSrv;
+        constants[CLOD_RT_SEC_CLAS_INFO_SRV] = frame.clasInfoSrv;
+        constants[CLOD_RT_SEC_INSTANCE_ROWS_SRV] = frame.instanceRowsSrv;
         constants[CLOD_RT_SEC_OUTPUT_UAV] = recording.Index(bindings.output);
-        constants[CLOD_RT_SEC_FRAME] = frame.frame;
         constants[CLOD_RT_PT_MAX_BOUNCES] = frame.maxBounces;
         uint32_t flags = frame.flags;
         // A reference image can't lean on these, and a denoiser handles what they'd clean up.
@@ -352,8 +429,8 @@ public:
         constants[CLOD_RT_PT_MOTION_UAV] = recording.Index(bindings.motion);
         constants[CLOD_RT_PT_PROJECTED_DEPTH_UAV] = recording.Index(bindings.projectedDepth);        constants[CLOD_RT_PT_SPECULAR_ALBEDO_UAV] = bindings.hasRayReconstructionGuides ? recording.Index(bindings.specularAlbedo) : CLOD_RT_PT_NO_DESCRIPTOR;
         constants[CLOD_RT_PT_SPECULAR_HIT_UAV] = bindings.hasRayReconstructionGuides ? recording.Index(bindings.specularHitDistance) : CLOD_RT_PT_NO_DESCRIPTOR;
-        constants[CLOD_RT_PT_WATCH_UAV] = frame.system->GetPixelWatchUav();
-        constants[CLOD_RT_PT_WATCH_BRIGHT] = std::bit_cast<uint32_t>(frame.system->GetPixelWatchBright());
+        constants[CLOD_RT_PT_WATCH_UAV] = frame.watchUav;
+        constants[CLOD_RT_PT_WATCH_BRIGHT] = frame.watchBright;
         frame.system->RecordPixelWatchBegin(recording, bindings.clearPipeline);
         recording.Retain(frame.table);
         static constexpr std::string_view kRvtPrefixes[] = { "Builtin::Terrain::Rvt" };
@@ -373,4 +450,5 @@ private:
     bool m_rayReconstruction = false;
     std::shared_ptr<org::PixelBuffer> m_accumulation;
     std::shared_ptr<br::lens::LensManager> m_lens;
+    std::shared_ptr<PathTraceRun> m_run = std::make_shared<PathTraceRun>();
 };

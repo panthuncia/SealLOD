@@ -10,6 +10,7 @@
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 #include "Runtime/Settings/SettingsManager.h"
 #include "VirtualGeometry/RayTracing/CLodRayTracingPasses.h"
 #include "Lighting/Stochastic/StochasticLightingResources.h"
@@ -20,8 +21,9 @@ namespace br::render {
 struct StochasticGuideFrame {
     uint32_t width = 0u;
     uint32_t height = 0u;
-    uint32_t frame = 0u;
+    uint32_t frame = 0u; // Always 0: stochasticGuide.hlsl does not read it, and a kept recording bakes no frame number.
     uint32_t flags = 0u;
+    bool operator==(const StochasticGuideFrame&) const = default;
 };
 
 struct StochasticGuideBindings {
@@ -62,18 +64,33 @@ public:
         // stochasticLightingMixtureConfidence is on; bound either way, so that setting is per frame too.
         bindings.signature = builder.UnorderedAccess(m_resources->signature).View();
         builder.PreferQueue(org::QueueKind::Compute);
+        m_pipeline = bindings.pipeline;
         return bindings;
     }
 
-    StochasticGuideFrame Prepare(const StochasticGuideBindings&, const org::PassPrepareContext& preparation) const {
+    // Kept recordings (M6 step 5): the frame's values are taken here, each run, and the revision names them all. Prepare only
+    // returns them, so it has no side effect for the revision audit to repeat.
+    // Staged recordings (M6 step 6): the values the revision names, taken without side effects (RenderGraphPass::TakeFrameValues).
+    void TakeFrameValues(const org::UpdateExecutionContext& execution) override {
         StochasticGuideFrame frame{};
-        const auto* update = preparation.preparationData->Get<UpdateContext>();
-        if (!update) {
-            return frame;
+        const auto* update = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr;
+        if (update) {
+            frame.width = update->renderResolution.x;
+            frame.height = update->renderResolution.y;
+            frame.flags = ReadFlags();
         }
-        frame.width = update->renderResolution.x;
-        frame.height = update->renderResolution.y;
-        frame.frame = static_cast<uint32_t>(update->frameNumber);
+        m_frame = frame;
+    }
+    void Revision(std::vector<uint64_t>& out) const {
+        br::render::AppendPipelineRevision(out, m_pipeline);
+        out.push_back((uint64_t(m_frame.width) << 32u) | m_frame.height);
+        out.push_back(m_frame.flags);
+    }
+
+    StochasticGuideFrame Prepare(const StochasticGuideBindings&, const org::PassPrepareContext&) const { return m_frame; }
+
+    static uint32_t ReadFlags() {
+        StochasticGuideFrame frame{};
         if (SettingsManager::GetInstance().getSettingGetter<bool>("stochasticLightingNormalize")()) {
             frame.flags |= STOCHASTIC_FLAG_NORMALIZE | STOCHASTIC_FLAG_DENOISED;
             if (SettingsManager::GetInstance().getSettingGetter<bool>("stochasticLightingMixtureConfidence")()) {
@@ -86,7 +103,7 @@ public:
                 frame.flags |= STOCHASTIC_FLAG_PAIRED;
             }
         }
-        return frame;
+        return frame.flags;
     }
 
     static void Record(const StochasticGuideBindings& bindings, const StochasticGuideFrame& frame, org::PassRecordContext& recording) {
@@ -106,6 +123,8 @@ public:
 
 private:
     std::shared_ptr<StochasticLightingResources> m_resources;
+    br::PipelineState m_pipeline;
+    StochasticGuideFrame m_frame{};
 };
 
 } // namespace br::render

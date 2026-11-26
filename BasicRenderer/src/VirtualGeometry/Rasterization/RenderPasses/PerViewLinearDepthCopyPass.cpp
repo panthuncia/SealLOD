@@ -35,6 +35,7 @@ PerViewLinearDepthCopyBindings PerViewLinearDepthCopyPass::Declare(org::PassBuil
         bindings.hasCanonicalDeviceDepth = true;
     }
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
+    m_pipeline = bindings.pipeline;
     return bindings;
 }
 
@@ -79,6 +80,15 @@ PerViewLinearDepthCopyFrame PerViewLinearDepthCopyPass::Prepare(const PerViewLin
         frame.views[i] = {found->width, found->height, found->projection};
     }
     return frame;
+}
+
+void PerViewLinearDepthCopyPass::Revision(std::vector<uint64_t>& out) const {
+    br::render::AppendPipelineRevision(out, m_pipeline);
+    for (const auto& view : m_views) {
+        out.push_back(reinterpret_cast<uintptr_t>(view.visibility.get()));
+        out.push_back(view.width | (uint64_t{view.height} << 32));
+        out.push_back(view.projection[0] | (uint64_t{view.projection[1]} << 32));
+    }
 }
 
 bool PerViewLinearDepthCopyPass::DeclaredResourcesChanged() const {

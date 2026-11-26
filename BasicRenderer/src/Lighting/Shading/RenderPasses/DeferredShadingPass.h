@@ -11,6 +11,7 @@
 #include "BasicRenderer/Scene/Scene.h"
 #include "Runtime/Settings/SettingsManager.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 #include "Runtime/Settings/RendererSettingsHelpers.h"
 #include "PostProcessing/AmbientOcclusion/AmbientOcclusionSettings.h"
 
@@ -24,7 +25,16 @@ struct DeferredShadingFrame {
 	uint32_t groupsX = 0, groupsY = 0;
 	bool rayTracedSunShadow = false;
 	bool virtualShadowReceiverTelemetry = false;
+	// Only the receiver telemetry reads it; 0 without it, so a kept recording bakes no frame number (M6 step 5). With the
+	// telemetry on, the pass's revision moves every frame and Shading records every frame.
 	uint32_t frameNumber = 0;
+	bool operator==(const DeferredShadingFrame& other) const {
+		return pipeline.PeekPayload() == other.pipeline.PeekPayload() && pipeline.GetGeneration() == other.pipeline.GetGeneration()
+			&& shadowingMode == other.shadowingMode && punctualLights == other.punctualLights && screenSpaceAO == other.screenSpaceAO
+			&& skybox == other.skybox && groupsX == other.groupsX && groupsY == other.groupsY
+			&& rayTracedSunShadow == other.rayTracedSunShadow
+			&& virtualShadowReceiverTelemetry == other.virtualShadowReceiverTelemetry && frameNumber == other.frameNumber;
+	}
 };
 
 class DeferredShadingPass : public org::TypedRenderGraphPass<DeferredShadingPass, DeferredShadingFrame> {
@@ -114,10 +124,33 @@ public:
 
 	void Initialize() {}
 
+	// Kept recordings (M6 step 5): the frame's choice is made here, each run, and the revision names all of it. Prepare only
+	// returns it.
+	// (M6 step 6: taken without side effects, so a staged recording takes it too: RenderGraphPass::TakeFrameValues.)
+	void TakeFrameValues(const org::UpdateExecutionContext& execution) override {
+		const auto* update = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr;
+		const auto* render = execution.hostData ? execution.hostData->Get<RenderContext>() : nullptr;
+		if (!update && !render) return;
+		m_frame = MakeFrame(update, render);
+	}
+	void Revision(std::vector<uint64_t>& out) const {
+		br::render::AppendPipelineRevision(out, m_frame.pipeline);
+		out.push_back(static_cast<uint64_t>(m_frame.shadowingMode) | (uint64_t(m_frame.screenSpaceAO) << 8u)
+			| (uint64_t(m_frame.punctualLights) << 16u) | (uint64_t(m_frame.skybox) << 17u)
+			| (uint64_t(m_frame.rayTracedSunShadow) << 18u) | (uint64_t(m_frame.virtualShadowReceiverTelemetry) << 19u));
+		out.push_back((uint64_t(m_frame.groupsX) << 32u) | m_frame.groupsY);
+		out.push_back(m_frame.frameNumber);
+	}
+
 	DeferredShadingFrame Prepare(const org::PassPrepareContext& preparation) {
 		const auto* update = preparation.preparationData->Get<UpdateContext>();
 		const auto* render = preparation.preparationData->Get<RenderContext>();
 		if (!update && !render) throw std::logic_error("DeferredShadingPass requires frame context");
+		return m_frame;
+	}
+
+private:
+	DeferredShadingFrame MakeFrame(const UpdateContext* update, const RenderContext* render) const {
 		const auto globalFlags = update ? update->globalPSOFlags : render->globalPSOFlags;
 		const auto resolution = update ? update->renderResolution : render->renderResolution;
 		const auto& lighting = update ? update->lighting : render->lighting;
@@ -139,9 +172,12 @@ public:
 		frame.groupsX = (resolution.x + 7u) / 8u; frame.groupsY = (resolution.y + 7u) / 8u;
 		frame.rayTracedSunShadow = m_rayTracedSunShadow;
 		frame.virtualShadowReceiverTelemetry = m_virtualShadowReceiverTelemetry;
-		frame.frameNumber = static_cast<uint32_t>(update ? update->frameNumber : render->frameNumber);
+		frame.frameNumber = m_virtualShadowReceiverTelemetry
+			? static_cast<uint32_t>(update ? update->frameNumber : render->frameNumber) : 0u;
 		return frame;
 	}
+
+public:
 	static void Record(const DeferredShadingFrame& frame, org::PassRecordContext& context) {
 		br::render::MiscConstants constants{};
 		constants[MiscShadowingMode] = static_cast<uint32_t>(frame.shadowingMode);
@@ -183,4 +219,5 @@ private:
 	bool m_clusteredLightingEnabled = true;
 	bool m_skyboxEnabled = false;
 	bool m_stochasticLighting = false;
+	DeferredShadingFrame m_frame{};
 };

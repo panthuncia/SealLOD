@@ -38,7 +38,17 @@ public:
 		CaptureLatestLease();
 	}
 
+    // Late binding: the graph sees only the fallback, a stand-in that never changes, so a new publication of the resource
+    // is not a binding change of the passes that declare it and does not make their kept recordings stale. Shaders must
+    // then read the published backing through an index the host writes into per-frame data (ResolveFrom gives the
+    // frame's backing). The selection's GPU waits are still reported, so the passes still wait for its uploads. The
+    // published backings are not tracked by the graph: they must be read-only for the passes. Call it before the graph
+    // clones the resolver.
+    void MakeLateBound() noexcept { m_lateBound = true; }
+    [[nodiscard]] bool LateBound() const noexcept { return m_lateBound; }
+
     std::vector<std::shared_ptr<org::Resource>> Resolve() const override {
+        if (m_lateBound) return ResolveFallback();
         if (m_selection && !m_selection->publishedEnabled.load(std::memory_order_acquire)) {
             return ResolveFallback();
         }
@@ -138,10 +148,15 @@ public:
         if (publishedEnabled) {
             const auto state = lease ? lease->state : nullptr;
             if (state && state->resourceCatalog) {
-                entryVersion = m_exact
-                    ? state->resourceCatalog->ContentVersion(m_key)
-                    : state->resourceCatalog->ContentVersion(m_query);
-                resources = ResolveFrom(state);
+                if (m_lateBound) {
+                    // The stand-in, whatever the publication holds. Its content version stays 0.
+                    resources = ResolveFallback();
+                } else {
+                    entryVersion = m_exact
+                        ? state->resourceCatalog->ContentVersion(m_key)
+                        : state->resourceCatalog->ContentVersion(m_query);
+                    resources = ResolveFrom(state);
+                }
                 const auto appendSelection = [&](const br::render::PublishedResourceSelection& selection) {
                     for (const auto& submissions : selection.gpuSubmissions) {
                         if (!submissions) continue;
@@ -162,6 +177,8 @@ public:
         } else {
             resources = ResolveFallback();
         }
+        // Late bound: the stand-in also before the first publication, so the set never changes.
+        if (m_lateBound) resources = ResolveFallback();
         result.contentRevision = entryVersion;
 
         auto mix = [](std::uint64_t& hash, std::uint64_t value) {
@@ -300,6 +317,7 @@ private:
     br::render::PublishedResourceQuery m_query;
     bool m_exact = false;
     bool m_configured = false;
+    bool m_lateBound = false;
     std::shared_ptr<FallbackState> m_fallback;
     std::shared_ptr<SelectionState> m_selection;
     std::shared_ptr<LeaseBinding> m_leaseBinding;

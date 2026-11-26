@@ -4,6 +4,7 @@
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 #include <BasicRenderer/Pipeline/PipelineDesc.h>
 
 namespace org { class Buffer; }
@@ -17,6 +18,7 @@ struct RasterBucketCreateCommandBindings {
 struct RasterBucketCreateCommandFrame {
     uint32_t numBuckets = 0;
     uint32_t groups = 0;
+    bool operator==(const RasterBucketCreateCommandFrame&) const = default;
 };
 
 class RasterBucketCreateCommandPass : public org::TypedRenderGraphPass<RasterBucketCreateCommandPass,
@@ -36,8 +38,17 @@ public:
         const org::PassPrepareContext& preparation) const;
     static void Record(const RasterBucketCreateCommandBindings& bindings, const RasterBucketCreateCommandFrame& frame,
         org::PassRecordContext& context);
+    // Kept recordings (M6 step 8): the frame's bucket count and software raster mode, taken from the host data
+    // (RenderGraphPass::TakeFrameValues) and returned by Prepare; Revision names them and the pipeline.
+    void TakeFrameValues(const org::UpdateExecutionContext& execution) override;
+    void Revision(std::vector<uint64_t>& out) const {
+        m_pipelines.Append(out);
+        out.push_back(m_taken.numBuckets | (uint64_t{m_taken.groups} << 32));
+    }
 
 private:
+    RasterBucketCreateCommandFrame m_taken{};
+    br::render::DeclaredPipelines m_pipelines;
     std::shared_ptr<org::Buffer> m_visibleClustersCounterBuffer;
     std::shared_ptr<org::Buffer> m_histogramIndirectCommand;
     std::shared_ptr<org::Buffer> m_occlusionReplayStateBuffer;

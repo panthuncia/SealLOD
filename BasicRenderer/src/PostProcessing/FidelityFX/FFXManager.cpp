@@ -1,5 +1,7 @@
 #include "PostProcessing/FidelityFX/FFXManager.h"
 
+#include <chrono>
+
 #include "Runtime/Settings/SettingsManager.h"
 #include "Runtime/Device/DeviceManager.h"
 #include "OpenRenderGraph/OpenRenderGraph.h"
@@ -9,53 +11,91 @@
 #include "BasicRenderer/Scene/Scene.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
 
-bool FFXManager::InitFFX() {
-    Shutdown();
+FFXManager::SssrContext::~SssrContext() {
+    if (m_native) FFXManager::GetInstance().Retire(std::move(m_native));
+}
 
-    m_getRenderRes = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("renderResolution");
-    m_getOutputRes = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("outputResolution");
-    auto outputRes = m_getOutputRes();
-    auto renderRes = m_getRenderRes();
+std::shared_ptr<FFXManager::SssrContext> FFXManager::AcquireSssrContext(DirectX::XMUINT2 renderSize) {
+    std::scoped_lock lock(m_contextsMutex);
+    std::erase_if(m_contexts, [](const std::weak_ptr<SssrContext>& context) { return context.expired(); });
+    for (const auto& weak : m_contexts) {
+        if (auto context = weak.lock(); context && context->m_renderSize.x == renderSize.x && context->m_renderSize.y == renderSize.y) {
+            return context;
+        }
+    }
 
+    const auto begin = std::chrono::steady_clock::now();
+    auto native = std::make_unique<SssrContext::Native>();
     const rhi::Device device = DeviceManager::GetInstance().GetDevice();
     const rhi::Backend backend = DeviceManager::GetInstance().GetBackend();
-    if (!fidelityfx_backend::host::CreateBackendInterface(m_backendInterface, m_pScratchMemory, backend, device, 1)) {
-        spdlog::error("FFXManager::InitFFX failed to create backend interface for backend {}", static_cast<uint32_t>(backend));
-        return false;
+    if (!fidelityfx_backend::host::CreateBackendInterface(native->backendInterface, native->scratchMemory, backend, device, 1)) {
+        spdlog::error("FFXManager: failed to create the SSSR backend interface for backend {}", static_cast<uint32_t>(backend));
+        if (native->scratchMemory) free(native->scratchMemory);
+        return nullptr;
     }
 
 	FfxSssrContextDescription sssrDesc{};
-	sssrDesc.backendInterface = m_backendInterface;
+	sssrDesc.backendInterface = native->backendInterface;
     sssrDesc.flags = FFX_SSSR_ENABLE_DEPTH_INVERTED;
-    sssrDesc.normalsHistoryBufferFormat = FFX_SURFACE_FORMAT_R32G32B32A32_TYPELESS;
-	sssrDesc.renderSize = { renderRes.x, renderRes.y };
+    // SSSR copies the normals into its history (CopyTextureRegion), so the history has the canonical surface's normal format
+    // (Builtin::Surface::NormalRoughness, R16G16B16A16_Float). R32G32B32A32 made that copy invalid: Shading's command list
+    // failed at Close with E_INVALIDARG whenever SSSR ran.
+    sssrDesc.normalsHistoryBufferFormat = FFX_SURFACE_FORMAT_R16G16B16A16_FLOAT;
+	sssrDesc.renderSize = { renderSize.x, renderSize.y };
 
-    const FfxErrorCode createResult = ffxSssrContextCreate(&m_sssrContext, &sssrDesc);
+    const FfxErrorCode createResult = ffxSssrContextCreate(&native->context, &sssrDesc);
     if (createResult != FFX_OK) {
-        spdlog::error("FFXManager::InitFFX failed to create SSSR context for backend {} error {}", static_cast<uint32_t>(backend), static_cast<int>(createResult));
-        Shutdown();
-        return false;
+        spdlog::error("FFXManager: failed to create the SSSR context for backend {} error {}", static_cast<uint32_t>(backend), static_cast<int>(createResult));
+        if (native->scratchMemory) free(native->scratchMemory);
+        return nullptr;
     }
+    auto context = std::shared_ptr<SssrContext>(new SssrContext());
+    context->m_renderSize = renderSize;
+    context->m_native = std::move(native);
+    m_contexts.push_back(context);
+    spdlog::info("FFXManager: SSSR context for {}x{} made in {:.2f} ms", renderSize.x, renderSize.y,
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count());
+    return context;
+}
 
-    m_sssrContextCreated = true;
+void FFXManager::Retire(std::unique_ptr<SssrContext::Native> native) {
+    // After Shutdown the device goes: what retires later is left to the process's exit.
+    if (m_shutDown.load(std::memory_order_acquire)) return;
+    std::scoped_lock lock(m_contextsMutex);
+    m_retired.push_back(std::move(native));
+}
 
-    return true;
+void FFXManager::Destroy(SssrContext::Native& native) {
+    ffxSssrContextDestroy(&native.context);
+    native.context = {};
+    native.backendInterface = {};
+    if (native.scratchMemory) {
+        free(native.scratchMemory);
+        native.scratchMemory = nullptr;
+    }
+}
+
+void FFXManager::CollectRetired() {
+    std::vector<std::unique_ptr<SssrContext::Native>> retired;
+    {
+        std::scoped_lock lock(m_contextsMutex);
+        retired.swap(m_retired);
+    }
+    if (retired.empty()) return;
+    // The last graph that used each has retired, so the GPU is done with its resources.
+    std::scoped_lock evaluateLock(m_evaluateMutex);
+    for (auto& native : retired) Destroy(*native);
+    spdlog::info("FFXManager: destroyed {} retired SSSR context(s)", retired.size());
 }
 
 void FFXManager::Shutdown() {
-    if (m_sssrContextCreated) {
-		ffxSssrContextDestroy(&m_sssrContext);
-        m_sssrContext = {};
-        m_sssrContextCreated = false;
-    }
-    m_backendInterface = {};
-    if (m_pScratchMemory) {
-        free(m_pScratchMemory);
-        m_pScratchMemory = nullptr;
-    }
+    // The graphs are gone (the device is idle).
+    CollectRetired();
+    m_shutDown.store(true, std::memory_order_release);
 }
 
-void FFXManager::EvaluateSSSR(rhi::CommandList& commandList,
+void FFXManager::EvaluateSSSR(SssrContext& sssr,
+    rhi::CommandList& commandList,
     const Components::Camera* currentCamera,
     org::PixelBuffer* pHDRTarget,
     org::PixelBuffer* pDepthTexture,
@@ -68,7 +108,7 @@ void FFXManager::EvaluateSSSR(rhi::CommandList& commandList,
     std::scoped_lock evaluateLock(m_evaluateMutex);
 
     const rhi::Backend backend = DeviceManager::GetInstance().GetBackend();
-    if (!m_sssrContextCreated) {
+    if (!sssr.m_native) {
         return;
     }
 
@@ -97,7 +137,8 @@ void FFXManager::EvaluateSSSR(rhi::CommandList& commandList,
         spdlog::warn("FFXManager::EvaluateSSSR skipped dispatch because no command list adapter is available for backend {}", static_cast<uint32_t>(backend));
         return;
     }
-    auto renderSize = m_getRenderRes();
+    // The context's render size: the graph that holds it was built for it.
+    const auto renderSize = sssr.RenderSize();
     sssrDesc.renderSize = { renderSize.x, renderSize.y };
 	sssrDesc.motionVectorScale = { -0.5f, 0.5f };
     sssrDesc.normalUnPackMul = 1.0f;
@@ -115,6 +156,6 @@ void FFXManager::EvaluateSSSR(rhi::CommandList& commandList,
     sssrDesc.samplesPerQuad = 1;
 	sssrDesc.temporalVarianceGuidedTracingEnabled = true;
 
-	ffxSssrContextDispatch(&m_sssrContext, &sssrDesc);
-    
+	ffxSssrContextDispatch(&sssr.m_native->context, &sssrDesc);
+
 }

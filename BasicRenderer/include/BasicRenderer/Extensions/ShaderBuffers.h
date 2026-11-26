@@ -108,7 +108,8 @@ struct PerFrameCB {
     float shadowVirtualReceiverTraceUncertaintyScale = 1.5f;
     float shadowVirtualReceiverTraceDepthSafetyScale = 4.0f;
     float shadowVirtualSmrtMaxLateralTexels = 32.0f;
-    unsigned int shadowVirtualReceiverTracePad1 = 0u;
+    // The frame's elapsed seconds (M6 step 4: kept recordings bake no per-frame root constants; was a padding word).
+    float deltaTime = 0.0f;
     unsigned int terrainStochasticSamplingEnabled = 1u;
     unsigned int terrainStochasticDiffuseEnabled = 1u;
     unsigned int terrainStochasticNormalEnabled = 1u;
@@ -145,6 +146,10 @@ struct PerFrameCB {
     // The light whose virtual shadow map the VSM debug views show: the vsmDebugLight setting, else the sun.
     unsigned int vsmDebugLightIndex = 0xFFFFFFFFu;
     unsigned int numDirectionalLights = 0u; // Directional lights in the light buffer.
+    // The descriptor index of the frame's texture image table (TextureStreamingManager::PublishedImageTableDescriptorIndex).
+    // Shaders read the table through it, not through a declared binding, so its publications re-record nothing (M6 step 5;
+    // was trailing padding).
+    unsigned int textureImageTableDescriptorIndex = 0xFFFFFFFFu;
 };
 
 static_assert(offsetof(PerFrameCB, shadowVirtualReceiverTraceEnabled) == 100, "PerFrameCB layout mismatch.");
@@ -167,6 +172,7 @@ static_assert(offsetof(PerFrameCB, terrainReyesDisplacementScale) == 208, "PerFr
 static_assert(offsetof(PerFrameCB, objectReyesDisplacementScale) == 212, "PerFrameCB layout mismatch.");
 static_assert(offsetof(PerFrameCB, objectParallaxHeightScale) == 216, "PerFrameCB layout mismatch.");
 static_assert(offsetof(PerFrameCB, sunLightIndex) == 220, "PerFrameCB layout mismatch.");
+static_assert(offsetof(PerFrameCB, textureImageTableDescriptorIndex) == 236, "PerFrameCB layout mismatch.");
 static_assert(sizeof(PerFrameCB) == 240, "PerFrameCB layout mismatch.");
 
 // Object flags (shared with HLSL OBJECT_FLAG_* defines)

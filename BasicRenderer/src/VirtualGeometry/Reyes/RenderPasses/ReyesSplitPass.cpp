@@ -132,6 +132,9 @@ ReyesSplitBindings ReyesSplitPass::Declare(org::PassBuilder& declaration)
     bindings.maxPassCount = m_maxSplitPassCount;
     bindings.phase = m_phaseIndex;
     bindings.useAabbOcclusion = SettingsManager::GetInstance().getSettingGetter<bool>(CLodReyesUseAabbOcclusionSettingName)();
+    m_pipelines.Clear();
+    m_pipelines.Add(bindings.clearCountersPipeline);
+    m_pipelines.Add(bindings.pipeline);
     return bindings;
 }
 

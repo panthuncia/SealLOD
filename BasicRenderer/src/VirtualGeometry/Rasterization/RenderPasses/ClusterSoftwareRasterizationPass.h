@@ -11,6 +11,7 @@
 #include "Render/PreparedTablePublisher.h"
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 #include "Resources/PixelBuffer.h"
 #include <BasicRenderer/Pipeline/PipelineDesc.h>
 
@@ -33,6 +34,9 @@ struct ClusterSoftwareRasterBindings {
 struct ClusterSoftwareRasterStep {
     br::PipelineState pipeline;
     uint64_t argumentsOffset = 0;
+    bool operator==(const ClusterSoftwareRasterStep& other) const {
+        return pipeline.PeekPayload() == other.pipeline.PeekPayload() && argumentsOffset == other.argumentsOffset;
+    }
 };
 struct ClusterSoftwareRasterFrame {
     std::vector<ClusterSoftwareRasterStep> steps;
@@ -43,6 +47,7 @@ struct ClusterSoftwareRasterFrame {
     uint32_t pageTableResolution = 0, virtualResolution = 0;
     bool enabled = false;
     bool hasSkinCache = false;
+    bool operator==(const ClusterSoftwareRasterFrame&) const = default;
 };
 
 class ClusterSoftwareRasterizationPass
@@ -73,6 +78,12 @@ public:
         const org::PassPrepareContext& preparation) const;
     static void Record(const ClusterSoftwareRasterBindings& bindings, const ClusterSoftwareRasterFrame& frame,
         org::PassRecordContext& context);
+    // Kept recordings (M6 step 8): the frame's buckets and their pipelines and the gating settings, taken from the host
+    // data before Update (RenderGraphPass::TakeFrameValues) and read by Prepare. Revision names them with the view rows
+    // Update took and the skin cache generation (which Update advances each run while the cache runs, so a pass with the
+    // cache records every run).
+    void TakeFrameValues(const org::UpdateExecutionContext& execution) override;
+    void Revision(std::vector<uint64_t>& out) const;
 
 private:
     std::shared_ptr<org::Buffer> m_compactedVisibleClustersBuffer;
@@ -102,6 +113,15 @@ private:
     bool m_runWhenComputeSWRasterEnabledOnly = false;
     uint32_t m_dynamicWindSkinCacheHashEntryCount = 0u;
     uint32_t m_dynamicWindSkinCachePositionCapacity = 0u;
-    // Ordered preparation owns the counter; inactive work consumes no generation.
-    mutable uint32_t m_dynamicWindSkinCacheGeneration = 1u;
+    // Advanced by Update each run the cache runs; inactive work consumes no generation.
+    uint32_t m_dynamicWindSkinCacheGeneration = 1u;
+    struct Taken {
+        std::vector<ClusterSoftwareRasterStep> steps;
+        uint32_t bucketCount = 0;
+        // The buckets the arguments buffer holds (see TakeFrameValues).
+        uint32_t argumentCapacity = 0;
+        uint32_t pageTableResolution = 0, virtualResolution = 0;
+        bool active = false;
+    };
+    Taken m_taken;
 };

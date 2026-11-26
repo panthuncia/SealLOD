@@ -87,8 +87,9 @@ void CSMain(
         // fetch last frame's adapted luminance
         float lumLastFrame = s_target[0];
 
-        // lerp toward new value
-        float adaptedLum = lumLastFrame + (weightedAvgLum - lumLastFrame) * TIME_COEFFICIENT;
+        // lerp toward new value, at the frame's elapsed time (the per-frame buffer's, so a kept recording of the pass adapts too)
+        ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
+        float adaptedLum = lumLastFrame + (weightedAvgLum - lumLastFrame) * perFrame.deltaTime;
 
         // store updated adapted luminance
         s_target[0] = adaptedLum;

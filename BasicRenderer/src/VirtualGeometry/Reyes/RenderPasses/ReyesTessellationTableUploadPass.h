@@ -20,6 +20,8 @@ public:
     void Declare(org::PassBuilder& builder);
     void Update(const org::UpdateExecutionContext& executionContext) override;
     static void Record(org::PassRecordContext&) {}
+    // Kept recordings (M6 step 8): it records nothing; Update uploads the tables once per backing.
+    void Revision(std::vector<uint64_t>&) const {}
 
 private:
     std::shared_ptr<org::Buffer> m_tessTableConfigsBuffer;

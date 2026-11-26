@@ -16,11 +16,16 @@ class VirtualShadowInvalidationQueue;
 struct ProducerPersistentState {
     struct DirectionalVsmResources {
         std::shared_ptr<org::Resource> contract;
+        // What the shadow variant writes each frame and receivers in other epochs' graphs read (Shading's deferred shading,
+        // the alpha variant): the clipmap and camera tables, the page view info, the page metadata (made again with the
+        // physical pages) and the statistics. The renderer's, so every epoch's graph binds the same objects, also a graph
+        // rebuilt without Visibility's (M5 step 8). Not aliased.
         std::shared_ptr<org::Resource> clipmapInfo;
         std::shared_ptr<org::Resource> mainCamera;
         std::shared_ptr<org::Resource> shadowCameras;
         std::shared_ptr<org::Resource> pageViewInfo;
         std::shared_ptr<org::Resource> pageMetadata;
+        std::shared_ptr<org::Resource> stats;
         // The directional virtual shadow map's atlas: the page table and the dynamic and static physical pages. Every
         // graph's shadow CLod variant binds these, so a rebuild neither dematerializes them nor makes a second atlas.
         // They are not aliased. Made again (new objects) only when the backing resolution or the page count changes; the
@@ -37,7 +42,7 @@ struct ProducerPersistentState {
 
         void InvalidateGpuState() {
             contract.reset(); clipmapInfo.reset(); mainCamera.reset(); shadowCameras.reset();
-            pageViewInfo.reset(); pageMetadata.reset(); pageTable.reset(); physicalPages.reset();
+            pageViewInfo.reset(); pageMetadata.reset(); stats.reset(); pageTable.reset(); physicalPages.reset();
             staticPhysicalPages.reset(); upgradeUploadSlots.clear();
             backingResolution = 0; physicalPageCount = 0;
             ++generation;

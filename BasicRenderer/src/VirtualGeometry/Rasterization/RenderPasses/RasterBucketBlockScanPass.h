@@ -3,6 +3,7 @@
 #include <memory>
 
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 #include <BasicRenderer/Pipeline/PipelineDesc.h>
 
@@ -15,6 +16,7 @@ struct RasterBucketBlockScanBindings {
 struct RasterBucketBlockScanFrame {
     uint32_t numBuckets = 0;
     uint32_t groups = 0;
+    bool operator==(const RasterBucketBlockScanFrame&) const = default;
 };
 
 class RasterBucketBlockScanPass : public org::TypedRenderGraphPass<RasterBucketBlockScanPass,
@@ -32,12 +34,19 @@ public:
     static void Record(const RasterBucketBlockScanBindings& bindings, const RasterBucketBlockScanFrame& frame,
         org::PassRecordContext& context);
     void Update(const org::UpdateExecutionContext& executionContext) override;
+    // Kept recordings (M6 step 8): the frame's bucket count and software raster mode, taken from the host data before
+    // Update (RenderGraphPass::TakeFrameValues) and returned by Prepare; Revision names them and the pipelines.
+    void TakeFrameValues(const org::UpdateExecutionContext& execution) override;
+    void Revision(std::vector<uint64_t>& out) const;
 
 private:
+    RasterBucketBlockScanFrame m_taken{};
+    br::render::DeclaredPipelines m_pipelines;
     uint32_t m_blockSize = 1024;
     std::shared_ptr<org::Buffer> m_histogramBuffer;
     std::shared_ptr<org::Buffer> m_offsetsBuffer;
     std::shared_ptr<org::Buffer> m_blockSumsBuffer;
     bool m_runWhenComputeSWRasterEnabledOnly = false;
     bool m_enabled = false;
+    void SizeBuffers(uint32_t numBuckets);
 };

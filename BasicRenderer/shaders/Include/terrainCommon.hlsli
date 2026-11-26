@@ -23,7 +23,9 @@ static const float TERRAIN_PARALLAX_MIN_LAYER_WEIGHT = 0.02f;
 static const float TERRAIN_PARALLAX_MIN_FADE = 0.01f;
 static const float TERRAIN_DEFAULT_LAYER_UV_SCALE = 24.0f / 4096.0f;
 #if defined(TERRAIN_REGION_GROUPSHARED_WEIGHTS)
-static const uint TERRAIN_SHARED_WEIGHT_SAMPLE_CAPACITY = 8192u;
+// The samples and the six words below must fit in 32768 bytes of group shared memory together; 8192 samples alone
+// filled it, so the shader never compiled. A region with more samples reads the rest from the weight blocks.
+static const uint TERRAIN_SHARED_WEIGHT_SAMPLE_CAPACITY = 8184u;
 groupshared float g_terrainSharedWeightSamples[TERRAIN_SHARED_WEIGHT_SAMPLE_CAPACITY];
 groupshared uint g_terrainSharedWeightSampleCount;
 groupshared uint g_terrainSharedWeightBaseSample;

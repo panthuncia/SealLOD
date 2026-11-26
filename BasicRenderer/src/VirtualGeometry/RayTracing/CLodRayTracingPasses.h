@@ -1,14 +1,17 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 #include "BuiltinResources.h"
 #include "Render/PassBuilders.h"
 #include "BasicRenderer/Extensions/PipelineDescs.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
 #include "BasicRenderer/Extensions/RenderContext.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 #include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "Resources/Buffers/Buffer.h"
@@ -31,7 +34,36 @@ enum class CLodRayTracingSceneStage : uint8_t { Clas, Blas, Tlas };
 
 struct CLodRayTracingSceneFrame {
     std::shared_ptr<br::render::CLodRayTracingSystem> system;
+    std::vector<uint64_t> state; // Kept: what the system's recording depends on (CLodRayTracingSystem::AppendSceneRevision).
+    bool operator==(const CLodRayTracingSceneFrame&) const = default;
 };
+
+// How the scene build is recorded (BASICRENDERER_RT_SCENE_AT_EXECUTION):
+// - Kept (the default since M6 step 9c): the three stages are recorded ahead with a revision and replayed. Their per-frame
+//   values come from the per-frame buffer on the GPU (arena slice, BLAS cache frame); the micromap uploads and the readback
+//   into this frame's slice are two small passes recorded at execution (CLodRayTracingSceneOmmPass, CLodRayTracingSceneEndPass).
+// - AtExecution (=1, step 9b's default): the three stages are recorded at execution, in a batch of their own.
+// - Ahead (=0): recorded ahead without a revision, so their batch is recorded every run and Visibility is not staged.
+enum class CLodRayTracingSceneRecording : uint8_t { Ahead, AtExecution, Kept };
+inline CLodRayTracingSceneRecording CLodRayTracingSceneRecordingMode() {
+    static const CLodRayTracingSceneRecording mode = [] {
+        const char* value = std::getenv("BASICRENDERER_RT_SCENE_AT_EXECUTION");
+        if (value && value[0] == '0') return CLodRayTracingSceneRecording::Ahead;
+        if (value && value[0] == '1') return CLodRayTracingSceneRecording::AtExecution;
+        return CLodRayTracingSceneRecording::Kept;
+    }();
+    return mode;
+}
+
+// Every pipeline of the scene build's set, for a kept stage's revision.
+inline void AppendScenePipelinesRevision(std::vector<uint64_t>& out, const br::render::CLodRayTracingSystem::ScenePipelines& p) {
+    for (const br::PipelineState* pipeline : { &p.clear, &p.resetDraws, &p.count, &p.allocate, &p.addCoarseConsumers, &p.allocateFinish,
+             &p.place, &p.writeInstances, &p.cacheInit, &p.cacheCollect, &p.cacheOmmRetire, &p.cacheEvict, &p.cacheAdmit, &p.cacheAssign,
+             &p.cacheArgs, &p.cachePack, &p.cacheEnd, &p.ptlasInit, &p.ptlasClaimCells, &p.ptlasAssignCells, &p.ptlasRetire, &p.ptlasFinish,
+             &p.bcInit, &p.bcBegin, &p.bcIndex, &p.bcLookup, &p.bcFinish, &p.bcScatter }) {
+        br::render::AppendPipelineRevision(out, *pipeline);
+    }
+}
 
 struct CLodRayTracingSceneBindings {
     br::render::CLodRayTracingSystem::ScenePipelines pipelines;
@@ -40,10 +72,21 @@ struct CLodRayTracingSceneBindings {
     CLodRayTracingSceneStage stage = CLodRayTracingSceneStage::Clas;
 };
 
-class CLodRayTracingScenePass
-    : public org::TypedRenderGraphPass<CLodRayTracingScenePass, CLodRayTracingSceneFrame, CLodRayTracingSceneBindings> {
+// AtExecution (M6 step 9; the default since step 9b, BASICRENDERER_RT_SCENE_AT_EXECUTION=0 turns it off): the pass is recorded at
+// execution, in a batch of its own, with an empty revision. Its Record reads and advances the system's per-frame state (the arena
+// slice, the TLAS instance count its readbacks returned, OMM uploads, the readback copies), so a kept recording records it again
+// at each submission and reuses the rest of Visibility, and Visibility can be staged. Off, the pass has no revision, so its batch
+// is recorded every run and Visibility is not staged.
+// Step 9's hang in PathTracePass with this on: ORG dropped RecordAtExecution set on the builder of an extension's pass, so the
+// scene build stayed in the RT culling's batch, which was kept and submitted again without recording it. A frozen frame of
+// the scene build then rebuilt one transient arena while earlier frames still traced it.
+template<CLodRayTracingSceneRecording Mode>
+class CLodRayTracingScenePassT
+    : public org::TypedRenderGraphPass<CLodRayTracingScenePassT<Mode>, CLodRayTracingSceneFrame, CLodRayTracingSceneBindings> {
+    static constexpr bool AtExecution = Mode == CLodRayTracingSceneRecording::AtExecution;
+    static constexpr bool Kept = Mode == CLodRayTracingSceneRecording::Kept;
 public:
-    CLodRayTracingScenePass(std::shared_ptr<br::render::CLodRayTracingSystem> system, CLodRayTracingSceneStage stage, std::shared_ptr<org::Buffer> clusters,
+    CLodRayTracingScenePassT(std::shared_ptr<br::render::CLodRayTracingSystem> system, CLodRayTracingSceneStage stage, std::shared_ptr<org::Buffer> clusters,
         std::shared_ptr<org::Buffer> sideBand, std::shared_ptr<org::Buffer> counter, std::shared_ptr<org::ResourceGroup> slabs, uint32_t clusterCapacity)
         : m_system(std::move(system)), m_stage(stage), m_clusters(std::move(clusters)), m_sideBand(std::move(sideBand)), m_counter(std::move(counter)),
           m_slabs(std::move(slabs)), m_clusterCapacity(clusterCapacity) {
@@ -102,6 +145,7 @@ public:
         }
         // What each stage reads and writes, and nothing else: the graph orders the stages, and makes the barriers between
         // them, from it. The system's own buffers it declares itself.
+        builder.ConstantBuffer(Builtin::PerFrameBuffer); // The texture image table's index (materialTextureBinding.hlsli).
         switch (m_stage) {
         case Stage::Clas:
             m_system->DeclareSceneClas(builder);
@@ -117,7 +161,7 @@ public:
             builder.ShaderResource(Builtin::CLod::Groups, Builtin::CLod::Segments, Builtin::CLod::GroupPageMap); // Place finds each cluster's CLAS.
             break;
         case Stage::Tlas:
-            bindings.tlasInstances = m_system->DeclareSceneTlas(builder);
+            bindings.tlasInstances = m_system->DeclareSceneTlas(builder, Kept);
             builder.ShaderResource(Builtin::PerMeshBuffer, Builtin::PerMeshInstanceBuffer, Builtin::InstanceDrawRecordBuffer, Builtin::PerInstanceTransformBuffer,
                 Builtin::PerMaterialDataBuffer, Builtin::CLod::MaterialPalettes, Builtin::CLod::AssemblyMaterialBases, Builtin::CLod::MeshMetadata,
                 Builtin::CLod::Groups, Builtin::CLod::AssemblyTransforms,
@@ -125,17 +169,28 @@ public:
             builder.UnorderedAccess(Builtin::Material::TextureStreamingFeedbackBuffer); // and keeps them resident at their test mip.
             break;
         }
+        if constexpr (AtExecution) builder.RecordAtExecution();
+        m_pipelines = bindings.pipelines;
         return bindings;
     }
 
-    CLodRayTracingSceneFrame Prepare(const CLodRayTracingSceneBindings&, const org::PassPrepareContext&) const {
-        return { m_system };
+    // AtExecution: recorded at each run, so only fixed objects name its recording. Kept: the pipelines and the system's state
+    // its recording depends on (the first-frame flags, the TLAS row count, micromap state).
+    void Revision(std::vector<uint64_t>& out) const requires (AtExecution || Kept) {
+        if constexpr (Kept) {
+            AppendScenePipelinesRevision(out, m_pipelines);
+            const auto frame = MakeFrame();
+            out.insert(out.end(), frame.state.begin(), frame.state.end());
+        }
     }
+
+    CLodRayTracingSceneFrame Prepare(const CLodRayTracingSceneBindings&, const org::PassPrepareContext&) const { return MakeFrame(); }
 
     static void Record(const CLodRayTracingSceneBindings& bindings, const CLodRayTracingSceneFrame& frame, org::PassRecordContext& recording) {
         std::scoped_lock lock(frame.system->FrameOperationMutex());
         br::render::CLodRayTracingSystem::SceneInputs inputs{};
         inputs.clusterCapacity = bindings.clusterCapacity;
+        inputs.kept = Kept;
         if (bindings.stage == CLodRayTracingSceneStage::Tlas) {
             inputs.tlasInstancesUav = recording.Index(bindings.tlasInstances);
             frame.system->RecordSceneTlas(recording, bindings.pipelines, inputs);
@@ -149,11 +204,91 @@ public:
     }
 
 private:
+    CLodRayTracingSceneFrame MakeFrame() const {
+        CLodRayTracingSceneFrame frame{ m_system };
+        if constexpr (Kept) {
+            std::scoped_lock lock(m_system->FrameOperationMutex());
+            m_system->AppendSceneRevision(frame.state);
+        }
+        return frame;
+    }
+
     std::shared_ptr<br::render::CLodRayTracingSystem> m_system;
     CLodRayTracingSceneStage m_stage = CLodRayTracingSceneStage::Clas;
     std::shared_ptr<org::Buffer> m_clusters, m_sideBand, m_counter;
     std::shared_ptr<org::ResourceGroup> m_slabs;
     uint32_t m_clusterCapacity = 0u;
+    br::render::CLodRayTracingSystem::ScenePipelines m_pipelines;
+};
+
+struct CLodRayTracingSceneSystemFrame {
+    std::shared_ptr<br::render::CLodRayTracingSystem> system;
+    bool operator==(const CLodRayTracingSceneSystemFrame&) const = default;
+};
+
+// A kept scene build's micromap uploads, before the CLAS pass, recorded at execution. A run without uploads skips it, and its late
+// batch keeps its list while it skips (RecordKeyAtExecution: the uploads' serial).
+class CLodRayTracingSceneOmmPass
+    : public org::TypedRenderGraphPass<CLodRayTracingSceneOmmPass, CLodRayTracingSceneSystemFrame> {
+public:
+    static constexpr bool kRecordKeyedBySkip = true;
+    explicit CLodRayTracingSceneOmmPass(std::shared_ptr<br::render::CLodRayTracingSystem> system) : m_system(std::move(system)) {}
+
+    void Declare(org::PassBuilder& builder) {
+        m_system->DeclareSceneOmm(builder);
+        builder.RecordAtExecution();
+    }
+    void Revision(std::vector<uint64_t>&) const {}
+    CLodRayTracingSceneSystemFrame Prepare(const org::PassPrepareContext&) const { return { m_system }; }
+    static bool SkipsAtExecution(const CLodRayTracingSceneSystemFrame& frame, const org::PassRecordContext&) {
+        std::scoped_lock lock(frame.system->FrameOperationMutex());
+        return !frame.system->SceneOmmPending();
+    }
+    static uint64_t RecordKeyAtExecution(const CLodRayTracingSceneSystemFrame& frame, const org::PassRecordContext&) {
+        std::scoped_lock lock(frame.system->FrameOperationMutex());
+        return frame.system->SceneOmmPending() ? frame.system->SceneOmmSerial() + 1u : 0u;
+    }
+    static void Record(const CLodRayTracingSceneSystemFrame& frame, org::PassRecordContext& recording) {
+        std::scoped_lock lock(frame.system->FrameOperationMutex());
+        frame.system->RecordSceneOmm(recording);
+    }
+
+private:
+    std::shared_ptr<br::render::CLodRayTracingSystem> m_system;
+};
+
+struct CLodRayTracingSceneEndBindings {
+    br::render::CLodRayTracingSystem::ScenePipelines pipelines; // clear and cacheEnd only.
+};
+
+// A kept scene build's end of frame, after the TLAS pass, recorded at execution: the readback into this frame's slice (its
+// offset and the slice bookkeeping are per frame), the coarse cut's clear and the cache's end of frame.
+class CLodRayTracingSceneEndPass
+    : public org::TypedRenderGraphPass<CLodRayTracingSceneEndPass, CLodRayTracingSceneSystemFrame, CLodRayTracingSceneEndBindings> {
+public:
+    explicit CLodRayTracingSceneEndPass(std::shared_ptr<br::render::CLodRayTracingSystem> system) : m_system(std::move(system)) {}
+
+    CLodRayTracingSceneEndBindings Declare(org::PassBuilder& builder) {
+        CLodRayTracingSceneEndBindings bindings{};
+        const auto make = [&](const wchar_t* entry, const char* name) {
+            return br::render::DeclarePipeline(br::render::ComputePipeline(L"Shaders/ClusterLOD/rayTracingSceneBuild.hlsl", entry, name));
+        };
+        bindings.pipelines.clear = make(L"CLodRtClearCS", "CLod.RayTracing.Clear.PSO");
+        bindings.pipelines.cacheEnd = make(L"CLodRtCacheEndCS", "CLod.RayTracing.CacheEnd.PSO");
+        builder.ConstantBuffer(Builtin::PerFrameBuffer);
+        m_system->DeclareSceneEnd(builder);
+        builder.RecordAtExecution();
+        return bindings;
+    }
+    void Revision(std::vector<uint64_t>&) const {}
+    CLodRayTracingSceneSystemFrame Prepare(const CLodRayTracingSceneEndBindings&, const org::PassPrepareContext&) const { return { m_system }; }
+    static void Record(const CLodRayTracingSceneEndBindings& bindings, const CLodRayTracingSceneSystemFrame& frame, org::PassRecordContext& recording) {
+        std::scoped_lock lock(frame.system->FrameOperationMutex());
+        frame.system->RecordSceneEnd(recording, bindings.pipelines);
+    }
+
+private:
+    std::shared_ptr<br::render::CLodRayTracingSystem> m_system;
 };
 
 // Primary visibility by ray, or (compare) counting how raster's result agrees with the rays.

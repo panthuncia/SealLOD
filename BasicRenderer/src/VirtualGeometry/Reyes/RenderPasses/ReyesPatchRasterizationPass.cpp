@@ -136,6 +136,8 @@ ReyesPatchRasterBindings ReyesPatchRasterizationPass::Declare(org::PassBuilder& 
     bindings.phase = m_phaseIndex;
     bindings.patchIndexBase = m_patchVisibilityIndexBase;
     bindings.enabled = !SettingsManager::GetInstance().getSettingGetter<bool>(CLodDisableNonVoxelVisibilitySettingName)();
+    m_pipelines.Clear();
+    m_pipelines.Add(bindings.pipeline);
     return bindings;
 }
 
@@ -171,6 +173,16 @@ std::vector<uint32_t> ReyesPatchRasterizationPass::ViewInputCameras() const {
     for (const auto& input : m_viewInputs) cameras.push_back(input.cameraIndex);
     std::sort(cameras.begin(), cameras.end());
     return cameras;
+}
+
+void ReyesPatchRasterizationPass::Revision(std::vector<uint64_t>& out) const
+{
+    m_pipelines.Append(out);
+    br::render::AppendRevisionRows(out, m_viewRasterInfos.data(), m_viewRasterInfos.size());
+    for (const auto& input : m_viewInputs) {
+        out.push_back(input.cameraIndex);
+        out.push_back(reinterpret_cast<uintptr_t>(input.visibility.get()));
+    }
 }
 
 bool ReyesPatchRasterizationPass::DeclaredResourcesChanged() const

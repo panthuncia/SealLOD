@@ -27,6 +27,8 @@ struct FrameBuildJob {
     std::string reason;
     uint64_t serial = 0;
     bool onRenderThread = false;
+    // It answers a resolution request (Renderer::ApplyResolutionRequest): at most one such build is in flight.
+    bool resolution = false;
     // The host's count of each built host epoch's rebuild requests when the build started (GraphHost::RebuildRequests), as
     // FrameBuild::hostEpochs. A larger count at the attach is a request the build does not answer.
     std::vector<uint64_t> hostRequestsAtStart;
@@ -35,6 +37,12 @@ struct FrameBuildJob {
     // The publication the build's resolvers are captured against: the render thread's latest manifest when it started, as
     // that frame's preparation would have used (GraphHost::BuildEpochGraph's capture context).
     std::shared_ptr<const org::ResolverCaptureContext> captureContext;
+    // Staged recordings (M6 step 6, GraphHost::RecordStagedCopies): the frame the kept epochs' copies are recorded for on the
+    // build's thread, standing in for the first frames after the attach: the build's update values (FrameBuildInputs::lastUpdate)
+    // with the last frame's render values. Null when there are none (the first build, a view that changed): nothing is recorded
+    // ahead, and the copies' first runs record.
+    std::shared_ptr<const org::IHostExecutionData> stagedFrame;
+    float stagedDeltaTime = 0.0f;
 
     // Written by the thread that builds: one graph per host epoch of the build (FrameBuild::hostEpochs), in that order.
     struct EpochGraphBuild {
@@ -45,6 +53,12 @@ struct FrameBuildJob {
     // Graphs whose transients the build placed (GraphHost::PlaceEpochGraphs), and how long that took on the build's thread.
     size_t graphsPlacedAtBuild = 0;
     double placementMs = 0.0;
+    // Each kept epoch's staged recordings (GraphHost::RecordStagedCopies), after the build's pipelines are in.
+    struct StagedRecordings {
+        uint32_t hostEpoch = 0;
+        org::GraphHost::StagedRecordings result;
+    };
+    std::vector<StagedRecordings> staged;
     // Built on the render thread by the host's own build point (GraphHost::BuildIfRequested), so already in place: no attach.
     bool installed = false;
     std::vector<std::string> pipelineFailures;

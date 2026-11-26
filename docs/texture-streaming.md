@@ -83,6 +83,14 @@ A material texture with a streaming ID samples the image its row in the texture 
 (`ResolveMaterialTextureDescriptor`, `materialTextureBinding.hlsli`). Per pixel that is a dependent chain: the material
 record, then the row, then the sample.
 
+Shaders find the table itself through the per-frame buffer (`PerFrameCB::textureImageTableDescriptorIndex`, written by the
+frame from `TextureStreamingManager::PublishedImageTableDescriptorIndex`), not through the pass's binding. The table's
+resolver is late bound (`PublishedStateResourceResolver::MakeLateBound`): passes still declare
+`Builtin::Material::TextureStreamingMetadataBuffer`, but it resolves to a fixed stand-in, so a new table is not a binding
+change and kept recordings stay current. The declaration still carries the table's upload waits. A pass whose shader reads
+the table must declare `Builtin::PerFrameBuffer`. `BASICRENDERER_TEXTURE_TABLE_LATE_BOUND=0` binds the table as before (for
+A/B; shaders still read the per-frame index).
+
 Material evaluation doesn't chain. `ResolveMaterialTextureDescriptorsPass` runs every frame just before it (~6 us on
 Zorah) and writes `Builtin::Material::ResolvedTextureDescriptors`: per material evaluation table row, the descriptor each of
 eight texture slots resolves to. Evaluation reads it by material index (`ResolveMaterialEvalTextureDescriptor`). The table

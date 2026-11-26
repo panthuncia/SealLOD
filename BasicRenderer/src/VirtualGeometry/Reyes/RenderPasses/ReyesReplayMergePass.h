@@ -7,6 +7,7 @@
 #include <BasicRenderer/Pipeline/PipelineDesc.h>
 #include "RenderPasses/Base/TypedRenderGraphPass.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 
 namespace org { class Buffer; }
 
@@ -46,8 +47,11 @@ public:
     ReyesReplayMergeBindings Declare(org::PassBuilder& builder);
     void Update(const org::UpdateExecutionContext& executionContext) override;
     static void Record(const ReyesReplayMergeBindings& bindings, org::PassRecordContext& recording);
+    // Kept recordings (M6 step 8): Record bakes only its bindings and its pipelines' builds.
+    void Revision(std::vector<uint64_t>& out) const { m_pipelines.Append(out); }
 
 private:
+    br::render::DeclaredPipelines m_pipelines;
     ReyesReplayMergeKind m_kind = ReyesReplayMergeKind::Split;
     std::shared_ptr<org::Buffer> m_sourceQueueBuffer;
     std::shared_ptr<org::Buffer> m_sourceQueueCounterBuffer;

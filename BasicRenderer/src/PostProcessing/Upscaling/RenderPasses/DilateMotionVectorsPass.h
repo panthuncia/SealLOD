@@ -5,6 +5,7 @@
 #include <BasicRenderer/Extensions/PipelineDescs.h>
 #include "BasicRenderer/Extensions/RenderContext.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 
 struct DilateMotionVectorsBindings {
     br::PipelineState pipeline;
@@ -12,6 +13,7 @@ struct DilateMotionVectorsBindings {
 };
 struct DilateMotionVectorsFrame {
     uint32_t width = 0, height = 0;
+    bool operator==(const DilateMotionVectorsFrame&) const = default;
 };
 
 class DilateMotionVectorsPass : public org::TypedRenderGraphPass<DilateMotionVectorsPass,
@@ -19,13 +21,17 @@ class DilateMotionVectorsPass : public org::TypedRenderGraphPass<DilateMotionVec
 public:
     DilateMotionVectorsBindings Declare(org::PassBuilder& builder) {
         builder.PreferQueue(org::QueueKind::Compute).AutomaticQueueAssignment();
+        m_pipeline = br::render::DeclarePipeline(br::render::ComputePipeline(
+            L"shaders/PostProcessing/dilateMotionVectors.hlsl", L"DilateMotionVectorsCS", "DilateMotionVectorsCS"));
         return {
-            br::render::DeclarePipeline(br::render::ComputePipeline(
-                L"shaders/PostProcessing/dilateMotionVectors.hlsl", L"DilateMotionVectorsCS", "DilateMotionVectorsCS")),
+            m_pipeline,
             builder.ShaderResource(Builtin::Surface::Motion),
             builder.ShaderResource(Builtin::PrimaryCamera::ProjectedDepthTexture),
             builder.UnorderedAccess(Builtin::Surface::DilatedMotion) };
     }
+
+    // Kept recordings (M6 step 4): the dispatch follows the destination's size, which only a new resource changes (a binding).
+    void Revision(std::vector<uint64_t>& out) const { br::render::AppendPipelineRevision(out, m_pipeline); }
 
 
 
@@ -46,4 +52,7 @@ public:
     }
 
     void ShutdownPass() {}
+
+private:
+    br::PipelineState m_pipeline;
 };

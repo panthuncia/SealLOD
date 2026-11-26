@@ -8,6 +8,7 @@
 #include "Runtime/Settings/SettingsManager.h"
 #include "../shaders/PerPassRootConstants/lightCullingRootConstants.h"
 #include "BasicRenderer/Extensions/RecordHelpers.h"
+#include "BasicRenderer/Extensions/PassRevision.h"
 
 // The light grid's three passes (shaders/lightCulling.hlsl; docs/lighting.md "The light grid"). The graph builder
 // (BuildLightClusteringPipeline) registers their buffers at the capacities it hands them.
@@ -15,6 +16,7 @@
 struct LightGridCapacities {
 	uint32_t indices = 0;
 	uint32_t records = 0;
+	bool operator==(const LightGridCapacities&) const = default;
 };
 
 namespace light_grid_detail {
@@ -30,6 +32,23 @@ inline DirectX::XMUINT2 RenderResolution(const org::PassPrepareContext& preparat
 	if (!update && !render) throw std::logic_error("light grid passes require frame context");
 	return update ? update->renderResolution : render->renderResolution;
 }
+// Kept recordings (M6 step 5): what the three passes' dispatches follow, taken by each pass's Update and named by its
+// revision with its pipeline.
+struct FrameShape {
+	DirectX::XMUINT3 grid{};
+	DirectX::XMUINT2 resolution{};
+	void Take(const org::UpdateExecutionContext& execution) {
+		const auto* update = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr;
+		const auto* render = execution.hostData ? execution.hostData->Get<RenderContext>() : nullptr;
+		if (update) { grid = update->lightClusterSize; resolution = update->renderResolution; }
+		else if (render) { grid = render->lightClusterSize; resolution = render->renderResolution; }
+	}
+	void Append(std::vector<uint64_t>& out, const br::PipelineState& pipeline) const {
+		br::render::AppendPipelineRevision(out, pipeline);
+		out.push_back((uint64_t(grid.x) << 40u) ^ (uint64_t(grid.y) << 20u) ^ grid.z);
+		out.push_back((uint64_t(resolution.x) << 32u) | resolution.y);
+	}
+};
 }
 
 struct LightGridComputeBindings {
@@ -39,6 +58,7 @@ struct LightGridDispatchFrame {
 	uint32_t groupsX = 0, groupsY = 0, groupsZ = 0;
 	LightGridCapacities capacities;
 	bool forwardLists = true;
+	bool operator==(const LightGridDispatchFrame&) const = default;
 };
 
 // One culling record per active light, and every froxel's depth bounds reset.
@@ -51,8 +71,10 @@ public:
 		builder.UnorderedAccess(Builtin::Light::CullingRecords, Builtin::Light::GridDepthBounds, Builtin::Light::CullingStats);
 		builder.ConstantBuffer(Builtin::PerFrameBuffer);
 		builder.PreferQueue(org::QueueKind::Compute);
-		return {br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/lightCulling.hlsl", L"LightGridPrepareCS", "Light Grid Prepare CS"))};
+		m_pipeline = br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/lightCulling.hlsl", L"LightGridPrepareCS", "Light Grid Prepare CS"));
+		return {m_pipeline};
 	}
+	void Revision(std::vector<uint64_t>& out) const { m_shape.Append(out, m_pipeline); }
 
 	void Initialize() {
 		m_cullingStatsHandle = m_resourceRegistryView->RequestHandle(Builtin::Light::CullingStats);
@@ -74,6 +96,8 @@ public:
 		br::render::DispatchCompute(context, bindings.pipeline, constants, frame.groupsX);
 	}
 
+	// Staged recordings (M6 step 6): the values the revision names, taken without side effects (RenderGraphPass::TakeFrameValues).
+	void TakeFrameValues(const org::UpdateExecutionContext& execution) override { m_shape.Take(execution); }
 	void Update(const org::UpdateExecutionContext&) override {
 		// The overflow counters and the index allocator (LightManager::PollCullingStats reads them back after the graph).
 		const uint32_t stats[LIGHT_CULLING_STATS_WORDS] = {};
@@ -83,6 +107,8 @@ public:
 private:
 	LightGridCapacities m_capacities;
 	org::ResourceRegistry::RegistryHandle m_cullingStatsHandle;
+	br::PipelineState m_pipeline;
+	light_grid_detail::FrameShape m_shape;
 };
 
 // Each opaque pixel widens its froxel's depth bounds and its tile's farthest depth.
@@ -94,8 +120,11 @@ public:
 		builder.UnorderedAccess(Builtin::Light::GridDepthBounds);
 		builder.ConstantBuffer(Builtin::PerFrameBuffer);
 		builder.PreferQueue(org::QueueKind::Compute);
-		return {br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/lightCulling.hlsl", L"LightGridDepthBoundsCS", "Light Grid Depth Bounds CS"))};
+		m_pipeline = br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/lightCulling.hlsl", L"LightGridDepthBoundsCS", "Light Grid Depth Bounds CS"));
+		return {m_pipeline};
 	}
+	void TakeFrameValues(const org::UpdateExecutionContext& execution) override { m_shape.Take(execution); }
+	void Revision(std::vector<uint64_t>& out) const { m_shape.Append(out, m_pipeline); }
 
 	LightGridDispatchFrame Prepare(const LightGridComputeBindings&, const org::PassPrepareContext& preparation) const {
 		const auto resolution = light_grid_detail::RenderResolution(preparation);
@@ -108,6 +137,10 @@ public:
 	static void Record(const LightGridComputeBindings& bindings, const LightGridDispatchFrame& frame, org::PassRecordContext& context) {
 		br::render::DispatchCompute(context, bindings.pipeline, {}, frame.groupsX, frame.groupsY);
 	}
+
+private:
+	br::PipelineState m_pipeline;
+	light_grid_detail::FrameShape m_shape;
 };
 
 // Culls every active light into the froxels: counts, packs each froxel's run into GridIndices, fills it.
@@ -120,8 +153,11 @@ public:
 		builder.UnorderedAccess(Builtin::Light::GridCells, Builtin::Light::GridIndices, Builtin::Light::CullingStats);
 		builder.ConstantBuffer(Builtin::PerFrameBuffer);
 		builder.PreferQueue(org::QueueKind::Compute);
-		return {br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/lightCulling.hlsl", L"LightCullingCS", "Light Culling CS"))};
+		m_pipeline = br::render::DeclarePipeline(br::render::ComputePipeline(L"shaders/lightCulling.hlsl", L"LightCullingCS", "Light Culling CS"));
+		return {m_pipeline};
 	}
+	void TakeFrameValues(const org::UpdateExecutionContext& execution) override { m_shape.Take(execution); }
+	void Revision(std::vector<uint64_t>& out) const { m_shape.Append(out, m_pipeline); }
 
 	LightGridDispatchFrame Prepare(const LightGridComputeBindings&, const org::PassPrepareContext& preparation) const {
 		const auto grid = light_grid_detail::GridSize(preparation);
@@ -144,4 +180,6 @@ public:
 private:
 	LightGridCapacities m_capacities;
 	bool m_forwardLists = true;
+	br::PipelineState m_pipeline;
+	light_grid_detail::FrameShape m_shape;
 };

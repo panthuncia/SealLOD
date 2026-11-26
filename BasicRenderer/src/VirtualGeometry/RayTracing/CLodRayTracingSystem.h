@@ -234,8 +234,13 @@ public:
     // The scene build's passes, in this order.
     void DeclareSceneClas(org::RenderPassBuilder& builder) const;
     void DeclareSceneBlas(org::RenderPassBuilder& builder) const;
-    // Returns the TLAS rows' view: a placed buffer, whose descriptor is the recording's to give.
-    org::DeclaredViewToken DeclareSceneTlas(org::RenderPassBuilder& builder) const;
+    // Returns the TLAS rows' view: a placed buffer, whose descriptor is the recording's to give. kept: the scene build is kept
+    // (SceneInputs::kept), and the end pass (DeclareSceneEnd) does the readback the TLAS pass does otherwise.
+    org::DeclaredViewToken DeclareSceneTlas(org::RenderPassBuilder& builder, bool kept = false) const;
+    // A kept scene build's two passes recorded at execution (M6 step 9c): the micromap uploads before the CLAS pass, and after
+    // the TLAS pass the readback into this frame's slice, the coarse cut's clear and the cache's end of frame.
+    void DeclareSceneOmm(org::RenderPassBuilder& builder) const;
+    void DeclareSceneEnd(org::RenderPassBuilder& builder) const;
     // Raytraced visibility, which clears the hash (and the comparison, which it then reads back when readStats).
     void DeclareVisibility(org::RenderPassBuilder& builder, bool readStats) const;
     // The path trace pass's pixel watch, when it's on.
@@ -257,7 +262,22 @@ public:
     // an input leaves it 0.
     struct SceneInputs {
         uint32_t clustersSrv = 0, sideBandSrv = 0, counterSrv = 0, clusterCapacity = 0, tlasInstancesUav = 0;
+        // Kept (M6 step 9c): the stages record nothing that changes per frame and change no state, so a kept recording
+        // replays them. The frame's arena slice and BLAS cache frame come from the per-frame buffer (rayTracingSceneBuild.hlsl);
+        // the micromap uploads, the readback and the first-frame flags are RecordSceneOmm's and RecordSceneEnd's.
+        bool kept = false;
     };
+    // What a kept stage's recording depends on beyond its bindings: the first-frame flags, the TLAS row count, micromap state.
+    // Under FrameOperationMutex.
+    void AppendSceneRevision(std::vector<uint64_t>& out) const;
+    // A kept scene build's micromap uploads (RecordSceneOmm), when this frame has any. Under FrameOperationMutex.
+    bool SceneOmmPending() const noexcept { return m_ommEnabled && m_ommStaged && m_tablesCleared; }
+    // Counts the frames RecordSceneOmm recorded uploads: the late batch keeps its list while it stays the same.
+    uint64_t SceneOmmSerial() const noexcept { return m_sceneOmmSerial; }
+    void RecordSceneOmm(org::RecordingContext& recording);
+    // A kept scene build's end of frame: the readback into this frame's slice, the coarse cut's clear, the cache's end, and
+    // the flags the stages' first recordings read (set here, once the frame that used them is submitted).
+    void RecordSceneEnd(org::RecordingContext& recording, const ScenePipelines& pipelines);
     // Counts what the cluster list needs and keeps the CLAS cache: builds into the arena, then moves into the pool.
     void RecordSceneClas(org::RecordingContext& recording, const ScenePipelines& pipelines, const SceneInputs& inputs);
     // Groups clusters by instance and builds the BLASes into the BLAS data.
@@ -270,6 +290,9 @@ public:
     // GetPixelWatchUav is CLOD_RT_PT_NO_DESCRIPTOR when it's off.
     uint32_t GetPixelWatchUav() const noexcept;
     float GetPixelWatchBright() const noexcept { return m_watchBright; }
+    // Whether the pixel watch exists (SARP_RT_PIXEL_WATCH): its readback takes a slice per frame, so the path tracer that copies it
+    // is recorded at execution.
+    bool HasPixelWatch() const noexcept { return static_cast<bool>(m_pixelWatch); }
     void RecordPixelWatchBegin(org::RecordingContext& recording, const br::PipelineState& clearPipeline);
     void RecordPixelWatchEnd(org::RecordingContext& recording);
     // At the start of each frame, before BeginFrame.
@@ -312,7 +335,6 @@ private:
     void RecordBlasCache(org::RecordingContext& recording, const ScenePipelines& pipelines);
     void RecordSceneClear(org::RecordingContext& recording, const ScenePipelines& pipelines, const GraphBuffer& buffer, uint64_t bytes);
     void SceneStamp(rhi::CommandList& commands, uint32_t index);
-    uint32_t ArenaSlot() const noexcept { return m_frame % m_transientSlices; }
     void LogStats();
 
     // ---- Opacity micromaps (CPU side).
@@ -492,6 +514,7 @@ private:
     bool m_ommPoolsReady = false;
     bool m_ommPoolsFailed = false;
     bool m_ommStaged = false; // This frame has staging to record (BeginFrame ran for it).
+    uint64_t m_sceneOmmSerial = 0; // RecordSceneOmm's recordings with uploads.
     // Shared with the IO threads.
     TaskScope m_ommScope;
     std::mutex m_ommMutex;

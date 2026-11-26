@@ -40,15 +40,21 @@ RasterBucketCreateCommandBindings RasterBucketCreateCommandPass::Declare(org::Pa
     builder.ConstantBuffer(Builtin::PerFrameBuffer);
     bindings.visibleCapacity = m_visibleClustersCapacity;
     bindings.patchReplay = m_patchReplayNodeInputs;
+    m_pipelines.Clear();
+    m_pipelines.Add(bindings.pipeline);
     return bindings;
 }
 
 RasterBucketCreateCommandFrame RasterBucketCreateCommandPass::Prepare(
-    const RasterBucketCreateCommandBindings&, const org::PassPrepareContext& preparation) const {
-    const auto* context = preparation.preparationData->Get<UpdateContext>();
+    const RasterBucketCreateCommandBindings&, const org::PassPrepareContext&) const {
+    return m_taken;
+}
+
+void RasterBucketCreateCommandPass::TakeFrameValues(const org::UpdateExecutionContext& execution) {
+    const auto* context = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr;
     const bool enabled = !m_runWhenComputeSWRasterEnabledOnly ||
         CLodSoftwareRasterUsesCompute(SettingsManager::GetInstance().getSettingGetter<CLodSoftwareRasterMode>(CLodSoftwareRasterModeSettingName)());
-    return {context->preparedRasterBucketCount, enabled ? 1u : 0u};
+    m_taken = {context ? context->preparedRasterBucketCount : 0u, enabled ? 1u : 0u};
 }
 
 void RasterBucketCreateCommandPass::Record(const RasterBucketCreateCommandBindings& bindings,
