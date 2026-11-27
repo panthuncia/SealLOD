@@ -172,6 +172,16 @@ loop and its visibility options, and the shadowing modes a new technique slots i
 [docs/stochastic_lighting.md](docs/stochastic_lighting.md) is the reference for stochastic (MegaLights-style) direct
 lighting.
 
+[docs/hair.md](docs/hair.md) is the reference for the strand-hair proof of concept in `Plugins/Hair/`: the importers
+(procedural, `.hair`, Alembic grooms), the builder and its data model, the `.groom` file, the LOD invariants and the
+tests that prove them, and the runtime plugin (`HairPlugin`, registered by the demo): its commands, attachment modes,
+GPU buffers and passes (root binding, LOD selection, strand evaluation, the compute rasterizer into the hair visibility
+target, the resolve of that target into the canonical surface, depth and motion vectors, and a debug overlay). Hair is
+lit as an opaque surface with a placeholder material: there is no hair BSDF and no shadow cast by hair. It also covers
+the opt-in simulation (`hair.sim`): guides simulated on the GPU with a fixed timestep, sphere and capsule colliders, and
+render strands interpolated from their guides. Its "POC measurements" section has the
+many-groom scenario's numbers: cost against distance and groom count, memory, continuity and curls under reduction.
+
 [docs/clod-simplification-validation.md](docs/clod-simplification-validation.md) covers the opt-in validation of CLod
 simplification results against the original surface: checks, retry policy, settings and Bistro measurements. It also covers
 the later opt-in stages: replacement vertices, optimal placement, controlled topology changes (seam relaxation), and error channels with appearance-aware LOD selection

@@ -156,9 +156,9 @@ else {
 }
 
 # The Agility SDK (D3D12SDKPath .\D3D\), Streamline plugins (NVSL\ beside the exe), USD's plugin info, shader sources
-# (shaders\ and SARPShaders\, which the shader store's records name), built-in and environment textures, and the path
-# tracer's lens prescriptions (lenses\, which LensManager reads beside the exe).
-foreach ($name in 'D3D', 'NVSL', 'usd', 'shaders', 'SARPShaders', 'BuiltinTextures', 'textures', 'lenses') { Copy-RuntimeDirectory $name }
+# (shaders\ and SARPShaders\, which the shader store's records name, and the hair plugin's HairShaders\), built-in and
+# environment textures, and the path tracer's lens prescriptions (lenses\, which LensManager reads beside the exe).
+foreach ($name in 'D3D', 'NVSL', 'usd', 'shaders', 'SARPShaders', 'HairShaders', 'BuiltinTextures', 'textures', 'lenses') { Copy-RuntimeDirectory $name }
 
 # The C# scenario runtime (scripting\, which --script loads beside the exe; nethost.dll is among the DLLs above) and the
 # example scenarios, when the build has scripting (BASICRENDERER_ENABLE_SCRIPTING and a .NET 10 SDK).

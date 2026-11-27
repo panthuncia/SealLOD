@@ -404,6 +404,7 @@ set(SOURCES
     "src/Runtime/Publication/RendererStateRequestService.cpp"
     "src/Scene/Ingestion/SceneAssetRequestService.cpp"
     "src/Scene/Ingestion/SceneEntityMaterializationService.cpp"
+    "src/Scene/Ingestion/SceneEntityRenderState.cpp"
     "src/Scene/Ingestion/SceneRenderBridge.cpp"
     "src/Scene/Ingestion/SceneRenderableResidencyService.cpp"
     "src/Scene/Ingestion/SceneSourceStateStore.cpp"
@@ -720,6 +721,7 @@ add_library(BasicRendererPublicHeaderSmoke OBJECT
     "tests/PublicHeaders/Extensions_Buffers_StructuredBackingFlags.cpp"
     "tests/PublicHeaders/Extensions_RenderGraphExtensionRegistration.cpp"
     "tests/PublicHeaders/Extensions_RenderDeviceAccess.cpp"
+    "tests/PublicHeaders/Extensions_SceneEntityRenderState.cpp"
     "tests/PublicHeaders/Extensions_PipelineDescs.cpp"
     "tests/PublicHeaders/Extensions_ShaderCompilationTypes.cpp"
     "tests/PublicHeaders/Extensions_SettingAccess.cpp"
@@ -1745,6 +1747,7 @@ endif()
 target_link_libraries(${BASICRENDERER_DEMO_TARGET}
 PRIVATE
     ${PROJECT_NAME}
+    BasicRenderer::HairPlugin
     ${BASICRENDERER_SPDLOG_TARGET}
     imgui::imgui
     Pix::headers

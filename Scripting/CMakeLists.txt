@@ -60,9 +60,15 @@ set(BR_SCRIPTING_SCENARIO_FILES
     "${CMAKE_CURRENT_LIST_DIR}/Scenarios/LightSweep.cs"
     "${CMAKE_CURRENT_LIST_DIR}/Scenarios/SpinningCubes.cs"
     "${CMAKE_CURRENT_LIST_DIR}/Scenarios/ZorahLights.cs"
+    "${CMAKE_CURRENT_LIST_DIR}/Scenarios/hair/hair_crowd.cs"
+    "${CMAKE_CURRENT_LIST_DIR}/Scenarios/hair/hair_lod_sweep.cs"
+    "${CMAKE_CURRENT_LIST_DIR}/Scenarios/hair/hair_sim.cs"
+    "${CMAKE_CURRENT_LIST_DIR}/Scenarios/hair/hair_sim_lod.cs"
+    "${CMAKE_CURRENT_LIST_DIR}/Scenarios/hair/hair_single.cs"
     "${CMAKE_CURRENT_LIST_DIR}/Scenarios/assets/cube.glb"
     "${CMAKE_CURRENT_LIST_DIR}/Scenarios/assets/make_assets.py"
     "${CMAKE_CURRENT_LIST_DIR}/Scenarios/assets/plane.glb"
+    "${CMAKE_CURRENT_LIST_DIR}/Scenarios/assets/skinned_bar.glb"
     "${CMAKE_CURRENT_LIST_DIR}/Scenarios/assets/sphere.glb"
     CACHE INTERNAL "")
 # Cache entries, not variables: basicrenderer_scripting_deploy runs in its caller's directory scope.

@@ -31,6 +31,8 @@
 #endif
 #include <BasicRenderer/Diagnostics/ControlCommandRegistry.h>
 #include <BasicRenderer/Diagnostics/SettingsCommands.h>
+#include <Hair/HairCommands.h>
+#include <Hair/HairExtension.h>
 
 #include "BasicRenderer/Assets/Geometry/Mesh.h"
 #include <BasicRenderer/Renderer.h>
@@ -1920,7 +1922,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         // lifecycle behavior across repeated graph replacement.
         _putenv_s("BASICRENDERER_DISABLE_STREAMLINE", "1");
     }
-    renderer.Initialize(hwnd, x_res, y_res, br::pipeline::MakeBasicRendererDemoPipeline());
+    // Strand hair (Plugins/Hair, docs/hair.md). Its passes feed visibility work, so they are Visibility's.
+    const auto hairRuntime = std::make_shared<br::hair::HairRuntime>();
+    auto pipelineRecipe = br::pipeline::MakeBasicRendererDemoPipeline();
+    pipelineRecipe.AddExtension("Hair", [hairRuntime] {
+        return std::make_unique<br::hair::HairExtension>(hairRuntime);
+    }, br::render::kVisibilityEpoch);
+    renderer.Initialize(hwnd, x_res, y_res, std::move(pipelineRecipe));
+    hairRuntime->Initialize(renderer);
     spdlog::info("Renderer initialized.");
     br::extensions::MakeSettingSetter<CLodTransparencyMode>(
         CLodTransparencyModeSettingName)(CLodTransparencyMode::AVBOIT);
@@ -2073,6 +2082,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
     // The control commands, for the pipe and for scripts. The pipe also runs without a sampling configuration.
     statisticalSampling.RegisterControlCommands(renderer, hwnd);
+    br::hair::RegisterHairCommands(statisticalSampling.Commands(), hairRuntime);
     const auto controlPipe = FindCommandLineValue(commandLine, "--sampling-control-pipe");
     if (controlPipe && !statisticalSampling.Enabled()) statisticalSampling.StartControlServer(*controlPipe);
 
@@ -2386,6 +2396,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 #if BASICRENDERER_HAS_SCRIPTING
     scriptRun.Shutdown();
 #endif
+    hairRuntime->Shutdown();
     renderer.Cleanup();
 
 #if BASICRENDERER_HAS_SCRIPTING

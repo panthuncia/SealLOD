@@ -400,6 +400,7 @@ add_subdirectory("Scripting" "${CMAKE_CURRENT_BINARY_DIR}/_scripting")
 add_subdirectory ("BasicRenderer")
 add_subdirectory("CLodCore")
 add_subdirectory("Plugins/ProceduralWind")
+add_subdirectory("Plugins/Hair")
 
 add_subdirectory("CLodCacheTool")
 add_subdirectory("CLodEval")

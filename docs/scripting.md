@@ -85,6 +85,9 @@ The examples are in [`Scripting/Scenarios/`](../Scripting/Scenarios):
 
 Their models are in `assets/`, written by `assets/make_assets.py`.
 
+Scenarios in subfolders need more than the scripting API: `hair/` drives the hair plugin's commands
+([hair.md](hair.md)). The tests compile them but run only the examples above on the fake host.
+
 **Implicit usings.** The compiler adds `System`, `System.Collections.Generic`, `System.Linq`, `System.Threading`,
 `System.Threading.Tasks` and `BasicRenderer.Scripting` (`ScenarioCompiler.GlobalUsings`).
 
