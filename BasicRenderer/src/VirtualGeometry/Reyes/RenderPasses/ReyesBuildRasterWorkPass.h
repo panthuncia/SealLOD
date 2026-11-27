@@ -57,6 +57,8 @@ public:
 
     ReyesBuildRasterWorkBindings Declare(org::PassBuilder& builder);
     void Update(const org::UpdateExecutionContext& executionContext) override;
+    // A staged recording's frame (UpdateContext::stagedRun), whose Update does not run: the view depth table as its Update takes it.
+    void TakeFrameValues(const org::UpdateExecutionContext& executionContext) override;
     bool DeclaredResourcesChanged() const override { return m_declaredResourcesChanged; }
     // Kept recordings (M6 step 8): beyond its bindings and pipelines, Record bakes the index of the view table Prepare
     // publishes, whose rows follow the views Update took.

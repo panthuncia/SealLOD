@@ -66,6 +66,7 @@ WindProfileSet ProceduralWindRuntime::ResolveProfile(std::string_view modelIdent
 }
 
 ResidentWindPair ProceduralWindRuntime::SnapshotResidentPair() const { std::lock_guard lock(m_mutex); return m_resident; }
+std::uint64_t ProceduralWindRuntime::ResidentPairRevision() const { std::lock_guard lock(m_mutex); return m_resident.valid ? m_resident.revision : 0u; }
 WindState ProceduralWindRuntime::SnapshotWindState() const { std::lock_guard lock(m_mutex); return m_state; }
 std::uint32_t ProceduralWindRuntime::WorldId() const { std::lock_guard lock(m_mutex); return m_worldId; }
 

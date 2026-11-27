@@ -1,4 +1,5 @@
 #include <BasicRenderer/Renderer.h>
+#include "OpenRenderGraph/GraphHost.h"
 #include <spdlog/spdlog.h>
 #include <rhi_debug.h>
 #include "Utilities/Utilities.h"
@@ -194,9 +195,14 @@ std::shared_ptr<br::render::ResolutionObjects> Renderer::CreateTextures(DirectX:
 }
 
 void Renderer::CreateRTVs() {
-    auto device = DeviceManager::GetInstance().GetDevice();
     const bool renderGraphBatchTraceEnabled = SettingsManager::GetInstance().getSettingGetter<bool>("renderGraphBatchTraceEnabled")();
     const auto outputResolution = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("outputResolution")();
+    UpdateBackbufferViews(outputResolution.x, outputResolution.y, renderGraphBatchTraceEnabled);
+}
+
+void Renderer::UpdateBackbufferViews(UINT width, UINT height, bool renderGraphBatchTraceEnabled) {
+    auto device = DeviceManager::GetInstance().GetDevice();
+    const DirectX::XMUINT2 outputResolution{ width, height };
     // Recreate the render target views
     for (UINT n = 0; n < m_numFramesInFlight; n++) {
         renderTargets[n] = m_swapChain->Image(n);
@@ -232,13 +238,69 @@ void Renderer::RequestOutputSize(UINT newWidth, UINT newHeight) {
     m_frameRevisions.RequestOutputSize(newWidth, newHeight, "window size");
 }
 
+void Renderer::ResizeSwapChainAtPresent(uint64_t fenceValue, UINT width, UINT height, bool trace) {
+    BT_ZONE_SCOPE("Renderer::ResizeSwapChainAtPresent");
+    auto& shared = *m_presentShared;
+    // The earlier frames presented from the backbuffers. Their closures ran before this one, so their fence values are on the
+    // queue: waiting for the last of them is waiting for all. The attach frame's own work is on the queues already.
+    const auto waitBegin = std::chrono::steady_clock::now();
+    const auto sincePresent = std::chrono::duration<double, std::milli>(waitBegin - m_lastPresentReturned).count();
+    if (fenceValue > 1) {
+        uint32_t timeouts = 0;
+        while (m_frameFence->GetCompletedValue() < fenceValue - 1) {
+            if (m_frameFence->HostWait(fenceValue - 1, 1000) != rhi::Result::WaitTimeout) break;
+            if (++timeouts % 5 == 0)
+                spdlog::warn("Renderer: the swapchain resize at present waits for frame fence {} (completed {})", fenceValue - 1,
+                    m_frameFence->GetCompletedValue());
+        }
+    }
+    const auto resizeBegin = std::chrono::steady_clock::now();
+    const auto result = m_swapChain->ResizeBuffersAfterFrames(m_numFramesInFlight, width, height, rhi::Format::R8G8B8A8_UNorm,
+        DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH);
+    const auto resizeEnd = std::chrono::steady_clock::now();
+    shared.resizeWaitMs = std::chrono::duration<double, std::milli>(resizeBegin - waitBegin).count();
+    shared.resizeBuffersMs = std::chrono::duration<double, std::milli>(resizeEnd - resizeBegin).count();
+    shared.resizeFailed = result != rhi::Result::Ok;
+    if (!shared.resizeFailed) {
+        // A Vulkan surface's extent is the window's, which a drag may have changed since the size was asked for.
+        if (uint32_t w = 0, h = 0; m_swapChain->Extent(w, h) && w && h) {
+            width = w;
+            height = h;
+        }
+        UpdateBackbufferViews(width, height, trace);
+    }
+    shared.resizedWidth = width;
+    shared.resizedHeight = height;
+    shared.resized = true;
+    spdlog::info("Renderer: swapchain resize {}x{} in the attach frame's present on the submission thread: {:.2f} ms waiting for the "
+        "frames that used the backbuffers, {:.2f} ms in ResizeBuffers{}; {:.1f} ms after the last Present returned (it took {:.1f} ms)",
+        width, height, shared.resizeWaitMs, shared.resizeBuffersMs, shared.resizeFailed ? " (failed)" : "", sincePresent, m_lastPresentMs);
+}
+
 bool Renderer::ResizeSwapChain(UINT newWidth, UINT newHeight) {
     BT_ZONE_SCOPE("Renderer::ResizeSwapChain");
+    // With the submission thread the presents run there: everything queued goes first, so no present is pending at the resize and
+    // the frame fences below are on the queue. A resize at present that was asked for is answered by this one.
+    if (m_frameHost) m_frameHost->DrainSubmissions("swapchain resize");
+    m_pendingSwapchainResize.reset();
     // At the attach of the graphs built for the new size (M5 step 5). The backbuffers are used only by the presentation copies and
     // the presents, both on the graphics queue before each frame's fence: waiting for every slot's fence is waiting for the last of
     // them. Work on the other queues (compute, copies, uploads, a build's upscaler allocation) goes on.
     const auto waitBegin = std::chrono::steady_clock::now();
-    for (uint8_t slot = 0; slot < m_numFramesInFlight; ++slot) WaitForFrame(slot);
+    // Each slot's frame, oldest first, and when its fence was reached (ms after the wait began): how far ahead of the GPU and the
+    // display the frames were.
+    std::string slots;
+    {
+        std::vector<uint8_t> order(m_numFramesInFlight);
+        for (uint8_t slot = 0; slot < m_numFramesInFlight; ++slot) order[slot] = slot;
+        std::sort(order.begin(), order.end(), [&](uint8_t a, uint8_t b) { return m_frameFenceValues[a] < m_frameFenceValues[b]; });
+        for (const auto slot : order) {
+            const bool pending = m_frameFence->GetCompletedValue() < m_frameFenceValues[slot];
+            WaitForFrame(slot);
+            slots += fmt::format("{}{}{:.1f}", slots.empty() ? "" : "/", pending ? "" : "~",
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waitBegin).count());
+        }
+    }
     const auto resizeBegin = std::chrono::steady_clock::now();
     auto& stats = m_resolutionStats;
     stats.lastSwapchainWaitMs = std::chrono::duration<double, std::milli>(resizeBegin - waitBegin).count();
@@ -252,13 +314,17 @@ bool Renderer::ResizeSwapChain(UINT newWidth, UINT newHeight) {
     stats.maxResizeBuffersMs = (std::max)(stats.maxResizeBuffersMs, stats.lastResizeBuffersMs);
     spdlog::info(
         "Renderer: swapchain resize {}x{} frameIndex={} totalFramesRendered={}: {:.2f} ms waiting for the frames that used the backbuffers, "
-        "{:.2f} ms in ResizeBuffers (no device wait)",
+        "{:.2f} ms in ResizeBuffers (no device wait); slots reached at {} ms (oldest first, ~ already), {:.1f} ms after the last Present "
+        "returned (it took {:.1f} ms)",
         newWidth,
         newHeight,
         static_cast<unsigned>(m_frameIndex),
         m_totalFramesRendered,
         stats.lastSwapchainWaitMs,
-        stats.lastResizeBuffersMs);
+        stats.lastResizeBuffersMs,
+        slots,
+        std::chrono::duration<double, std::milli>(waitBegin - m_lastPresentReturned).count(),
+        m_lastPresentMs);
     if (resizeResult != rhi::Result::Ok) {
         spdlog::critical(
             "Renderer: ResizeBuffers failed for {}x{} result={} frameIndex={} totalFramesRendered={}",
@@ -280,9 +346,12 @@ bool Renderer::ResizeSwapChain(UINT newWidth, UINT newHeight) {
     SettingsManager::GetInstance().getSettingSetter<DirectX::XMUINT2>("outputResolution")({ newWidth, newHeight });
 
     // Inside Update (the consolidation point), after the frame took its slot: the frame continues on the image the resized
-    // swapchain gives, as a frame after a resize between frames did. Every slot's frame is complete (the waits above).
-    m_frameIndex = static_cast<uint8_t>(m_swapChain->CurrentImageIndex());
-    m_preparationFrameIndex = m_frameIndex;
+    // swapchain gives, as a frame after a resize between frames did. Every slot's frame is complete (the waits above). With the
+    // submission thread the frame slot does not follow the image: the present reads the image itself.
+    if (!m_submissionThread) {
+        m_frameIndex = static_cast<uint8_t>(m_swapChain->CurrentImageIndex());
+        m_preparationFrameIndex = m_frameIndex;
+    }
 
     CreateRTVs();
     m_swapChainReady = true;
@@ -310,8 +379,15 @@ void Renderer::SwitchResolutionObjects(const std::shared_ptr<br::render::Resolut
     // The swapchain's size (outputResolution is written only where the swapchain is made or resized).
     const auto swapchainSize = settings.getSettingGetter<DirectX::XMUINT2>("outputResolution")();
     const bool resizeSwapchain = m_swapChain && (objects->recreateSwapchain || swapchainSize.x != objects->output.x || swapchainSize.y != objects->output.y);
-    if (resizeSwapchain && !ResizeSwapChain(objects->output.x, objects->output.y))
+    if (resizeSwapchain && m_submissionThread && m_resizeAtPresent) {
+        // In this frame's present closure, before its presentation tail (ResizeSwapChainAtPresent): the wait for the old frames'
+        // presents then overlaps this frame's work on the render thread instead of stalling it here. Readers of the size see the
+        // new one from now on; the closure corrects it if the swapchain was made at another (EnqueuePresent).
+        m_pendingSwapchainResize = PendingSwapchainResize{ objects->output.x, objects->output.y };
+        settings.getSettingSetter<DirectX::XMUINT2>("outputResolution")(objects->output);
+    } else if (resizeSwapchain && !ResizeSwapChain(objects->output.x, objects->output.y)) {
         spdlog::critical("Renderer: the swapchain could not be resized to {}x{} at the attach of the graphs built for it", objects->output.x, objects->output.y);
+    }
     objects->recreateSwapchain = false;
     // The presentation copy reads the slot surfaces of the graphs that ran the frame: from this frame on, the new ones.
     m_presentationColorResources = objects->presentationColor;
@@ -334,7 +410,8 @@ void Renderer::SwitchResolutionObjects(const std::shared_ptr<br::render::Resolut
     stats.lastSwitchMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
     stats.maxSwitchMs = (std::max)(stats.maxSwitchMs, stats.lastSwitchMs);
     spdlog::info("Renderer: render {}x{}, output {}x{} are current from this attach{}; {:.2f} ms on the render thread", objects->render.x,
-        objects->render.y, objects->output.x, objects->output.y, resizeSwapchain ? " (swapchain resized)" : "", stats.lastSwitchMs);
+        objects->render.y, objects->output.x, objects->output.y,
+        resizeSwapchain ? (m_pendingSwapchainResize ? " (swapchain resized in this frame's present)" : " (swapchain resized)") : "", stats.lastSwitchMs);
 }
 
 void Renderer::ApplyResolutionRequest() {

@@ -41,16 +41,17 @@ CullingSettings ReadCullingSettings(const CullingPassConfig& config, bool hasRec
     auto& settings = SettingsManager::GetInstance();
     CullingSettings result;
     result.telemetry = IsCLodWorkGraphTelemetryEnabled();
-    result.occlusion = settings.getSettingGetter<bool>("enableOcclusionCulling")();
+    // Every culling pass reads these every frame: by the cached getters.
+    result.occlusion = settings.cachedSettingValue<bool>("enableOcclusionCulling");
     result.predictiveInvalidation =
-        settings.getSettingGetter<bool>(CLodDirectionalVirtualShadowPredictiveLodInvalidationSettingName)();
-    result.frustumCulling = settings.getSettingGetter<bool>(CLodFrustumCullingSettingName)();
-    result.softwareRasterThreshold = std::min(settings.getSettingGetter<uint32_t>(config.UsesVirtualShadowOutput()
+        settings.cachedSettingValue<bool>(CLodDirectionalVirtualShadowPredictiveLodInvalidationSettingName);
+    result.frustumCulling = settings.cachedSettingValue<bool>(CLodFrustumCullingSettingName);
+    result.softwareRasterThreshold = std::min(settings.cachedSettingValue<uint32_t>(config.UsesVirtualShadowOutput()
         ? CLodVirtualShadowSoftwareRasterDiameterThresholdSettingName
-        : CLodSoftwareRasterDiameterThresholdSettingName)(), 0xFFFFu);
-    result.forcedTraversalDepth = settings.getSettingGetter<uint32_t>(CLodForceTraversalDepthRootSettingName)();
+        : CLodSoftwareRasterDiameterThresholdSettingName), 0xFFFFu);
+    result.forcedTraversalDepth = settings.cachedSettingValue<uint32_t>(CLodForceTraversalDepthRootSettingName);
     result.receiverSubpageMode = hasReceiverSubpageMask
-        ? settings.getSettingGetter<uint32_t>(CLodDirectionalVirtualShadowReceiverSubpageModeSettingName)()
+        ? settings.cachedSettingValue<uint32_t>(CLodDirectionalVirtualShadowReceiverSubpageModeSettingName)
         : CLodVirtualShadowReceiverSubpageModeOff;
     return result;
 }

@@ -174,6 +174,10 @@ struct UpdateContext {
 	DirectX::XMUINT2 outputResolution{};
 	unsigned int globalPSOFlags = 0;
 	float deltaTime = 0.0f;
+	// A staged recording's stand-in frame (FrameBuildJob::stagedRuns): the run of the new graph it stands for, 0 for its first.
+	// UINT32_MAX in a frame's own context. A pass whose frame data depends on its own earlier runs (a history kept since the
+	// last frame) takes it from this in TakeFrameValues: it has no earlier runs when staged.
+	uint32_t stagedRun = UINT32_MAX;
 
 	std::span<const PreparedViewFrameData> Views() const noexcept {
 		return viewFamily ? std::span<const PreparedViewFrameData>(viewFamily->views)

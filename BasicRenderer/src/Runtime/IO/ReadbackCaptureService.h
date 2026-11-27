@@ -64,6 +64,9 @@ private:
 		uint64_t value = 0;
 		std::shared_ptr<Request> request;
 		std::shared_ptr<rhi::TimelinePtr> timelineOwner;
+		// An after-graph copy queued behind the submission thread that failed there (ExternalClient::Signal::failed): dropped
+		// when reached, since its failure callback queued the request again.
+		std::shared_ptr<const std::atomic<bool>> failed;
 	};
 
 	std::mutex m_mutex;

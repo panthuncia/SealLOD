@@ -129,6 +129,12 @@ ReyesBuildRasterWorkBindings ReyesBuildRasterWorkPass::Declare(org::PassBuilder&
     return bindings;
 }
 
+void ReyesBuildRasterWorkPass::TakeFrameValues(const org::UpdateExecutionContext& executionContext) {
+    const auto* context = executionContext.hostData ? executionContext.hostData->Get<UpdateContext>() : nullptr;
+    if (!context || context->stagedRun == UINT32_MAX) return;
+    m_declaredResourcesChanged = m_enableViewDepthOcclusion && m_viewDepthTable.Update(context->Views(), m_phaseIndex == 1u);
+}
+
 void ReyesBuildRasterWorkPass::Update(const org::UpdateExecutionContext& executionContext)
 {
     const auto* context = executionContext.hostData->Get<UpdateContext>();

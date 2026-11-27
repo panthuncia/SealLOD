@@ -8,6 +8,7 @@
 #include <optional>
 #include <map>
 #include <span>
+#include <string>
 #include <vector>
 
 #include <BasicRenderer/Streaming/ArtifactTypes.h>
@@ -76,6 +77,8 @@ public:
     // Cheap level-triggered wake used once per frame. It only submits work when
     // a retained ready root is newer than the active published fragment.
     void RefreshPublication();
+    // The manifest state, the retained roots, the last builds' decisions and the publisher's pending patches (start-stall report).
+    [[nodiscard]] std::string DescribePublication() const;
 
 private:
     struct PublicationNodeCache {

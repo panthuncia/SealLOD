@@ -56,10 +56,12 @@ namespace TerrainRvt
         return { dispatchX, dispatchY };
     }
 
+    // The passes read about thirty of these in every frame's TakeFrameValues: by the cached getter (making a getter each time
+    // was about 10 us of Visibility's update per frame).
     inline uint32_t SettingU32(const char* name, uint32_t fallback)
     {
         try {
-            return SettingsManager::GetInstance().getSettingGetter<uint32_t>(name)();
+            return SettingsManager::GetInstance().cachedSettingValue<uint32_t>(name);
         }
         catch (...) {
             return fallback;
@@ -69,7 +71,7 @@ namespace TerrainRvt
     inline float SettingFloat(const char* name, float fallback)
     {
         try {
-            return SettingsManager::GetInstance().getSettingGetter<float>(name)();
+            return SettingsManager::GetInstance().cachedSettingValue<float>(name);
         }
         catch (...) {
             return fallback;

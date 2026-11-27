@@ -6,6 +6,7 @@
 #include <memory>
 #include <mutex>
 #include <vector>
+#include <string>
 #include <unordered_map>
 #include <atomic>
 #include <optional>
@@ -321,6 +322,8 @@ public:
     [[nodiscard]] std::shared_ptr<const PublishedRendererState> Active() const;
     [[nodiscard]] std::uint64_t ActiveEpoch() const;
     [[nodiscard]] RendererStatePublisherStats Stats() const;
+    // The active epoch, the candidate, each pending patch's state and the commit counts (start-stall report).
+    [[nodiscard]] std::string DescribePending() const;
     [[nodiscard]] std::shared_ptr<PublishedStateSource> ResourceSource() const { return m_source; }
     [[nodiscard]] const std::shared_ptr<VersionedBufferRuntime>& VersionedBuffers() const noexcept { return m_versionedBuffers; }
     void SetCandidateRejectedCallback(std::function<void(std::uint64_t)> callback);
@@ -334,7 +337,8 @@ private:
         std::shared_ptr<const PublishedRendererState> base, prepared;
         ExecutablePreparation prepareExecutable;
         bool materializeOnWorker = false;
-        std::atomic_bool ready{false}, cancelled{false}, failed{false};
+        // started: its preparation runs on a worker. A newer patch does not cancel a started one (PublishPatch).
+        std::atomic_bool ready{false}, cancelled{false}, failed{false}, started{false};
     };
     std::vector<std::shared_ptr<PendingPatch>> m_patches;
     std::function<bool(std::function<void()>&&)> m_preparePublication;

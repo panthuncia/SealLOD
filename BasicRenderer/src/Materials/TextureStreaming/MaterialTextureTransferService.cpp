@@ -648,7 +648,9 @@ void MaterialTextureTransferService::PumpWorker()
 	if (!m_timeline || !*m_timeline ||
 		rhi::Failed(m_graphicsQueue.Signal({(*m_timeline)->GetHandle(), batch.fenceValue}))) {
 		// Submission already transferred ownership to the queue.  Keep every
-		// allocation alive and force completion before marking the ticket failed.
+		// allocation alive and force completion before marking the ticket failed. The frame host's submission thread goes first,
+		// so nothing it holds reaches the queue during the wait.
+		DeviceManager::GetInstance().DrainSubmissions("MaterialTextureTransferService WaitIdle");
 		(void)m_device.WaitIdle();
 		for (const auto& image : batch.images) {
 			failTransfer(image, "completion signal failed");

@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <optional>
 #include <array>
+#include <atomic>
 #include <stdexcept>
 #include <map>
 #include <unordered_map>
@@ -221,6 +222,10 @@ public:
     br::render::SceneIngestionServices& GetSceneIngestionServices() { return m_sceneIngestionServices; }
     const br::render::SceneIngestionServices& GetSceneIngestionServices() const { return m_sceneIngestionServices; }
     uint64_t GetTotalFramesRendered() const { return m_totalFramesRendered; }
+    // Frames whose present has run (M7 step 5). With the submission thread (on by default; BASICRENDERER_SUBMISSION_THREAD=0
+    // turns it off) it can trail GetTotalFramesRendered, which counts Render calls, by the frame queued there; without, it
+    // equals it. Pace by this one: a frame counted here has been handed to the display.
+    uint64_t GetPresentedFrames() const { return m_presentShared ? m_presentShared->passed.load(std::memory_order_acquire) : m_totalFramesRendered; }
     org::RenderGraph* GetRenderGraph() { return currentRenderGraph; }
     // The path tracer's accumulation, for capturing a reference image. buffer is null unless the current graph path traces
     // with pathTracingAccumulate on. framesSinceRestart counts frames prepared since the last restart, so it can lead the
@@ -326,6 +331,43 @@ private:
     // prefill is enabled. m_frameIndex remains the acquired swapchain image.
     uint8_t m_preparationFrameIndex = 0;
     double m_lastWaitForFrameMs = 0.0; // The frame's WaitForFrame, for the hitch log in FrameMaintenance.
+    // The last Present's duration and return time, for the swapchain resize's log (how far ahead of the display the frames are).
+    double m_lastPresentMs = 0.0;
+    std::chrono::steady_clock::time_point m_lastPresentReturned{};
+    // M7 step 5, BASICRENDERER_SUBMISSION_THREAD (on by default since step 6; =0 turns it off): the frame host submits its
+    // epochs on its submission thread, and Render queues the frame's presentation tail, Present and the frame fence's signal
+    // behind them as one closure (EnqueuePresent). At most one present is queued ahead of the thread: Render waits for the
+    // previous one first. The frame slot then advances round robin, apart from the swapchain image, which the closure reads
+    // when it presents.
+    bool m_submissionThread = false;
+    // A resize at an attach is made in the attach frame's present closure, before its presentation tail, so the wait for the old
+    // frames' presents overlaps the render thread's next frame (BASICRENDERER_RESIZE_AT_PRESENT=0: at the attach, as before).
+    bool m_resizeAtPresent = false;
+    struct PendingSwapchainResize { UINT width = 0, height = 0; };
+    std::optional<PendingSwapchainResize> m_pendingSwapchainResize;
+    // What the present closures report to the render thread.
+    struct PresentShared {
+        std::atomic<uint64_t> passed{0};        // closures finished
+        std::atomic<bool> modeChanged{false};   // a present reported a mode change
+        uint64_t modeChangeGeneration = 0;      // m_swapchainGeneration when that present was queued (written before modeChanged)
+        // A resize made in a closure, for the render thread to take up at its next present (written before passed).
+        bool resized = false, resizeFailed = false;
+        UINT resizedWidth = 0, resizedHeight = 0;
+        double resizeWaitMs = 0.0, resizeBuffersMs = 0.0;
+    };
+    std::unique_ptr<PresentShared> m_presentShared;
+    uint64_t m_presentsQueued = 0;
+    std::chrono::steady_clock::time_point m_updateBegin{};
+    void EnqueuePresent(org::RenderGraph* presentationGraph);
+    void HandlePresentModeChange(uint64_t generationAtPresent);
+    // The backbuffer views and wrappers for the swapchain's current images at this size (CreateRTVs without the settings).
+    void UpdateBackbufferViews(UINT width, UINT height, bool trace);
+    // On the submission thread, in an attach frame's present closure: waits for every earlier frame's fence, then resizes the
+    // swapchain and updates the backbuffer views. The render thread takes the result at its next present (PresentShared).
+    void ResizeSwapChainAtPresent(uint64_t fenceValue, UINT width, UINT height, bool trace);
+    // The presentation tail: copies the frame's presentation color into the backbuffer through the graph's external client.
+    void SubmitPresentationTail(org::RenderGraph& presentationGraph, const std::shared_ptr<org::PixelBuffer>& presentationSource,
+        const std::shared_ptr<org::ExternalTextureResource>& backbuffer);
     // The pass timestamps of the last run the frame host retired, per queue ([0] graphics, [1] compute), for the hitch log
     // and the GPU timeline dump (OnFrameHostRunCompleted). Pass indices into the statistics service's names.
     struct CompletedPassStamp { int passIndex = -1; uint64_t begin = 0, end = 0; double milliseconds = 0.0; };
@@ -724,7 +766,23 @@ private:
             std::map<std::string, uint64_t> batchReasons;
         };
         std::vector<Kept> kept;
+        // With the submission thread (M7 step 5): each host epoch's execution on the thread by stage (retire, admission, acquire,
+        // record, submit, commit, the rest, the completion points), from GraphHost::TakeSubmittedExecutions, and its runs.
+        static constexpr size_t kThreadStages = 8;
+        std::vector<std::array<double, kThreadStages>> threadStageMs;
+        std::vector<uint64_t> threadRuns;
+        uint64_t threadFailed = 0;
+        // The render thread's whole frame, from Update's start to Render's end, and the waits in it: WaitForFrame, Present on
+        // the render thread (without the submission thread), and the present lead's wait for the previous present closure.
+        double renderThreadFrameMs = 0.0, waitForFrameMs = 0.0, inlinePresentMs = 0.0, presentLeadWaitMs = 0.0;
+        uint32_t renderThreadFrames = 0, presentLeadWaits = 0;
     } m_frameGraphExecutionTiming;
+    // Takes what the submission thread did with the frame's executions (GraphHost::TakeSubmittedExecutions) into the timing.
+    void RecordSubmittedExecutions();
+    // The frame's close (RecordFrameGraphExecution with SIZE_MAX): its totals, the slow-frame lines and every 600 frames the means.
+    void FinishFrameGraphExecution(double milliseconds);
+    // Adds an epoch's kept-recording statistics (GraphHost::TakeKeptStats) to the timing and the totals.
+    void AddKeptStats(size_t index, uint32_t host);
     // The same since the start, by host epoch, for renderer.revisions' "recordings".
     std::map<uint32_t, FrameGraphExecutionTiming::Kept> m_keptRecordingTotals;
     // Frames since the latest attach of frame graphs (FinishFrameBuild), for the first frames' line. UINT32_MAX: none yet.

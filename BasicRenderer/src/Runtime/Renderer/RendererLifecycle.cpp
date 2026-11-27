@@ -90,7 +90,8 @@ void Renderer::SignalFence(rhi::Queue commandQueue, uint8_t frameIndexToSignal) 
 }
 
 void Renderer::AdvanceFrameIndex() {
-    if (m_swapChain) {
+    // With the submission thread the image is read where the present is made (EnqueuePresent): the slot goes round robin.
+    if (m_swapChain && !m_submissionThread) {
         m_frameIndex = static_cast<uint8_t>(m_swapChain->CurrentImageIndex());
     } else {
         m_frameIndex = (m_frameIndex + 1) % m_numFramesInFlight;
@@ -105,6 +106,8 @@ void Renderer::StallPipeline(std::string_view reason) {
     // next build runs on the render thread, so the attached graph renders no frame against the replaced resources.
     DiscardFrameBuildInFlight("a GPU idle wait");
     m_nextFrameBuildSynchronous = true;
+    // What the submission thread holds goes to the queues first, presents included: the waits below then cover it.
+    if (m_frameHost) m_frameHost->DrainSubmissions("StallPipeline");
     for (uint8_t i = 0; i < m_numFramesInFlight; ++i) {
         WaitForFrame(i);
     }
@@ -126,6 +129,8 @@ void Renderer::Cleanup() {
     // A frame build in flight goes first: it builds against the host and the services torn down below.
     DiscardFrameBuildInFlight("shutdown");
     m_frameBuildWorker.reset();
+    // The frame's executions and present still queued on the submission thread run before the graphs stop.
+    if (m_frameHost) m_frameHost->DrainSubmissions("shutdown");
     for (const auto host : FrameGraphHostEpochs())
         if (auto* graph = FrameGraph(host)) graph->StopFrameProduction();
     // Wait for all GPU frames to complete
@@ -156,6 +161,8 @@ void Renderer::Cleanup() {
 	if (m_pMaterialManager) {
 		m_pMaterialManager->ShutdownTextureStreaming();
 	}
+	// Its last user (the texture transfer service's failure path) has stopped.
+	DeviceManager::GetInstance().SetSubmissionDrain({});
 	spdlog::info("Cleaning up resources");
     // Desired-state jobs borrow the request service. Its Stop flag cannot be
     // read safely after destruction: join the producer before closing/freeing
@@ -596,7 +603,25 @@ void Renderer::Initialize(
         m_framePlacement = !m_useGraphInstance && !br::runtime::renderer_settings::ReadFalsyEnvironmentFlag("BASICRENDERER_FRAME_PLACEMENT");
         // The renderer builds its epochs itself, so it rebuilds the graphs whose placements went stale (ConsolidateFrameGraph).
         hostDesc.reportStaleAliasPlacements = m_framePlacement;
+        // M7 step 5: the frame's epochs are submitted on the host's submission thread (O-M7-1), external client submissions made
+        // meanwhile queue behind them (O-M7-3), seals are queued, and the present runs there too (EnqueuePresent). On by default
+        // since M7 step 6; BASICRENDERER_SUBMISSION_THREAD=0 submits and presents on the render thread, as before. Not with the
+        // in-place graph.
+        m_submissionThread = !m_useGraphInstance && !br::runtime::renderer_settings::ReadFalsyEnvironmentFlag("BASICRENDERER_SUBMISSION_THREAD");
+        if (m_submissionThread) {
+            hostDesc.submissionThread = true;
+            hostDesc.queuedSeals = true;
+            hostDesc.executeOnSubmissionThread = true;
+            m_presentShared = std::make_unique<PresentShared>();
+            m_resizeAtPresent = !br::runtime::renderer_settings::ReadFalsyEnvironmentFlag("BASICRENDERER_RESIZE_AT_PRESENT");
+        }
         m_frameHost = std::make_unique<org::GraphHost>(std::move(hostDesc));
+        if (m_submissionThread) {
+            // Device-wide waits made on other threads (MaterialTextureTransferService's failure path) drain the thread first.
+            DeviceManager::GetInstance().SetSubmissionDrain([host = m_frameHost.get()](const char* why) { host->DrainSubmissions(why); });
+            spdlog::info("Renderer: the frame host submits on its submission thread, and presents there (BASICRENDERER_SUBMISSION_THREAD); "
+                "swapchain resizes at an attach are made in the present {}", m_resizeAtPresent ? "(BASICRENDERER_RESIZE_AT_PRESENT)" : "off: at the attach");
+        }
         m_frameHost->SetExplicitBuilds(true);
         // M6 step 3: kept recordings for the frame's synchronous epochs (GraphHost::SetKeptEpochs). Visibility, Shading and Post keep
         // theirs; Overlay records every frame (the menu changes every frame). A run submits its copy's kept recording while it is

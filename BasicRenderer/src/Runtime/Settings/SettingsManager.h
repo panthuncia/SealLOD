@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <atomic>
 #include <cstdint>
+#include <mutex>
 #include <vector>
 
 #include <BasicRenderer/Extensions/SettingAccess.h>
@@ -27,6 +28,7 @@ public:
         auto setting = std::make_unique<Setting<T>>(initialValue);
         setting->snapshotIndex = m_nextSnapshotIndex++;
         settings[name] = std::move(setting);
+        m_registrations.fetch_add(1, std::memory_order_acq_rel);
     }
 
     // Render thread (where settings are written): a copy of every setting's value. Install it on a thread with
@@ -83,6 +85,28 @@ public:
         return [getter]() -> T {
             return static_cast<T>(*static_cast<typename std::remove_reference<T>::type*>(getter()));
         };
+    }
+
+    // A setting's value by a name whose address stays (a literal or a named constant), for readers that ask every frame:
+    // getSettingGetter looks the name up and copies two functions at each call. The getter is made once per address and kept
+    // until any setting is registered again (registration may replace a setting). Reads the thread's snapshot as getters do.
+    // Throws as getSettingGetter does for a name that is not registered.
+    template<typename T>
+    T cachedSettingValue(const char* name) {
+        struct Entry {
+            uint64_t registrations = 0;
+            std::function<T(void)> getter;
+        };
+        static std::mutex mutex;
+        static std::unordered_map<const char*, Entry> cache;
+        const uint64_t registrations = m_registrations.load(std::memory_order_acquire);
+        std::scoped_lock lock(mutex);
+        auto& entry = cache[name];
+        if (!entry.getter || entry.registrations != registrations) {
+            entry.getter = getSettingGetter<T>(name);
+            entry.registrations = registrations;
+        }
+        return entry.getter();
     }
 
     // By-name access for control commands and scripts (SettingAccess.h: ListSettingNames, ReadSettingValue, ...).
@@ -407,6 +431,7 @@ private:
     std::atomic_uint64_t m_revision{1};
     std::size_t m_nextSnapshotIndex = 0;
     std::unordered_map<std::string, std::unique_ptr<ISetting>> settings;
+    std::atomic<uint64_t> m_registrations{ 0 };
     std::vector<Subscription> m_dependencySubscriptions;
 
     SettingsManager() = default;

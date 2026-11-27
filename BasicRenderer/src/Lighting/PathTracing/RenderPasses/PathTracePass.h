@@ -50,6 +50,12 @@ struct PathTraceState {
     uint64_t tableFrame = ~0ull;
     uint64_t tableCodeHash = 0u;
     std::shared_ptr<const br::render::CLodRtShaderTable> frameTable;
+    // The lens publication and pipeline cache generation the table was last found current for, with the pipeline it wanted:
+    // while both are the same, the next frame takes the table without copying the recipe and looking the pipeline up (about
+    // 6 us of the path traced Shading update per frame). Shader reloads advance the generation.
+    std::shared_ptr<const br::lens::LensPublishedState> cachedPublished;
+    uint64_t cachedGeneration = ~0ull;
+    bool cachedWanted = false;
 
     // The table for this frame. The pipeline the published lens needs compiles on a worker: until it exists the last table
     // stays (its shader traces the surfaces for a polynomial it wasn't compiled with). Null until any has compiled.
@@ -58,10 +64,16 @@ struct PathTraceState {
         if (frame == tableFrame) return frameTable;
         tableFrame = frame;
         auto& manager = PSOManager::GetInstance();
+        const auto published = lens ? lens->Published() : nullptr;
+        const auto generation = manager.PipelineCacheGeneration();
+        if (cachedWanted && table && published == cachedPublished && generation == cachedGeneration) {
+            frameTable = table;
+            return frameTable;
+        }
+        cachedWanted = false;
         RayTracingPipelineRecipe wanted = recipe;
         std::wstring code;
-        if (lens) {
-            const auto published = lens->Published();
+        if (published) {
             for (auto& define : br::lens::LensManager::ShaderDefines(*published)) wanted.defines.push_back(std::move(define));
             code = published->polynomialInclude;
         }
@@ -70,6 +82,7 @@ struct PathTraceState {
             frameTable = table;
             return frameTable;
         }
+        const bool found = pipeline != nullptr;
         if (!pipeline && !code.empty()) {
             pipeline = manager.TryGetRayTracingPipeline(recipe);
             code.clear();
@@ -86,6 +99,9 @@ struct PathTraceState {
                 "Path trace shader table");
             tableCodeHash = code.empty() ? 0u : std::hash<std::wstring>{}(code);
         }
+        cachedWanted = found;
+        cachedPublished = published;
+        cachedGeneration = generation;
         frameTable = table;
         return frameTable;
     }

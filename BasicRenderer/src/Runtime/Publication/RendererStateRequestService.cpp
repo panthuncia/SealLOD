@@ -18,6 +18,71 @@
 
 namespace br::render {
 
+namespace {
+// What the last manifest builds decided, for the start-stall report (DescribePublication).
+struct ManifestBuildTrace {
+    std::mutex mutex;
+    std::uint64_t builds = 0, cancelled = 0, notMonotonic = 0, notCoherent = 0;
+    std::size_t lastRoots = 0, lastClosures = 0;
+    std::uint64_t lastSelectedMask = 0;
+    std::string lastUnready;
+};
+ManifestBuildTrace& BuildTrace() {
+    static ManifestBuildTrace trace;
+    return trace;
+}
+
+// The first snapshot in a root's closure that has not reached its publication milestone, or empty.
+std::string FirstUnready(const ArtifactSnapshot& root, std::vector<ArtifactVersionID>& visited) {
+    const auto requiredReadiness = root.gpuSubmissions ? ArtifactReadiness::UploadSubmitted : ArtifactReadiness::CpuReady;
+    if (!root.Version() || !ArtifactReachedMilestone(root.readiness, requiredReadiness)) {
+        return std::format("{}:{}:{} rev {} gen {} readiness {}", static_cast<unsigned>(root.key.kind), root.key.primaryID,
+            root.key.variantID, root.revision, root.generation, static_cast<unsigned>(root.readiness));
+    }
+    if (std::ranges::contains(visited, root.Version())) return {};
+    visited.push_back(root.Version());
+    const auto artifact = root.payload.Get<RendererStateFragmentArtifact>();
+    if (!artifact) return {};
+    for (const auto& dependency : artifact->fragment.dependencyClosure) {
+        if (auto found = FirstUnready(dependency, visited); !found.empty()) return found;
+    }
+    return {};
+}
+}
+
+std::string RendererStateRequestService::DescribePublication() const {
+    const auto active = m_publisher.Active();
+    std::string text;
+    {
+        std::lock_guard lock(m_mutex);
+        text = std::format("accepting={} inFlight={} inFlightRevision={} manifestRevision={} dirty={} submitted={} completed={};",
+            m_accepting.load(std::memory_order_acquire), m_manifestInFlight, m_manifestInFlightRevision, m_manifestRevision,
+            m_manifestDirtyGeneration, m_manifestSubmittedDirtyGeneration, m_manifestCompletedDirtyGeneration);
+        for (std::size_t index = 0; index < m_roots.size(); ++index) {
+            const auto activeRoot = active ? active->Fragment(static_cast<PublishedFragmentKind>(index)).publicationRoot
+                                           : ArtifactVersionID{};
+            if (m_roots[index].empty() && !activeRoot) continue;
+            text += std::format(" fragment {}: active rev {} gen {};", index, activeRoot.revision, activeRoot.generation);
+            for (const auto& root : m_roots[index]) {
+                std::vector<ArtifactVersionID> visited;
+                const auto unready = FirstUnready(root, visited);
+                text += std::format(" root {}:{}:{} rev {} gen {} readiness {} gpu {} unready '{}';",
+                    static_cast<unsigned>(root.key.kind), root.key.primaryID, root.key.variantID, root.revision,
+                    root.generation, static_cast<unsigned>(root.readiness), static_cast<bool>(root.gpuSubmissions), unready);
+            }
+        }
+    }
+    {
+        auto& trace = BuildTrace();
+        std::lock_guard lock(trace.mutex);
+        text += std::format(" builds={} cancelled={} notMonotonic={} notCoherent={} lastRoots={} lastClosures={} lastSelected=0x{:x} lastUnready='{}';",
+            trace.builds, trace.cancelled, trace.notMonotonic, trace.notCoherent, trace.lastRoots, trace.lastClosures,
+            trace.lastSelectedMask, trace.lastUnready);
+    }
+    text += " publisher: " + m_publisher.DescribePending();
+    return text;
+}
+
 std::function<void(std::uint64_t)> RendererStateRequestService::MakeSuspensionNotifier() {
     return m_graph.MakeSuspensionNotifier();
 }
@@ -557,12 +622,18 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
 
     std::vector<Selection> closures;
     closures.reserve(input->roots.size());
+    std::string unready;
     for (const auto& root : input->roots) {
         std::vector<ArtifactVersionID> visited;
-        if (!publicationReady(publicationReady, root, visited)) continue;
+        if (!publicationReady(publicationReady, root, visited)) {
+            std::vector<ArtifactVersionID> traced;
+            if (unready.size() < 600) unready += FirstUnready(root, traced) + "; ";
+            continue;
+        }
         Selection closure;
         if (addClosure(addClosure, root, closure)) closures.push_back(std::move(closure));
     }
+    std::uint64_t notMonotonic = 0, notCoherent = 0;
     const auto closureScore = [](const Selection& selection) {
         std::pair<std::size_t, std::uint64_t> result{};
         for (const auto& root : selection) {
@@ -606,11 +677,32 @@ ArtifactBuildResult RendererStateRequestService::BuildManifest(const ArtifactBui
             if (merge(merged, closures[index])) trial = std::move(merged);
         }
         const auto score = candidateScore(trial);
-        if ((bestScore && score <= *bestScore) || !monotonicSuccessor(trial)) continue;
+        if (bestScore && score <= *bestScore) continue;
+        if (!monotonicSuccessor(trial)) {
+            ++notMonotonic;
+            continue;
+        }
         const auto candidate = materialize(trial, false);
         if (coherent(candidate)) {
             bestScore = score;
             selected = std::move(trial);
+        } else {
+            ++notCoherent;
+        }
+    }
+    {
+        auto& trace = BuildTrace();
+        std::lock_guard lock(trace.mutex);
+        ++trace.builds;
+        trace.cancelled += bestScore ? 0u : 1u;
+        trace.notMonotonic += notMonotonic;
+        trace.notCoherent += notCoherent;
+        trace.lastRoots = input->roots.size();
+        trace.lastClosures = closures.size();
+        trace.lastUnready = std::move(unready);
+        trace.lastSelectedMask = 0;
+        for (std::size_t index = 0; index < selected.size(); ++index) {
+            if (selected[index]) trace.lastSelectedMask |= 1ull << index;
         }
     }
     if (!bestScore) return ArtifactBuildResult::Cancelled();

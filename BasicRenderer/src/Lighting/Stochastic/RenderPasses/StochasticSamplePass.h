@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <stdexcept>
 
 #include <spdlog/spdlog.h>
@@ -256,9 +257,18 @@ public:
         }
         // The split passes of one frame share one run, so they agree on the flags (and the average restarts once).
         if (m_state->preparedFrame != update->frameNumber) {
-            m_state->prepared = PrepareLocked(*update);
+            m_state->prepared = PrepareLocked(*update, false);
             m_state->preparedFrame = update->frameNumber;
         }
+    }
+    // A staged recording (UpdateContext::stagedRun, M7 step 2): the run as Update will make it for the new graph's run stagedRun,
+    // from the stand-in frame and without touching the shared state (Update does not run when staged). In a frame it takes nothing.
+    void TakeFrameValues(const org::UpdateExecutionContext& execution) override {
+        const auto* update = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr;
+        m_staged.reset();
+        if (!update || update->stagedRun == UINT32_MAX) return;
+        std::scoped_lock lock(m_state->mutex);
+        m_staged = PrepareLocked(*update, true);
     }
     // The run as Update made it (Revision is asked after Update), without what the shaders read from the per-frame buffer.
     void Revision(std::vector<uint64_t>& out) const {
@@ -348,7 +358,9 @@ private:
     StochasticSampleFrame MakeFrame() const {
         StochasticSampleFrame frame{};
         frame.system = m_system;
-        {
+        if (m_staged) {
+            frame.run = *m_staged;
+        } else {
             std::scoped_lock lock(m_state->mutex);
             frame.run = m_state->prepared;
         }
@@ -364,8 +376,10 @@ private:
     }
 
     // One frame's constants and flags, with the frame-to-frame bookkeeping (guiding history, the running average's restarts).
-    // Called once per frame, under the state's mutex.
-    StochasticSampleRun PrepareLocked(const UpdateContext& update) const {
+    // Called once per frame, under the state's mutex. Staged (TakeFrameValues): the flags of the new graph's run update.stagedRun,
+    // whose history is valid from its second run on, and no bookkeeping.
+    StochasticSampleRun PrepareLocked(const UpdateContext& update, bool staged) const {
+        const bool ranBefore = staged && update.stagedRun > 0u;
         StochasticSampleRun frame{};
         frame.width = update.renderResolution.x;
         frame.height = update.renderResolution.y;
@@ -394,22 +408,27 @@ private:
                     if (m_resources->gradient
                         && SettingsManager::GetInstance().getSettingGetter<bool>("stochasticLightingVisibilityGradient")()) {
                         frame.flags |= STOCHASTIC_FLAG_GRADIENT;
-                        if (m_state->lastGradientFrame + 1u == update.frameNumber) frame.flags |= STOCHASTIC_FLAG_GRADIENT_VALID;
-                        m_state->lastGradientFrame = update.frameNumber;
+                        if (staged ? ranBefore : m_state->lastGradientFrame + 1u == update.frameNumber) frame.flags |= STOCHASTIC_FLAG_GRADIENT_VALID;
+                        if (!staged) m_state->lastGradientFrame = update.frameNumber;
                     }
                 }
             }
             if (SettingsManager::GetInstance().getSettingGetter<bool>("stochasticLightingGuiding")()) {
                 frame.flags |= STOCHASTIC_FLAG_GUIDING;
-                if (m_state->lastGuidedFrame + 1u == update.frameNumber) frame.flags |= STOCHASTIC_FLAG_HISTORY_VALID;
-                m_state->lastGuidedFrame = update.frameNumber;
+                if (staged ? ranBefore : m_state->lastGuidedFrame + 1u == update.frameNumber) frame.flags |= STOCHASTIC_FLAG_HISTORY_VALID;
+                if (!staged) m_state->lastGuidedFrame = update.frameNumber;
             }
-            m_state->lastFrame = update.frameNumber;
+            if (!staged) m_state->lastFrame = update.frameNumber;
         }
         if (!m_accumulate) {
             return frame;
         }
         frame.flags |= STOCHASTIC_FLAG_ACCUMULATE;
+        // Staged: the new graph's average restarts at its first run (its state holds no scene yet), and holds after it.
+        if (staged) {
+            if (!ranBefore) frame.flags |= STOCHASTIC_FLAG_RESTART_ACCUMULATION;
+            return frame;
+        }
         // Any change restarts the average: the camera (unjittered, since the upscaler's jitter moves every frame and spreads
         // the samples over the pixel anyway), any light's row, and the BVH. The light tables' revision and the resident texture
         // bytes are no use here: both change every frame with nothing visible changing (lights are re-uploaded each frame, and
@@ -465,6 +484,7 @@ private:
     std::shared_ptr<org::ResourceGroup> m_slabs;
     std::shared_ptr<StochasticLightingResources> m_resources;
     std::shared_ptr<StochasticSampleState> m_state;
+    std::optional<StochasticSampleRun> m_staged;  // TakeFrameValues' for a staged recording
     StochasticLightingPassMode m_mode = StochasticLightingPassMode::Reference;
     bool m_accumulate = true;
     StochasticSampleKernel m_kernel = StochasticSampleKernel::Single;

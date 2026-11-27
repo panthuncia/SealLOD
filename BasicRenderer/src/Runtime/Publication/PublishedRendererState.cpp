@@ -1,6 +1,7 @@
 #include <BasicRenderer/Streaming/PublishedRendererState.h>
 
 #include <chrono>
+#include <format>
 #include <algorithm>
 #include <stdexcept>
 #include <string>
@@ -508,6 +509,11 @@ bool RendererStatePublisher::PublishPatch(PublishedStatePatch patch) {
             for (const auto& entry : prior.catalogEntries) superseded &= keyCovered(entry.first, false);
             for (const auto& entry : prior.catalogSelections) superseded &= keyCovered(entry.first, true);
             if (!superseded) continue;
+            // A preparation under way finishes and can be committed: Commit applies it, or rejects it when a newer one went first.
+            // Cancelling it too starved publication when manifests came faster than one preparation (the start stall: the light
+            // table's root advanced every Update while frames waited for the material root, and every patch with the material root
+            // was cancelled before its preparation finished).
+            if (pending->started.load(std::memory_order_acquire) && !pending->ready.load(std::memory_order_acquire)) continue;
             pending->cancelled.store(true, std::memory_order_release);
             pending->failed.store(true, std::memory_order_relaxed);
             pending->ready.store(true, std::memory_order_release);
@@ -527,6 +533,7 @@ bool RendererStatePublisher::PublishPatch(PublishedStatePatch patch) {
         // A task service can retain a completed callable. Consume its captures
         // on entry so completion, cancellation and failure all release them.
         auto pending = std::move(candidate);
+        pending->started.store(true, std::memory_order_release);
         auto capturedInputs = std::move(inputs);
         try {
             for (auto& [index, captured] : capturedInputs) {
@@ -847,6 +854,27 @@ RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) 
         } else rebuild();
     }
     return result;
+}
+
+std::string RendererStatePublisher::DescribePending() const {
+    std::lock_guard lock(m_mutex);
+    auto text = std::format("active epoch {} candidate {} patches {}:", m_active ? m_active->epoch : 0u,
+        static_cast<bool>(m_candidate.state), m_patches.size());
+    for (const auto& pending : m_patches) {
+        std::uint64_t mask = 0;
+        for (std::size_t index = 0; index < pending->patch.fragments.size(); ++index) {
+            if (pending->patch.fragments[index]) mask |= 1ull << index;
+        }
+        text += std::format(" [fragments 0x{:x} source {} base {} ready {} failed {} cancelled {} worker {} baseIsActive {} prepared {}]",
+            mask, pending->patch.sourceEpoch, pending->base ? pending->base->epoch : 0u,
+            pending->ready.load(std::memory_order_acquire), pending->failed.load(std::memory_order_relaxed),
+            pending->cancelled.load(std::memory_order_acquire), pending->materializeOnWorker, pending->base == m_active,
+            static_cast<bool>(pending->prepared));
+    }
+    text += std::format("; committed {} rejected base {} regressions {} preconditions {} rebased {} candidates {}", m_stats.committed,
+        m_stats.rejectedBaseEpoch, m_stats.rejectedFragmentRegressions, m_stats.rejectedPatchPreconditions, m_stats.rebasedPatches,
+        m_stats.candidates);
+    return text;
 }
 
 void RendererStatePublisher::SetCandidateRejectedCallback(std::function<void(std::uint64_t)> callback) {

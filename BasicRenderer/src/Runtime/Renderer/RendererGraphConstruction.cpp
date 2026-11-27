@@ -502,6 +502,21 @@ std::shared_ptr<br::render::FrameBuildJob> Renderer::StartFrameBuild(br::render:
         // light grid of that render size.
         auto update = std::make_shared<UpdateContext>(*lastUpdate);
         auto render = std::make_shared<RenderContext>(*m_lastFrameRender);
+        // The views as the first frame after the attach has them (MakeBuildUpdateContext: a resize's attach gives the primary view
+        // the build's depth maps, visibility buffer and sizes), in both contexts: passes take their values from either.
+        render->viewFamily = update->viewFamily;
+        if (frameBuild.inputs.camera) {
+            const auto& built = frameBuild.inputs.camera->info;
+            for (auto* camera : { &update->primaryCamera, &render->primaryCamera }) {
+                auto& info = camera->info;
+                info.numDepthMips = built.numDepthMips;
+                info.depthResX = built.depthResX;
+                info.depthResY = built.depthResY;
+                info.lodResY = built.lodResY;
+                info.uvScaleToNextPowerOfTwo = built.uvScaleToNextPowerOfTwo;
+            }
+        }
+        if (frameBuild.inputs.depth.linearDepthMap) render->primaryDepthMap = frameBuild.inputs.depth;
         if (const auto& sizes = frameBuild.inputs.resolution; sizes && sizes->render.x && sizes->render.y) {
             update->renderResolution = render->renderResolution = sizes->render;
             update->outputResolution = render->outputResolution = sizes->output;
@@ -510,8 +525,28 @@ std::shared_ptr<br::render::FrameBuildJob> Renderer::StartFrameBuild(br::render:
                 settings.getSettingGetter<uint32_t>(LightGridTileSizeSettingName)(), settings.getSettingGetter<uint32_t>(LightGridSlicesSettingName)());
             update->lightClusterSize = render->lightClusterSize = { grid.tilesX, grid.tilesY, grid.slices };
         }
+        // Runs after the first: a view whose depth map is new (a resize's) has its history from the second run on, as the frames'
+        // own selections give it (DepthHistoryPublicationService::Select). Only whether there is one is read ahead (the depth tables).
+        auto laterUpdate = std::make_shared<UpdateContext>(*update);
+        auto laterRender = std::make_shared<RenderContext>(*render);
+        if (update->viewFamily) {
+            auto family = std::make_shared<br::render::PreparedViewFamilyState>(*update->viewFamily);
+            for (auto& view : family->views)
+                if (view.linearDepthMap && !view.depthHistory)
+                    view.depthHistory = { view.linearDepthMap, view.linearDepthMap->GetBackingGeneration(), 0, (std::max<uint64_t>)(update->frameNumber, 1), nullptr };
+            laterUpdate->viewFamily = laterRender->viewFamily = std::move(family);
+        }
+        update->stagedRun = 0;
+        laterUpdate->stagedRun = 1;
+        job->stagedLaterFrame = std::make_shared<const br::render::RendererFrameInputs>(std::move(laterUpdate), std::move(laterRender),
+            br::render::PrimaryCameraFrameUpload{});
         job->stagedFrame = std::make_shared<const br::render::RendererFrameInputs>(std::move(update), std::move(render), br::render::PrimaryCameraFrameUpload{});
         job->stagedDeltaTime = lastUpdate->deltaTime;
+        if (const auto& objects = frameBuild.inputs.resolution) {
+            const auto swapchain = SettingsManager::GetInstance().getSettingGetter<DirectX::XMUINT2>("outputResolution")();
+            job->drainsAtAttach = objects->recreateSwapchain || objects->output.x != swapchain.x || objects->output.y != swapchain.y;
+            job->swapsPrimaryDepth = objects->primaryDepth.has_value();
+        }
     }
     job->started = std::chrono::steady_clock::now();
     job->prepareMs = std::chrono::duration<double, std::milli>(job->started - begin).count();
@@ -636,14 +671,45 @@ void Renderer::RunFrameBuild(br::render::FrameBuildJob& job) {
         // (Visibility, until it converts) and says why. Each copy's first run confirms its recording against its own frame data.
         if (built && job.stagedFrame && !m_useGraphInstance && !job.installed && job.pipelineFailures.empty()) {
             BT_ZONE_SCOPE("Renderer::RunFrameBuild::StagedRecordings");
-            org::UpdateExecutionContext frame{};
-            frame.resolverCaptureContext = job.captureContext;
-            frame.hostData = job.stagedFrame.get();
-            frame.ownedHostData = job.stagedFrame;
-            frame.deltaTime = job.stagedDeltaTime;
+            // By run (M7 step 2) when the attach resizes the swapchain: the first run's frame, then the later runs', each copy
+            // recorded for the run that takes it (the drain frees every copy, so the new graph's runs take them in order). Every
+            // copy (4 with three frames in flight), except Visibility's two: they cover the attach frame and the next, and the
+            // later copies record at their first runs (BASICRENDERER_STAGED_RUNS=N stages N runs of every epoch, by run, always).
+            static const uint32_t stagedRunsOverride = [] {
+                const char* value = std::getenv("BASICRENDERER_STAGED_RUNS");
+                return value && value[0] ? static_cast<uint32_t>(std::max(1, std::atoi(value))) : 0u;
+            }();
+            constexpr uint32_t kEveryCopy = 8u;
+            std::vector<org::UpdateExecutionContext> runs(kEveryCopy);
+            for (uint32_t run = 0; run < kEveryCopy; ++run) {
+                auto& frame = runs[run];
+                const auto& host = run == 0 || !job.stagedLaterFrame ? job.stagedFrame : job.stagedLaterFrame;
+                frame.resolverCaptureContext = job.captureContext;
+                frame.hostData = host.get();
+                frame.ownedHostData = host;
+                frame.deltaTime = job.stagedDeltaTime;
+            }
             for (auto& entry : job.graphs) {
                 if (!entry.graph || !entry.graph->Built()) continue;
-                job.staged.push_back({ entry.hostEpoch, m_frameHost->RecordStagedCopies(*entry.graph, frame) });
+                if (job.swapsPrimaryDepth && entry.hostEpoch == br::render::HostEpochOf(br::render::kPostEpoch)
+                    && entry.hostEpoch != br::render::HostEpochOf(br::render::kVisibilityEpoch)) {
+                    org::GraphHost::StagedRecordings skipped;
+                    skipped.why = "not recorded: the attach changes the depth map group its depth history pass declares";
+                    job.staged.push_back({ entry.hostEpoch, skipped });
+                    continue;
+                }
+                // Without a swapchain resize the copies the new graph's first runs take are still in flight at its attach, so its
+                // runs take them in turn from wherever the turn is (GraphHost::TakeSyncCopy): every copy is recorded for the first
+                // run, the one that matters most (the attach frame), as before.
+                if (!job.drainsAtAttach && !stagedRunsOverride) {
+                    job.staged.push_back({ entry.hostEpoch, m_frameHost->RecordStagedCopies(*entry.graph, runs.front()) });
+                    continue;
+                }
+                uint32_t count = kEveryCopy;
+                if (stagedRunsOverride) count = stagedRunsOverride;
+                else if (entry.hostEpoch == br::render::HostEpochOf(br::render::kVisibilityEpoch)) count = 2u;
+                job.staged.push_back({ entry.hostEpoch, m_frameHost->RecordStagedCopies(*entry.graph,
+                    std::span<const org::UpdateExecutionContext>(runs.data(), (std::min<size_t>)(count, runs.size()))) });
             }
         }
     }

@@ -79,10 +79,18 @@ void EmitWindTelemetry(const std::string& line)
 	spdlog::info("{}", line);
 	const auto path = WindTelemetryPath();
 	if (path.empty()) return;
+	// Kept open: opening the file for each line (through MO2's virtual file system) was about 0.5 ms a line.
 	static std::mutex mutex;
+	static std::ofstream output;
+	static std::filesystem::path openPath;
 	const std::scoped_lock lock(mutex);
-	std::ofstream output(path, std::ios::app);
-	if (output) output << line << '\n';
+	if (openPath != path) {
+		output.close();
+		output.clear();
+		output.open(path, std::ios::app);
+		openPath = path;
+	}
+	if (output) output << line << '\n' << std::flush;
 }
 
 struct WindBoneGPU {
@@ -208,6 +216,40 @@ std::array<std::uint32_t, 2> ResidentFieldSliceCapacities(const ProceduralWindRu
     return capacities;
 }
 
+} // namespace
+
+// A skeleton's wind types, bones and remaps (relative to the block), built once per skeleton and profile revision.
+struct WindTypeBlock {
+    std::vector<WindTypeGPU> types;          // firstBone / remapOffset relative to the block
+    std::vector<WindBoneGPU> bones;          // parentEntry relative to the block
+    std::vector<std::uint32_t> remaps;
+    std::string layoutSummary;
+};
+
+// The type blocks of the scene's wind skeletons, shared by every graph's wind passes (ProceduralWindExtension). A new graph's first
+// Update finds the blocks the running graph built and only concatenates them (building them was about 3 ms of Visibility's first
+// frame after an attach). An entry whose skeleton is gone is built again: a new skeleton can take its address.
+struct WindTypeBlockCache {
+    struct Entry {
+        std::weak_ptr<const Skeleton> skeleton;
+        std::shared_ptr<const WindTypeBlock> block;
+    };
+    std::mutex mutex;
+    std::uint64_t profileRevision = ~0ull;
+    std::unordered_map<const Skeleton*, Entry> blocks;
+    // What the wind telemetry last logged, for all graphs: a new graph with the same layout logs nothing. Each graph logged its
+    // layout (several KB through spdlog and an appended file) at its first Update, most of the 3 ms that pass took at an attach.
+    std::string loggedLayoutSummary;
+    std::uint32_t loggedRegisteredTypes = ~0u;
+    std::uint32_t loggedPlacementCount = ~0u;
+    // The capacities the running graph's wind buffers grew to (WindSharedResources::ForEachSizedBuffer order). A new graph makes
+    // its buffers at these sizes on the build thread (SeedDeclarations), so its first Update does not grow them on the render thread
+    // (about 1.5 ms of that Update), and a staged recording binds the backings its first run uses.
+    std::vector<std::uint32_t> capacities;
+};
+
+namespace {
+
 struct WindSharedResources {
     std::shared_ptr<org::GloballyIndexedResource> inverseBindResource;
     // What the passes' declarations depend on (Declared): whether the inverse-bind table and the placement buffers are
@@ -238,13 +280,35 @@ struct WindSharedResources {
         if (!placementVersion || !activePlacementVersion) return;
         skinnedPlacements = placementVersion->resource;
         activeSkinnedPlacements = activePlacementVersion->resource;
+        {
+            std::vector<std::uint32_t> capacities;
+            {
+                std::scoped_lock lock(typeBlocks->mutex);
+                capacities = typeBlocks->capacities;
+            }
+            size_t index = 0;
+            ForEachSizedBuffer([&](auto& buffer) {
+                if (index < capacities.size() && capacities[index] > buffer->Capacity()) buffer->Resize(capacities[index]);
+                ++index;
+            });
+        }
         // The membership table follows the resident transforms whether or not any wind type is registered: sized here as the
         // first UpdateTypes would, so a recording of the new graph made ahead (staged, M6 step 9) still binds its backing.
         visibleSkeletonMembership->EnsureSize((std::max)(1u, static_cast<std::uint32_t>(publishedObjects->residentTransformCount)));
     }
     bool seeded = false;
-    explicit WindSharedResources(std::shared_ptr<ProceduralWindRuntime> runtimeIn, br::ReadbackCaptureService* readbackServiceIn)
-        : WindSharedResources(runtimeIn, readbackServiceIn, ResidentFieldSliceCapacities(*runtimeIn)) {}
+    // The buffers UpdateTypes grows to the scene's wind types and placements.
+    template <class F>
+    void ForEachSizedBuffer(F&& f)
+    {
+        f(boneEntries); f(boneRemaps); f(baseTypeLookup); f(windTypes); f(activeInstances); f(typeCounters);
+        f(processedTypeCounts); f(deferredEntries); f(indirectCommands); f(allocationRecords); f(visibleSkeletons);
+    }
+    WindSharedResources(std::shared_ptr<ProceduralWindRuntime> runtimeIn, br::ReadbackCaptureService* readbackServiceIn,
+        std::shared_ptr<WindTypeBlockCache> blockCacheIn)
+        : WindSharedResources(runtimeIn, readbackServiceIn, ResidentFieldSliceCapacities(*runtimeIn)) {
+        if (blockCacheIn) typeBlocks = std::move(blockCacheIn);
+    }
     // The field slices are made at the resident pair's size: the first UpdateFieldPair of a new graph then fills them in place,
     // so a recording of the graph made ahead (staged, M6 step 9) still binds their backings at its first run.
     WindSharedResources(std::shared_ptr<ProceduralWindRuntime> runtimeIn, br::ReadbackCaptureService* readbackServiceIn,
@@ -363,6 +427,8 @@ struct WindSharedResources {
 
     void UpdateFieldPair()
     {
+        // Every frame asks; the field changes rarely. Copying the pair to compare its revision was about 50 us of each frame.
+        if (fieldReady && runtime->ResidentPairRevision() == fieldRevision) return;
         const auto pair = runtime->SnapshotResidentPair();
         if (!pair.valid || (pair.revision == fieldRevision && fieldReady)) return;
         bool ready = true;
@@ -418,13 +484,6 @@ struct WindSharedResources {
     // entries with block-relative offsets and no instance slot. Blocks depend only
     // on the skeleton and the profile revision, so streaming instances in and out
     // concatenates cached blocks instead of re-deriving every bone.
-    struct WindTypeBlock {
-        std::vector<WindTypeGPU> types;          // firstBone / remapOffset relative to the block
-        std::vector<WindBoneGPU> bones;          // parentEntry relative to the block
-        std::vector<std::uint32_t> remaps;
-        std::string layoutSummary;
-    };
-
     std::shared_ptr<const WindTypeBlock> BuildTypeBlock(const Skeleton& typeSkeleton) const
     {
         auto block = std::make_shared<WindTypeBlock>();
@@ -585,9 +644,10 @@ struct WindSharedResources {
     void RebuildLayout(const br::render::PublishedPoseState& publishedPoses, std::uint64_t profileRevision)
     {
         BT_ZONE_SCOPE("ProceduralWind::UpdateTypes::Layout");
-        if (typeBlockCacheProfileRevision != profileRevision) {
-            typeBlockCache.clear();
-            typeBlockCacheProfileRevision = profileRevision;
+        std::scoped_lock blockLock(typeBlocks->mutex);
+        if (typeBlocks->profileRevision != profileRevision) {
+            typeBlocks->blocks.clear();
+            typeBlocks->profileRevision = profileRevision;
         }
         std::vector<WindBoneGPU> next;
         std::vector<std::uint32_t> nextRemaps;
@@ -612,9 +672,9 @@ struct WindSharedResources {
                 continue;
             }
             liveSkeletons.insert(typeSkeleton);
-            auto& cached = typeBlockCache[typeSkeleton];
-            if (!cached) cached = BuildTypeBlock(*typeSkeleton);
-            const auto& block = *cached;
+            auto& cached = typeBlocks->blocks[typeSkeleton];
+            if (!cached.block || cached.skeleton.expired()) cached = { instance.baseSkeleton, BuildTypeBlock(*typeSkeleton) };
+            const auto& block = *cached.block;
             const std::uint32_t firstVariant = static_cast<std::uint32_t>(types.size());
             firstVariantByBaseSkeleton.emplace(typeSkeleton, firstVariant);
             sourceSlotToBaseType[instance.instanceSlot] = firstVariant;
@@ -637,10 +697,10 @@ struct WindSharedResources {
             }
             nextRemaps.insert(nextRemaps.end(), block.remaps.begin(), block.remaps.end());
         }
-        // Drop blocks for skeletons that left the scene so the cache follows residency.
-        for (auto it = typeBlockCache.begin(); it != typeBlockCache.end();) {
-            if (liveSkeletons.contains(it->first)) ++it;
-            else it = typeBlockCache.erase(it);
+        // Drop blocks for skeletons that are gone. Another graph's (the next one's) may still use one that left this one's scene.
+        for (auto it = typeBlocks->blocks.begin(); it != typeBlocks->blocks.end();) {
+            if (liveSkeletons.contains(it->first) || !it->second.skeleton.expired()) ++it;
+            else it = typeBlocks->blocks.erase(it);
         }
         lastTypes = std::move(types);
         lastSourceSlotToBaseType = sourceSlotToBaseType;
@@ -650,9 +710,9 @@ struct WindSharedResources {
         boneEntries->ReplaceData(std::move(next));
         boneRemaps->ReplaceData(std::move(nextRemaps));
         baseTypeLookup->ReplaceData(std::move(sourceSlotToBaseType));
-        if (layoutSummary != lastLoggedLayoutSummary) {
-            lastLoggedLayoutSummary = layoutSummary;
-            EmitWindTelemetry(fmt::format("ProceduralWind skeleton LOD layouts:{}", lastLoggedLayoutSummary));
+        if (layoutSummary != typeBlocks->loggedLayoutSummary) {
+            typeBlocks->loggedLayoutSummary = layoutSummary;
+            EmitWindTelemetry(fmt::format("ProceduralWind skeleton LOD layouts:{}", layoutSummary));
         }
     }
 
@@ -799,9 +859,22 @@ struct WindSharedResources {
         visibleSkeletons->EnsureSize((std::max)(1u, residentPlacementCount));
         visibleSkeletonMembership->EnsureSize((std::max)(1u, residentTransformCount));
         activeBoneCount = std::min(lastRequestedBoneCount, boneEntries->ResidentCapacity());
+        {
+            std::vector<std::uint32_t> capacities;
+            ForEachSizedBuffer([&](auto& buffer) { capacities.push_back(buffer->Capacity()); });
+            std::scoped_lock lock(typeBlocks->mutex);
+            typeBlocks->capacities = std::move(capacities);
+        }
         TracyPlot("ProceduralWind.CandidatePlacements", static_cast<std::int64_t>(residentPlacementCount));
         TracyPlot("ProceduralWind.RegisteredTypes", static_cast<std::int64_t>(registeredTypes));
-        if (registeredTypes != lastLoggedRegisteredTypes || residentPlacementCount != lastLoggedPlacementCount) {
+        bool logTransient = false;
+        {
+            std::scoped_lock logLock(typeBlocks->mutex);
+            logTransient = registeredTypes != typeBlocks->loggedRegisteredTypes || residentPlacementCount != typeBlocks->loggedPlacementCount;
+            typeBlocks->loggedRegisteredTypes = registeredTypes;
+            typeBlocks->loggedPlacementCount = residentPlacementCount;
+        }
+        if (logTransient) {
             EmitWindTelemetry(fmt::format(
                 "ProceduralWind transient: registeredVariants={} typeSlots={} typeBones={} activePlacementEntries={} matrixCapacity={} bucketEntries={} legacyBucketEntries={} distance=[{},{}]",
                 registeredTypes, typeCount, activeBoneCount, residentPlacementCount,
@@ -809,16 +882,13 @@ struct WindSharedResources {
                 static_cast<std::uint64_t>(typeCount) * placementCapacity,
                 update->proceduralWind.innerRadius,
                 update->proceduralWind.outerRadius));
-            lastLoggedRegisteredTypes = registeredTypes;
-            lastLoggedPlacementCount = residentPlacementCount;
         }
         AdvanceAndPublishFrame(context.deltaTime, update->proceduralWind);
         RequestTelemetryReadback();
         TracyPlot("ProceduralWind.SimulatedBones", static_cast<std::int64_t>(activeBoneCount));
     }
 
-    std::unordered_map<const Skeleton*, std::shared_ptr<const WindTypeBlock>> typeBlockCache;
-    std::uint64_t typeBlockCacheProfileRevision = ~0ull;
+    std::shared_ptr<WindTypeBlockCache> typeBlocks = std::make_shared<WindTypeBlockCache>();
     std::vector<WindTypeGPU> lastTypes;
     std::vector<std::uint32_t> lastSourceSlotToBaseType;
     std::uint32_t lastLookupCount = 0u;
@@ -854,8 +924,6 @@ struct WindSharedResources {
     std::uint32_t residentPlacementCount = 0u;
     std::uint32_t activeSkinnedPlacementResidentSize = 0u;
     std::uint32_t residentTransformCount = 0u;
-    std::uint32_t lastLoggedRegisteredTypes = ~0u;
-    std::uint32_t lastLoggedPlacementCount = ~0u;
 	std::uint32_t registeredTypeCount = 0u;
 	std::uint64_t lastActiveInstanceRevision = ~0ull;
 	std::uint64_t lastProfileRevision = ~0ull;
@@ -863,7 +931,6 @@ struct WindSharedResources {
 	std::uint32_t lastStructuralPlacementCapacity = ~0u;
 	std::uint32_t lastStructuralPlacementCount = ~0u;
 	const org::GloballyIndexedResource* lastActivePlacementsBuffer = nullptr;
-	std::string lastLoggedLayoutSummary;
     float nextTelemetrySeconds = 2.0f;
     float elapsedSeconds = 0.0f;
 	float previousElapsedSeconds = 0.0f;
@@ -1552,11 +1619,12 @@ private:
 
 } // namespace
 
-ProceduralWindExtension::ProceduralWindExtension(std::shared_ptr<ProceduralWindRuntime> runtime) : m_runtime(std::move(runtime)) {}
+ProceduralWindExtension::ProceduralWindExtension(std::shared_ptr<ProceduralWindRuntime> runtime)
+    : m_runtime(std::move(runtime)), m_typeBlocks(std::make_shared<WindTypeBlockCache>()) {}
 
 void ProceduralWindExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& out)
 {
-    auto resources = std::make_shared<WindSharedResources>(m_runtime, br::GetReadbackCaptureService());
+    auto resources = std::make_shared<WindSharedResources>(m_runtime, br::GetReadbackCaptureService(), m_typeBlocks);
 	rg.RegisterResource("Builtin::DynamicWind::VisibleSkeletons", resources->visibleSkeletons);
 	rg.RegisterResource("Builtin::DynamicWind::VisibleSkeletonCounter", resources->visibleSkeletonCounter);
 	rg.RegisterResource("Builtin::DynamicWind::VisibleSkeletonMembership", resources->visibleSkeletonMembership);

@@ -49,6 +49,9 @@ private:
         std::wstring outputFile;
         std::function<void()> callback;
         uint64_t fenceValue = 0;
+        // Set when the copy was queued behind the frame host's submission thread and failed there (ExternalClient::Signal::failed).
+        // Its fence value is signalled anyway, so the request is dropped then: the failure callback queued it again.
+        std::shared_ptr<const std::atomic<bool>> failed;
     };
 
     struct State {

@@ -680,6 +680,7 @@ bool CLodRayTracingSystem::EnsureInitialized(rhi::Device device, const RayTracin
 
     m_tlasInstanceCount = m_limits.maxInstances;
     m_tlasBuildCount = m_tlasInstanceCount; // Until a count has been read back.
+    m_tlasCountRead = false;
     m_sliceTlasBuildCount.assign(m_framesInFlight, m_tlasBuildCount);
     m_stats.initialized = true;
     if (m_ommEnabled) {
@@ -936,18 +937,26 @@ void CLodRayTracingSystem::BeginFrame(MeshManager& meshManager) {
     }
     {
         // The next TLAS covers what this slice counted with a quarter more and 4k rows of headroom, rounded to 4k. It grows at
-        // once, and shrinks only after it has been twice too large for 120 frames in a row. A count past the bound the slice
-        // was built with lost the rows past it for that frame.
+        // once, to at least twice its rows, and shrinks only after it has been twice too large for 1200 frames in a row. The
+        // row count is in the scene passes' revision, so every change records Visibility's scene batch again: an orbiting camera's
+        // instance count (about 150 to 6500 here) moved it every few seconds. The first count read back sets it. A count past the
+        // bound the slice was built with lost the rows past it for that frame.
         const uint32_t built = m_sliceTlasBuildCount[sliceIndex];
         if (m_stats.instances > built) m_stats.clippedInstancesTotal += m_stats.instances - built;
         const uint64_t wanted = ((uint64_t(m_stats.instances) * 5u / 4u + 4096u + 4095u) / 4096u) * 4096u;
         const uint32_t target = static_cast<uint32_t>(std::min<uint64_t>(wanted, m_tlasInstanceCount));
-        if (target > m_tlasBuildCount) {
+        if (!m_tlasCountRead) {
+            m_tlasCountRead = true;
             m_tlasBuildCount = target;
             m_tlasShrinkFrames = 0;
         }
+        else if (target > m_tlasBuildCount) {
+            m_tlasBuildCount = static_cast<uint32_t>(std::min<uint64_t>(std::max<uint64_t>(target, uint64_t(m_tlasBuildCount) * 2u),
+                m_tlasInstanceCount));
+            m_tlasShrinkFrames = 0;
+        }
         else if (target * 2u < m_tlasBuildCount) {
-            if (++m_tlasShrinkFrames >= 120u) {
+            if (++m_tlasShrinkFrames >= 1200u) {
                 m_tlasBuildCount = target;
                 m_tlasShrinkFrames = 0;
             }

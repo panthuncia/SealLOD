@@ -27,6 +27,8 @@ public:
     WindProfileSet ResolveProfile(std::string_view modelIdentity) const;
     std::uint64_t ProfileRevision() const;
     ResidentWindPair SnapshotResidentPair() const;
+    // The resident pair's revision, or 0 while it is not valid: a check that copies nothing (SnapshotResidentPair copies both slices).
+    std::uint64_t ResidentPairRevision() const;
     WindState SnapshotWindState() const;
     Float3 SampleWindSkyrim(float x, float y) const;
     std::uint32_t WorldId() const;

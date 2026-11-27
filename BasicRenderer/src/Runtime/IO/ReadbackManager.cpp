@@ -241,8 +241,9 @@ void ReadbackManager::Submit(org::ExternalClient& client, uint32_t queueSlot)
 
     // The textures stay alive through the copy because the requests and inputs hold them until it completes.
     const rhi::TimelinePoint signal{m_readbackFence.GetHandle(), fenceValue};
+    org::ExternalClient::Signal submitted{};
     try {
-        client.Submit(queueSlot, accesses, [&](rhi::CommandList& list) {
+        submitted = client.Submit(queueSlot, accesses, [&](rhi::CommandList& list) {
             for (const auto& copy : copies) {
                 rhi::BufferTextureCopyFootprint region{};
                 region.texture = copy.source;
@@ -252,7 +253,13 @@ void ReadbackManager::Submit(org::ExternalClient& client, uint32_t queueSlot)
                 region.footprint = copy.footprint;
                 list.CopyTextureToBuffer(region);
             }
-        }, {&signal, 1}, std::make_shared<std::vector<ReadbackInfo>>(inputs));
+        }, {&signal, 1}, std::make_shared<std::vector<ReadbackInfo>>(inputs), {}, true, [state = m_state, inputs] {
+            // Queued behind the submission thread and failed there: queue the requests again for a later frame, as a throw does.
+            spdlog::error("ReadbackManager: a queued readback submission failed; retrying next frame");
+            std::scoped_lock lock(state->mutex);
+            if (state->accepting)
+                for (const auto& input : inputs) state->queuedReadbacks.push_back(input);
+        });
     } catch (const std::exception& error) {
         // Nothing was submitted. Queue the requests again for the next frame.
         spdlog::error("ReadbackManager: readback submission failed: {}", error.what());
@@ -262,8 +269,10 @@ void ReadbackManager::Submit(org::ExternalClient& client, uint32_t queueSlot)
         return;
     }
     std::scoped_lock lock(m_state->mutex);
-    for (auto& request : requests)
+    for (auto& request : requests) {
+        request.failed = submitted.failed;
         m_state->readbackRequests.push_back(std::move(request));
+    }
 }
 
 void ReadbackManager::ProcessReadbackRequests() {
@@ -275,6 +284,7 @@ void ReadbackManager::ProcessReadbackRequests() {
         remainingRequests.reserve(m_state->readbackRequests.size());
         for (auto& request : m_state->readbackRequests) {
             if (completedValue >= request.fenceValue) {
+                if (request.failed && request.failed->load(std::memory_order_acquire)) continue;  // queued again
                 if (request.callback)
                     completedCallbacks.push_back(std::move(request.callback));
             }

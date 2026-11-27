@@ -274,7 +274,13 @@ void FrameReadbackCaptures::SubmitAfterGraph(org::ExternalClient& client, uint32
 			for (auto& request : requests) {
 				if (RecordCapture(list, request->resource->GetAPIResource().GetHandle(), *request->resource, *request)) recorded.push_back(request);
 			}
-		}, {}, std::make_shared<std::vector<std::shared_ptr<Request>>>(requests));
+		}, {}, std::make_shared<std::vector<std::shared_ptr<Request>>>(requests), {}, true, [this, requests] {
+			// Queued behind the submission thread and failed there: retried next frame, as a throw is. The service outlives the
+			// graphs' clients, which wait for their queued submissions.
+			spdlog::error("ReadbackCapture: a queued after-graph submission failed, retrying next frame");
+			std::scoped_lock lock(m_mutex);
+			if (m_accepting) for (const auto& request : requests) m_afterGraph.push_back(request);
+		});
 	} catch (const std::exception& error) {
 		spdlog::error("ReadbackCapture: after-graph submission failed, retrying next frame: {}", error.what());
 		std::scoped_lock lock(m_mutex);
@@ -282,7 +288,7 @@ void FrameReadbackCaptures::SubmitAfterGraph(org::ExternalClient& client, uint32
 		return;
 	}
 	std::scoped_lock lock(m_mutex);
-	for (auto& request : recorded) m_inFlight.push_back({signal.timeline, signal.value, std::move(request)});
+	for (auto& request : recorded) m_inFlight.push_back({signal.timeline, signal.value, std::move(request), {}, signal.failed});
 }
 
 void FrameReadbackCaptures::NoteFrameSubmitted(rhi::Timeline frameFence, uint64_t value) {
@@ -307,7 +313,9 @@ void FrameReadbackCaptures::ProcessCompleted() {
 		for (auto it = m_inFlight.begin(); it != m_inFlight.end();) {
 			const bool reached = runtime ? runtime->Reached({it->timeline, it->value})
 				: it->timeline.GetCompletedValue() >= it->value;
-			if (reached) {
+			if (reached && it->failed && it->failed->load(std::memory_order_acquire)) {
+				it = m_inFlight.erase(it);  // queued again by its failure callback
+			} else if (reached) {
 				completed.push_back(std::move(it->request));
 				it = m_inFlight.erase(it);
 			} else {

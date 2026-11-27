@@ -137,6 +137,7 @@ void Renderer::Update(float elapsedSeconds) {
         elapsedSeconds = 0.0f;
     }
     BT_ZONE_SCOPE("Renderer::Update");
+    m_updateBegin = std::chrono::steady_clock::now();
     // Capture input before camera application clears the per-frame mouse delta.
     // Used only by the opt-in camera telemetry stream below.
     const auto cameraTelemetryMovement = movementState;
@@ -1000,6 +1001,7 @@ void Renderer::Update(float elapsedSeconds) {
                     "stateAge={} ms blockers={} error='{}' chain='{}'",
                     diagnostic.desiredRevision, diagnostic.artifact.revision, static_cast<unsigned>(diagnostic.artifact.readiness),
                     diagnostic.stateAge.count() / 1000, diagnostic.blockers.size(), diagnostic.error, diagnostic.blockerChain);
+                spdlog::warn("Renderer: publication state: {}", m_rendererStateRequests->DescribePublication());
                 for (const auto& blocker : diagnostic.blockers) {
                     const auto current = m_rendererStateRequests->Diagnose(blocker.key);
                     spdlog::warn("Renderer: material table root blocker kind={} primary={} variant={} requiredRevision={} "

@@ -42,7 +42,16 @@ struct FrameBuildJob {
     // with the last frame's render values. Null when there are none (the first build, a view that changed): nothing is recorded
     // ahead, and the copies' first runs record.
     std::shared_ptr<const org::IHostExecutionData> stagedFrame;
+    // The same for the new graph's runs after its first (M7 step 2, RecordStagedCopies by run): the views' depth histories valid
+    // (a resize's new depth maps have none at the first run only) and UpdateContext::stagedRun 1. Null with stagedFrame.
+    std::shared_ptr<const org::IHostExecutionData> stagedLaterFrame;
     float stagedDeltaTime = 0.0f;
+    // Its attach resizes the swapchain, which waits for every frame in flight: the new graphs' runs then take their copies in run
+    // order (GraphHost::RecordStagedCopies by run), so only the copies of the first runs are worth recording ahead.
+    bool drainsAtAttach = false;
+    // Its attach gives the primary view the build's depth maps (a new render size): the view manager's depth map group changes
+    // then, and Post's depth history pass declares again at its first run (a new executable), so Post's copies would be stale.
+    bool swapsPrimaryDepth = false;
 
     // Written by the thread that builds: one graph per host epoch of the build (FrameBuild::hostEpochs), in that order.
     struct EpochGraphBuild {

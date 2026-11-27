@@ -423,7 +423,13 @@ void ComputeCullingPass::TakeFrameValues(const org::UpdateExecutionContext& exec
     m_taken = {};
     // The published traversal depth is a value of the frame, not of the pass's declarations: taken here rather than in Update,
     // so a recording made ahead (staged, M6 step 9) names the depth its frame publishes.
-    if (const auto* update = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr) UpdateTraversalDepth(*update);
+    if (const auto* update = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr) {
+        UpdateTraversalDepth(*update);
+        // A staged recording's frame (UpdateContext::stagedRun), whose Update does not run: the view tables as its Update would
+        // take them (which views have depth history differs between a new graph's first run and the later ones). Then the
+        // preparation declares again only if they changed, as in a frame.
+        if (update->stagedRun != UINT32_MAX) m_declaredResourcesChanged = UpdateViewTables(*update);
+    }
     const auto* renderContext = execution.hostData ? execution.hostData->Get<RenderContext>() : nullptr;
     if (!renderContext) return;
     m_taken.hasContext = true;

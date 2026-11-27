@@ -483,6 +483,7 @@ private:
     uint64_t m_readbackBcOffset = 0u;
     uint64_t m_readbackPtlasOffset = 0u; // The first build starts from empty; later ones update in place.
     uint32_t m_tlasShrinkFrames = 0;
+    bool m_tlasCountRead = false;  // a count was read back since the TLAS rows were made
     std::vector<uint32_t> m_sliceTlasBuildCount;
     rhi::QueryPoolPtr m_timers;
     uint64_t m_timerTicksPerSecond = 0;

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 
 #include "BuiltinResources.h"
 #include "Render/PassBuilders.h"
@@ -136,9 +137,16 @@ public:
     void Update(const org::UpdateExecutionContext& execution) override {
         const auto* update = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr;
         StochasticDenoiseRun frame{};
-        if (update) frame = MakeRun(*update);
+        if (update) frame = MakeRun(*update, false);
         std::scoped_lock lock(m_state->mutex);
         m_state->run = frame;
+    }
+    // A staged recording (UpdateContext::stagedRun, M7 step 2): the run as Update will make it for the new graph's run stagedRun,
+    // without touching the shared state (Update does not run when staged). In a frame it takes nothing.
+    void TakeFrameValues(const org::UpdateExecutionContext& execution) override {
+        const auto* update = execution.hostData ? execution.hostData->Get<UpdateContext>() : nullptr;
+        m_staged.reset();
+        if (update && update->stagedRun != UINT32_MAX) m_staged = MakeRun(*update, true);
     }
     // The run as Update made it (Revision is asked after Update), without what the shaders read from the per-frame buffer.
     void Revision(std::vector<uint64_t>& out) const {
@@ -152,7 +160,9 @@ public:
 private:
     StochasticDenoiseFrame MakeFrame() const {
         StochasticDenoiseFrame frame{};
-        {
+        if (m_staged) {
+            frame.run = *m_staged;
+        } else {
             std::scoped_lock lock(m_state->mutex);
             frame.run = m_state->run;
         }
@@ -161,7 +171,8 @@ private:
         return frame;
     }
 
-    StochasticDenoiseRun MakeRun(const UpdateContext& context) const {
+    // Staged: the run update.stagedRun of a new graph, whose history is valid from its second run on, and no bookkeeping.
+    StochasticDenoiseRun MakeRun(const UpdateContext& context, bool staged) const {
         const auto* update = &context;
         StochasticDenoiseRun frame{};
         frame.width = update->renderResolution.x;
@@ -189,6 +200,10 @@ private:
         // Last frame's history is this pass's only if it ran the frame before (not on its first frame after a graph build), in
         // the same domain (a history of radiance is no history of ratios to the guide, and the reverse; without the paired
         // ratio the change history holds no unshadowed estimate; without light-mixture confidence no mixture history was kept).
+        if (staged) {
+            if (update->stagedRun > 0u) frame.flags |= STOCHASTIC_FLAG_HISTORY_VALID;
+            return frame;
+        }
         std::scoped_lock lock(m_state->mutex);
         if (m_state->lastFrame + 1u == update->frameNumber && m_state->lastNormalize == normalize && m_state->lastPaired == paired
             && m_state->lastMixture == mixture && m_state->lastGradient == gradient) {
@@ -260,6 +275,7 @@ private:
     std::shared_ptr<StochasticLightingResources> m_resources;
     StochasticDenoiseStage m_stage = StochasticDenoiseStage::Temporal;
     std::shared_ptr<StochasticDenoiseState> m_state;
+    std::optional<StochasticDenoiseRun> m_staged;  // TakeFrameValues' for a staged recording
     br::PipelineState m_pipeline;
 };
 

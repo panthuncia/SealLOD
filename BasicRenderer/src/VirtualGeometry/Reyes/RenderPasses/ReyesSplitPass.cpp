@@ -140,6 +140,12 @@ ReyesSplitBindings ReyesSplitPass::Declare(org::PassBuilder& declaration)
 
 
 
+void ReyesSplitPass::TakeFrameValues(const org::UpdateExecutionContext& executionContext) {
+    const auto* context = executionContext.hostData ? executionContext.hostData->Get<UpdateContext>() : nullptr;
+    if (!context || context->stagedRun == UINT32_MAX) return;
+    m_declaredResourcesChanged = m_enableViewDepthOcclusion && m_viewDepthTable.Update(context->Views(), m_phaseIndex == 1u);
+}
+
 void ReyesSplitPass::Update(const org::UpdateExecutionContext& executionContext) {
     const auto* context = executionContext.hostData->Get<UpdateContext>();
     m_declaredResourcesChanged = m_enableViewDepthOcclusion

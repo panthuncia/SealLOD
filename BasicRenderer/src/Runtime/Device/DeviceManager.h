@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <string>
 
 #include <rhi.h>
@@ -70,8 +71,16 @@ public:
         return m_pathTracingUnsupportedReason;
     }
 
+    // A device-wide wait (WaitIdle) made off the render thread drains the frame host's submission thread first, so the wait covers
+    // what the frame handed it (BASICRENDERER_SUBMISSION_THREAD). The renderer sets it with its host and clears it at shutdown.
+    void SetSubmissionDrain(std::function<void(const char*)> drain) { m_submissionDrain = std::move(drain); }
+    void DrainSubmissions(const char* why) const {
+        if (m_submissionDrain) m_submissionDrain(why);
+    }
+
 private:
     DeviceManager() = default;
+    std::function<void(const char*)> m_submissionDrain;
 
     void CheckGPUFeatures();
 

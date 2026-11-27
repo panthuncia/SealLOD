@@ -181,9 +181,30 @@ void Renderer::RecordFrameGraphExecution(size_t index, double milliseconds, doub
                 for (const auto& [name, count] : p.names) probe.names[name] += count;
             }
             // Kept recordings (M6 step 3): what the epoch's run did with its kept copy, and why it recorded.
-            if (last.kept != org::RenderGraph::KeptRunOutcome::None) {
+            // With the submission thread the run's outcome comes from the thread's report (RecordSubmittedExecutions).
+            if (last.kept != org::RenderGraph::KeptRunOutcome::None) AddKeptStats(index, index < hosts.size() ? hosts[index] : 0u);
+        }
+        timing.frameEpochs += fmt::format("{}{}: {:.2f} (build {:.2f}, wait {:.2f}, update {:.2f}, execute {:.2f})",
+            timing.frameEpochs.empty() ? "" : ", ", index < hosts.size() ? hosts[index] : 0u, milliseconds, last.buildUs / 1000.0, waitMs,
+            updateMs, executeMs);
+        // A long execute: where it went (diagnostic, M5 step 8).
+        if (executeMs > 8.0) {
+            const auto& e = last.execute;
+            timing.frameEpochs += fmt::format(" [execute: retire {:.2f}, admission {:.2f}, acquire {:.2f}, record {:.2f}, submit {:.2f}, "
+                "commit {:.2f}; {} batches]", e.retireUs / 1000.0, e.admissionUs / 1000.0, e.acquireUs / 1000.0, e.recordUs / 1000.0,
+                e.submitUs / 1000.0, e.commitUs / 1000.0, e.batches);
+        }
+        return;
+    }
+    FinishFrameGraphExecution(milliseconds);
+}
+
+void Renderer::AddKeptStats(size_t index, uint32_t host) {
+    auto& timing = m_frameGraphExecutionTiming;
+    {
+        {
+            {
                 if (timing.kept.size() <= index) timing.kept.resize(index + 1);
-                const uint32_t host = index < hosts.size() ? hosts[index] : 0u;
                 const auto stats = m_frameHost->TakeKeptStats(host);
                 for (auto* into : { &timing.kept[index], &m_keptRecordingTotals[host] }) {
                     into->runs += stats.runs;
@@ -208,18 +229,39 @@ void Renderer::RecordFrameGraphExecution(size_t index, double milliseconds, doub
                 }
             }
         }
-        timing.frameEpochs += fmt::format("{}{}: {:.2f} (build {:.2f}, wait {:.2f}, update {:.2f}, execute {:.2f})",
-            timing.frameEpochs.empty() ? "" : ", ", index < hosts.size() ? hosts[index] : 0u, milliseconds, last.buildUs / 1000.0, waitMs,
-            updateMs, executeMs);
-        // A long execute: where it went (diagnostic, M5 step 8).
-        if (executeMs > 8.0) {
-            const auto& e = last.execute;
-            timing.frameEpochs += fmt::format(" [execute: retire {:.2f}, admission {:.2f}, acquire {:.2f}, record {:.2f}, submit {:.2f}, "
-                "commit {:.2f}; {} batches]", e.retireUs / 1000.0, e.admissionUs / 1000.0, e.acquireUs / 1000.0, e.recordUs / 1000.0,
-                e.submitUs / 1000.0, e.commitUs / 1000.0, e.batches);
-        }
-        return;
     }
+}
+
+void Renderer::RecordSubmittedExecutions() {
+    if (!m_frameHost || !m_frameHost->ExecutionsOnSubmissionThread()) return;
+    auto& timing = m_frameGraphExecutionTiming;
+    const auto& hosts = br::render::FrameHostEpochs();
+    for (const auto& run : m_frameHost->TakeSubmittedExecutions()) {
+        const auto position = static_cast<size_t>(std::find(hosts.begin(), hosts.end(), run.epoch) - hosts.begin());
+        if (position >= hosts.size()) continue;  // the upload epoch's
+        if (timing.threadStageMs.size() <= position) {
+            timing.threadStageMs.resize(position + 1, {});
+            timing.threadRuns.resize(position + 1, 0);
+        }
+        const auto& e = run.execute;
+        const double parts[FrameGraphExecutionTiming::kThreadStages] = {e.retireUs, e.admissionUs, e.acquireUs, e.recordUs, e.submitUs,
+            e.commitUs, run.executeUs - (e.retireUs + e.admissionUs + e.acquireUs + e.recordUs + e.submitUs + e.commitUs), run.signalUs};
+        auto& stages = timing.threadStageMs[position];
+        for (size_t stage = 0; stage < FrameGraphExecutionTiming::kThreadStages; ++stage) stages[stage] += parts[stage] / 1000.0;
+        ++timing.threadRuns[position];
+        if (run.failed) ++timing.threadFailed;
+        if (run.kept != org::RenderGraph::KeptRunOutcome::None) AddKeptStats(position, run.epoch);
+        if (run.executeUs > 8000.0)
+            spdlog::info("Renderer: host epoch {} of host frame {} took {:.2f} ms on the submission thread [retire {:.2f}, admission {:.2f}, "
+                "acquire {:.2f}, record {:.2f}, submit {:.2f}, commit {:.2f}; {} batches]", run.epoch, run.hostFrame, run.executeUs / 1000.0,
+                e.retireUs / 1000.0, e.admissionUs / 1000.0, e.acquireUs / 1000.0, e.recordUs / 1000.0, e.submitUs / 1000.0, e.commitUs / 1000.0,
+                e.batches);
+    }
+}
+
+void Renderer::FinishFrameGraphExecution(double milliseconds) {
+    auto& timing = m_frameGraphExecutionTiming;
+    RecordSubmittedExecutions();
     timing.totalMs += milliseconds;
     timing.worstMs = (std::max)(timing.worstMs, milliseconds);
     // A slow frame, or one of the two frames after an attach (diagnostic): where its render-thread time went, with the
@@ -308,6 +350,41 @@ void Renderer::RecordFrameGraphExecution(size_t index, double milliseconds, doub
                 "mismatches {}{}{}", timing.frames, epoch < hosts.size() ? hosts[epoch] : 0u, kept.audited, kept.auditCompared,
                 kept.auditUncomparable, kept.auditMismatches, names.empty() ? "" : ": ", names);
         }
+    }
+    // The submission thread (M7 step 5): each epoch's execution there by stage, and the thread's own counts.
+    static constexpr const char* kThreadStageNames[FrameGraphExecutionTiming::kThreadStages] = {"retire", "admission", "acquire", "record",
+        "submit", "commit", "executeRest", "signal"};
+    for (size_t epoch = 0; epoch < timing.threadStageMs.size(); ++epoch) {
+        std::string stages;
+        double total = 0.0;
+        for (size_t stage = 0; stage < FrameGraphExecutionTiming::kThreadStages; ++stage) {
+            stages += fmt::format("{}{} {:.3f}", stages.empty() ? "" : ", ", kThreadStageNames[stage], timing.threadStageMs[epoch][stage] / timing.frames);
+            total += timing.threadStageMs[epoch][stage];
+        }
+        spdlog::info("Renderer: frame graph on the submission thread over {} frames, host epoch {}: total {:.3f}, {}; runs {}", timing.frames,
+            epoch < hosts.size() ? hosts[epoch] : 0u, total / timing.frames, stages, timing.threadRuns[epoch]);
+    }
+    if (m_frameHost->SubmissionThreadOn()) {
+        const auto thread = m_frameHost->TakeSubmitThreadStats();
+        const auto describe = [](const auto& byWhy) {
+            std::string text;
+            for (const auto& [why, counts] : byWhy)
+                text += fmt::format("{}{} x{} ({:.2f} ms)", text.empty() ? "" : "; ", why, counts.first, counts.second / 1000.0);
+            return text.empty() ? std::string("none") : text;
+        };
+        spdlog::info("Renderer: submission thread over {} frames: busy {:.3f} ms per frame, {} executions ({} failed, {} reported failed), "
+            "peak depth {}, external submissions queued {}; drains {} ({:.3f} ms per frame): {}; epoch waits {} ({:.3f} ms per frame): {}; "
+            "backpressure waits {} ({:.2f} ms)", timing.frames, thread.busyUs / 1000.0 / timing.frames, thread.executions,
+            thread.failedExecutions, timing.threadFailed, thread.peakDepth, thread.externalQueued, thread.drains,
+            thread.drainUs / 1000.0 / timing.frames, describe(thread.drainsByCaller), thread.epochWaits, thread.epochWaitUs / 1000.0 / timing.frames,
+            describe(thread.epochWaitsByReason), thread.backpressureWaits, thread.backpressureUs / 1000.0);
+    }
+    if (timing.renderThreadFrames) {
+        const double frames = timing.renderThreadFrames;
+        spdlog::info("Renderer: render thread over {} frames: Update + Render {:.3f} ms per frame, of which WaitForFrame {:.3f}, Present {:.3f}, "
+            "present lead wait {:.3f} ({} waits); the rest {:.3f}", timing.renderThreadFrames, timing.renderThreadFrameMs / frames,
+            timing.waitForFrameMs / frames, timing.inlinePresentMs / frames, timing.presentLeadWaitMs / frames, timing.presentLeadWaits,
+            (timing.renderThreadFrameMs - timing.waitForFrameMs - timing.inlinePresentMs - timing.presentLeadWaitMs) / frames);
     }
     timing = {};
     sets.frames = sets.mixed = sets.unknown = 0;
@@ -416,7 +493,9 @@ void Renderer::ExecuteFrameGraph(const org::UpdateExecutionContext& frameContext
     // acquired image at the last responsible point and bind the graph's dynamic
     // backbuffer to that exact image.  Using the CPU frame slot here can record
     // transitions for a presentable image that was not acquired.
-    const uint8_t renderedFrameIndex = m_swapChain
+    // With the submission thread (M7 step 5) the present runs there and reads the image itself: the frame slot advances round
+    // robin, and no graph pass binds the backbuffer.
+    const uint8_t renderedFrameIndex = m_swapChain && !m_submissionThread
         ? static_cast<uint8_t>(m_swapChain->CurrentImageIndex())
         : m_frameIndex;
     if (renderedFrameIndex != m_frameIndex) {
@@ -473,6 +552,11 @@ void Renderer::ExecuteFrameGraph(const org::UpdateExecutionContext& frameContext
             if (m_clodRayTracingSystem && m_clodRayTracingSystem->IsInitialized() && m_pMeshManager) {
                 // Reads back the RT cache's statistics and micromap requests, and records new page slabs.
                 BT_ZONE_SCOPE("Renderer::Render::PrepareRenderContext::CLodRayTracing");
+                // The scene passes recorded at execution (CLodRayTracingSceneOmmPass, CLodRayTracingSceneEndPass) write the frame's
+                // readback slice by the system's frame count. With the submission thread the last frame's may still be queued there:
+                // they go through before the count advances. Normally they have, and this costs nothing.
+                if (m_submissionThread)
+                    for (const auto host : br::render::FrameHostEpochs()) m_frameHost->WaitForEpochExecution(host, "CLod ray tracing frame advance");
                 std::scoped_lock rayTracingLock(m_clodRayTracingSystem->FrameOperationMutex());
                 m_clodRayTracingSystem->AdvanceFrame();
                 m_clodRayTracingSystem->BeginFrame(*m_pMeshManager);
@@ -696,6 +780,10 @@ void Renderer::Render() {
     auto& deviceManager = DeviceManager::GetInstance();
     auto graphicsQueue = deviceManager.GetGraphicsQueue();
 
+    if (m_submissionThread) {
+        // The tail, Present and the frame fence's signal go behind the frame's executions on the submission thread.
+        EnqueuePresent(presentationGraph);
+    } else {
     if (!presentationGraph->GetLastPresentDependency()) {
         basic_telemetry::AddCounter("ORG.PresentationTail.DeferredForRecording");
         static auto lastDeferredLog = std::chrono::steady_clock::time_point{};
@@ -727,6 +815,75 @@ void Renderer::Render() {
         || !currentBackbufferResource->HasHandle()) {
         throw std::runtime_error("Presentation tail has invalid resource bindings");
     }
+    SubmitPresentationTail(*presentationGraph, presentationSource, currentBackbufferResource);
+    basic_telemetry::AddCounter("ORG.PresentationTail.Submitted");
+
+    // Present the frame
+    rhi::Result presentResult = rhi::Result::Ok;
+    runCapturedStage("Present", [&]() {
+        BT_ZONE_SCOPE("Renderer::Render::Present");
+        if (renderGraphBatchTraceEnabled) {
+            spdlog::info("Renderer: frame {} calling Present for slot {}", m_totalFramesRendered, renderedFrameIndex);
+        }
+        // The tail was submitted on the presentation queue immediately before
+        // this call, so queue order covers the copy and Present transition.
+        const auto presentBegin = std::chrono::steady_clock::now();
+        presentResult = m_swapChain->Present(!m_allowTearing);
+        m_lastPresentReturned = std::chrono::steady_clock::now();
+        m_lastPresentMs = std::chrono::duration<double, std::milli>(m_lastPresentReturned - presentBegin).count();
+        m_frameGraphExecutionTiming.inlinePresentMs += m_lastPresentMs;
+        // Where the render thread waits for the display (diagnostic): its frame-start wait for the GPU and Present, per 600 frames.
+        static double presentSum = 0.0, waitSum = 0.0;
+        static uint32_t frames = 0;
+        presentSum += m_lastPresentMs;
+        waitSum += m_lastWaitForFrameMs;
+        if (++frames == 600) {
+            spdlog::info("Renderer: over 600 frames the render thread waited {:.2f} ms per frame for the GPU at the frame's start "
+                "(WaitForFrame) and {:.2f} ms in Present", waitSum / frames, presentSum / frames);
+            presentSum = waitSum = 0.0;
+            frames = 0;
+        }
+    });
+	if (presentResult == rhi::Result::ModeChanged) HandlePresentModeChange(m_swapchainGeneration);
+	if (presentResult != rhi::Result::Ok && presentResult != rhi::Result::ModeChanged) {
+		spdlog::error("Renderer: swapchain presentation failed with {}", rhi::ResultName(presentResult));
+		return;
+	}
+
+    runCapturedStage("SignalFence", [&]() {
+        BT_ZONE_SCOPE("Renderer::Render::SignalFence");
+        // The renderer's slot: WaitForFrame waits on it before the slot's resources are written again.
+        SignalFence(graphicsQueue, m_executedPresentationSlot);
+        // The capture copies this frame recorded complete with its fence.
+        if (m_readbackCaptures) m_readbackCaptures->NoteFrameSubmitted(m_frameFence.Get(), m_currentFrameFenceValue);
+        br::telemetry::nvperf::EndFrameCapture(deviceManager.GetBackend(), graphicsQueue, m_totalFramesRendered);
+    });
+    }
+
+    AdvanceFrameIndex();
+
+    runCapturedStage("ReadbackRequests", [&]() {
+        if (m_readbackCaptures) {
+            BT_ZONE_SCOPE("Renderer::Render::ReadbackRequests");
+            m_readbackCaptures->ProcessCompleted();
+        }
+        if (m_pReadbackManager) {
+            m_pReadbackManager->ProcessReadbackRequests(); // Save images to disk if requested
+        }
+    });
+    PublishFrameTaskGraphCapture();
+    FrameMark;
+    // The render thread's whole frame (M7 step 5): from Update's start to here.
+    auto& timing = m_frameGraphExecutionTiming;
+    if (m_updateBegin != std::chrono::steady_clock::time_point{}) {
+        timing.renderThreadFrameMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - m_updateBegin).count();
+        timing.waitForFrameMs += m_lastWaitForFrameMs;
+        ++timing.renderThreadFrames;
+    }
+}
+
+void Renderer::SubmitPresentationTail(org::RenderGraph& presentationGraph, const std::shared_ptr<org::PixelBuffer>& presentationSource,
+    const std::shared_ptr<org::ExternalTextureResource>& backbuffer) {
     // The copy into the backbuffer goes through the frame graph's external client: the runtime orders it after the
     // frame's write of PresentationColor (its wait and transition), and keeps PresentationColor from its next writer
     // until the copy is done. The backbuffer is not a graph resource; its own barriers leave it ready to present, on
@@ -734,18 +891,18 @@ void Renderer::Render() {
     {
         BT_ZONE_SCOPE("Renderer::Render::PresentationTail");
         const auto graphicsSlot = static_cast<uint32_t>(
-            static_cast<uint8_t>(presentationGraph->GetQueueRegistry().FindGraphicsSlot()));
+            static_cast<uint8_t>(presentationGraph.GetQueueRegistry().FindGraphicsSlot()));
         const org::ResourceState copySource{rhi::ResourceAccessType::CopySource,
             rhi::AccessToLayout(rhi::ResourceAccessType::CopySource, true),
             rhi::RenderSyncFromAccess(rhi::ResourceAccessType::CopySource)};
         const std::array<org::ExternalClient::Access, 1> accesses{{{presentationSource.get(), {}, copySource}}};
-        presentationGraph->GetExternalClient().Submit(graphicsSlot, accesses,
+        presentationGraph.GetExternalClient().Submit(graphicsSlot, accesses,
             [&](rhi::CommandList& list) {
                 rhi::TextureSubresourceRange presentationRange{};
                 presentationRange.mipCount = 1;
                 presentationRange.layerCount = 1;
                 rhi::TextureBarrier backbufferToCopy{};
-                backbufferToCopy.texture = currentBackbufferResource->GetHandle();
+                backbufferToCopy.texture = backbuffer->GetHandle();
                 backbufferToCopy.range = presentationRange;
                 backbufferToCopy.beforeSync = rhi::ResourceSyncState::All;
                 backbufferToCopy.afterSync = rhi::ResourceSyncState::Copy;
@@ -760,13 +917,13 @@ void Renderer::Render() {
                 rhi::TextureCopyRegion sourceRegion{};
                 sourceRegion.texture = presentationSource->GetAPIResource().GetHandle();
                 rhi::TextureCopyRegion destinationRegion{};
-                destinationRegion.texture = currentBackbufferResource->GetHandle();
+                destinationRegion.texture = backbuffer->GetHandle();
                 // A backbuffer of another size than the presentation surface (a swapchain the RHI made again at present, before
                 // the graphs for its size attach): the copy takes the part both have.
-                if (currentBackbufferResource->GetWidth() != presentationSource->GetWidth()
-                    || currentBackbufferResource->GetHeight() != presentationSource->GetHeight()) {
-                    sourceRegion.width = destinationRegion.width = (std::min)(currentBackbufferResource->GetWidth(), presentationSource->GetWidth());
-                    sourceRegion.height = destinationRegion.height = (std::min)(currentBackbufferResource->GetHeight(), presentationSource->GetHeight());
+                if (backbuffer->GetWidth() != presentationSource->GetWidth()
+                    || backbuffer->GetHeight() != presentationSource->GetHeight()) {
+                    sourceRegion.width = destinationRegion.width = (std::min)(backbuffer->GetWidth(), presentationSource->GetWidth());
+                    sourceRegion.height = destinationRegion.height = (std::min)(backbuffer->GetHeight(), presentationSource->GetHeight());
                 }
                 list.CopyTextureRegion(destinationRegion, sourceRegion);
 
@@ -782,94 +939,174 @@ void Renderer::Render() {
                 list.Barriers(afterPresentationCopy);
             }, {}, presentationSource);
     }
-    basic_telemetry::AddCounter("ORG.PresentationTail.Submitted");
+}
 
-    // Present the frame
-    rhi::Result presentResult = rhi::Result::Ok;
-    runCapturedStage("Present", [&]() {
-        BT_ZONE_SCOPE("Renderer::Render::Present");
-        if (renderGraphBatchTraceEnabled) {
-            spdlog::info("Renderer: frame {} calling Present for slot {}", m_totalFramesRendered, renderedFrameIndex);
-        }
-        // The tail was submitted on the presentation queue immediately before
-        // this call, so queue order covers the copy and Present transition.
-        presentResult = m_swapChain->Present(!m_allowTearing);
-    });
-	if (presentResult == rhi::Result::ModeChanged) {
-		// The client extent in the window's own DPI awareness, as its WM_SIZE reports it: the thread may be DPI aware (ImGui's
-		// EnableDpiAwareness) while a DPI-unaware window (the SARP host's) gets logical sizes, which a query in the thread's
-		// awareness would scale to physical pixels (M5 step 8).
-		RECT clientRect{};
-		bool clientKnown = false;
-		if (m_hwnd) {
-			const DPI_AWARENESS_CONTEXT previous = SetThreadDpiAwarenessContext(GetWindowDpiAwarenessContext(m_hwnd));
-			clientKnown = GetClientRect(m_hwnd, &clientRect) != FALSE;
-			if (previous) SetThreadDpiAwarenessContext(previous);
-		}
-		if (clientKnown) {
-			const UINT clientWidth = static_cast<UINT>((std::max)(clientRect.right - clientRect.left, 0L));
-			const UINT clientHeight = static_cast<UINT>((std::max)(clientRect.bottom - clientRect.top, 0L));
-			if (clientWidth != 0 && clientHeight != 0) {
-				spdlog::info(
-					"Renderer: presentation reported mode change; the swapchain is made again for client extent {}x{} at the next "
-					"consolidation point",
-					clientWidth,
-					clientHeight);
-				// A resolution request as WM_SIZE's (M5 step 4), made even at the same size. The frame was submitted: it is
-				// signalled and the frame index advances as for any other.
-				m_modeChangeSwapchainGeneration = m_swapchainGeneration;
-				m_frameRevisions.RequestOutputSize(clientWidth, clientHeight, "presentation mode change", true);
-				// The RHI made the swapchain again (Vulkan: out of date, at the surface's extent, which is the client's): its
-				// images are new. The backbuffer wrappers take them now, and the presentation copy clips to the smaller size until
-				// the graphs built for the window's size attach (M5 step 8).
-				bool remade = false;
-				for (UINT n = 0; n < m_numFramesInFlight && n < renderTargets.size(); ++n) {
-					const auto image = m_swapChain->Image(n);
-					if (image.index != renderTargets[n].index || image.generation != renderTargets[n].generation) remade = true;
-				}
-				if (remade) {
-					uint32_t width = clientWidth, height = clientHeight;
-					(void)m_swapChain->Extent(width, height);
-					SettingsManager::GetInstance().getSettingSetter<DirectX::XMUINT2>("outputResolution")({ width, height });
-					CreateRTVs();
-					++m_swapchainGeneration;
-					++m_resolutionStats.swapchainResizes;
-					spdlog::info("Renderer: the swapchain was made again at present ({}x{}); the backbuffers follow", width, height);
-				}
+void Renderer::HandlePresentModeChange(uint64_t generationAtPresent) {
+	// The client extent in the window's own DPI awareness, as its WM_SIZE reports it: the thread may be DPI aware (ImGui's
+	// EnableDpiAwareness) while a DPI-unaware window (the SARP host's) gets logical sizes, which a query in the thread's
+	// awareness would scale to physical pixels (M5 step 8).
+	RECT clientRect{};
+	bool clientKnown = false;
+	if (m_hwnd) {
+		const DPI_AWARENESS_CONTEXT previous = SetThreadDpiAwarenessContext(GetWindowDpiAwarenessContext(m_hwnd));
+		clientKnown = GetClientRect(m_hwnd, &clientRect) != FALSE;
+		if (previous) SetThreadDpiAwarenessContext(previous);
+	}
+	if (clientKnown) {
+		const UINT clientWidth = static_cast<UINT>((std::max)(clientRect.right - clientRect.left, 0L));
+		const UINT clientHeight = static_cast<UINT>((std::max)(clientRect.bottom - clientRect.top, 0L));
+		if (clientWidth != 0 && clientHeight != 0) {
+			spdlog::info(
+				"Renderer: presentation reported mode change; the swapchain is made again for client extent {}x{} at the next "
+				"consolidation point",
+				clientWidth,
+				clientHeight);
+			// A resolution request as WM_SIZE's (M5 step 4), made even at the same size. The frame was submitted: it is
+			// signalled and the frame index advances as for any other.
+			m_modeChangeSwapchainGeneration = generationAtPresent;
+			m_frameRevisions.RequestOutputSize(clientWidth, clientHeight, "presentation mode change", true);
+			// The RHI made the swapchain again (Vulkan: out of date, at the surface's extent, which is the client's): its
+			// images are new. The backbuffer wrappers take them now, and the presentation copy clips to the smaller size until
+			// the graphs built for the window's size attach (M5 step 8).
+			bool remade = false;
+			for (UINT n = 0; n < m_numFramesInFlight && n < renderTargets.size(); ++n) {
+				const auto image = m_swapChain->Image(n);
+				if (image.index != renderTargets[n].index || image.generation != renderTargets[n].generation) remade = true;
 			}
-			else {
-				spdlog::warn("Renderer: presentation reported mode change but no non-zero client extent is available");
+			if (remade) {
+				uint32_t width = clientWidth, height = clientHeight;
+				(void)m_swapChain->Extent(width, height);
+				SettingsManager::GetInstance().getSettingSetter<DirectX::XMUINT2>("outputResolution")({ width, height });
+				CreateRTVs();
+				++m_swapchainGeneration;
+				++m_resolutionStats.swapchainResizes;
+				spdlog::info("Renderer: the swapchain was made again at present ({}x{}); the backbuffers follow", width, height);
 			}
 		}
 		else {
 			spdlog::warn("Renderer: presentation reported mode change but no non-zero client extent is available");
 		}
 	}
-	if (presentResult != rhi::Result::Ok && presentResult != rhi::Result::ModeChanged) {
-		spdlog::error("Renderer: swapchain presentation failed with {}", rhi::ResultName(presentResult));
-		return;
+	else {
+		spdlog::warn("Renderer: presentation reported mode change but no non-zero client extent is available");
 	}
+}
 
-    runCapturedStage("SignalFence", [&]() {
-        BT_ZONE_SCOPE("Renderer::Render::SignalFence");
-        // The renderer's slot: WaitForFrame waits on it before the slot's resources are written again.
-        SignalFence(graphicsQueue, m_executedPresentationSlot);
-        // The capture copies this frame recorded complete with its fence.
-        if (m_readbackCaptures) m_readbackCaptures->NoteFrameSubmitted(m_frameFence.Get(), m_currentFrameFenceValue);
-        br::telemetry::nvperf::EndFrameCapture(deviceManager.GetBackend(), graphicsQueue, m_totalFramesRendered);
-    });
-
-    AdvanceFrameIndex();
-
-    runCapturedStage("ReadbackRequests", [&]() {
-        if (m_readbackCaptures) {
-            BT_ZONE_SCOPE("Renderer::Render::ReadbackRequests");
-            m_readbackCaptures->ProcessCompleted();
+void Renderer::EnqueuePresent(org::RenderGraph* presentationGraph) {
+    BT_ZONE_SCOPE("Renderer::Render::EnqueuePresent");
+    auto& shared = *m_presentShared;
+    auto& timing = m_frameGraphExecutionTiming;
+    // At most one present queued ahead of the submission thread (decision U3): the previous frame's closure must have run.
+    // Normally it has, so this costs nothing. It also makes what that closure reported safe to read below.
+    if (shared.passed.load(std::memory_order_acquire) < m_presentsQueued) {
+        BT_ZONE_SCOPE("Renderer::Render::PresentLeadWait");
+        const auto waitBegin = std::chrono::steady_clock::now();
+        for (uint64_t passed = shared.passed.load(std::memory_order_acquire); passed < m_presentsQueued;
+             passed = shared.passed.load(std::memory_order_acquire))
+            shared.passed.wait(passed, std::memory_order_acquire);
+        timing.presentLeadWaitMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - waitBegin).count();
+        ++timing.presentLeadWaits;
+    }
+    // A resize the previous closure made (an attach's, m_resizeAtPresent): its numbers, and the size the swapchain has.
+    if (shared.resized) {
+        shared.resized = false;
+        auto& stats = m_resolutionStats;
+        stats.lastSwapchainWaitMs = shared.resizeWaitMs;
+        stats.maxSwapchainWaitMs = (std::max)(stats.maxSwapchainWaitMs, stats.lastSwapchainWaitMs);
+        stats.lastResizeBuffersMs = shared.resizeBuffersMs;
+        stats.maxResizeBuffersMs = (std::max)(stats.maxResizeBuffersMs, stats.lastResizeBuffersMs);
+        if (shared.resizeFailed) {
+            spdlog::critical("Renderer: the swapchain could not be resized to {}x{} in the attach frame's present", shared.resizedWidth,
+                shared.resizedHeight);
+        } else {
+            auto& settings = SettingsManager::GetInstance();
+            const auto size = settings.getSettingGetter<DirectX::XMUINT2>("outputResolution")();
+            if (size.x != shared.resizedWidth || size.y != shared.resizedHeight) {
+                spdlog::info("Renderer: the swapchain is {}x{}, not the {}x{} asked for", shared.resizedWidth, shared.resizedHeight, size.x, size.y);
+                settings.getSettingSetter<DirectX::XMUINT2>("outputResolution")({ shared.resizedWidth, shared.resizedHeight });
+            }
         }
-        if (m_pReadbackManager) {
-            m_pReadbackManager->ProcessReadbackRequests(); // Save images to disk if requested
+    }
+    // A mode change the previous present reported: handled here, before the next present, with no closure in flight.
+    if (shared.modeChanged.exchange(false, std::memory_order_acq_rel)) HandlePresentModeChange(shared.modeChangeGeneration);
+
+    const auto sourceSlot = static_cast<size_t>(m_executedPresentationSlot);
+    if (sourceSlot >= m_presentationColorResources.size() || sourceSlot >= m_frameFenceValues.size())
+        throw std::runtime_error("Presentation tail has incomplete slot ownership");
+    auto presentationSource = m_presentationColorResources[sourceSlot];
+    if (!presentationSource || !presentationSource->HasValidBackingResource())
+        throw std::runtime_error("Presentation tail has invalid resource bindings");
+    // The slot's frame fence value is reserved here, so WaitForFrame and the captures know it before the closure signals it.
+    // Closures run in order, so the values are signalled in increasing order.
+    const uint64_t fenceValue = ++m_currentFrameFenceValue;
+    m_frameFenceValues[sourceSlot] = fenceValue;
+    const auto resize = std::exchange(m_pendingSwapchainResize, std::nullopt);
+    if (resize) {
+        ++m_swapchainGeneration;
+        ++m_resolutionStats.swapchainResizes;
+    }
+    auto& deviceManager = DeviceManager::GetInstance();
+    const bool trace = SettingsManager::GetInstance().getSettingGetter<bool>("renderGraphBatchTraceEnabled")();
+    ++m_presentsQueued;
+    m_frameHost->EnqueueOnSubmitThread([this, presentationGraph, presentationSource = std::move(presentationSource), fenceValue,
+        vsync = !m_allowTearing, frameNumber = m_totalFramesRendered, generation = m_swapchainGeneration, resize, trace,
+        graphicsQueue = deviceManager.GetGraphicsQueue(), backend = deviceManager.GetBackend()]() mutable {
+        BT_ZONE_SCOPE("Renderer::PresentOnSubmissionThread");
+        auto& shared = *m_presentShared;
+        rhi::Result presentResult = rhi::Result::Ok;
+        try {
+            if (resize) ResizeSwapChainAtPresent(fenceValue, resize->width, resize->height, trace);
+            // The presentation graph's execution ran just before this on the thread. Without a present dependency (it failed, or
+            // recorded nothing to present) the frame is not presented.
+            if (!presentationGraph->GetLastPresentDependency()) {
+                basic_telemetry::AddCounter("ORG.PresentationTail.DeferredForRecording");
+                static auto lastDeferredLog = std::chrono::steady_clock::time_point{};
+                if (const auto now = std::chrono::steady_clock::now(); now - lastDeferredLog > std::chrono::seconds(2)) {
+                    lastDeferredLog = now;
+                    spdlog::warn("Renderer: frame {} has no present dependency; presentation deferred", frameNumber);
+                }
+            } else {
+                // The image the swapchain gives now: every present is made on this thread, so it is the one this present uses.
+                const auto image = m_swapChain->CurrentImageIndex();
+                if (image >= m_backbufferResources.size()) throw std::runtime_error("Presentation tail has no backbuffer for the acquired image");
+                const auto& backbuffer = m_backbufferResources[image];
+                if (!backbuffer || !backbuffer->HasHandle()) throw std::runtime_error("Presentation tail has invalid resource bindings");
+                if (trace) spdlog::info("Renderer: frame {} calling Present for image {} on the submission thread", frameNumber, image);
+                {
+                    BT_ZONE_SCOPE("Renderer::PresentationTail");
+                    SubmitPresentationTail(*presentationGraph, presentationSource, backbuffer);
+                }
+                basic_telemetry::AddCounter("ORG.PresentationTail.Submitted");
+                BT_ZONE_SCOPE("Renderer::Present");
+                const auto presentBegin = std::chrono::steady_clock::now();
+                presentResult = m_swapChain->Present(vsync);
+                m_lastPresentReturned = std::chrono::steady_clock::now();
+                m_lastPresentMs = std::chrono::duration<double, std::milli>(m_lastPresentReturned - presentBegin).count();
+                static double presentSum = 0.0;
+                static uint32_t presents = 0;
+                presentSum += m_lastPresentMs;
+                if (++presents == 600) {
+                    spdlog::info("Renderer: over 600 frames the submission thread spent {:.2f} ms per frame in Present", presentSum / presents);
+                    presentSum = 0.0;
+                    presents = 0;
+                }
+            }
+        } catch (const std::exception& error) {
+            spdlog::error("Renderer: frame {}'s present on the submission thread failed: {}", frameNumber, error.what());
         }
+        // The fence is signalled whatever happened above: WaitForFrame waits for it.
+        if (rhi::Failed(graphicsQueue.Signal({ m_frameFence->GetHandle(), fenceValue })))
+            spdlog::error("Renderer: signalling the frame fence value {} failed on the submission thread", fenceValue);
+        br::telemetry::nvperf::EndFrameCapture(backend, graphicsQueue, frameNumber);
+        if (presentResult == rhi::Result::ModeChanged) {
+            shared.modeChangeGeneration = generation;
+            shared.modeChanged.store(true, std::memory_order_release);
+        } else if (presentResult != rhi::Result::Ok) {
+            spdlog::error("Renderer: swapchain presentation failed with {}", rhi::ResultName(presentResult));
+        }
+        shared.passed.fetch_add(1, std::memory_order_release);
+        shared.passed.notify_all();
     });
-    PublishFrameTaskGraphCapture();
-    FrameMark;
+    // The capture copies this frame recorded complete with its fence.
+    if (m_readbackCaptures) m_readbackCaptures->NoteFrameSubmitted(m_frameFence.Get(), fenceValue);
 }

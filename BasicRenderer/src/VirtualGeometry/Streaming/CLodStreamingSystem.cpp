@@ -397,11 +397,24 @@ namespace {
                 return;
             }
             const rhi::TimelinePoint signal{snapshot.completionTimeline.GetHandle(), snapshot.completionValue};
+            // Queued behind the submission thread and failed there: the batches are cancelled, as when Submit throws. It runs on the
+            // submission thread before the completion value is signalled; the ticket states are atomics.
+            auto cancelQueued = [batches = snapshot.batches] {
+                spdlog::error("CLod async upload submission failed on the submission thread; its batches are cancelled");
+                for (const auto& batch : batches) {
+                    if (!batch || !batch->ticket) continue;
+                    for (auto state : {CLodUploadTicketState::Claimed, CLodUploadTicketState::Submitted}) {
+                        auto expected = state;
+                        if (batch->ticket->state.compare_exchange_strong(expected, CLodUploadTicketState::Cancelled,
+                                std::memory_order_acq_rel, std::memory_order_acquire)) break;
+                    }
+                }
+            };
             try {
                 client.Submit(queueSlot, accesses, [&](rhi::CommandList& list) {
                     for (const auto& copy : copies)
                         list.CopyBufferRegion(copy.destination, copy.destinationOffset, copy.source, copy.sourceOffset, copy.size);
-                }, {&signal, 1}, std::make_shared<CLodAsyncUploadSnapshot>(std::move(snapshot)));
+                }, {&signal, 1}, std::make_shared<CLodAsyncUploadSnapshot>(std::move(snapshot)), {}, true, std::move(cancelQueued));
             } catch (const std::exception& error) {
                 spdlog::error("CLod async upload submission failed: {}", error.what());
                 cancel();
@@ -611,7 +624,12 @@ namespace {
             try {
                 client.Submit(queueSlot, accesses, [&](rhi::CommandList& list) {
                     for (const auto& copy : copies) list.CopyBufferRegion(copy.destination, 0u, copy.source, 0u, copy.bytes);
-                }, {&signal, 1}, std::make_shared<CLodStreamingReadbackSnapshot>(std::move(snapshot)));
+                }, {&signal, 1}, std::make_shared<CLodStreamingReadbackSnapshot>(std::move(snapshot)), {}, true,
+                    [cancel = m_cancelSnapshot, selectedSlot] {
+                        // Queued behind the submission thread and failed there: the slot is freed, as when Submit throws.
+                        spdlog::error("CLod streaming readback submission failed on the submission thread");
+                        if (cancel) cancel(selectedSlot);
+                    });
             } catch (const std::exception& error) {
                 spdlog::error("CLod streaming readback submission failed: {}", error.what());
                 if (m_cancelSnapshot) m_cancelSnapshot(selectedSlot);

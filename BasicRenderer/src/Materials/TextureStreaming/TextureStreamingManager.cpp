@@ -1290,7 +1290,23 @@ void TextureStreamingManager::SubmitTextureStreamingFeedbackReadback(org::Extern
 	try {
 		client.Submit(queueSlot, accesses, [&](rhi::CommandList& list) {
 			list.CopyBufferRegion(staging->GetAPIResource().GetHandle(), 0, source->GetAPIResource().GetHandle(), 0, bytes);
-		}, {&signal, 1});
+		}, {&signal, 1}, {}, {}, true, [state = m_readbackCallbackState, selectedSlot, fenceValue]() {
+			// Queued behind the submission thread and failed there, on that thread: the slot is freed, as when Submit throws. It may
+			// run before or after `submitted` records the fence value, so either is taken as this submission's.
+			spdlog::error("Texture streaming feedback readback submission failed on the submission thread");
+			std::lock_guard stateLock(state->mutex);
+			auto* owner = state->owner;
+			if (!owner) return;
+			std::lock_guard lock(owner->m_readbackSlotMutex);
+			if (selectedSlot >= owner->m_readbackSlots.size()) return;
+			auto& slot = owner->m_readbackSlots[selectedSlot];
+			if (slot.inFlight && (slot.fenceValue == 0 || slot.fenceValue == fenceValue)) {
+				slot.activeStreamingTextureIDs.clear();
+				slot.inFlight = false;
+				slot.copyBytes = 0;
+				slot.fenceValue = 0;
+			}
+		});
 	} catch (const std::exception& error) {
 		spdlog::error("Texture streaming feedback readback submission failed: {}", error.what());
 		cancel();
