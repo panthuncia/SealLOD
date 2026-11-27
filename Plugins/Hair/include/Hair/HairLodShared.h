@@ -15,12 +15,14 @@
 #define HAIR_SHARED_INLINE inline
 #define HAIR_SHARED_CEIL(x) std::ceil(x)
 #define HAIR_SHARED_LOG2(x) std::log2(x)
+#define HAIR_SHARED_POW(x, y) std::pow(x, y)
 
 namespace br::hair {
 #else
 #define HAIR_SHARED_INLINE
 #define HAIR_SHARED_CEIL(x) ceil(x)
 #define HAIR_SHARED_LOG2(x) log2(x)
+#define HAIR_SHARED_POW(x, y) pow(x, y)
 #endif
 
 // A cluster's detail level l in [minDetail, 1] from the spacing of its strands on screen: every strand is drawn while
@@ -32,6 +34,19 @@ HAIR_SHARED_INLINE float HairLodDetailLevel(float strandSpacingPixels, float lod
         return minDetail;
     }
     return level < 1.0f ? level : 1.0f;
+}
+
+// The same with the share raised to `exponent`. At 1 it is HairLodDetailLevel: the drawn strands fall as one over the
+// distance. At 2 they fall as its square, as the area the cluster covers does, and the kept strands' width
+// (HairLodWidthScale) has to make up the coverage.
+HAIR_SHARED_INLINE float HairLodDetailLevelPower(float strandSpacingPixels, float lodErrorPixels, float minDetail, float exponent)
+{
+    const float share = strandSpacingPixels / (lodErrorPixels > 1.0e-6f ? lodErrorPixels : 1.0e-6f);
+    if (exponent == 1.0f || !(share > 0.0f) || !(share < 1.0f)) {
+        return HairLodDetailLevel(strandSpacingPixels, lodErrorPixels, minDetail);
+    }
+    const float level = HAIR_SHARED_POW(share, exponent);
+    return level > minDetail ? level : minDetail;
 }
 
 // How many strands of a cluster a view draws at detail level l: ceil(l * (N + delta_c)), clamped to [1, N]. The cluster
@@ -66,6 +81,19 @@ HAIR_SHARED_INLINE float HairLodBoundaryWeight(float detailLevel, uint strandCou
 HAIR_SHARED_INLINE float HairLodWidthScale(float detailLevel, float maxWidthScale)
 {
     const float scale = 1.0f / (detailLevel > 1.0e-6f ? detailLevel : 1.0e-6f);
+    return scale < maxWidthScale ? scale : maxWidthScale;
+}
+
+// The width scale that keeps a cluster's coverage exactly: its strands over the strands' worth it draws, whole strands
+// plus the boundary strand's weight, which is l * (N + delta_c) held to [1, N]. HairLodWidthScale's 1 / l is that only
+// while more than one strand is drawn and delta_c is ignored: it overshoots by delta_c / N, and without bound once the
+// cluster is down to its one strand. It is what partial coverage uses; a strand under the rasterizer's one-pixel floor
+// did not show the difference before.
+HAIR_SHARED_INLINE float HairLodCoverageWidthScale(float detailLevel, uint strandCount, float randomOffset, float maxWidthScale)
+{
+    float drawn = detailLevel * ((float)strandCount + randomOffset);
+    drawn = drawn < 1.0f ? 1.0f : (drawn > (float)strandCount ? (float)strandCount : drawn);
+    const float scale = (float)strandCount / drawn;
     return scale < maxWidthScale ? scale : maxWidthScale;
 }
 

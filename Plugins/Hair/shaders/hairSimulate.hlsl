@@ -8,6 +8,11 @@
 // simulated from the state its rows hold, which that pass kept ready (position, and a velocity in solverPrevious).
 // This pass keeps each guide's blend state (HAIR_GUIDE_STATE_*) in its row 0; the pull itself is that pass's.
 //
+// An instance is only simulated while a view shows it. One that starts (HAIR_SIM_FLAG_RESET) puts its guides on their
+// rigid pose, at rest. One that starts again after it was simulated before (HAIR_SIM_FLAG_KEEP_SHAPE as well) has the
+// shape it was left in in its rows: a guide the solver owned then, and that the level still asks for, starts at rest in
+// that shape, each point at the offset from its rigid pose that it had; the others are left to the guide-level pass.
+//
 // A frame takes stepCount fixed steps of `substeps` substeps each, and a guide whose root or whose fastest point
 // travels far in the frame divides the same time into more substeps (HAIR_SIM_SUBSTEP_TRAVEL). One substep, for a
 // guide of n points:
@@ -43,7 +48,6 @@
 #define HAIR_CLUSTERS UintRootConstant1             // StructuredBuffer<HairClusterHeader>
 #define HAIR_STRANDS UintRootConstant2              // StructuredBuffer<HairStrandRecord>
 #define HAIR_ROOT_BINDINGS UintRootConstant3        // StructuredBuffer<HairRootBinding>
-#define HAIR_ROOT_FRAMES UintRootConstant4          // StructuredBuffer<HairRootFramePair>
 #define HAIR_POINTS UintRootConstant5               // StructuredBuffer<HairPackedPoint>
 #define HAIR_GUIDE_STRAND_INDICES UintRootConstant6 // StructuredBuffer<uint>
 #define HAIR_GUIDE_POINT_RANGES UintRootConstant7   // StructuredBuffer<HairGuidePointRange>
@@ -59,7 +63,9 @@
 // roots and colliders that jump (a frame that repeats or skips the entity's motion).
 #define HAIR_STRETCH_PASSES 3u
 
-typedef row_major float4x4 HairSkinMatrix;
+#include "HairShaders/hairRootFrame.hlsli"
+
+typedef HairRootSkinMatrix HairSkinMatrix;
 
 // A collider in world space at the previous frame's pose (0) and this frame's (1).
 struct HairColliderMotion
@@ -107,7 +113,8 @@ void HairSimulateCS(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
     const uint instanceIndex = simGroup.instanceIndex;
     const HairInstanceGPU instance = instances[instanceIndex];
     const uint rank = simGroup.firstRank + groupIndex;
-    if ((instance.simFlags & HAIR_SIM_FLAG_ENABLED) == 0u || groupIndex >= simGroup.count || rank >= instance.guideCount)
+    if ((instance.simFlags & HAIR_SIM_FLAG_ENABLED) == 0u || instance.guidePointBase == HAIR_INVALID_INDEX ||
+        groupIndex >= simGroup.count || rank >= instance.guideCount)
     {
         return;
     }
@@ -121,9 +128,12 @@ void HairSimulateCS(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
     const uint pointCount = range.count;
     const uint base = instance.guidePointBase + range.offset;
     const bool wanted = HairGuideIsSimulated(instance, binding);
-    // The rows of an instance that starts hold nothing.
+    // The rows of an instance that starts hold nothing, or the shape it was left in.
     const bool instanceReset = (instance.simFlags & HAIR_SIM_FLAG_RESET) != 0u;
-    uint guideState = instanceReset ? 0u : guidePoints[base].guideState;
+    const uint storedState = guidePoints[base].guideState;
+    const bool keepShape = instanceReset && (instance.simFlags & HAIR_SIM_FLAG_KEEP_SHAPE) != 0u &&
+        (storedState & HAIR_GUIDE_STATE_SIMULATED) != 0u;
+    uint guideState = instanceReset ? 0u : storedState;
     float guideBlend = guidePoints[base].guideBlend;
     if (!wanted && (guideState & HAIR_GUIDE_STATE_SIMULATED) == 0u)
     {
@@ -137,7 +147,6 @@ void HairSimulateCS(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
     StructuredBuffer<HairClusterHeader> clusters = ResourceDescriptorHeap[HAIR_CLUSTERS];
     StructuredBuffer<HairStrandRecord> strands = ResourceDescriptorHeap[HAIR_STRANDS];
     StructuredBuffer<HairRootBinding> rootBindings = ResourceDescriptorHeap[HAIR_ROOT_BINDINGS];
-    StructuredBuffer<HairRootFramePair> rootFrames = ResourceDescriptorHeap[HAIR_ROOT_FRAMES];
     StructuredBuffer<HairPackedPoint> points = ResourceDescriptorHeap[HAIR_POINTS];
     StructuredBuffer<uint> guideStrandIndices = ResourceDescriptorHeap[HAIR_GUIDE_STRAND_INDICES];
     StructuredBuffer<HairColliderGPU> colliders = ResourceDescriptorHeap[HAIR_COLLIDERS];
@@ -152,8 +161,8 @@ void HairSimulateCS(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
     const uint restBase = instance.pointBase + strand.pointOffset;
 
     const HairRootBinding rootBinding = rootBindings[instance.strandBase + strandRow];
-    const HairRootFramePair rootFrame = rootFrames[instance.rootFrameBase + strandRow];
     const PerObjectBuffer object = perObject[instance.perObjectIndex];
+    const HairRootFramePair rootFrame = HairMakeRootFramePair(instance, rootBinding, object, sim.frameNumber);
     const float scale = HairModelScale(object.model);
     const HairRootFollow follow = HairMakeRootFollow(rootBinding, rootFrame.current, scale);
     const HairRootFollow previousFollow = HairMakeRootFollow(rootBinding, rootFrame.previous, HairModelScale(object.prevModel));
@@ -166,9 +175,11 @@ void HairSimulateCS(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
     const bool promoted = !reset && (guideState & HAIR_GUIDE_STATE_SIMULATED) == 0u;
     if (reset)
     {
-        if (!wanted)
+        if (!wanted || (instanceReset && (instance.simFlags & HAIR_SIM_FLAG_KEEP_SHAPE) != 0u && !keepShape))
         {
-            // A teleport in a demotion ends it: the guide-level pass puts the guide on what its parents give it.
+            // A teleport in a demotion ends it: the guide-level pass puts the guide on what its parents give it. So it
+            // does a guide the solver did not own when its instance was left: the level asks for it now, and it is
+            // promoted from that in the next frame, like any other.
             guidePoints[base].guideState = 0u;
             return;
         }
@@ -225,6 +236,8 @@ void HairSimulateCS(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
     {
         const float3 rest = HairDecodePointPosition(cluster, points[restBase + pointIndex]);
         HairGuidePoint state = guidePoints[base + pointIndex];
+        // The shape the instance was left in, as each point's offset from the rigid pose it had then.
+        const float3 keptOffset = keepShape ? state.position - state.rigid : float3(0.0f, 0.0f, 0.0f);
         state.rigid = HairFollowRoot(follow, rest);
         state.previousRigid = HairFollowRoot(previousFollow, rest);
         if (pointIndex == 0u)
@@ -232,11 +245,21 @@ void HairSimulateCS(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
             state.guideState = guideState;
             state.guideBlend = guideBlend;
         }
+        else if (pointIndex == 1u)
+        {
+            // A guide that goes on from the state its rows hold must find them written for this instance in the frame
+            // before: counted when not. Then the stamp of this frame, which the passes that read the guide check.
+            if (!reset && state.guideState != HAIR_GUIDE_STAMP(instanceIndex, sim.frameNumber - 1u))
+            {
+                InterlockedAdd(metrics[instanceIndex * HAIR_SIM_METRIC_COUNT + HAIR_SIM_METRIC_STALE_GUIDES], 1u);
+            }
+            state.guideState = HAIR_GUIDE_STAMP(instanceIndex, sim.frameNumber);
+        }
         if (reset)
         {
-            state.position = state.rigid;
-            state.solverPrevious = state.rigid;
-            state.previousPosition = state.previousRigid;
+            state.position = state.rigid + keptOffset;
+            state.solverPrevious = state.position;
+            state.previousPosition = state.previousRigid + keptOffset;
             state.solverSeconds = 0.0f;
         }
         else
@@ -532,7 +555,7 @@ void HairSimulateCS(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
     InterlockedMax(metrics[metricBase + HAIR_SIM_METRIC_ROOT_SHIFT], asuint(length(rootShift)));
     if (reset)
     {
-        InterlockedAdd(metrics[metricBase + HAIR_SIM_METRIC_RESET_GUIDES], 1u);
+        InterlockedAdd(metrics[metricBase + (keepShape ? HAIR_SIM_METRIC_RESUMED_GUIDES : HAIR_SIM_METRIC_RESET_GUIDES)], 1u);
     }
     InterlockedAdd(metrics[metricBase + HAIR_SIM_METRIC_LEVEL_GUIDES + min(binding.level, HAIR_MAX_GUIDE_LEVELS - 1u)], 1u);
     InterlockedAdd(metrics[metricBase + HAIR_SIM_METRIC_SIMULATED_POINTS], pointCount);

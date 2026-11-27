@@ -51,9 +51,19 @@ public sealed class HairSim : Scenario
 
     // Adds the newest metrics read back to the samples. A frame's metrics arrive a few frames after it, one frame's
     // worth per frame, so calling this once a frame collects every frame.
+    // Rows of metrics read with the groom in view and out of it: the simulation follows the view, and this scenario is
+    // about the solver, so its grooms have to be in view throughout.
+    int _inViewRows, _outOfViewRows;
+    // Guide rows are lent to a groom while it is simulated: guides that went on from rows that were not theirs of the
+    // frame before, and rows of metrics read with the groom in view but without guide rows.
+    long _staleGuides, _starvedRows;
+
     void Collect(ScenarioContext ctx)
     {
         foreach (var row in ctx.Commands.Invoke("hair.sim").GetProperty("metrics").EnumerateArray()) {
+            if (row.GetProperty("in_view").GetBoolean()) ++_inViewRows; else ++_outOfViewRows;
+            _staleGuides += row.GetProperty("stale_guides").GetUInt32();
+            if (row.GetProperty("starved").GetBoolean()) ++_starvedRows;
             double distance = row.TryGetProperty("collider_distance", out var value) ? value.GetDouble() : double.PositiveInfinity;
             var sample = new Sample(row.GetProperty("frame").GetUInt64(), row.GetProperty("steps").GetUInt64(), row.GetProperty("guides").GetUInt32(),
                 row.GetProperty("stretch_max").GetDouble(), row.GetProperty("stretch_mean").GetDouble(),
@@ -202,6 +212,7 @@ public sealed class HairSim : Scenario
         var commands = ctx.Commands;
         commands.Invoke("hair.clear");
         commands.Invoke("hair.lod", new { error_pixels = 1.0, max_width_scale = 8.0, min_detail = 0.02, force_detail = 0.0, segment_pixels = 4.0, freeze = false });
+        if (Environment.GetEnvironmentVariable("HAIR_COVERAGE") is string coverage) commands.Invoke("hair.lod", new { coverage }); // off: the opaque form
         commands.Invoke("hair.debug", new { view = "off" });
         // Every control, so an earlier session's values do not carry over. The simulation level is forced to every guide:
         // this scenario is about the solver, and hair_sim_lod.cs about the level.
@@ -226,7 +237,7 @@ public sealed class HairSim : Scenario
         var loaded = commands.Invoke("hair.stats");
         ctx.Require(loaded.GetProperty("active_instances").GetUInt32() == 1, "the groom is attached and dispatched");
         ctx.Log($"groom: {loaded.GetProperty("strands")} strands, {loaded.GetProperty("rows").GetProperty("guides").GetProperty("used")} guides with " +
-            $"{loaded.GetProperty("rows").GetProperty("guide_points").GetProperty("used")} points; simulation defaults {defaults}");
+            $"{loaded.GetProperty("instance_list")[0].GetProperty("guide_rows")} points; simulation defaults {defaults}");
         var rigid = await FrameCounters(ctx);
         ctx.Log($"rigid: {rigid[0]} to {rigid[^1]}");
         ctx.Check(rigid.All(frame => frame.Written > 0 && frame.Resolved > 0), "the rigid groom is drawn");
@@ -324,7 +335,10 @@ public sealed class HairSim : Scenario
         // The same strands and segments exactly, and the same pixels to one part in 10,000: the entity has moved and come
         // back since `rigid` was read, and a rigid groom whose entity is moved and put back draws a few pixels in five
         // million differently from then on, with no simulation at all (the entity's row is not bit for bit what it was).
-        static bool Close(uint a, uint b) => Math.Abs((double)a - b) <= 1e-4 * Math.Max(a, b);
+        // With coverage on the written and resolved pixels are random draws, a different pattern every frame: two frames
+        // of the same view differ by a few parts in a thousand, so the comparison is only that coarse.
+        double tolerance = commands.Invoke("hair.lod", new { }).GetProperty("coverage").GetString() == "off" ? 1e-4 : 2e-2;
+        bool Close(uint a, uint b) => Math.Abs((double)a - b) <= tolerance * Math.Max(a, b);
         ctx.Check(rigidAgain.Count == rigid.Count && rigidAgain.Zip(rigid).All(pair => pair.First.Strands == pair.Second.Strands &&
                 pair.First.Segments == pair.Second.Segments && Close(pair.First.Drawn, pair.Second.Drawn) &&
                 Close(pair.First.Written, pair.Second.Written) && Close(pair.First.Resolved, pair.Second.Resolved)),
@@ -373,6 +387,8 @@ public sealed class HairSim : Scenario
         await Step(ctx, 45);
         await Capture(ctx, "hair_sim_8_wstraight_settled_back");
         await Captured(ctx);
+        ctx.Check(_outOfViewRows == 0 && _inViewRows > 0, $"the grooms were in view whenever their metrics were read ({_inViewRows} rows in view, {_outOfViewRows} out of it)");
+        ctx.Check(_staleGuides == 0 && _starvedRows == 0, $"every guide went on from its own rows of the frame before, and no groom went without guide rows ({_staleGuides} stale guides, {_starvedRows} starved rows)");
         commands.Invoke("hair.sim", new { enabled = false, lod_force_level = -1.0 });
         commands.Invoke("hair.stats", new { continuous = false });
     }

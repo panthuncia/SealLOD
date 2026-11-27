@@ -832,9 +832,32 @@ namespace {
         CHECK(HairLodDetailLevel(3.0f, 1.0f, 0.02f) == 1.0f);
         CHECK(HairLodDetailLevel(0.001f, 1.0f, 0.02f) == 0.02f);
         CHECK(HairLodDetailLevel(1.0f, 2.0f, 0.02f) == 0.5f);
+        // The power form: exponent 1 is the rule above exactly; a higher one draws less, down to the floor, and still
+        // every strand from the same spacing up.
+        for (const float spacing : { 0.001f, 0.1f, 0.5f, 0.99f, 1.0f, 3.0f }) {
+            CHECK(HairLodDetailLevelPower(spacing, 1.0f, 0.02f, 1.0f) == HairLodDetailLevel(spacing, 1.0f, 0.02f));
+            CHECK(HairLodDetailLevelPower(spacing, 1.0f, 0.02f, 2.0f) <= HairLodDetailLevel(spacing, 1.0f, 0.02f));
+            CHECK(HairLodDetailLevelPower(spacing, 1.0f, 0.02f, 2.0f) >= 0.02f);
+        }
+        CHECK(HairLodDetailLevelPower(0.5f, 1.0f, 0.02f, 2.0f) == 0.25f);
+        CHECK(HairLodDetailLevelPower(1.0f, 1.0f, 0.02f, 2.0f) == 1.0f);
         CHECK(HairLodWidthScale(0.25f, 8.0f) == 4.0f);
         CHECK(HairLodWidthScale(0.01f, 8.0f) == 8.0f);
         CHECK(HairLodWidthScale(1.0f, 8.0f) == 1.0f);
+        // The exact scale: drawn strands (whole ones plus the boundary strand's weight) times it is the cluster's strand
+        // count, down to the one strand a cluster always draws, until the cap.
+        for (const std::uint32_t strandCount : { 1u, 7u, 40u, 64u }) {
+            for (const float offset : { 0.0f, 0.37f, 0.99f }) {
+                for (float l = 0.001f; l <= 1.0f; l *= 1.3f) {
+                    const std::uint32_t count = HairLodStrandCountShared(l, strandCount, offset);
+                    const float drawn = static_cast<float>(count - 1u) + HairLodBoundaryWeight(l, strandCount, offset);
+                    const float scale = HairLodCoverageWidthScale(l, strandCount, offset, 1000.0f);
+                    CHECK(std::fabs(drawn * scale - static_cast<float>(strandCount)) < 1.0e-3f * static_cast<float>(strandCount));
+                    CHECK(HairLodCoverageWidthScale(l, strandCount, offset, 4.0f) <= 4.0f);
+                }
+                CHECK(HairLodCoverageWidthScale(1.0f, strandCount, offset, 64.0f) == 1.0f);
+            }
+        }
 
         // Vertex level: 2^f segments of the target length, never above the stored level; the drawn level less the
         // geomorph is f, so the shape is continuous where the drawn level steps.

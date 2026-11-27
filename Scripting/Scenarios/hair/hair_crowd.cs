@@ -17,7 +17,7 @@ public sealed class HairCrowd : Scenario
     const float HeadScale = 0.22f; // sphere.glb has radius 0.5: an 11 cm head
 
     sealed record Sample(ulong Frame, uint Instances, uint ClustersTested, uint Clusters, uint Strands, uint Segments, uint PoolVertices,
-        uint Overflow, uint SegmentsDrawn, uint PixelsWritten, uint PixelsResolved, uint Capped)
+        uint Overflow, uint SegmentsDrawn, uint PixelsWritten, uint PixelsResolved, uint Capped, uint StaleGuides, uint UnseenStrands)
     {
         public override string ToString() =>
             $"frame={Frame} instances_visible={Instances} clusters_visible={Clusters}/{ClustersTested} strands={Strands} segments={Segments} " +
@@ -27,7 +27,7 @@ public sealed class HairCrowd : Scenario
 
     // The simulation of one frame, over every instance: how many are simulated, their guides and guide points, and the
     // instances by simulation level (off, up to 1, up to 2, ..., and every guide).
-    sealed record SimSample(ulong Frame, uint Simulated, uint Guides, uint Points, uint Evaluated, int[] Levels)
+    sealed record SimSample(ulong Frame, uint Simulated, uint Guides, uint Points, uint Evaluated, uint StaleGuides, uint Starved, int[] Levels)
     {
         public override string ToString() =>
             $"sim_instances={Simulated} sim_guides={Guides} sim_points={Points} evaluated_guides={Evaluated} sfrac_off|<=1|<=2|..|full=[{string.Join(",", Levels)}]";
@@ -60,7 +60,8 @@ public sealed class HairCrowd : Scenario
                 frame.GetProperty("strands_selected").GetUInt32(), frame.GetProperty("segments_selected").GetUInt32(),
                 frame.GetProperty("pool_vertices").GetProperty("used").GetUInt32(), frame.GetProperty("overflow_clusters").GetUInt32(),
                 frame.GetProperty("segments_drawn").GetUInt32(), frame.GetProperty("pixels_written").GetUInt32(),
-                frame.GetProperty("pixels_resolved").GetUInt32(), frame.GetProperty("segments_capped").GetUInt32());
+                frame.GetProperty("pixels_resolved").GetUInt32(), frame.GetProperty("segments_capped").GetUInt32(),
+                frame.GetProperty("stale_guides_drawn").GetUInt32(), frame.GetProperty("unseen_strands_drawn").GetUInt32());
             _samples[sample.Frame] = sample;
         }
         if (!_simulate) return;
@@ -75,8 +76,10 @@ public sealed class HairCrowd : Scenario
             if (rows.Count != _heads.Count) continue;
             int levelCount = rows.Max(row => row.GetProperty("level_guides").GetArrayLength());
             var levels = new int[levelCount + 2];
-            uint simulated = 0, guides = 0, points = 0, evaluated = 0;
+            uint simulated = 0, guides = 0, points = 0, evaluated = 0, staleGuides = 0, starved = 0;
             foreach (var row in rows) {
+                staleGuides += row.GetProperty("stale_guides").GetUInt32();
+                starved += row.GetProperty("starved").GetBoolean() ? 1u : 0u;
                 double level = row.GetProperty("sim_level").GetDouble();
                 uint rowGuides = row.GetProperty("guides").GetUInt32();
                 simulated += rowGuides > 0 ? 1u : 0u;
@@ -86,7 +89,7 @@ public sealed class HairCrowd : Scenario
                 int bin = level <= 0 ? 0 : level >= row.GetProperty("level_guides").GetArrayLength() ? levelCount + 1 : (int)Math.Ceiling(level);
                 ++levels[Math.Min(bin, levelCount + 1)];
             }
-            _simSamples[frame] = new SimSample(frame, simulated, guides, points, evaluated, levels);
+            _simSamples[frame] = new SimSample(frame, simulated, guides, points, evaluated, staleGuides, starved, levels);
         }
     }
 
@@ -166,6 +169,7 @@ public sealed class HairCrowd : Scenario
         var commands = ctx.Commands;
         commands.Invoke("hair.clear");
         commands.Invoke("hair.lod", new { error_pixels = 1.0, max_width_scale = 8.0, min_detail = 0.02, force_detail = 0.0, segment_pixels = 4.0, freeze = false });
+        if (Environment.GetEnvironmentVariable("HAIR_COVERAGE") is string coverage) commands.Invoke("hair.lod", new { coverage }); // off: the opaque form
         commands.Invoke("hair.debug", new { view = "off" });
         var grooms = new object[] {
             new { style = "straight", strands = 12000, seed = 21, radius = 0.5, length = 0.9, droop = 6.0, root_width = 0.0004, tip_width = 0.0002, points = 17 },
@@ -189,7 +193,7 @@ public sealed class HairCrowd : Scenario
 
         var loaded = commands.Invoke("hair.stats");
         var rows = loaded.GetProperty("rows");
-        uint totalStrands = rows.GetProperty("root_frames").GetProperty("used").GetUInt32();
+        uint totalStrands = loaded.GetProperty("instance_strands").GetUInt32();
         ctx.Log($"crowd: {n} x {n} heads {spacing} m apart, simulation {(_simulate ? "on" : "off")}; {loaded.GetProperty("assets")} assets, " +
             $"{loaded.GetProperty("instances")} instances, {totalStrands} strands over the instances; rows {rows}; " +
             $"buffers {loaded.GetProperty("buffer_bytes").GetUInt64() / (1024.0 * 1024.0):F1} MB; visibility target {loaded.GetProperty("visibility_target")}");
@@ -215,6 +219,15 @@ public sealed class HairCrowd : Scenario
         // Behind the last row, facing away: nothing is in view.
         var away = await Station(ctx, "facing away", (0, HeadHeight, -depth - 3.0), (0, HeadHeight, -depth - 20.0));
         ctx.Check(away.Instances == 0 && away.Strands == 0 && away.PixelsWritten == 0, $"nothing is selected or drawn facing away from the grid ({away.Instances} instances, {away.Strands} strands)");
+        // The simulation follows the view: with no groom in view none is simulated. The guide rows still lent out are
+        // kept shapes: none belongs to a groom that is being simulated.
+        if (_simulate && _simSamples.Count > 0) {
+            var awaySim = _simSamples.Values.Last();
+            ctx.Check(awaySim.Simulated == 0 && awaySim.Evaluated == 0, $"no groom is simulated facing away from the grid ({awaySim})");
+        }
+        var awayRows = commands.Invoke("hair.stats").GetProperty("memory").GetProperty("guide_state");
+        ctx.Log($"guide rows facing away: {awayRows}");
+        ctx.Check(awayRows.GetProperty("rows_active").GetUInt32() == 0, $"no guide rows are in active use facing away from the grid ({awayRows.GetProperty("rows_active")})");
 
         // From far in front, the whole grid small on screen.
         double farDistance = 30.0 + depth;
@@ -234,12 +247,28 @@ public sealed class HairCrowd : Scenario
             $"overflow frames {all.Count(s => s.Overflow != 0)}, capped segments in a frame up to {all.Max(s => s.Capped)}");
         ctx.Check(all.All(sample => sample.Overflow == 0), $"the strand pool and the visible-cluster list never overflow (pool use up to {all.Max(s => s.PoolVertices)} of {poolCapacity})");
         ctx.Check(all.All(sample => sample.ClustersTested > 0), "every frame ran the select pass over the crowd");
+        ctx.Check(all.All(sample => sample.StaleGuides == 0),
+            $"no drawn strand read guide rows that were not written in its frame for its groom (up to {all.Max(s => s.StaleGuides)} did)");
+        ctx.Check(all.All(sample => sample.UnseenStrands == 0),
+            $"no strand was drawn of a groom left unsimulated for being out of view (up to {all.Max(s => s.UnseenStrands)} in a frame)");
+        // Guide state is lent on demand. From the far camera every groom is too small to simulate and none holds rows;
+        // over the run every groom a view showed got the rows it asked for.
+        var guideRows = commands.Invoke("hair.stats").GetProperty("memory").GetProperty("guide_state");
+        ctx.Log($"guide rows at the end: {guideRows}");
+        ctx.Check(guideRows.GetProperty("rows_in_use").GetUInt32() == 0, $"no groom holds guide rows from {farDistance:F0} m ({guideRows.GetProperty("rows_in_use")} rows)");
+        ctx.Check(guideRows.GetProperty("allocation_failures").GetUInt64() == 0 && guideRows.GetProperty("starved_instances").GetUInt32() == 0,
+            $"every groom in view got the guide rows it asked for ({guideRows.GetProperty("allocation_failures")} failures)");
+        ctx.Check(guideRows.GetProperty("high_water_rows").GetUInt32() <= guideRows.GetProperty("capacity_rows").GetUInt32() &&
+            (guideRows.GetProperty("allocations").GetUInt64() > 0) == _simulate,
+            $"guide rows were lent only while simulating, within the buffer ({guideRows.GetProperty("allocations")} ranges, at most {guideRows.GetProperty("high_water_rows")} rows of {guideRows.GetProperty("capacity_rows")})");
         if (_simulate) {
             var sims = _simSamples.Values.ToList();
             ctx.Check(sims.Count > FlyFrames / 2, $"the simulation's metrics were read back for every instance in {sims.Count} frames");
             if (sims.Count > 0) {
                 ctx.Log($"simulation over {sims.Count} frames: instances simulated {sims.Min(s => s.Simulated)} to {sims.Max(s => s.Simulated)}, " +
                     $"guides {sims.Min(s => s.Guides)} to {sims.Max(s => s.Guides)}, guide points {sims.Min(s => s.Points)} to {sims.Max(s => s.Points)}");
+                ctx.Check(sims.All(s => s.StaleGuides == 0), $"every guide went on from its own rows of the frame before (up to {sims.Max(s => s.StaleGuides)} in a frame did not)");
+                ctx.Check(sims.All(s => s.Starved == 0), $"no groom in view went without guide rows (up to {sims.Max(s => s.Starved)} in a frame)");
                 var farSim = sims[^1];
                 ctx.Check(farSim.Simulated == 0, $"no groom is simulated from {farDistance:F0} m ({farSim})");
             }

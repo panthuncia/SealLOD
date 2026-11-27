@@ -60,9 +60,19 @@ public sealed class HairSimLod : Scenario
     int _swayFrame;
     bool _sway = true;
 
+    // Rows of metrics read with the groom in view and out of it: the simulation follows the view, and this scenario is
+    // about the solver, so its grooms have to be in view throughout.
+    int _inViewRows, _outOfViewRows;
+    // Guide rows are lent to a groom while it is simulated: guides that went on from rows that were not theirs of the
+    // frame before, and rows of metrics read with the groom in view but without guide rows.
+    long _staleGuides, _starvedRows;
+
     void Collect(ScenarioContext ctx)
     {
         foreach (var row in ctx.Commands.Invoke("hair.sim").GetProperty("metrics").EnumerateArray()) {
+            if (row.GetProperty("in_view").GetBoolean()) ++_inViewRows; else ++_outOfViewRows;
+            _staleGuides += row.GetProperty("stale_guides").GetUInt32();
+            if (row.GetProperty("starved").GetBoolean()) ++_starvedRows;
             if (row.GetProperty("instance").GetUInt32() != 0) continue;
             double distance = row.TryGetProperty("collider_distance", out var value) ? value.GetDouble() : double.PositiveInfinity;
             var sample = new Sample(row.GetProperty("frame").GetUInt64(), 0, row.GetProperty("sim_level").GetDouble(),
@@ -258,9 +268,15 @@ public sealed class HairSimLod : Scenario
             $"(changing {excess[0] * 1000:F3} mm, blending {excess[1] * 1000:F3} mm, others {excess[2] * 1000:F3} mm)");
     }
 
-    // Dumps the guide state of `frames` consecutive frames while `drive` sets each frame's level.
+    // An instance's first row of guide state: rows are lent while it is simulated, and -1 means it holds none.
+    static int GuideRowBase(ScenarioContext ctx, int instance) =>
+        (int)ctx.Commands.Invoke("hair.stats").GetProperty("instance_list")[instance].GetProperty("guide_row_base").GetInt64();
+
+    // Dumps the guide state of `frames` consecutive frames while `drive` sets each frame's level. The groom is the only
+    // one simulated, so its rows are the buffer's first.
     async Task<List<GuideDump>> DumpFrames(ScenarioContext ctx, string name, int frames, int rows, Action<int> drive)
     {
+        ctx.Require(GuideRowBase(ctx, 0) == 0, $"{name}: the groom's guide rows are the first of the buffer ({GuideRowBase(ctx, 0)})");
         var paths = new List<string>();
         for (int frame = 0; frame < frames; ++frame) {
             drive(frame);
@@ -288,6 +304,7 @@ public sealed class HairSimLod : Scenario
         var commands = ctx.Commands;
         commands.Invoke("hair.clear");
         commands.Invoke("hair.lod", new { error_pixels = 1.0, max_width_scale = 8.0, min_detail = 0.02, force_detail = 0.0, segment_pixels = 4.0, freeze = false });
+        if (Environment.GetEnvironmentVariable("HAIR_COVERAGE") is string coverage) commands.Invoke("hair.lod", new { coverage }); // off: the opaque form
         commands.Invoke("hair.debug", new { view = "off" });
         // Every control, so an earlier session's values do not carry over. The level is forced to every guide to begin with.
         var controls = commands.Invoke("hair.sim", new {
@@ -313,7 +330,7 @@ public sealed class HairSimLod : Scenario
         ctx.Require(Math.Abs(ctx.DeltaTime - 1.0 / 60.0) < 1e-5, "the scenario runs with --script-fixed-dt 0.0166667");
         var loaded = commands.Invoke("hair.stats");
         ctx.Require(loaded.GetProperty("active_instances").GetUInt32() == 1, "the groom is attached and dispatched");
-        int guideRows = (int)loaded.GetProperty("rows").GetProperty("guide_points").GetProperty("used").GetUInt32();
+        int guideRows = (int)loaded.GetProperty("instance_list")[0].GetProperty("guide_rows").GetUInt32();
         ctx.Require(loaded.GetProperty("rows").GetProperty("guides").GetProperty("used").GetUInt32() == Guides && guideRows % Guides == 0,
             $"the groom has {Guides} guides of one point count ({guideRows} guide points)");
         int pointsPerGuide = guideRows / Guides;
@@ -437,8 +454,8 @@ public sealed class HairSimLod : Scenario
             $"far away nothing is simulated: {farFrames[^1]}");
         await Capture(ctx, "hair_sim_lod_cost_3_off_by_distance");
         var dollyOut = Since(dollyOutStart).Where(sample => sample.Frame <= far).ToList();
-        ctx.Check(dollyOut.Zip(dollyOut.Skip(1)).All(pair => pair.Second.Level <= pair.First.Level + 1e-6),
-            "dollying away, the level never rises");
+        var rise = dollyOut.Zip(dollyOut.Skip(1)).FirstOrDefault(pair => pair.Second.Level > pair.First.Level + 1e-6);
+        ctx.Check(rise.First is null, "dollying away, the level never rises" + (rise.First is null ? "" : $" (from {rise.First} to {rise.Second})"));
         foreach (var sample in dollyOut.Where((_, index) => index % 40 == 0)) ctx.Log($"dolly away: {sample}");
         ulong dollyBackStart = NewestFrame;
         for (int frame = 1; frame <= DollyFrames; ++frame) {
@@ -523,6 +540,10 @@ public sealed class HairSimLod : Scenario
             commands.Invoke("hair.simlevel", new { instance = second, level });
             commands.Invoke("hair.sim", new { reset = true });
             await Step(ctx, 240);
+            // Where each groom's guide rows are: both are simulated, so both hold rows, and keep them through the swing.
+            int baseA = GuideRowBase(ctx, 0), baseB = GuideRowBase(ctx, (int)second);
+            ctx.Require(baseA >= 0 && baseB >= 0 && baseA != baseB, $"both grooms hold guide rows (from rows {baseA} and {baseB})");
+            int dumpRows = Math.Max(baseA, baseB) + guideRows;
             var paths = new List<string>();
             for (int frame = 0; frame <= dumpFrames[^1]; ++frame) {
                 double time = frame / 60.0;
@@ -531,7 +552,7 @@ public sealed class HairSimLod : Scenario
                 _secondHead.Position = (SecondHeadPosition.X + offset, SecondHeadPosition.Y, SecondHeadPosition.Z);
                 if (dumpFrames.Contains(frame)) {
                     paths.Add($"{DumpFolder()}/fidelity_{level:F0}_{frame:D3}.bin");
-                    commands.Invoke("hair.dump", new { buffer = "guide_points", path = paths[^1], rows = 2 * guideRows });
+                    commands.Invoke("hair.dump", new { buffer = "guide_points", path = paths[^1], rows = dumpRows });
                 }
                 if (frame == 90 && level == 1.0) TryCapture(ctx, "hair_sim_lod_d_full_left_level_1_right");
                 await Step(ctx);
@@ -539,14 +560,15 @@ public sealed class HairSimLod : Scenario
             await WaitDumps(ctx);
             // A point's offset from its rigid pose, in the second groom against the first. The first dump is the settled
             // hair before the swing; the motion is how far the first groom's points are from where they were then.
-            var dumps = paths.Select(path => ReadDump(path, 2 * guideRows)).ToList();
+            ctx.Require(GuideRowBase(ctx, 0) == baseA && GuideRowBase(ctx, (int)second) == baseB, "both grooms kept their guide rows through the swing");
+            var dumps = paths.Select(path => ReadDump(path, dumpRows)).ToList();
             double settledError = 0, sum = 0, largest = 0, motionSum = 0;
             var errors = new List<float>();
             for (int index = 0; index < dumps.Count; ++index) {
                 var dump = dumps[index];
                 double frameSum = 0;
                 for (int row = 0; row < guideRows; ++row) {
-                    int a = row * 3, b = (row + guideRows) * 3;
+                    int a = (row + baseA) * 3, b = (row + baseB) * 3;
                     double ex = 0, mx = 0;
                     for (int axis = 0; axis < 3; ++axis) {
                         double first = dump.Position[a + axis] - dump.Rigid[a + axis];
@@ -580,6 +602,8 @@ public sealed class HairSimLod : Scenario
             $"the difference grows as the level falls ({string.Join(", ", fidelity.Skip(1).Select(row => $"level {row.Level:F0}: {row.Mean * 1000:F3} mm"))})");
         await Captured(ctx);
 
+        ctx.Check(_outOfViewRows == 0 && _inViewRows > 0, $"the grooms were in view whenever their metrics were read ({_inViewRows} rows in view, {_outOfViewRows} out of it)");
+        ctx.Check(_staleGuides == 0 && _starvedRows == 0, $"every guide went on from its own rows of the frame before, and no groom went without guide rows ({_staleGuides} stale guides, {_starvedRows} starved rows)");
         var status = commands.Invoke("hair.sim", new { enabled = false, lod_force_level = -1.0 });
         ctx.Check(status.GetProperty("capped_frames").GetUInt64() == 0, "no frame hit the step cap");
         commands.Invoke("hair.stats", new { continuous = false });

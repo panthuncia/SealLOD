@@ -60,7 +60,8 @@ set(HAIR_SHADER_FILES
     "${CMAKE_CURRENT_LIST_DIR}/shaders/hairGuideSkin.hlsli"
     "${CMAKE_CURRENT_LIST_DIR}/shaders/hairRaster.hlsl"
     "${CMAKE_CURRENT_LIST_DIR}/shaders/hairResolve.hlsl"
-    "${CMAKE_CURRENT_LIST_DIR}/shaders/hairRootBinding.hlsl"
+    "${CMAKE_CURRENT_LIST_DIR}/shaders/hairRootCheck.hlsl"
+    "${CMAKE_CURRENT_LIST_DIR}/shaders/hairRootFrame.hlsli"
     "${CMAKE_CURRENT_LIST_DIR}/shaders/hairSelectEvaluate.hlsl"
     "${CMAKE_CURRENT_LIST_DIR}/shaders/hairSimulate.hlsl"
     "${CMAKE_CURRENT_LIST_DIR}/shaders/hairStructs.hlsli")

@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 
@@ -74,6 +75,7 @@ struct DebugViewName {
 constexpr DebugViewName kDebugViews[] = {
     { "off", HairDebugView::Off },           { "cluster", HairDebugView::Cluster }, { "detail", HairDebugView::Detail },
     { "strand", HairDebugView::Strand },     { "rank", HairDebugView::Rank },       { "vertex_level", HairDebugView::VertexLevel },
+    { "coverage", HairDebugView::Coverage },
 };
 
 const char* DebugViewText(HairDebugView view)
@@ -84,11 +86,29 @@ const char* DebugViewText(HairDebugView view)
     return "off";
 }
 
+struct CoverageModeName {
+    const char* name;
+    HairCoverageMode mode;
+};
+constexpr CoverageModeName kCoverageModes[] = {
+    { "off", HairCoverageMode::Off }, { "white", HairCoverageMode::White }, { "interleaved", HairCoverageMode::Interleaved },
+};
+
+const char* CoverageModeText(HairCoverageMode mode)
+{
+    for (const auto& entry : kCoverageModes) {
+        if (entry.mode == mode) return entry.name;
+    }
+    return "off";
+}
+
 Json DescribeLod(const HairLodSettings& lod)
 {
     return {
         { "error_pixels", lod.errorPixels },   { "max_width_scale", lod.maxWidthScale }, { "min_detail", lod.minDetail },
         { "force_detail", lod.forceDetail },   { "segment_pixels", lod.segmentPixels }, { "freeze", lod.freeze },
+        { "coverage", CoverageModeText(lod.coverage) }, { "coverage_accumulate", lod.accumulateCoverage },
+        { "detail_exponent", lod.detailExponent },
     };
 }
 
@@ -99,6 +119,8 @@ Json DescribeFrameCounters(const HairGpuCounters& counters, const HairCapacities
         { "frame", counters.frame },
         { "selected", counters.selected },
         { "camera_position", { counters.cameraPosition.x, counters.cameraPosition.y, counters.cameraPosition.z } },
+        { "stale_guides_drawn", counters.staleGuidesDrawn },
+        { "unseen_strands_drawn", counters.unseenStrandsDrawn },
         { "clusters_tested", counters.clustersTested },
         { "clusters_visible", counters.clustersVisible },
         { "instances_visible", counters.instancesVisible },
@@ -107,6 +129,8 @@ Json DescribeFrameCounters(const HairGpuCounters& counters, const HairCapacities
         { "pool_vertices", Rows(counters.poolVertices, capacities.poolVertices) },
         { "visible_clusters", Rows(counters.clustersVisible, capacities.visibleClusters) },
         { "overflow_clusters", counters.overflowClusters },
+        { "pixels_covered", counters.pixelsCovered },
+        { "coverage_sum", counters.coverageSum },
         { "segments_drawn", counters.segmentsDrawn },
         { "pixels_written", counters.pixelsWritten },
         { "pixels_occluded", counters.pixelsOccluded },
@@ -147,10 +171,16 @@ Json DescribeSim(const HairSimStatus& status)
             { "strand_roots", instance.strandRoots },
             { "strand_root_error", instance.strandRootError },
             { "reset_guides", instance.resetGuides },
+            { "resumed_guides", instance.resumedGuides },
+            { "stale_guides", instance.staleGuides },
+            { "holds_rows", instance.holdsRows },
+            { "starved", instance.starved },
             { "root_shift", instance.rootShift },
             { "sim_level", instance.simLevel },
             { "target_level", instance.targetLevel },
             { "coverage", instance.coverage },
+            { "view_extent", instance.viewExtent },
+            { "in_view", instance.inView },
             { "level_guides", std::vector<std::uint32_t>(instance.levelGuides.begin(), instance.levelGuides.begin() + instance.levelCount) },
             { "simulated_points", instance.simulatedPoints },
             { "evaluated_guides", instance.evaluatedGuides },
@@ -189,6 +219,10 @@ Json DescribeSim(const HairSimStatus& status)
         { "lod_point_budget", settings.lodPointBudget },
         { "promote_seconds", settings.promoteSeconds },
         { "demote_seconds", settings.demoteSeconds },
+        { "lod_view_grace_seconds", settings.lodViewGraceSeconds },
+        { "lod_settle_seconds", settings.lodSettleSeconds },
+        { "guide_point_budget", settings.guidePointBudget },
+        { "guide_keep_seconds", settings.guideKeepSeconds },
         { "steps", status.steps },
         { "simulated_seconds", status.simulatedSeconds },
         { "dropped_seconds", status.droppedSeconds },
@@ -196,6 +230,58 @@ Json DescribeSim(const HairSimStatus& status)
         { "last_frame_steps", status.lastFrameSteps },
         { "guide_points", status.guidePoints },
         { "metrics", std::move(metrics) },
+    };
+}
+
+// Each pooled buffer's capacity, what is in use and the most that was, and the lending of guide state.
+Json DescribeMemory(const HairStats& stats)
+{
+    Json buffers = Json::array();
+    std::uint64_t capacity = 0u;
+    std::uint64_t used = 0u;
+    std::uint64_t highWater = 0u;
+    for (const HairBufferUse& buffer : stats.bufferUse) {
+        capacity += buffer.capacityRows * buffer.rowBytes;
+        used += buffer.usedRows * buffer.rowBytes;
+        highWater += buffer.highWaterRows * buffer.rowBytes;
+        buffers.push_back({
+            { "name", buffer.name },
+            { "row_bytes", buffer.rowBytes },
+            { "capacity_rows", buffer.capacityRows },
+            { "used_rows", buffer.usedRows },
+            { "high_water_rows", buffer.highWaterRows },
+            { "capacity_bytes", buffer.capacityRows * buffer.rowBytes },
+            { "used_bytes", buffer.usedRows * buffer.rowBytes },
+            { "high_water_bytes", buffer.highWaterRows * buffer.rowBytes },
+        });
+    }
+    const HairGuideRowStats& guide = stats.guideRows;
+    return {
+        { "capacity_bytes", capacity },
+        { "used_bytes", used },
+        { "high_water_bytes", highWater }, // the sum of each buffer's own: an upper bound on the most in use at once
+        { "buffers", std::move(buffers) },
+        { "guide_state", {
+            { "row_bytes", sizeof(HairGuidePoint) },
+            { "capacity_rows", guide.capacityRows },
+            { "budget_rows", guide.budgetRows },
+            { "rows_in_use", guide.rowsInUse },
+            { "rows_active", guide.rowsActive },
+            { "rows_kept", guide.rowsInUse - guide.rowsActive },
+            { "high_water_rows", guide.highWaterRows },
+            { "largest_free_rows", guide.largestFreeRows },
+            { "holders", guide.holders },
+            { "active_holders", guide.activeHolders },
+            { "kept_holders", guide.holders - guide.activeHolders },
+            { "starved_instances", guide.starvedInstances },
+            { "unsettled_instances", guide.unsettledInstances },
+            { "allocations", guide.allocations },
+            { "releases", guide.releases },
+            { "evictions", guide.evictions },
+            { "evictions_for_rows", guide.evictionsForRows },
+            { "evictions_by_age", guide.evictionsByAge },
+            { "allocation_failures", guide.allocationFailures },
+        } },
     };
 }
 
@@ -209,28 +295,29 @@ Json DescribeStats(const HairStats& stats)
     reply["failed_instances"] = stats.failedInstances;
     reply["strands"] = stats.strands;
     reply["points"] = stats.points;
+    reply["instance_strands"] = stats.instanceStrands;
     reply["rows"] = {
         { "clusters", Rows(stats.clusters, stats.capacities.clusters) },
         { "strands", Rows(stats.strands, stats.capacities.strands) },
         { "guides", Rows(stats.guides, stats.capacities.guides) },
         { "points", Rows(stats.points, stats.capacities.points) },
         { "instances", Rows(stats.instances, stats.capacities.instances) },
-        { "root_frames", Rows(stats.rootFrames, stats.capacities.rootFrames) },
-        { "guide_points", Rows(stats.guidePoints, stats.capacities.guidePoints) },
+        { "guide_points", Rows(stats.guidePoints, stats.capacities.guidePoints) }, // lent out now (memory.guide_state)
     };
     reply["buffers_created"] = stats.buffersCreated;
     reply["buffer_bytes"] = stats.bufferBytes;
+    reply["memory"] = DescribeMemory(stats);
     reply["asset_bytes_uploaded"] = stats.assetBytesUploaded;
     reply["instance_bytes_uploaded"] = stats.instanceBytesUploaded;
     reply["bytes_uploaded"] = stats.assetBytesUploaded + stats.instanceBytesUploaded;
     reply["pending_upload_assets"] = stats.pendingUploadAssets;
     reply["frames"] = stats.frames;
-    reply["root_binding_dispatches"] = stats.rootBindingDispatches;
+    reply["evaluate_dispatches"] = stats.evaluateDispatches;
     const auto& counters = stats.gpuCounters;
     reply["gpu_counter"] = {
         { "valid", counters.valid },
-        { "root_binding_dispatches", counters.rootBindingDispatches },
-        { "cpu_root_binding_dispatches", counters.cpuRootBindingDispatches },
+        { "evaluate_dispatches", counters.evaluateDispatches },
+        { "cpu_evaluate_dispatches", counters.cpuEvaluateDispatches },
         { "frame", counters.frame },
     };
     // The same readback: what the select and raster passes counted in that frame.
@@ -281,6 +368,10 @@ Json DescribeStats(const HairStats& stats)
             { "color", { instance.material.baseColor.x, instance.material.baseColor.y, instance.material.baseColor.z } },
             { "roughness", instance.material.roughness },
             { "active", instance.active },
+            { "strands", instance.strands },
+            { "guide_rows", instance.guideRows },
+            // Its first row of guide state while it holds rows; -1 while it has none.
+            { "guide_row_base", instance.guideRowBase == HAIR_INVALID_INDEX ? -1 : static_cast<std::int64_t>(instance.guideRowBase) },
             { "error", instance.error },
         });
     }
@@ -354,6 +445,17 @@ void RegisterHairCommands(br::diagnostics::ControlCommandRegistry& commands, std
         lod.forceDetail = args.value("force_detail", lod.forceDetail);
         lod.segmentPixels = args.value("segment_pixels", lod.segmentPixels);
         lod.freeze = args.value("freeze", lod.freeze);
+        lod.accumulateCoverage = args.value("coverage_accumulate", lod.accumulateCoverage);
+        lod.detailExponent = args.value("detail_exponent", lod.detailExponent);
+        if (const auto coverage = args.find("coverage"); coverage != args.end()) {
+            // A mode's name, or true and false for the default mode and off.
+            const std::string name = coverage->is_boolean() ? (coverage->get<bool>() ? "white" : "off") : coverage->get<std::string>();
+            const auto found = std::ranges::find_if(kCoverageModes, [&](const CoverageModeName& entry) { return name == entry.name; });
+            if (found == std::end(kCoverageModes)) {
+                throw std::runtime_error("unknown hair coverage mode " + name + ": expected off, white or interleaved");
+            }
+            lod.coverage = found->mode;
+        }
         runtime->SetLodSettings(lod);
         return DescribeLod(runtime->LodSettings());
     });
@@ -365,7 +467,7 @@ void RegisterHairCommands(br::diagnostics::ControlCommandRegistry& commands, std
                 return Json{ { "view", entry.name } };
             }
         }
-        throw std::runtime_error("unknown hair debug view " + name + ": expected off, cluster, detail, strand, rank or vertex_level");
+        throw std::runtime_error("unknown hair debug view " + name + ": expected off, cluster, detail, strand, rank, vertex_level or coverage");
     });
     // Only the fields given change. `reset` puts every guide back on its rest pose.
     commands.Register("hair.sim", [runtime](const br::diagnostics::ControlRequest& request) {
@@ -395,6 +497,10 @@ void RegisterHairCommands(br::diagnostics::ControlCommandRegistry& commands, std
         sim.lodPointBudget = args.value("lod_point_budget", sim.lodPointBudget);
         sim.promoteSeconds = args.value("promote_seconds", sim.promoteSeconds);
         sim.demoteSeconds = args.value("demote_seconds", sim.demoteSeconds);
+        sim.lodViewGraceSeconds = args.value("lod_view_grace_seconds", sim.lodViewGraceSeconds);
+        sim.lodSettleSeconds = args.value("lod_settle_seconds", sim.lodSettleSeconds);
+        sim.guidePointBudget = args.value("guide_point_budget", sim.guidePointBudget);
+        sim.guideKeepSeconds = args.value("guide_keep_seconds", sim.guideKeepSeconds);
         runtime->SetSimSettings(sim);
         if (args.value("reset", false)) runtime->ResetSimulation();
         return DescribeSim(runtime->SimStatus());

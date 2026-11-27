@@ -27,7 +27,6 @@
 #define HAIR_CLUSTERS UintRootConstant1             // StructuredBuffer<HairClusterHeader>
 #define HAIR_STRANDS UintRootConstant2              // StructuredBuffer<HairStrandRecord>
 #define HAIR_ROOT_BINDINGS UintRootConstant3        // StructuredBuffer<HairRootBinding>
-#define HAIR_ROOT_FRAMES UintRootConstant4          // StructuredBuffer<HairRootFramePair>
 #define HAIR_POINTS UintRootConstant5               // StructuredBuffer<HairPackedPoint>
 #define HAIR_GUIDE_STRAND_INDICES UintRootConstant6 // StructuredBuffer<uint>
 #define HAIR_GUIDE_POINT_RANGES UintRootConstant7   // StructuredBuffer<HairGuidePointRange>
@@ -40,6 +39,7 @@
 
 #define HAIR_GUIDE_POINT_BUFFER RWStructuredBuffer<HairGuidePoint>
 #include "HairShaders/hairGuideSkin.hlsli"
+#include "HairShaders/hairRootFrame.hlsli"
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -51,7 +51,8 @@ void HairGuideLevelCS(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupInde
     const uint instanceIndex = simGroup.instanceIndex;
     const HairInstanceGPU instance = instances[instanceIndex];
     const uint rank = simGroup.firstRank + groupIndex;
-    if ((instance.simFlags & HAIR_SIM_FLAG_ENABLED) == 0u || groupIndex >= simGroup.count || rank >= instance.guideCount)
+    if ((instance.simFlags & HAIR_SIM_FLAG_ENABLED) == 0u || instance.guidePointBase == HAIR_INVALID_INDEX ||
+        groupIndex >= simGroup.count || rank >= instance.guideCount)
     {
         return;
     }
@@ -73,7 +74,6 @@ void HairGuideLevelCS(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupInde
     StructuredBuffer<HairClusterHeader> clusters = ResourceDescriptorHeap[HAIR_CLUSTERS];
     StructuredBuffer<HairStrandRecord> strands = ResourceDescriptorHeap[HAIR_STRANDS];
     StructuredBuffer<HairRootBinding> rootBindings = ResourceDescriptorHeap[HAIR_ROOT_BINDINGS];
-    StructuredBuffer<HairRootFramePair> rootFrames = ResourceDescriptorHeap[HAIR_ROOT_FRAMES];
     StructuredBuffer<HairPackedPoint> points = ResourceDescriptorHeap[HAIR_POINTS];
     StructuredBuffer<uint> guideStrandIndices = ResourceDescriptorHeap[HAIR_GUIDE_STRAND_INDICES];
     StructuredBuffer<HairGuideBinding> guideBindings = ResourceDescriptorHeap[HAIR_GUIDE_BINDINGS];
@@ -88,8 +88,8 @@ void HairGuideLevelCS(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupInde
     const HairClusterHeader cluster = clusters[instance.clusterBase + strand.clusterIndex];
     const uint restBase = instance.pointBase + strand.pointOffset;
     const HairRootBinding rootBinding = rootBindings[instance.strandBase + strandRow];
-    const HairRootFramePair rootFrame = rootFrames[instance.rootFrameBase + strandRow];
     const PerObjectBuffer object = perObject[instance.perObjectIndex];
+    const HairRootFramePair rootFrame = HairMakeRootFramePair(instance, rootBinding, object, sim.frameNumber);
     const HairRootFollow follow = HairMakeRootFollow(rootBinding, rootFrame.current, HairModelScale(object.model));
     const HairRootFollow previousFollow = HairMakeRootFollow(rootBinding, rootFrame.previous, HairModelScale(object.prevModel));
     // As the simulate pass resets a guide: the instance starts, or the root jumped.
@@ -126,6 +126,10 @@ void HairGuideLevelCS(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupInde
     // A demotion whose pull has reached 1 is over: the rows are the evaluated state, and stay so.
     const bool demoted = simulated && (guideState & HAIR_GUIDE_STATE_DEMOTING) != 0u && pull >= 1.0f;
 
+    // The stamp of the rows this pass writes. A guide that goes on from the state its rows hold must find them written
+    // for this instance in the frame before, or in this one by the simulate pass: counted when not.
+    const uint guideStamp = HAIR_GUIDE_STAMP(instanceIndex, sim.frameNumber);
+    const uint previousStamp = HAIR_GUIDE_STAMP(instanceIndex, sim.frameNumber - 1u);
     float motion = 0.0f;
     float3 rootMotion = float3(0.0f, 0.0f, 0.0f);
     for (uint pointIndex = 0u; pointIndex < pointCount; ++pointIndex)
@@ -191,6 +195,14 @@ void HairGuideLevelCS(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupInde
             {
                 state.solverPrevious += moved;
             }
+        }
+        if (pointIndex == 1u)
+        {
+            if (!reset && state.guideState != guideStamp && state.guideState != previousStamp)
+            {
+                InterlockedAdd(metrics[instanceIndex * HAIR_SIM_METRIC_COUNT + HAIR_SIM_METRIC_STALE_GUIDES], 1u);
+            }
+            state.guideState = guideStamp;
         }
         if (pointIndex == 0u)
         {

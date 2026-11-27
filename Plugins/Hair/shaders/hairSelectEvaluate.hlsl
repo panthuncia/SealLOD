@@ -5,8 +5,8 @@
 // of the strand pool.
 //
 // HairEvaluateCS: one thread group per visible cluster, one thread per drawn strand. It writes the strand's drawn
-// vertices into the pool in world space, for this frame and the previous one. Without simulation a strand follows its
-// root rigidly. With it (HAIR_SIM_FLAG_ENABLED) a guide's vertices are its guide state, simulated or evaluated from its
+// vertices into the pool in world space, for this frame and the previous one. A root's frame is worked out here
+// (hairRootFrame.hlsli). Without simulation a strand follows its root rigidly. With it (HAIR_SIM_FLAG_ENABLED) a guide's vertices are its guide state, simulated or evaluated from its
 // parents (hairGuideLevels.hlsl), and every other strand is skinned to its three guides.
 
 #include "HairShaders/hairCommon.hlsli"
@@ -16,9 +16,8 @@
 #define HAIR_CLUSTERS UintRootConstant1         // StructuredBuffer<HairClusterHeader>
 #define HAIR_AGGREGATES UintRootConstant2       // StructuredBuffer<HairClusterAggregate>, select only
 #define HAIR_ROOT_BINDINGS UintRootConstant3    // StructuredBuffer<HairRootBinding>
-#define HAIR_ROOT_FRAMES UintRootConstant4      // StructuredBuffer<HairRootFramePair>
 #define HAIR_FRAME_STATE UintRootConstant5      // StructuredBuffer<HairFrameGPU>
-#define HAIR_COUNTERS UintRootConstant6         // RWStructuredBuffer<uint> in select, StructuredBuffer<uint> in evaluate
+#define HAIR_COUNTERS UintRootConstant6         // RWStructuredBuffer<uint>
 #define HAIR_VISIBLE_CLUSTERS UintRootConstant7 // RWStructuredBuffer<HairVisibleCluster> in select, read in evaluate
 #define HAIR_INSTANCE_INDEX UintRootConstant8   // select only
 #define HAIR_STRANDS UintRootConstant9          // StructuredBuffer<HairStrandRecord>, evaluate only
@@ -30,6 +29,7 @@
 #define HAIR_SIM_METRICS UintRootConstant15        // RWStructuredBuffer<uint>, evaluate only
 
 #include "HairShaders/hairGuideSkin.hlsli"
+#include "HairShaders/hairRootFrame.hlsli"
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
@@ -45,7 +45,6 @@ void HairSelectCS(uint3 dispatchThreadId : SV_DispatchThreadID)
     StructuredBuffer<HairClusterHeader> clusters = ResourceDescriptorHeap[HAIR_CLUSTERS];
     StructuredBuffer<HairClusterAggregate> aggregates = ResourceDescriptorHeap[HAIR_AGGREGATES];
     StructuredBuffer<HairRootBinding> rootBindings = ResourceDescriptorHeap[HAIR_ROOT_BINDINGS];
-    StructuredBuffer<HairRootFramePair> rootFrames = ResourceDescriptorHeap[HAIR_ROOT_FRAMES];
     StructuredBuffer<HairFrameGPU> frameState = ResourceDescriptorHeap[HAIR_FRAME_STATE];
     StructuredBuffer<PerObjectBuffer> perObject = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerObjectBuffer)];
     ConstantBuffer<PerFrameBuffer> perFrame = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerFrameBuffer)];
@@ -64,9 +63,13 @@ void HairSelectCS(uint3 dispatchThreadId : SV_DispatchThreadID)
 
     // The cluster's bounds follow its first strand's root, as its strands follow theirs. That is exact while every root
     // of the instance moves with one matrix; with a skin binding per root it is what the margin below allows for.
-    const float scale = HairModelScale(perObject[instance.perObjectIndex].model);
-    const HairRootFollow follow = HairMakeRootFollow(rootBindings[instance.strandBase + cluster.strandOffset],
-        rootFrames[instance.rootFrameBase + cluster.strandOffset].current, scale);
+    const PerObjectBuffer object = perObject[instance.perObjectIndex];
+    const float scale = HairModelScale(object.model);
+    const HairRootBinding firstRoot = rootBindings[instance.strandBase + cluster.strandOffset];
+    float4x4 skin;
+    float4x4 previousSkin;
+    HairLoadRootSkin(instance, firstRoot, skin, previousSkin);
+    const HairRootFollow follow = HairMakeRootFollow(firstRoot, HairMakeRootFrame(firstRoot, skin, object.model, 0u), scale);
     const float3 center = HairFollowRoot(follow, cluster.boundsCenter);
     const float radius = cluster.boundsRadius * scale;
 
@@ -96,7 +99,8 @@ void HairSelectCS(uint3 dispatchThreadId : SV_DispatchThreadID)
     const float spacing = (aggregate.density > 0.0f
         ? rsqrt(aggregate.density)
         : 2.0f * cluster.boundsRadius * rsqrt((float)cluster.strandCount)) * scale;
-    float detailLevel = HairLodDetailLevel(spacing * pixelsPerMetre, frame.lodErrorPixels, frame.minDetail);
+    float detailLevel =
+        HairLodDetailLevelPower(spacing * pixelsPerMetre, frame.lodErrorPixels, frame.minDetail, frame.detailExponent);
     if (frame.forceDetail > 0.0f)
     {
         detailLevel = min(frame.forceDetail, 1.0f);
@@ -210,9 +214,13 @@ HairEvaluatedPoint HairEvaluateSimulatedPoint(HairSimulatedStrand strand, uint p
 void HairEvaluateCS(uint3 groupId : SV_GroupID, uint strandIndex : SV_GroupIndex)
 {
     StructuredBuffer<HairFrameGPU> frameState = ResourceDescriptorHeap[HAIR_FRAME_STATE];
-    StructuredBuffer<uint> counters = ResourceDescriptorHeap[HAIR_COUNTERS];
+    RWStructuredBuffer<uint> counters = ResourceDescriptorHeap[HAIR_COUNTERS];
     const HairFrameGPU frame = frameState[0];
     const uint visibleIndex = groupId.x;
+    if (visibleIndex == 0u && strandIndex == 0u)
+    {
+        InterlockedAdd(counters[HAIR_COUNTER_EVALUATE_DISPATCHES], 1u);
+    }
     if (visibleIndex >= min(counters[HAIR_COUNTER_CLUSTERS_VISIBLE], frame.visibleClusterCapacity))
     {
         return;
@@ -228,7 +236,6 @@ void HairEvaluateCS(uint3 groupId : SV_GroupID, uint strandIndex : SV_GroupIndex
     StructuredBuffer<HairClusterHeader> clusters = ResourceDescriptorHeap[HAIR_CLUSTERS];
     StructuredBuffer<HairStrandRecord> strands = ResourceDescriptorHeap[HAIR_STRANDS];
     StructuredBuffer<HairRootBinding> rootBindings = ResourceDescriptorHeap[HAIR_ROOT_BINDINGS];
-    StructuredBuffer<HairRootFramePair> rootFrames = ResourceDescriptorHeap[HAIR_ROOT_FRAMES];
     StructuredBuffer<HairPackedPoint> points = ResourceDescriptorHeap[HAIR_POINTS];
     StructuredBuffer<PerObjectBuffer> perObject = ResourceDescriptorHeap[ResourceDescriptorIndex(Builtin::PerObjectBuffer)];
     RWStructuredBuffer<HairPoolVertex> poolVertices = ResourceDescriptorHeap[HAIR_POOL_VERTICES];
@@ -239,14 +246,31 @@ void HairEvaluateCS(uint3 groupId : SV_GroupID, uint strandIndex : SV_GroupIndex
     const uint strandRow = cluster.strandOffset + strandIndex;
     const HairStrandRecord strand = strands[instance.strandBase + strandRow];
     const HairRootBinding rootBinding = rootBindings[instance.strandBase + strandRow];
-    const HairRootFramePair rootFrame = rootFrames[instance.rootFrameBase + strandRow];
     const PerObjectBuffer object = perObject[instance.perObjectIndex];
+    const HairRootFramePair rootFrame = HairMakeRootFramePair(instance, rootBinding, object, frame.frameNumber);
     const HairRootFollow follow = HairMakeRootFollow(rootBinding, rootFrame.current, HairModelScale(object.model));
     const HairRootFollow previousFollow =
         HairMakeRootFollow(rootBinding, rootFrame.previous, HairModelScale(object.prevModel));
 
+    // Something that should not happen, counted: a drawn strand of an instance that is not simulated because the CPU
+    // found it in no view.
+    if ((instance.simFlags & HAIR_SIM_FLAG_UNSEEN) != 0u)
+    {
+        InterlockedAdd(counters[HAIR_COUNTER_UNSEEN_STRANDS_DRAWN], 1u);
+    }
+    // A simulated instance holds guide rows. One that does not is counted and drawn rigid: nothing reads rows it was
+    // not lent.
+    const bool simulatedInstance = (instance.simFlags & HAIR_SIM_FLAG_ENABLED) != 0u;
+    if (simulatedInstance && instance.guidePointBase == HAIR_INVALID_INDEX)
+    {
+        InterlockedAdd(counters[HAIR_COUNTER_STALE_GUIDES_DRAWN], 1u);
+    }
+
     // The strand is widened to make up for the dropped ones; the cluster's last drawn strand fades in by width.
-    float width = strand.width * HairLodWidthScale(visible.detailLevel, frame.maxWidthScale);
+    // With coverage the scale is the exact one; without, the one-pixel floor hides the width and the rule is as it was.
+    float width = strand.width * (frame.coverageMode != HAIR_COVERAGE_OFF
+        ? HairLodCoverageWidthScale(visible.detailLevel, cluster.strandCount, cluster.randomOffset, frame.maxWidthScale)
+        : HairLodWidthScale(visible.detailLevel, frame.maxWidthScale));
     if (strandIndex + 1u == visible.strandCount)
     {
         width *= visible.boundaryWeight;
@@ -260,10 +284,14 @@ void HairEvaluateCS(uint3 groupId : SV_GroupID, uint strandIndex : SV_GroupIndex
     const uint poolBase = visible.poolVertexBase + strandIndex * (segmentCount + 1u);
     uint vertex;
 
-    if ((instance.simFlags & HAIR_SIM_FLAG_ENABLED) != 0u)
+    if (simulatedInstance && instance.guidePointBase != HAIR_INVALID_INDEX)
     {
         StructuredBuffer<HairGuidePointRange> guidePointRanges = ResourceDescriptorHeap[HAIR_GUIDE_POINT_RANGES];
+        StructuredBuffer<HairGuidePoint> guidePoints = ResourceDescriptorHeap[HAIR_GUIDE_POINTS];
         RWStructuredBuffer<uint> metrics = ResourceDescriptorHeap[HAIR_SIM_METRICS];
+        // The guide rows this strand reads were written this frame, for this instance: counted when not.
+        const uint guideStamp = HAIR_GUIDE_STAMP(visible.instanceIndex, frame.frameNumber);
+        bool staleGuide = false;
         HairSimulatedStrand simulated;
         simulated.cluster = cluster;
         simulated.follow = follow;
@@ -287,6 +315,14 @@ void HairEvaluateCS(uint3 groupId : SV_GroupID, uint strandIndex : SV_GroupIndex
             simulated.guideBases[guide] = instance.guidePointBase + range.offset;
             simulated.guideSegmentCounts[guide] = range.count - 1u;
             simulated.guideWeights[guide] = used ? strand.guideWeights[guide] : 0.0f;
+            if (used && simulated.guideWeights[guide] > 0.0f && guidePoints[simulated.guideBases[guide] + 1u].guideState != guideStamp)
+            {
+                staleGuide = true;
+            }
+        }
+        if (staleGuide)
+        {
+            InterlockedAdd(counters[HAIR_COUNTER_STALE_GUIDES_DRAWN], 1u);
         }
 
         for (vertex = 0u; vertex <= segmentCount; ++vertex)

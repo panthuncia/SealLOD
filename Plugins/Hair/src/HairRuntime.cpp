@@ -62,6 +62,9 @@ struct Asset {
         const auto count = std::ranges::upper_bound(guideThresholds, level) - guideThresholds.begin();
         return count == 0 ? 0u : guideThresholdPoints[static_cast<std::size_t>(count) - 1u];
     }
+    // The radius of a sphere about the middle of the groom's bounds that holds every cluster's bounding sphere, in rest
+    // space: what the select pass tests cluster by cluster, as one sphere.
+    float cullRadius = 0.0f;
     bool hasSkinBindings = false; // built with a scalp mesh: the roots carry real joints and weights
     bool uploaded = false;
 };
@@ -71,8 +74,9 @@ struct Instance {
     std::uint64_t stableSceneID = 0u;
     std::uint32_t attachBone = HAIR_INVALID_INDEX;
     std::shared_ptr<Skeleton> skeleton; // the entity's pose instance, in Bone and PerRoot mode
-    std::uint32_t rootFrameBase = 0u;
-    std::uint32_t guidePointBase = 0u;
+    // Its rows of guide state while it holds any (HairGuideRowStats): simulated, or keeping the shape it stopped with.
+    std::uint32_t guideRowBase = HAIR_INVALID_INDEX;
+    std::uint32_t guideRowCount = 0u;
     std::vector<HairCollider> colliders;
     bool collidersUploaded = false;
     bool simResetRequested = false;            // by ResetSimulation or by turning the simulation on
@@ -83,6 +87,21 @@ struct Instance {
     float simForceLevel = -1.0f;   // >= 0: SetInstanceSimLevel's
     bool simMoving = false;        // sFrac is on its way to simTarget
     float simCoverage = 0.0f;
+    float simViewExtent = 0.0f;    // OnScreenExtent of its bounds this frame
+    bool simInView = false;        // a view shows part of it: it is to be simulated at the level its size there asks for
+    bool simUnseen = false;        // not simulated this frame only because no view shows it (HAIR_SIM_FLAG_UNSEEN)
+    bool simPlanned = false;       // PlanSimLevels looked at it this frame: its entity is drawn
+    bool simStarved = false;       // in view and to be simulated, but there were no guide rows for it: it follows rigidly
+    bool simUnsettled = false;     // out of view, would settle unseen, but there were no free guide rows for it
+    // Its guide rows were taken back with its shape (or its unseen settle) lost: it is not settled out of view again,
+    // and starts from its rigid pose when a view shows it. Cleared by that start, and when it is too small to simulate.
+    bool simEvicted = false;
+    double simLastSimulated = 0.0; // State::guideClock when it was last simulated: how old a kept shape is (guideKeepSeconds)
+    double simOutOfViewSeconds = 0.0; // simulated time since a view last showed it
+    double simSettledSeconds = 0.0;   // simulated time since it last started from its rigid pose
+    // Its guide rows hold the shape an earlier simulated frame left: it starts again from that and not from the rigid
+    // pose. Only while it holds rows: taking them back clears this.
+    bool simStateValid = false;
     double simOffSeconds = 0.0;    // simulated time spent at level 0 while active: the guides' blend back to the rigid pose
     // The highest sFrac of this stretch of simulated time and of the one before, each as long as a demotion takes: a
     // guide the level no longer asks for is still simulated that long, so these say which levels can have such a guide.
@@ -108,6 +127,66 @@ struct ExpectedRoot {
     bool unknown = false; // the CPU could not tell what the dispatch read
     HairRootFrame current{};
     HairRootFrame previous{};
+};
+
+// Contiguous row ranges out of one buffer: first fit, merged when freed, never moved.
+struct RowAllocator {
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> free; // offset and count, ascending, no two adjacent
+    std::uint32_t capacity = 0u;
+    std::uint32_t used = 0u;
+    std::uint32_t highWater = 0u;
+
+    void Reset(std::uint32_t rows)
+    {
+        capacity = rows;
+        used = 0u;
+        free.clear();
+        if (rows != 0u) free.emplace_back(0u, rows);
+    }
+    std::optional<std::uint32_t> Allocate(std::uint32_t count)
+    {
+        if (count == 0u) return 0u;
+        for (auto range = free.begin(); range != free.end(); ++range) {
+            if (range->second < count) continue;
+            const std::uint32_t offset = range->first;
+            range->first += count;
+            range->second -= count;
+            if (range->second == 0u) free.erase(range);
+            used += count;
+            highWater = (std::max)(highWater, used);
+            return offset;
+        }
+        return std::nullopt;
+    }
+    void Free(std::uint32_t offset, std::uint32_t count)
+    {
+        if (count == 0u) return;
+        auto range = free.insert(std::ranges::lower_bound(free, offset, {}, &std::pair<std::uint32_t, std::uint32_t>::first),
+            { offset, count });
+        if (range + 1 != free.end() && range->first + range->second == (range + 1)->first) {
+            range->second += (range + 1)->second;
+            range = free.erase(range + 1) - 1;
+        }
+        if (range != free.begin() && (range - 1)->first + (range - 1)->second == range->first) {
+            (range - 1)->second += range->second;
+            free.erase(range);
+        }
+        used -= count;
+    }
+    std::uint32_t LargestFree() const
+    {
+        std::uint32_t largest = 0u;
+        for (const auto& range : free) largest = (std::max)(largest, range.second);
+        return largest;
+    }
+};
+
+// The pooled buffers, for HairStats::bufferUse.
+enum BufferId : std::size_t {
+    kBufferClusters, kBufferAggregates, kBufferStrands, kBufferRootBindings, kBufferGuideBindings, kBufferGuideStrandIndices,
+    kBufferGuidePointRanges, kBufferPoints, kBufferInstances, kBufferColliders, kBufferFrameState, kBufferSimFrame,
+    kBufferCounters, kBufferSimMetrics, kBufferSimGroups, kBufferGuidePoints, kBufferVisibleClusters, kBufferPoolVertices,
+    kBufferPoolSegmentIds, kBufferRootCheckList, kBufferRootCheck, kBufferProbe, kBufferCount
 };
 
 std::string LowerExtension(const std::filesystem::path& path)
@@ -154,7 +233,7 @@ XMVECTOR Load(const Float3& value) { return XMVectorSet(value.x, value.y, value.
 
 Float3 Store(FXMVECTOR value) { return { XMVectorGetX(value), XMVectorGetY(value), XMVectorGetZ(value) }; }
 
-// hairRootBinding.hlsl's MakeRootFrame.
+// hairRootFrame.hlsli's HairMakeRootFrame.
 HairRootFrame MakeRootFrame(const HairRootBinding& binding, CXMMATRIX skin, CXMMATRIX model, std::uint64_t frameNumber)
 {
     HairRootFrame frame{};
@@ -165,7 +244,7 @@ HairRootFrame MakeRootFrame(const HairRootBinding& binding, CXMMATRIX skin, CXMM
     return frame;
 }
 
-// hairRootBinding.hlsl's LoadRootSkin, over a palette of skin matrices. `palette` holds the attach bone alone in Bone mode.
+// hairRootFrame.hlsli's HairLoadRootSkin, over a palette of skin matrices. `palette` holds the attach bone alone in Bone mode.
 XMMATRIX RootSkin(HairAttachMode mode, const HairRootBinding& binding, const std::vector<XMFLOAT4X4>& palette)
 {
     if (mode == HairAttachMode::Bone) {
@@ -200,6 +279,44 @@ float SimLevelForCoverage(const HairSimSettings& sim, float coverage, float leve
         return 1.0f + (levels - 1.0f) * std::log(coverage / sim.lodLevel0Coverage) / std::log(sim.lodFullCoverage / sim.lodLevel0Coverage);
     }
     return std::log(coverage / sim.lodOffCoverage) / std::log(sim.lodLevel0Coverage / sim.lodOffCoverage);
+}
+
+// The select pass's frustum test grows a cluster's sphere by HAIR_CULL_RADIUS_MARGIN. The CPU's test of an instance's
+// sphere, which decides whether the instance is simulated, grows it by this instead: the camera and the bones the CPU
+// sees can be a frame from the ones the frame draws with, and an instance has to be simulated before a strand of it is
+// drawn.
+constexpr float kSimViewRadiusMargin = 0.5f;
+// OnScreenExtent of a sphere that the view is inside of, or that reaches behind it.
+constexpr float kWholeView = 1.0e9f;
+
+// The one place that answers whether a view needs an instance's hair, and how much of it: the size on screen, over the
+// view's height, of the part of the sphere (centre and radius in world space) that is inside a view. That is the
+// diameter of its projection times the smaller of the shares of its width and of its height that are on screen; a
+// sphere wholly in view gives its coverage, as PlanSimLevels computes it. 0: no view shows any of it, by the test the
+// select pass gives a cluster (the six view-space planes). Hair is drawn in the main view only, so there is one view
+// here; a second one that shows hair is the larger of the two answers.
+float OnScreenExtent(const HairFrameInputs& inputs, const Float3& center, float radius)
+{
+    const HairView& view = inputs.mainView;
+    const XMVECTOR viewCenter = XMVector3Transform(XMVectorSetW(Load(center), 1.0f),
+        XMLoadFloat4x4(reinterpret_cast<const XMFLOAT4X4*>(view.view.data())));
+    for (const auto& plane : view.planes) {
+        const float distance = plane[0] * XMVectorGetX(viewCenter) + plane[1] * XMVectorGetY(viewCenter) +
+            plane[2] * XMVectorGetZ(viewCenter) + plane[3];
+        if (distance < -radius) return 0.0f;
+    }
+    const float depth = -XMVectorGetZ(viewCenter);
+    if (depth <= radius) return kWholeView;
+    // The projection's interval on each screen axis, in units of half the view: the share of it inside [-1, 1].
+    const auto share = [&](float viewCoordinate, float projectionScale) {
+        const float middle = viewCoordinate * projectionScale / depth;
+        const float half = radius * projectionScale / depth;
+        return half > 0.0f ? std::clamp(((std::min)(middle + half, 1.0f) - (std::max)(middle - half, -1.0f)) / (2.0f * half), 0.0f, 1.0f) : 0.0f;
+    };
+    const float visible =
+        (std::min)(share(XMVectorGetX(viewCenter), view.projectionScaleX), share(XMVectorGetY(viewCenter), view.projectionScaleY));
+    // A sphere the planes let through has some of it on screen, however little.
+    return (std::max)(radius * view.projectionScaleY / depth * visible, 1.0e-6f);
 }
 
 // Copies bytes out of a paged buffer image. False when the range is not in the image.
@@ -286,9 +403,16 @@ struct HairRuntime::State {
     std::uint32_t usedStrands = 0u;
     std::uint32_t usedGuides = 0u;
     std::uint32_t usedPoints = 0u;
-    std::uint32_t usedRootFrames = 0u;
-    std::uint32_t usedGuidePoints = 0u;
+    std::uint32_t instanceStrands = 0u; // strands summed over instances
     std::uint64_t generation = 0u; // bumped by Clear: readbacks asked for before it are dropped
+
+    // Guide state, lent to instances (HairGuideRowStats says by what rules).
+    RowAllocator guideRows;
+    HairGuideRowStats guideStats; // the running counts; Stats fills in the rest
+    double guideClock = 0.0;      // simulated seconds, never reset: when an instance was last simulated
+    std::array<HairBufferUse, kBufferCount> bufferUse;
+    std::uint32_t lastSimGroups = 0u;
+    std::uint32_t lastRootChecks = 0u;
 
     std::shared_ptr<HairGpuBuffers> buffers;
     std::uint64_t bufferBytes = 0u;
@@ -302,7 +426,7 @@ struct HairRuntime::State {
 
     std::uint64_t lastFrame = kNoFrame;
     std::uint64_t frames = 0u;
-    std::uint64_t rootBindingDispatches = 0u;
+    std::uint64_t evaluateDispatches = 0u;
     std::uint64_t assetBytesUploaded = 0u;
     std::uint64_t instanceBytesUploaded = 0u;
 
@@ -349,12 +473,138 @@ struct HairRuntime::State {
     HairSimStatus DescribeSim();
     std::uint32_t PlanSimSteps(float deltaSeconds);
     void PlanSimLevels(const HairFrameInputs& inputs, float simulatedSeconds);
+    std::uint32_t GuideRowBudget() const
+    {
+        return sim.guidePointBudget != 0u ? (std::min)(sim.guidePointBudget, guideRows.capacity) : guideRows.capacity;
+    }
+    bool AcquireGuideRows(Instance& instance, bool inView);
+    void ReleaseGuideRows(Instance& instance);
+    void EvictGuideRows(Instance& instance, bool byAge);
+    Instance* PickGuideRowVictim(bool includeInView, std::uint64_t* evictableRows = nullptr);
+    void Use(BufferId id, std::uint64_t rows)
+    {
+        bufferUse[id].usedRows = rows;
+        bufferUse[id].highWaterRows = (std::max)(bufferUse[id].highWaterRows, rows);
+    }
+    void RefreshBufferUse();
 };
+
+// Gives an instance its guide rows, if it has none: free ones, within the budget. An instance in view may take them from
+// instances that are not, the smallest on screen first. False when there are none to be had; nothing is evicted in vain.
+bool HairRuntime::State::AcquireGuideRows(Instance& instance, bool inView)
+{
+    if (instance.guideRowBase != HAIR_INVALID_INDEX) return true;
+    const std::uint32_t rows = assets[instance.info.asset].guidePointCount;
+    const std::uint32_t budget = GuideRowBudget();
+    if (rows > budget) return false;
+    const auto take = [&] {
+        if (guideRows.used > budget - rows) return false;
+        const auto base = guideRows.Allocate(rows);
+        if (!base) return false;
+        instance.guideRowBase = *base;
+        instance.guideRowCount = rows;
+        // New rows hold nothing of this instance: its next simulated frame starts every guide again, also when it was
+        // simulated in the frame before and lost its rows in this one.
+        instance.simulatedFrame = kNoFrame;
+        ++guideStats.allocations;
+        return true;
+    };
+    if (take()) return true;
+    if (!inView) return false;
+    std::uint64_t evictable = 0u;
+    PickGuideRowVictim(false, &evictable);
+    if (guideRows.used - evictable > budget - rows) return false;
+    while (Instance* victim = PickGuideRowVictim(false)) {
+        EvictGuideRows(*victim, false);
+        if (take()) return true;
+    }
+    return false; // fragmentation: the rows were there, in pieces
+}
+
+// Gives an instance's rows back when nothing is lost by it: no shape is kept in them.
+void HairRuntime::State::ReleaseGuideRows(Instance& instance)
+{
+    instance.simStateValid = false;
+    if (instance.guideRowBase == HAIR_INVALID_INDEX) return;
+    guideRows.Free(instance.guideRowBase, instance.guideRowCount);
+    instance.guideRowBase = HAIR_INVALID_INDEX;
+    instance.guideRowCount = 0u;
+    ++guideStats.releases;
+}
+
+// Takes an instance's rows back with what they hold: its kept shape, or the simulation it was running.
+void HairRuntime::State::EvictGuideRows(Instance& instance, bool byAge)
+{
+    if (instance.guideRowBase == HAIR_INVALID_INDEX) return;
+    guideRows.Free(instance.guideRowBase, instance.guideRowCount);
+    instance.guideRowBase = HAIR_INVALID_INDEX;
+    instance.guideRowCount = 0u;
+    instance.simActive = false;
+    instance.simStateValid = false;
+    instance.simEvicted = true;
+    ++guideStats.evictions;
+    ++(byAge ? guideStats.evictionsByAge : guideStats.evictionsForRows);
+}
+
+// The holder of guide rows to take them from next: of the instances no view shows, the one that would be smallest on
+// screen (its coverage), whether it keeps a shape or is being simulated out of view; one whose entity is not drawn
+// before any. Else, when asked, the smallest instance in view. `evictableRows` gets the rows of every holder out of view.
+//
+// Smallest first, and not the one simulated longest ago: with more grooms near enough to simulate than there are rows
+// for, a camera that turns in place comes to them in turn, and the one simulated longest ago is the one it shows next.
+// Every entry is then a start from the rigid pose, each of which is simulated for lodSettleSeconds out of view, and
+// those starts evict each other. By size the same turn keeps the shapes of the large grooms and takes the small ones'.
+Instance* HairRuntime::State::PickGuideRowVictim(bool includeInView, std::uint64_t* evictableRows)
+{
+    Instance* best = nullptr;
+    bool bestInView = false;
+    float bestCoverage = 0.0f;
+    for (auto& instance : instances) {
+        if (instance.guideRowBase == HAIR_INVALID_INDEX) continue;
+        const bool inView = instance.simPlanned && instance.simInView;
+        if (!inView && evictableRows) *evictableRows += instance.guideRowCount;
+        if (inView && !includeInView) continue;
+        const float coverage = instance.simPlanned ? instance.simCoverage : -1.0f;
+        if (!best || (bestInView && !inView) || (bestInView == inView && coverage < bestCoverage)) {
+            best = &instance;
+            bestInView = inView;
+            bestCoverage = coverage;
+        }
+    }
+    return best;
+}
+
+void HairRuntime::State::RefreshBufferUse()
+{
+    const auto instanceCount = static_cast<std::uint64_t>(instances.size());
+    Use(kBufferClusters, usedClusters);
+    Use(kBufferAggregates, usedClusters);
+    Use(kBufferStrands, usedStrands);
+    Use(kBufferRootBindings, usedStrands);
+    Use(kBufferGuideBindings, usedGuides);
+    Use(kBufferGuideStrandIndices, usedGuides);
+    Use(kBufferGuidePointRanges, usedGuides);
+    Use(kBufferPoints, usedPoints);
+    Use(kBufferInstances, instanceCount);
+    Use(kBufferColliders, instanceCount * HAIR_MAX_COLLIDERS_PER_INSTANCE);
+    Use(kBufferSimMetrics, sim.enabled ? instanceCount * HAIR_SIM_METRIC_COUNT : 0u);
+    Use(kBufferFrameState, 1u);
+    Use(kBufferSimFrame, 1u);
+    Use(kBufferCounters, HAIR_COUNTER_COUNT);
+    Use(kBufferSimGroups, lastSimGroups);
+    Use(kBufferRootCheckList, lastRootChecks);
+    Use(kBufferRootCheck, lastRootChecks);
+    bufferUse[kBufferGuidePoints].usedRows = guideRows.used;
+    bufferUse[kBufferGuidePoints].highWaterRows = guideRows.highWater;
+    // The visible-cluster list and the strand pool are filled on the GPU: the counter readback sets theirs. The probe
+    // buffer's is set when a probe is written.
+}
 
 HairRuntime::HairRuntime(HairCapacities capacities)
     : m_state(std::make_shared<State>())
 {
     m_state->capacities = capacities;
+    m_state->guideRows.Reset(capacities.guidePoints);
 }
 
 HairRuntime::~HairRuntime() { Shutdown(); }
@@ -430,6 +680,10 @@ std::optional<std::uint32_t> HairRuntime::LoadGroom(const HairGroomRequest& requ
         asset.guidePointRanges.push_back({ asset.guidePointCount, count });
         asset.guidePointCount += count;
     }
+    const Float3 boundsMiddle = (groom.boundsMin + groom.boundsMax) * 0.5f;
+    for (const HairClusterHeader& cluster : groom.clusters) {
+        asset.cullRadius = (std::max)(asset.cullRadius, Distance(cluster.boundsCenter, boundsMiddle) + cluster.boundsRadius);
+    }
     if (groom.GuideLevelCount() > HAIR_MAX_GUIDE_LEVELS) {
         error = "groom '" + asset.source + "' has " + std::to_string(groom.GuideLevelCount()) + " guide levels; the runtime takes " +
             std::to_string(HAIR_MAX_GUIDE_LEVELS);
@@ -493,18 +747,9 @@ std::optional<std::uint32_t> HairRuntime::AttachGroom(std::uint32_t asset, std::
         error = "an instance needs an entity name";
         return std::nullopt;
     }
-    const auto strands = static_cast<std::uint32_t>(state.assets[asset].groom.strands.size());
-    const std::uint32_t guidePoints = state.assets[asset].guidePointCount;
-    if (guidePoints > state.capacities.guidePoints - state.usedGuidePoints) {
-        error = "the instance needs " + std::to_string(guidePoints) + " guide points but " + std::to_string(state.usedGuidePoints) +
-            " of " + std::to_string(state.capacities.guidePoints) + " are in use (HairCapacities)";
-    } else if (state.instances.size() >= state.capacities.instances) {
+    // An instance takes nothing but its row: no root frames are stored, and guide state is lent while it is simulated.
+    if (state.instances.size() >= state.capacities.instances) {
         error = "all " + std::to_string(state.capacities.instances) + " hair instances are in use (HairCapacities)";
-    } else if (strands > state.capacities.rootFrames - state.usedRootFrames) {
-        error = "the instance needs " + std::to_string(strands) + " root frames but " + std::to_string(state.usedRootFrames) +
-            " of " + std::to_string(state.capacities.rootFrames) + " are in use (HairCapacities)";
-    }
-    if (!error.empty()) {
         spdlog::error("Hair: {}", error);
         return std::nullopt;
     }
@@ -514,10 +759,9 @@ std::optional<std::uint32_t> HairRuntime::AttachGroom(std::uint32_t asset, std::
     instance.info.entity = std::move(entityName);
     instance.info.bone = std::move(boneName);
     instance.info.material = material;
-    instance.rootFrameBase = state.usedRootFrames;
-    state.usedRootFrames += strands;
-    instance.guidePointBase = state.usedGuidePoints;
-    state.usedGuidePoints += guidePoints;
+    instance.info.strands = static_cast<std::uint32_t>(state.assets[asset].groom.strands.size());
+    instance.info.guideRows = state.assets[asset].guidePointCount;
+    state.instanceStrands += instance.info.strands;
     state.instances.push_back(std::move(instance));
     return state.instances.back().info.id;
 }
@@ -531,8 +775,8 @@ void HairRuntime::Clear()
     state.selectionValid = false;
     state.instances.clear();
     state.assets.clear();
-    state.usedClusters = state.usedStrands = state.usedGuides = state.usedPoints = state.usedRootFrames = 0u;
-    state.usedGuidePoints = 0u;
+    state.usedClusters = state.usedStrands = state.usedGuides = state.usedPoints = state.instanceStrands = 0u;
+    state.guideRows.Reset(state.capacities.guidePoints);
 }
 
 void HairRuntime::SetSelfCheck(bool enabled, std::uint32_t rootsPerInstance)
@@ -552,26 +796,46 @@ HairStats HairRuntime::Stats()
     HairStats stats;
     stats.assets = static_cast<std::uint32_t>(state.assets.size());
     stats.instances = static_cast<std::uint32_t>(state.instances.size());
+    HairGuideRowStats& guideRows = stats.guideRows;
+    guideRows = state.guideStats;
+    guideRows.capacityRows = state.guideRows.capacity;
+    guideRows.budgetRows = state.GuideRowBudget();
+    guideRows.rowsInUse = state.guideRows.used;
+    guideRows.highWaterRows = state.guideRows.highWater;
+    guideRows.largestFreeRows = state.guideRows.LargestFree();
     for (const auto& instance : state.instances) {
         stats.attachedInstances += instance.info.state == HairInstanceState::Attached ? 1u : 0u;
         stats.failedInstances += instance.info.state == HairInstanceState::Failed ? 1u : 0u;
         stats.activeInstances += instance.info.active ? 1u : 0u;
         stats.instanceInfo.push_back(instance.info);
+        stats.instanceInfo.back().guideRowBase = instance.guideRowBase;
+        guideRows.starvedInstances += instance.simStarved ? 1u : 0u;
+        guideRows.unsettledInstances += instance.simUnsettled ? 1u : 0u;
+        if (instance.guideRowBase == HAIR_INVALID_INDEX) continue;
+        ++guideRows.holders;
+        if (instance.simActive && instance.simPlanned) {
+            ++guideRows.activeHolders;
+            guideRows.rowsActive += instance.guideRowCount;
+        }
     }
     for (const auto& asset : state.assets) stats.pendingUploadAssets += asset.uploaded ? 0u : 1u;
     stats.clusters = state.usedClusters;
     stats.strands = state.usedStrands;
     stats.guides = state.usedGuides;
     stats.points = state.usedPoints;
-    stats.rootFrames = state.usedRootFrames;
-    stats.guidePoints = state.usedGuidePoints;
+    stats.instanceStrands = state.instanceStrands;
+    stats.guidePoints = state.guideRows.used;
     stats.capacities = state.capacities;
     stats.buffersCreated = state.buffers != nullptr;
     stats.bufferBytes = state.bufferBytes;
+    if (state.buffers) {
+        state.RefreshBufferUse();
+        stats.bufferUse.assign(state.bufferUse.begin(), state.bufferUse.end());
+    }
     stats.assetBytesUploaded = state.assetBytesUploaded;
     stats.instanceBytesUploaded = state.instanceBytesUploaded;
     stats.frames = state.frames;
-    stats.rootBindingDispatches = state.rootBindingDispatches;
+    stats.evaluateDispatches = state.evaluateDispatches;
     stats.gpuCounters = state.gpuCounters;
     stats.continuousCounters = state.continuousCounters;
     stats.debugCapture = state.debugCapture;
@@ -596,7 +860,7 @@ HairSimStatus HairRuntime::State::DescribeSim()
 {
     HairSimStatus status = simStatus;
     status.settings = sim;
-    status.guidePoints = usedGuidePoints;
+    status.guidePoints = guideRows.used;
     for (const auto& instance : instances) {
         if (instance.simMetrics.valid) status.metrics.push_back(instance.simMetrics);
     }
@@ -626,6 +890,9 @@ void HairRuntime::SetSimSettings(const HairSimSettings& settings)
     clamped.lodForceLevel = settings.lodForceLevel < 0.0f ? -1.0f : (std::min)(settings.lodForceLevel, static_cast<float>(HAIR_MAX_GUIDE_LEVELS));
     clamped.promoteSeconds = std::clamp(settings.promoteSeconds, 0.0f, 10.0f);
     clamped.demoteSeconds = std::clamp(settings.demoteSeconds, 0.0f, 10.0f);
+    clamped.lodViewGraceSeconds = std::clamp(settings.lodViewGraceSeconds, 0.0f, 60.0f);
+    clamped.lodSettleSeconds = std::clamp(settings.lodSettleSeconds, 0.0f, 60.0f);
+    clamped.guideKeepSeconds = (std::max)(settings.guideKeepSeconds, 0.0f);
     auto& state = *m_state;
     std::scoped_lock lock(state.mutex);
     if (clamped.enabled && !state.sim.enabled) {
@@ -649,7 +916,11 @@ void HairRuntime::ResetSimulation()
     std::scoped_lock lock(state.mutex);
     state.simAccumulator = 0.0;
     state.simStatus = HairSimStatus{};
-    for (auto& instance : state.instances) instance.simResetRequested = true;
+    for (auto& instance : state.instances) {
+        instance.simResetRequested = true;
+        instance.simStateValid = false; // an instance that is not simulated gives its rows back in the next frame
+        instance.simEvicted = false;
+    }
 }
 
 bool HairRuntime::SetInstanceSimLevel(std::uint32_t instance, float level, std::string& error)
@@ -707,36 +978,80 @@ std::uint32_t HairRuntime::State::PlanSimSteps(float deltaSeconds)
     return static_cast<std::uint32_t>(steps);
 }
 
-// Simulation LOD: each drawn instance's simulation level for this frame. What its coverage asks for (or the forced
-// level), scaled down with every other instance's when together they pass the point budget; the level then moves
-// toward that at a limited rate. An instance whose level has come down to 0 stays simulated for as long as its guides
-// take to blend back onto the rigid pose, then stops.
+// Simulation LOD: each drawn instance's simulation level for this frame, and whether it is simulated at all. An instance
+// is simulated while a view shows part of it (OnScreenExtent), at the level its size on screen asks for: its coverage,
+// or the part of that inside the view when less is, though never less than level 0 alone. Those levels are scaled down
+// together when they pass the point budget, and an instance's level moves toward its own at a limited rate.
+//
+// An instance whose coverage has brought its level down to 0 stays simulated for as long as its guides take to blend
+// back onto the rigid pose, then stops. One that no view shows stops as it is, once it has been out of view for
+// lodViewGraceSeconds, and its guide rows keep its shape: when a view shows it again it goes on from that
+// (HAIR_SIM_FLAG_KEEP_SHAPE), in the frame it enters. An instance with no such shape that would be simulated in view is
+// started out of view too, at level 0 alone, and stops like any other once it has had lodSettleSeconds: it settles
+// before a view can turn to it.
+//
+// A simulated instance holds guide rows, and this is where they are lent and taken back (HairGuideRowStats has the
+// rules). An instance in view that cannot get any is not simulated (simStarved): it follows its roots rigidly.
 void HairRuntime::State::PlanSimLevels(const HairFrameInputs& inputs, float simulatedSeconds)
 {
+    guideClock += simulatedSeconds;
     std::vector<Instance*> drawn;
     for (auto& instance : instances) {
+        instance.simUnseen = false;
+        instance.simPlanned = false;
+        instance.simUnsettled = false;
         if (instance.info.state != HairInstanceState::Attached) continue;
         const auto entity = br::extensions::FindSceneEntityRenderState(instance.stableSceneID);
         if (!entity || entity->perObjectBufferIndex >= inputs.objects.rowCount) continue;
-        const BuiltGroom& groom = assets[instance.info.asset].groom;
+        const Asset& asset = assets[instance.info.asset];
+        const BuiltGroom& groom = asset.groom;
         const auto levels = static_cast<float>(groom.GuideLevelCount());
-        // Without the entity's matrices on the CPU the coverage is not known: every guide is simulated.
+        // Without the entity's matrices on the CPU neither its coverage nor where it is on screen is known: every guide
+        // is simulated. So is a groom whose roots follow their own joints: its bounds on the CPU do not follow them.
         instance.simCoverage = 0.0f;
+        instance.simViewExtent = kWholeView;
+        instance.simInView = true;
         instance.simTarget = levels;
         ObjectMatrices matrices{};
-        if (inputs.objects.image && inputs.objects.rowStride >= sizeof(ObjectMatrices) &&
+        if (instance.info.mode != HairAttachMode::PerRoot && inputs.objects.image && inputs.objects.rowStride >= sizeof(ObjectMatrices) &&
             ReadImage(*inputs.objects.image, static_cast<std::size_t>(entity->perObjectBufferIndex) * inputs.objects.rowStride,
                 &matrices, sizeof(matrices))) {
             const XMMATRIX model = XMLoadFloat4x4(&matrices.model);
-            const Float3 center = Store(XMVector3Transform(XMVectorSetW(Load((groom.boundsMin + groom.boundsMax) * 0.5f), 1.0f), model));
-            const float radius = 0.5f * Length(groom.boundsMax - groom.boundsMin) * XMVectorGetX(XMVector3Length(model.r[0]));
-            instance.simCoverage = radius * inputs.projectionScaleY / (std::max)(Distance(center, inputs.cameraPosition), 1.0e-3f);
-            instance.simTarget = SimLevelForCoverage(sim, instance.simCoverage, levels);
+            XMMATRIX toWorld = model;
+            if (instance.info.mode == HairAttachMode::Bone && instance.skeleton && entity->skinningInstanceSlot != HAIR_INVALID_INDEX) {
+                const auto pose = instance.skeleton->GetBoneMatrices();
+                const auto inverseBind = instance.skeleton->GetInverseBindMatrices();
+                if (instance.attachBone < (std::min)(pose.size(), inverseBind.size())) {
+                    toWorld = XMMatrixMultiply(XMMatrixMultiply(inverseBind[instance.attachBone], pose[instance.attachBone]), model);
+                }
+            }
+            const Float3 center = Store(XMVector3Transform(XMVectorSetW(Load((groom.boundsMin + groom.boundsMax) * 0.5f), 1.0f), toWorld));
+            const float scale = XMVectorGetX(XMVector3Length(model.r[0]));
+            const float radius = 0.5f * Length(groom.boundsMax - groom.boundsMin) * scale;
+            instance.simCoverage = radius * inputs.mainView.projectionScaleY / (std::max)(Distance(center, inputs.cameraPosition), 1.0e-3f);
+            instance.simViewExtent =
+                OnScreenExtent(inputs, center, (asset.cullRadius * (1.0f + kSimViewRadiusMargin) + HAIR_CULL_WIDTH_MARGIN) * scale);
+            instance.simInView = instance.simViewExtent > 0.0f;
+            const float byCoverage = SimLevelForCoverage(sim, instance.simCoverage, levels);
+            if (!instance.simInView) {
+                instance.simTarget = (std::min)(byCoverage, 1.0f); // what it settles at, unseen
+            } else if (byCoverage >= 1.0f) {
+                instance.simTarget =
+                    (std::max)(SimLevelForCoverage(sim, (std::min)(instance.simCoverage, instance.simViewExtent), levels), 1.0f);
+            } else {
+                instance.simTarget = byCoverage;
+            }
         }
         const float force = instance.simForceLevel >= 0.0f ? instance.simForceLevel : sim.lodForceLevel;
-        if (force >= 0.0f) instance.simTarget = (std::min)(force, levels);
+        if (force >= 0.0f) {
+            // A forced level is for testing: it holds wherever the instance is.
+            instance.simTarget = (std::min)(force, levels);
+            instance.simInView = true;
+        }
+        instance.simPlanned = true;
         drawn.push_back(&instance);
     }
+    for (auto& instance : instances) instance.simStarved = instance.simStarved && instance.simPlanned;
 
     if (sim.lodPointBudget != 0u) {
         const auto points = [&](float scale) {
@@ -756,14 +1071,67 @@ void HairRuntime::State::PlanSimLevels(const HairFrameInputs& inputs, float simu
         }
     }
 
+    // A budget that fell below what is lent out: kept shapes go, then instances simulated out of view, then the
+    // smallest instances in view, which then follow rigidly.
+    while (guideRows.used > GuideRowBudget()) {
+        Instance* victim = PickGuideRowVictim(true);
+        if (!victim) break;
+        EvictGuideRows(*victim, false);
+    }
+
+    // Rows go first to the instances a view shows, the largest on screen first.
+    std::ranges::stable_sort(drawn, [](const Instance* a, const Instance* b) {
+        return a->simInView != b->simInView ? a->simInView : a->simCoverage > b->simCoverage;
+    });
     for (Instance* instance : drawn) {
         const bool forced = instance->simForceLevel >= 0.0f || sim.lodForceLevel >= 0.0f;
+        instance->simOutOfViewSeconds = instance->simInView ? 0.0 : instance->simOutOfViewSeconds + simulatedSeconds;
+        const bool wasStarved = std::exchange(instance->simStarved, false);
         if (!instance->simActive) {
-            if (instance->simTarget <= 0.0f || (!forced && instance->simTarget < kSimLevelStart)) continue;
-            // It starts with every guide on its rigid pose, which is where its strands are: at its level at once.
+            if (instance->simTarget <= 0.0f || (!forced && instance->simTarget < kSimLevelStart)) {
+                // Too small on screen to be simulated, in view or out of it: a kept shape has no use.
+                ReleaseGuideRows(*instance);
+                instance->simEvicted = false;
+                continue;
+            }
+            if (!instance->simInView) {
+                // Out of view it starts only to settle, when its rows hold no shape to go on from; and not again once
+                // that was taken from it. It takes free rows only.
+                if (instance->simStateValid || !(sim.lodSettleSeconds > 0.0f) || instance->simEvicted) {
+                    instance->simUnseen = true;
+                    continue;
+                }
+                if (!AcquireGuideRows(*instance, false)) {
+                    instance->simUnseen = instance->simUnsettled = true;
+                    continue;
+                }
+            } else if (!AcquireGuideRows(*instance, true)) {
+                // No rows to be had: it follows its roots rigidly, and asks again every frame.
+                instance->simStarved = true;
+                guideStats.allocationFailures += wasStarved ? 0u : 1u;
+                continue;
+            }
+            instance->simEvicted = false;
             instance->simActive = true;
-            instance->simLevel = instance->simTarget;
+            instance->simMoving = false;
             instance->simOffSeconds = 0.0;
+            if (instance->simStateValid) {
+                // It goes on from the shape it was left in, with the guides that were simulated then: at the level it
+                // had, from which the level moves like any other.
+                instance->simLevel = (std::min)(instance->simTarget, instance->simLevel);
+            } else {
+                // It starts with every guide on its rigid pose, which is where its strands are: at its level at once.
+                instance->simLevel = instance->simTarget;
+                instance->simSettledSeconds = 0.0;
+            }
+        } else if (!instance->simInView && instance->simOutOfViewSeconds >= sim.lodViewGraceSeconds &&
+            instance->simSettledSeconds >= sim.lodSettleSeconds) {
+            // No view needs it: it stops as it is. A level of 0 was on its way to the rigid pose, and starts from there.
+            instance->simActive = false;
+            instance->simStateValid = instance->simLevel > 0.0f;
+            instance->simUnseen = instance->simTarget >= kSimLevelStart;
+            if (!instance->simStateValid) ReleaseGuideRows(*instance);
+            continue;
         } else if (forced) {
             instance->simLevel = instance->simTarget;
         } else {
@@ -775,12 +1143,27 @@ void HairRuntime::State::PlanSimLevels(const HairFrameInputs& inputs, float simu
                 instance->simLevel = (std::max)(instance->simLevel + std::clamp(difference, -most, most), 0.0f);
             }
         }
+        instance->simSettledSeconds += simulatedSeconds;
         if (instance->simLevel > 0.0f) {
             instance->simOffSeconds = 0.0;
             continue;
         }
         instance->simOffSeconds += simulatedSeconds;
-        if (instance->simOffSeconds >= sim.demoteSeconds + 2.0 * sim.stepSeconds) instance->simActive = false;
+        if (instance->simOffSeconds >= sim.demoteSeconds + 2.0 * sim.stepSeconds) {
+            // Its guides are on the rigid pose: there is no shape to keep.
+            instance->simActive = false;
+            ReleaseGuideRows(*instance);
+        }
+    }
+
+    // Kept shapes: one that was reset away goes back at once, and one older than guideKeepSeconds when that is set.
+    for (auto& instance : instances) {
+        if (instance.guideRowBase == HAIR_INVALID_INDEX || (instance.simActive && instance.simPlanned)) continue;
+        if (!instance.simActive && !instance.simStateValid) {
+            ReleaseGuideRows(instance);
+        } else if (sim.guideKeepSeconds > 0.0f && guideClock - instance.simLastSimulated >= sim.guideKeepSeconds) {
+            EvictGuideRows(instance, true);
+        }
     }
 }
 
@@ -804,6 +1187,7 @@ void HairRuntime::SetLodSettings(const HairLodSettings& settings)
     clamped.minDetail = std::clamp(settings.minDetail, 1.0e-4f, 1.0f);
     clamped.forceDetail = std::clamp(settings.forceDetail, 0.0f, 1.0f);
     clamped.segmentPixels = (std::max)(settings.segmentPixels, 0.25f);
+    clamped.detailExponent = std::clamp(settings.detailExponent, 1.0f, 3.0f);
     std::scoped_lock lock(m_state->mutex);
     m_state->lod = clamped;
 }
@@ -915,6 +1299,23 @@ org::Buffer* HairRuntime::State::DumpTarget(const std::string& name, std::size_t
         stride = sizeof(HairGuidePoint);
         return buffers ? buffers->guidePoints.get() : nullptr;
     }
+    // The groom data and the instance rows, as uploaded: for working out from a frame's selection what it used.
+    if (name == "instances") {
+        stride = sizeof(HairInstanceGPU);
+        return buffers ? buffers->instances.get() : nullptr;
+    }
+    if (name == "clusters") {
+        stride = sizeof(HairClusterHeader);
+        return buffers ? buffers->clusters.get() : nullptr;
+    }
+    if (name == "strands") {
+        stride = sizeof(HairStrandRecord);
+        return buffers ? buffers->strands.get() : nullptr;
+    }
+    if (name == "guide_bindings") {
+        stride = sizeof(HairGuideBinding);
+        return buffers ? buffers->guideBindings.get() : nullptr;
+    }
     stride = 0u;
     return nullptr;
 }
@@ -925,7 +1326,8 @@ bool HairRuntime::DumpBuffer(const std::string& buffer, const std::string& path,
     std::size_t stride = 0u;
     m_state->DumpTarget(buffer, stride);
     if (stride == 0u) {
-        error = "unknown buffer '" + buffer + "': expected pool_vertices, visible_clusters or guide_points";
+        error = "unknown buffer '" + buffer +
+            "': expected pool_vertices, visible_clusters, guide_points, instances, clusters, strands or guide_bindings";
         return false;
     }
     m_state->dumpRequests.push_back({ buffer, path, rows });
@@ -1046,32 +1448,38 @@ void HairRuntime::State::CreateBuffers()
 {
     auto created = std::make_shared<HairGpuBuffers>();
     std::uint64_t bytes = 0u;
-    const auto make = [&bytes](std::uint32_t rows, std::size_t stride, bool unorderedAccess, const char* name) {
+    const auto make = [&](BufferId id, std::uint32_t rows, std::size_t stride, bool unorderedAccess, const char* name) {
         bytes += static_cast<std::uint64_t>(rows) * stride;
+        bufferUse[id] = HairBufferUse{ name, static_cast<std::uint32_t>(stride), rows, 0u, 0u };
         return MakeBuffer(rows, stride, unorderedAccess, name);
     };
-    created->clusters = make(capacities.clusters, sizeof(HairClusterHeader), false, "Hair.Clusters");
-    created->aggregates = make(capacities.clusters, sizeof(HairClusterAggregate), false, "Hair.ClusterAggregates");
-    created->strands = make(capacities.strands, sizeof(HairStrandRecord), false, "Hair.Strands");
-    created->rootBindings = make(capacities.strands, sizeof(HairRootBinding), false, "Hair.RootBindings");
-    created->guideBindings = make(capacities.guides, sizeof(HairGuideBinding), false, "Hair.GuideBindings");
-    created->guideStrandIndices = make(capacities.guides, sizeof(std::uint32_t), false, "Hair.GuideStrandIndices");
-    created->points = make(capacities.points, sizeof(HairPackedPoint), false, "Hair.Points");
-    created->instances = make(capacities.instances, sizeof(HairInstanceGPU), false, "Hair.Instances");
-    created->frameState = make(1u, sizeof(HairFrameGPU), false, "Hair.FrameState");
-    created->rootFrames = make(capacities.rootFrames, sizeof(HairRootFramePair), true, "Hair.RootFrames");
-    created->counters = make(HAIR_COUNTER_COUNT, sizeof(std::uint32_t), true, "Hair.Counters");
-    created->visibleClusters = make(capacities.visibleClusters, sizeof(HairVisibleCluster), true, "Hair.VisibleClusters");
-    created->poolVertices = make(capacities.poolVertices, sizeof(HairPoolVertex), true, "Hair.PoolVertices");
-    created->poolSegmentIds = make(capacities.poolVertices, sizeof(std::uint32_t), true, "Hair.PoolSegmentIds");
-    created->probe = make(HAIR_PROBE_HEADER_WORDS + HAIR_PROBE_ROW_CAPACITY * HAIR_PROBE_ROW_WORDS, sizeof(std::uint32_t), true,
-        "Hair.Probe");
-    created->guidePointRanges = make(capacities.guides, sizeof(HairGuidePointRange), false, "Hair.GuidePointRanges");
-    created->guidePoints = make(capacities.guidePoints, sizeof(HairGuidePoint), true, "Hair.GuidePoints");
-    created->colliders = make(capacities.instances * HAIR_MAX_COLLIDERS_PER_INSTANCE, sizeof(HairColliderGPU), false, "Hair.Colliders");
-    created->simFrame = make(1u, sizeof(HairSimFrameGPU), false, "Hair.SimFrame");
-    created->simMetrics = make(capacities.instances * HAIR_SIM_METRIC_COUNT, sizeof(std::uint32_t), true, "Hair.SimMetrics");
-    created->simGroups = make(capacities.simGroups, sizeof(HairSimGroup), false, "Hair.SimGroups");
+    created->clusters = make(kBufferClusters, capacities.clusters, sizeof(HairClusterHeader), false, "Hair.Clusters");
+    created->aggregates = make(kBufferAggregates, capacities.clusters, sizeof(HairClusterAggregate), false, "Hair.ClusterAggregates");
+    created->strands = make(kBufferStrands, capacities.strands, sizeof(HairStrandRecord), false, "Hair.Strands");
+    created->rootBindings = make(kBufferRootBindings, capacities.strands, sizeof(HairRootBinding), false, "Hair.RootBindings");
+    created->guideBindings = make(kBufferGuideBindings, capacities.guides, sizeof(HairGuideBinding), false, "Hair.GuideBindings");
+    created->guideStrandIndices =
+        make(kBufferGuideStrandIndices, capacities.guides, sizeof(std::uint32_t), false, "Hair.GuideStrandIndices");
+    created->points = make(kBufferPoints, capacities.points, sizeof(HairPackedPoint), false, "Hair.Points");
+    created->instances = make(kBufferInstances, capacities.instances, sizeof(HairInstanceGPU), false, "Hair.Instances");
+    created->frameState = make(kBufferFrameState, 1u, sizeof(HairFrameGPU), false, "Hair.FrameState");
+    created->rootCheckList = make(kBufferRootCheckList, HAIR_ROOT_CHECK_CAPACITY, sizeof(HairRootCheckSample), false, "Hair.RootCheckList");
+    created->rootCheck = make(kBufferRootCheck, HAIR_ROOT_CHECK_CAPACITY, sizeof(HairRootFramePair), true, "Hair.RootCheck");
+    created->counters = make(kBufferCounters, HAIR_COUNTER_COUNT, sizeof(std::uint32_t), true, "Hair.Counters");
+    created->visibleClusters =
+        make(kBufferVisibleClusters, capacities.visibleClusters, sizeof(HairVisibleCluster), true, "Hair.VisibleClusters");
+    created->poolVertices = make(kBufferPoolVertices, capacities.poolVertices, sizeof(HairPoolVertex), true, "Hair.PoolVertices");
+    created->poolSegmentIds = make(kBufferPoolSegmentIds, capacities.poolVertices, sizeof(std::uint32_t), true, "Hair.PoolSegmentIds");
+    created->probe = make(kBufferProbe, HAIR_PROBE_HEADER_WORDS + HAIR_PROBE_ROW_CAPACITY * HAIR_PROBE_ROW_WORDS,
+        sizeof(std::uint32_t), true, "Hair.Probe");
+    created->guidePointRanges = make(kBufferGuidePointRanges, capacities.guides, sizeof(HairGuidePointRange), false, "Hair.GuidePointRanges");
+    created->guidePoints = make(kBufferGuidePoints, capacities.guidePoints, sizeof(HairGuidePoint), true, "Hair.GuidePoints");
+    created->colliders = make(kBufferColliders, capacities.instances * HAIR_MAX_COLLIDERS_PER_INSTANCE, sizeof(HairColliderGPU), false,
+        "Hair.Colliders");
+    created->simFrame = make(kBufferSimFrame, 1u, sizeof(HairSimFrameGPU), false, "Hair.SimFrame");
+    created->simMetrics =
+        make(kBufferSimMetrics, capacities.instances * HAIR_SIM_METRIC_COUNT, sizeof(std::uint32_t), true, "Hair.SimMetrics");
+    created->simGroups = make(kBufferSimGroups, capacities.simGroups, sizeof(HairSimGroup), false, "Hair.SimGroups");
     buffers = std::move(created);
     bufferBytes = bytes;
     spdlog::info("Hair: created the pooled GPU buffers, {:.1f} MB", static_cast<double>(bytes) / (1024.0 * 1024.0));
@@ -1092,6 +1500,10 @@ void HairRuntime::State::EnsureVisibilityTarget(std::uint32_t width, std::uint32
     auto replaced = std::make_shared<HairGpuBuffers>(*buffers);
     replaced->visibility = org::PixelBuffer::CreateShared(description);
     replaced->visibility->SetName("Hair.Visibility");
+    description.channels = 1;
+    description.format = rhi::Format::R32_UInt;
+    replaced->coverage = org::PixelBuffer::CreateShared(description);
+    replaced->coverage->SetName("Hair.Coverage");
     replaced->visibilityWidth = width;
     replaced->visibilityHeight = height;
     buffers = std::move(replaced);
@@ -1128,7 +1540,7 @@ void HairRuntime::State::RequestCounterReadback(const std::shared_ptr<State>& se
     counterReadbackInFlight = true;
     HairGpuCounters request;
     request.frame = inputs.frameNumber;
-    request.cpuRootBindingDispatches = rootBindingDispatches;
+    request.cpuEvaluateDispatches = evaluateDispatches;
     request.cameraPosition = inputs.cameraPosition;
     request.selected = selected;
     readbacks->RequestReadbackCaptureAfterGraph(buffers->counters.get(), {},
@@ -1143,7 +1555,9 @@ void HairRuntime::State::RequestCounterReadback(const std::shared_ptr<State>& se
             std::memcpy(rows, result.data.data(), sizeof(rows));
             HairGpuCounters counters = request;
             counters.valid = true;
-            counters.rootBindingDispatches = rows[HAIR_COUNTER_ROOT_BINDING_DISPATCHES];
+            counters.evaluateDispatches = rows[HAIR_COUNTER_EVALUATE_DISPATCHES];
+            counters.staleGuidesDrawn = rows[HAIR_COUNTER_STALE_GUIDES_DRAWN];
+            counters.unseenStrandsDrawn = rows[HAIR_COUNTER_UNSEEN_STRANDS_DRAWN];
             counters.clustersTested = rows[HAIR_COUNTER_CLUSTERS_TESTED];
             // The two allocators run past their capacities when clusters are dropped.
             counters.clustersVisible = (std::min)(rows[HAIR_COUNTER_CLUSTERS_VISIBLE], visibleCapacity);
@@ -1154,11 +1568,16 @@ void HairRuntime::State::RequestCounterReadback(const std::shared_ptr<State>& se
             counters.segmentsSelected = rows[HAIR_COUNTER_SEGMENTS_SELECTED];
             counters.poolVertices = (std::min)(rows[HAIR_COUNTER_POOL_VERTICES], poolCapacity);
             counters.overflowClusters = rows[HAIR_COUNTER_OVERFLOW_CLUSTERS];
+            counters.pixelsCovered = rows[HAIR_COUNTER_PIXELS_COVERED];
+            counters.coverageSum = static_cast<float>(rows[HAIR_COUNTER_COVERAGE_SUM]) / HAIR_COVERAGE_COUNTER_UNIT;
             counters.segmentsDrawn = rows[HAIR_COUNTER_SEGMENTS_DRAWN];
             counters.pixelsWritten = rows[HAIR_COUNTER_PIXELS_WRITTEN];
             counters.pixelsOccluded = rows[HAIR_COUNTER_PIXELS_OCCLUDED];
             counters.segmentsCapped = rows[HAIR_COUNTER_SEGMENTS_CAPPED];
             counters.pixelsResolved = rows[HAIR_COUNTER_PIXELS_RESOLVED];
+            locked->Use(kBufferVisibleClusters, counters.clustersVisible);
+            locked->Use(kBufferPoolVertices, counters.poolVertices);
+            locked->Use(kBufferPoolSegmentIds, counters.poolVertices);
             // Readbacks of different frames can be in flight together: keep the newest, and the history in frame order.
             if (!locked->gpuCounters.valid || counters.frame >= locked->gpuCounters.frame) locked->gpuCounters = counters;
             if (!locked->continuousCounters) return;
@@ -1184,6 +1603,10 @@ void HairRuntime::State::RequestSimMetricsReadback(const std::shared_ptr<State>&
         known.simLevel = dispatch.simulated != 0u ? instance.simLevel : 0.0f;
         known.targetLevel = instance.simTarget;
         known.coverage = instance.simCoverage;
+        known.viewExtent = instance.simViewExtent;
+        known.inView = instance.simViewExtent > 0.0f;
+        known.holdsRows = instance.guideRowBase != HAIR_INVALID_INDEX;
+        known.starved = instance.simStarved;
         known.levelCount = dispatch.guideLevelCount;
         measured.emplace_back(dispatch.instanceIndex, known);
     }
@@ -1229,6 +1652,8 @@ void HairRuntime::State::RequestSimMetricsReadback(const std::shared_ptr<State>&
                 metrics.strandRoots = rows[HAIR_SIM_METRIC_STRAND_ROOTS];
                 metrics.strandRootError = asFloat(rows[HAIR_SIM_METRIC_STRAND_ROOT_ERROR]);
                 metrics.resetGuides = rows[HAIR_SIM_METRIC_RESET_GUIDES];
+                metrics.resumedGuides = rows[HAIR_SIM_METRIC_RESUMED_GUIDES];
+                metrics.staleGuides = rows[HAIR_SIM_METRIC_STALE_GUIDES];
                 metrics.rootShift = asFloat(rows[HAIR_SIM_METRIC_ROOT_SHIFT]);
                 for (std::uint32_t level = 0u; level < HAIR_MAX_GUIDE_LEVELS; ++level) {
                     metrics.levelGuides[level] = rows[HAIR_SIM_METRIC_LEVEL_GUIDES + level];
@@ -1267,7 +1692,8 @@ void HairRuntime::State::RequestProbe(const std::shared_ptr<State>& self)
         finish("the renderer has no readback service", 0u);
         return;
     }
-    readbacks->RequestReadbackCaptureAfterGraph(buffers->probe.get(), {}, [finish, path = probe.path](br::ReadbackCaptureResult&& result) {
+    readbacks->RequestReadbackCaptureAfterGraph(buffers->probe.get(), {},
+        [finish, state = std::weak_ptr<State>(self), path = probe.path](br::ReadbackCaptureResult&& result) {
         if (result.data.size() < HAIR_PROBE_HEADER_WORDS * sizeof(std::uint32_t)) {
             finish("the readback is shorter than the probe header", 0u);
             return;
@@ -1275,6 +1701,10 @@ void HairRuntime::State::RequestProbe(const std::shared_ptr<State>& self)
         std::uint32_t found = 0u;
         std::memcpy(&found, result.data.data(), sizeof(found));
         const std::uint32_t rows = (std::min)(found, HAIR_PROBE_ROW_CAPACITY);
+        if (const auto locked = state.lock()) {
+            std::scoped_lock lock(locked->mutex);
+            locked->Use(kBufferProbe, HAIR_PROBE_HEADER_WORDS + static_cast<std::uint64_t>(rows) * HAIR_PROBE_ROW_WORDS);
+        }
         const std::size_t bytes = (HAIR_PROBE_HEADER_WORDS + static_cast<std::size_t>(rows) * HAIR_PROBE_ROW_WORDS) * sizeof(std::uint32_t);
         std::ofstream file(path, std::ios::binary | std::ios::trunc);
         if (bytes <= result.data.size()) file.write(reinterpret_cast<const char*>(result.data.data()), static_cast<std::streamsize>(bytes));
@@ -1289,7 +1719,7 @@ void HairRuntime::State::RequestSelfCheck(const std::shared_ptr<State>& self, st
     if (!readbacks || expected.empty()) return;
     selfCheckInFlight = true;
     selfCheckFrame = frameNumber;
-    readbacks->RequestReadbackCaptureAfterGraph(buffers->rootFrames.get(), {},
+    readbacks->RequestReadbackCaptureAfterGraph(buffers->rootCheck.get(), {},
         [state = std::weak_ptr<State>(self), frameNumber, requestGeneration = generation,
             expected = std::move(expected)](br::ReadbackCaptureResult&& result) {
             const auto locked = state.lock();
@@ -1303,25 +1733,26 @@ void HairRuntime::State::RequestSelfCheck(const std::shared_ptr<State>& self, st
             status.instances = status.skinnedInstances = status.staleInstances = status.roots = status.previousRoots = 0u;
             status.positionError = status.directionError = status.previousPositionError = status.previousDirectionError = 0.0f;
             status.motion = status.skinnedMotion = 0.0f;
+            // Row i of the check buffer is root i of the list the frame's root-check pass was given. A row it did not
+            // write in the checked frame says nothing; an instance with no row written was not compared.
             std::uint32_t lastInstance = HAIR_INVALID_INDEX;
-            bool stale = false;
+            bool compared = true;
             for (const auto& root : expected) {
                 const std::size_t offset = static_cast<std::size_t>(root.row) * sizeof(HairRootFramePair);
                 if (offset + sizeof(HairRootFramePair) > result.data.size()) continue;
                 HairRootFramePair pair;
                 std::memcpy(&pair, result.data.data() + offset, sizeof(pair));
                 if (root.instance != lastInstance) {
+                    status.staleInstances += compared ? 0u : 1u;
                     lastInstance = root.instance;
-                    // Rows the pass did not write in the checked frame say nothing about it.
-                    stale = root.unknown || pair.current.writtenFrame != static_cast<std::uint32_t>(frameNumber);
-                    if (stale) {
-                        ++status.staleInstances;
-                    } else {
-                        ++status.instances;
-                        status.skinnedInstances += root.skinned ? 1u : 0u;
-                    }
+                    compared = false;
                 }
-                if (stale) continue;
+                if (root.unknown || pair.current.writtenFrame != static_cast<std::uint32_t>(frameNumber)) continue;
+                if (!compared) {
+                    compared = true;
+                    ++status.instances;
+                    status.skinnedInstances += root.skinned ? 1u : 0u;
+                }
                 ++status.roots;
                 float& motion = root.skinned ? status.skinnedMotion : status.motion;
                 motion = (std::max)(motion, Distance(pair.current.position, pair.previous.position));
@@ -1335,6 +1766,7 @@ void HairRuntime::State::RequestSelfCheck(const std::shared_ptr<State>& self, st
                 status.previousDirectionError = (std::max)({ status.previousDirectionError,
                     Distance(pair.previous.normal, root.previous.normal), Distance(pair.previous.tangent, root.previous.tangent) });
             }
+            status.staleInstances += compared ? 0u : 1u;
             ++status.completedChecks;
             status.totalStaleInstances += status.staleInstances;
             status.largestMotion = (std::max)(status.largestMotion, status.motion);
@@ -1372,6 +1804,7 @@ void HairRuntime::UpdateFrame(const HairFrameInputs& inputs, const HairUpload& u
     const bool checking = state.selfCheck.enabled && !state.selfCheckInFlight &&
         (state.selfCheckFrame == kNoFrame || frameNumber >= state.selfCheckFrame + kSelfCheckFrameInterval);
     std::vector<ExpectedRoot> expected;
+    std::vector<HairRootCheckSample> checkList; // the roots the root-check pass writes this frame: `expected` rows name them
 
     // The simulation's steps for this frame, the same for every instance.
     const bool simulating = state.sim.enabled;
@@ -1383,6 +1816,12 @@ void HairRuntime::UpdateFrame(const HairFrameInputs& inputs, const HairUpload& u
         state.simStatus.simulatedSeconds += static_cast<double>(simSteps) * state.sim.stepSeconds;
         state.simStatus.lastFrameSteps = simSteps;
         state.PlanSimLevels(inputs, static_cast<float>(simSteps) * state.sim.stepSeconds);
+    } else {
+        // Nothing is simulated: no instance holds guide rows.
+        for (auto& instance : state.instances) {
+            instance.simActive = instance.simUnseen = instance.simStarved = instance.simUnsettled = instance.simEvicted = false;
+            state.ReleaseGuideRows(instance);
+        }
     }
 
     HairFramePlan plan;
@@ -1408,21 +1847,25 @@ void HairRuntime::UpdateFrame(const HairFrameInputs& inputs, const HairUpload& u
         gpu.guideCount = groom.GuideCount();
         gpu.pointBase = asset.pointBase;
         gpu.pointCount = static_cast<std::uint32_t>(groom.points.size());
-        gpu.rootFrameBase = instance.rootFrameBase;
         gpu.perObjectIndex = entity->perObjectBufferIndex;
         gpu.skinningInstanceSlot = skinned ? entity->skinningInstanceSlot : HAIR_INVALID_INDEX;
         gpu.attachBone = instance.info.mode == HairAttachMode::Bone ? instance.attachBone : HAIR_INVALID_INDEX;
         gpu.baseColor = instance.info.material.baseColor;
         gpu.roughness = instance.info.material.roughness;
-        gpu.guidePointBase = instance.guidePointBase;
+        gpu.guidePointBase = instance.guideRowBase;
         gpu.colliderBase = index * HAIR_MAX_COLLIDERS_PER_INSTANCE;
         gpu.colliderCount = static_cast<std::uint32_t>(instance.colliders.size());
-        if (!simulating) instance.simActive = false;
+        // Simulated only with guide rows to simulate in (PlanSimLevels saw to it).
+        if (instance.simActive && instance.guideRowBase == HAIR_INVALID_INDEX) instance.simActive = false;
         if (instance.simActive) {
-            // The guide state is only good while it was simulated in the frame before.
+            // The guide state is only live while it was simulated in the frame before. After a gap the guides start
+            // again: from the shape the rows still hold when there is one, and from the rigid pose otherwise.
             const bool reset = instance.simResetRequested || instance.simulatedFrame == kNoFrame ||
                 instance.simulatedFrame + 1u != frameNumber;
-            gpu.simFlags = HAIR_SIM_FLAG_ENABLED | (reset ? HAIR_SIM_FLAG_RESET : 0u);
+            const bool keepShape = reset && !instance.simResetRequested && instance.simStateValid;
+            if (reset && !keepShape) instance.simSettledSeconds = 0.0;
+            instance.simStateValid = true;
+            gpu.simFlags = HAIR_SIM_FLAG_ENABLED | (reset ? HAIR_SIM_FLAG_RESET : 0u) | (keepShape ? HAIR_SIM_FLAG_KEEP_SHAPE : 0u);
             gpu.simLevel = instance.simLevel;
             // Which guides the simulate pass looks at: the levels up to the highest the level has asked for lately.
             const double highWindow = state.sim.demoteSeconds + 4.0 * state.sim.stepSeconds;
@@ -1439,8 +1882,10 @@ void HairRuntime::UpdateFrame(const HairFrameInputs& inputs, const HairUpload& u
             }
             instance.simResetRequested = false;
             instance.simulatedFrame = frameNumber;
+            instance.simLastSimulated = state.guideClock;
         } else {
             instance.simulatedFrame = kNoFrame;
+            gpu.simFlags = instance.simUnseen ? HAIR_SIM_FLAG_UNSEEN : 0u;
         }
         if (!instance.collidersUploaded) {
             HairColliderGPU rows[HAIR_MAX_COLLIDERS_PER_INSTANCE] = {};
@@ -1459,7 +1904,7 @@ void HairRuntime::UpdateFrame(const HairFrameInputs& inputs, const HairUpload& u
             instance.gpuValid = true;
         }
         instance.info.active = true;
-        HairInstanceDispatch dispatch{ index, gpu.strandCount, gpu.clusterCount, gpu.guideCount };
+        HairInstanceDispatch dispatch{ index, gpu.clusterCount, gpu.guideCount };
         dispatch.simulated = instance.simActive ? 1u : 0u;
         dispatch.guideLevelCount = groom.GuideLevelCount();
         if (instance.simActive) {
@@ -1501,19 +1946,19 @@ void HairRuntime::UpdateFrame(const HairFrameInputs& inputs, const HairUpload& u
             const XMMATRIX previousModel = XMLoadFloat4x4(&matrices.previousModel);
             // Without them one root with no expectation marks the instance as not compared.
             const std::uint32_t count = haveMatrices ? (std::min)(state.selfCheck.rootsPerInstance, gpu.strandCount) : 0u;
-            if (!haveMatrices) {
+            if (!haveMatrices || checkList.size() + count > HAIR_ROOT_CHECK_CAPACITY) {
                 ExpectedRoot unknown;
                 unknown.instance = index;
-                unknown.row = instance.rootFrameBase;
                 unknown.unknown = true;
                 expected.push_back(unknown);
             }
-            for (std::uint32_t sample = 0u; sample < count; ++sample) {
+            for (std::uint32_t sample = 0u; sample < count && checkList.size() + count <= HAIR_ROOT_CHECK_CAPACITY + sample; ++sample) {
                 const auto root = static_cast<std::uint32_t>(static_cast<std::uint64_t>(sample) * gpu.strandCount / count);
                 const HairRootBinding& binding = groom.rootBindings[root];
                 ExpectedRoot expectedRoot;
                 expectedRoot.instance = index;
-                expectedRoot.row = instance.rootFrameBase + root;
+                expectedRoot.row = static_cast<std::uint32_t>(checkList.size());
+                checkList.push_back({ index, root });
                 expectedRoot.skinned = skinned;
                 expectedRoot.hasPrevious = hasPrevious;
                 const XMMATRIX currentSkin = skinned ? RootSkin(instance.info.mode, binding, skin) : XMMatrixIdentity();
@@ -1531,7 +1976,6 @@ void HairRuntime::UpdateFrame(const HairFrameInputs& inputs, const HairUpload& u
     }
 
     ++state.frames;
-    state.rootBindingDispatches += plan.instances.size();
 
     // A frozen LOD keeps the visible-cluster list of the last selection while it was made for these same instances.
     plan.select = !plan.instances.empty() &&
@@ -1543,6 +1987,11 @@ void HairRuntime::UpdateFrame(const HairFrameInputs& inputs, const HairUpload& u
     plan.rasterRows = static_cast<std::uint32_t>((std::min<std::uint64_t>)(planPoints, state.capacities.poolVertices));
     plan.debugView = state.debugView;
     plan.probe = !plan.instances.empty() && std::exchange(state.probeRequested, false);
+    if (!checkList.empty()) {
+        upload(state.buffers->rootCheckList, 0u, checkList.data(), checkList.size() * sizeof(HairRootCheckSample));
+        plan.rootCheckCount = static_cast<std::uint32_t>(checkList.size());
+        state.lastRootChecks = plan.rootCheckCount;
+    }
     if (plan.simulate) {
         // The frame's simulation thread groups: the simulate pass's, then the guide-level pass's level by level.
         std::vector<HairSimGroup> groups;
@@ -1569,7 +2018,13 @@ void HairRuntime::UpdateFrame(const HairFrameInputs& inputs, const HairUpload& u
         } else if (!groups.empty()) {
             upload(state.buffers->simGroups, 0u, groups.data(), groups.size() * sizeof(HairSimGroup));
         }
+        state.lastSimGroups = plan.levelGroupFirst[HAIR_MAX_GUIDE_LEVELS];
+    } else {
+        state.lastSimGroups = 0u;
     }
+    state.Use(kBufferSimGroups, state.lastSimGroups);
+    // The evaluate pass's dispatch, as it records it: one over the most clusters the frame can show.
+    state.evaluateDispatches += plan.evaluateGroups != 0u ? 1u : 0u;
     state.plan = plan;
 
     HairSimFrameGPU simFrame{};
@@ -1590,6 +2045,7 @@ void HairRuntime::UpdateFrame(const HairFrameInputs& inputs, const HairUpload& u
     simFrame.teleportDistance = state.sim.teleportDistance;
     simFrame.promoteSeconds = state.sim.promoteSeconds;
     simFrame.demoteSeconds = state.sim.demoteSeconds;
+    simFrame.frameNumber = static_cast<std::uint32_t>(frameNumber);
     upload(state.buffers->simFrame, 0u, &simFrame, sizeof(simFrame));
     if (simulating) {
         // The frame's metrics start from nothing measured; the smallest collider distance starts at all ones.
@@ -1609,6 +2065,9 @@ void HairRuntime::UpdateFrame(const HairFrameInputs& inputs, const HairUpload& u
     frame.segmentPixels = state.lod.segmentPixels;
     frame.visibleClusterCapacity = state.capacities.visibleClusters;
     frame.poolVertexCapacity = state.capacities.poolVertices;
+    frame.coverageMode = static_cast<std::uint32_t>(state.lod.coverage);
+    frame.coverageAccumulate = state.lod.accumulateCoverage || state.debugView == HairDebugView::Coverage ? 1u : 0u;
+    frame.detailExponent = state.lod.detailExponent;
     upload(state.buffers->frameState, 0u, &frame, sizeof(frame));
     // The frame's counters start at zero. A frozen selection keeps its counters with its list.
     static constexpr std::uint32_t zeros[HAIR_COUNTER_COUNT] = {};
@@ -1616,6 +2075,8 @@ void HairRuntime::UpdateFrame(const HairFrameInputs& inputs, const HairUpload& u
     // The visible-instance bits are the selection's too, and sit after the raster counters.
     const std::uint32_t resetEnd = firstReset == HAIR_COUNTER_SELECTION_FIRST ? HAIR_COUNTER_COUNT : HAIR_COUNTER_INSTANCE_MASK_FIRST;
     upload(state.buffers->counters, firstReset * sizeof(std::uint32_t), zeros, (resetEnd - firstReset) * sizeof(std::uint32_t));
+    upload(state.buffers->counters, HAIR_COUNTER_FRAME_FIRST * sizeof(std::uint32_t), zeros,
+        (HAIR_COUNTER_SELECTION_FIRST - HAIR_COUNTER_FRAME_FIRST) * sizeof(std::uint32_t));
 
     if (plan.instances.empty()) return;
     if (plan.probe) {

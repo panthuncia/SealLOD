@@ -1,8 +1,8 @@
 #ifndef BR_HAIR_RUNTIME_GPU_TYPES_H
 #define BR_HAIR_RUNTIME_GPU_TYPES_H
 
-// Runtime-only structs shared by HairPlugin and the hair shaders: what the plugin uploads per instance and what the
-// root-binding pass writes, and what the select, evaluate and raster passes share. Like HairGPUTypes.h this compiles as C++ and HLSL, with the same layout rules. Nothing
+// Runtime-only structs shared by HairPlugin and the hair shaders: what the plugin uploads per instance, a root's frame,
+// the guides' simulated state, and what the select, evaluate and raster passes share. Like HairGPUTypes.h this compiles as C++ and HLSL, with the same layout rules. Nothing
 // here is stored in a .groom file, so a change needs no schema bump.
 //
 // HLSL includes HairGPUTypes.h before this file (hairStructs.hlsli).
@@ -24,13 +24,16 @@ struct HairInstanceGPU {
     uint guideCount;
     uint pointBase; // HairPackedPoint
     uint pointCount;
-    uint rootFrameBase;        // HairRootFramePair, strandCount rows owned by this instance
+    uint reserved0;
     uint perObjectIndex;       // the entity's row of Builtin::PerObjectBuffer: model and previous model matrix
     uint skinningInstanceSlot; // row of SkinningInstanceInfo; HAIR_INVALID_INDEX: the roots follow the entity rigidly
     uint attachBone;           // every root follows this joint; HAIR_INVALID_INDEX: each root's own joints and weights
     float3 baseColor;          // the placeholder material the resolve writes: linear base colour and perceptual roughness
     float roughness;
-    uint guidePointBase; // HairGuidePoint: the instance's simulated guide state, one row per point of every guide
+    // HairGuidePoint: the instance's guide state, one row per point of every guide. The rows are lent to an instance
+    // while it is simulated or keeps a shape (HairRuntime's guide rows); HAIR_INVALID_INDEX while it has none, and then
+    // HAIR_SIM_FLAG_ENABLED is never set.
+    uint guidePointBase;
     uint colliderBase;   // HairColliderGPU, colliderCount rows
     uint colliderCount;
     uint simFlags;       // HAIR_SIM_FLAG_*
@@ -46,22 +49,40 @@ struct HairInstanceGPU {
 // HairInstanceGPU::simFlags.
 #define HAIR_SIM_FLAG_ENABLED 1u // the guide state is live and the other strands follow it; off: every strand follows its root rigidly
 #define HAIR_SIM_FLAG_RESET 2u   // this frame: put every guide back on its rest pose, at rest
+// With HAIR_SIM_FLAG_RESET: the instance was simulated before and its guide rows hold the shape it was left in. A guide
+// the solver owned then, and that the level still asks for, starts at rest in that shape: every point keeps its offset
+// from its rigid pose. The other guides are evaluated from those.
+#define HAIR_SIM_FLAG_KEEP_SHAPE 4u
+// Not simulated because no view needs it (HairRuntime's OnScreenExtent), though its size on screen would ask for it. Set
+// without HAIR_SIM_FLAG_ENABLED. None of its strands should be drawn: the evaluate pass counts those that are
+// (HAIR_COUNTER_UNSEEN_STRANDS_DRAWN).
+#define HAIR_SIM_FLAG_UNSEEN 8u
 
-// A strand root's frame in world space.
+// A strand root's frame in world space. Nothing stores these from frame to frame: every pass that needs a root's frame
+// works it out (hairRootFrame.hlsli).
 struct HairRootFrame {
     float3 position;
-    uint writtenFrame; // low 32 bits of the frame number of the dispatch that wrote this row
+    uint writtenFrame; // the self-check's rows only: low 32 bits of the frame number of the dispatch that wrote the row
     float3 normal;     // unit
     float pad0;
     float3 tangent; // unit; perpendicular to the normal up to what skinning and the model matrix do to the rest frame
     float pad1;
 };
 
-// What the root-binding pass writes for one root: this frame's frame and the one the previous frame's matrices give.
+// A root's frame this frame and the one the previous frame's matrices give.
 struct HairRootFramePair {
     HairRootFrame current;
     HairRootFrame previous;
 };
+
+// One root the self-check (hair.selfcheck) asks the GPU for: the root-check pass writes row i of the check buffer from
+// row i of this list.
+struct HairRootCheckSample {
+    uint instanceIndex; // HairInstanceGPU
+    uint strandRow;     // groom-relative
+};
+
+#define HAIR_ROOT_CHECK_CAPACITY 4096u
 
 // One point of a guide, in world space. A guide (by rank) owns 2^k + 1 consecutive rows from
 // guidePointBase + its HairGuidePointRange's offset, k being its cluster's vertex level; row 0 is its root.
@@ -77,8 +98,16 @@ struct HairGuidePoint {
     float3 rigid;            // the rest point through this frame's root frame: where the point is without simulation
     float guideBlend;        // row 0 only: seconds into the guide's promotion or demotion blend
     float3 previousRigid;    // the same through the previous frame's root frame
-    uint guideState;         // row 0 only: HAIR_GUIDE_STATE_*
+    uint guideState;         // row 0: HAIR_GUIDE_STATE_*. Row 1: HAIR_GUIDE_STAMP of the frame the guide's rows were last written in
 };
+
+// What a guide's row 1 holds in guideState: the instance the rows were written for and the frame they were written in
+// (its low 22 bits), by the simulate pass or the guide-level pass. Guide rows are lent to instances and taken back, so
+// the passes check this and count a mismatch: the evaluate pass that the rows a drawn strand reads were written this
+// frame for its instance (HAIR_COUNTER_STALE_GUIDES_DRAWN), the simulate and guide-level passes that the rows a guide
+// goes on from were written for its instance in the frame before (HAIR_SIM_METRIC_STALE_GUIDES). A guide has at least
+// two points.
+#define HAIR_GUIDE_STAMP(instanceIndex, frameNumber) ((((uint)(instanceIndex)) << 22u) | (((uint)(frameNumber)) & 0x3FFFFFu))
 
 // HairGuidePoint::guideState, in a guide's row 0. A guide the simulation level asks for is promoted: simulated from the
 // state its rows hold. One it no longer asks for is demoted: still simulated while its state is pulled onto what its
@@ -144,7 +173,7 @@ struct HairSimFrameGPU {
     float shapeCompliance;   // XPBD, s^2: of the pull toward the rigid pose at the tip; it falls to 0 at the root
     float promoteSeconds;    // simulation LOD: how long a promoted guide's blend from its evaluated state takes
     float demoteSeconds;     // and a demoted guide's blend back onto it
-    uint pad0;
+    uint frameNumber;        // HairFrameGPU's: the frame the root frames of this frame's guides were written in
     uint pad1;
     uint pad2;
 };
@@ -159,7 +188,24 @@ struct HairFrameGPU {
     float segmentPixels;  // vertex LOD: the length on screen a drawn segment aims for
     uint visibleClusterCapacity; // rows of the visible-cluster list
     uint poolVertexCapacity;     // rows of the strand pool
+    uint coverageMode;       // HAIR_COVERAGE_*: how the rasterizer treats a strand thinner than its one-pixel footprint
+    uint coverageAccumulate; // not 0: the rasterizer adds every segment's coverage into the coverage target
+    float detailExponent;    // the detail level is (strand spacing / lodErrorPixels) to this power: 1 spacing, 2 area
+    uint pad0;
 };
+
+// HairFrameGPU::coverageMode. Off: a covered pixel is written, whatever share of it the strand covers. Otherwise a pixel
+// is written with the probability of the strand's coverage there, from a random number per pixel, strand and frame.
+#define HAIR_COVERAGE_OFF 0u
+#define HAIR_COVERAGE_WHITE 1u       // a hash of the pixel, the strand and the frame
+#define HAIR_COVERAGE_INTERLEAVED 2u // interleaved gradient noise over the pixels, shifted each frame and by a hash of the strand
+
+// The coverage target: one uint per pixel, the sum of the coverage of every segment over the pixel in front of the opaque
+// surface, in these units (65536 is one whole pixel's worth, so a far strand's thousandth of a pixel still counts).
+#define HAIR_COVERAGE_UNIT 65536.0f
+// The frame's coverage counter is in these units of a pixel, coarse so that a view full of hair fits 32 bits. Each segment
+// adds its own sum, rounded up or down at random in proportion (a far segment's sum is far below one unit).
+#define HAIR_COVERAGE_COUNTER_UNIT 32.0f
 
 // One cluster the select pass kept for this frame: what the evaluate pass, the rasterizer and anything reading the hair
 // visibility target need to find its strands. Row i of the visible-cluster list is visible cluster i.
@@ -219,9 +265,16 @@ struct HairPoolVertex {
 #define HAIR_DEBUG_VIEW_STRAND 3u  // one colour per strand
 #define HAIR_DEBUG_VIEW_RANK 4u    // the strand's rank in its groom: white is kept longest
 #define HAIR_DEBUG_VIEW_VERTEX_LEVEL 5u // the cluster's drawn vertex level and geomorph
+#define HAIR_DEBUG_VIEW_COVERAGE 6u     // the coverage target, over black: grey up to one pixel's worth, then towards red
 
 // Rows of the counter buffer (uint).
-#define HAIR_COUNTER_ROOT_BINDING_DISPATCHES 0u // one per root-binding dispatch that ran on the GPU; never reset
+#define HAIR_COUNTER_EVALUATE_DISPATCHES 0u // one per evaluate dispatch that ran on the GPU; never reset
+// Reset every frame.
+// Evaluate: drawn strands of a simulated instance that read guide rows not written this frame for that instance
+// (HAIR_GUIDE_STAMP), or whose instance has no guide rows. 0 unless the CPU's lending of guide rows and the passes disagree.
+#define HAIR_COUNTER_STALE_GUIDES_DRAWN 1u
+#define HAIR_COUNTER_UNSEEN_STRANDS_DRAWN 2u // evaluate: drawn strands of instances the CPU found in no view (HAIR_SIM_FLAG_UNSEEN); 0 likewise
+// Row 3 is not used.
 // Selection: reset every frame the select pass runs (not while the LOD is frozen).
 #define HAIR_COUNTER_CLUSTERS_TESTED 4u
 #define HAIR_COUNTER_CLUSTERS_VISIBLE 5u  // also the visible-cluster list's allocator: it can pass the capacity
@@ -230,6 +283,8 @@ struct HairPoolVertex {
 #define HAIR_COUNTER_POOL_VERTICES 8u     // also the strand pool's allocator: it can pass the capacity
 #define HAIR_COUNTER_OVERFLOW_CLUSTERS 9u // visible clusters dropped because the pool or the list was full
 // Raster: reset every frame.
+#define HAIR_COUNTER_PIXELS_COVERED 10u   // pixels of segments' footprints in front of the opaque surface, counted for each segment
+#define HAIR_COUNTER_COVERAGE_SUM 11u     // the coverage of those, summed, in 1 / HAIR_COVERAGE_COUNTER_UNIT of a pixel
 #define HAIR_COUNTER_SEGMENTS_DRAWN 12u   // segments that wrote at least one pixel
 #define HAIR_COUNTER_PIXELS_WRITTEN 13u   // InterlockedMin writes: a pixel under several segments counts for each
 #define HAIR_COUNTER_PIXELS_OCCLUDED 14u  // covered pixels rejected by the opaque depth
@@ -240,8 +295,9 @@ struct HairPoolVertex {
 #define HAIR_COUNTER_INSTANCE_MASK_FIRST 17u
 #define HAIR_COUNTER_INSTANCE_MASK_WORDS 32u // 1,024 instances
 #define HAIR_COUNTER_COUNT 49u
+#define HAIR_COUNTER_FRAME_FIRST 1u
 #define HAIR_COUNTER_SELECTION_FIRST 4u
-#define HAIR_COUNTER_RASTER_FIRST 12u
+#define HAIR_COUNTER_RASTER_FIRST 10u
 
 // The simulation's metrics (uint): HAIR_SIM_METRIC_COUNT rows per instance, from row instance * HAIR_SIM_METRIC_COUNT.
 // Set to their start values every frame by an upload, written by the simulate and evaluate passes, read back after it.
@@ -271,6 +327,8 @@ struct HairPoolVertex {
                                               // frame before, or is in a blend
 #define HAIR_SIM_METRIC_STEADY_MOTION 19u     // float bits: largest motion of any other guide, simulated or evaluated
 #define HAIR_SIM_METRIC_EVALUATED_GUIDES 20u  // guides not simulated: evaluated from their parents (level 0: on the rigid pose)
+#define HAIR_SIM_METRIC_RESUMED_GUIDES 21u    // guides that started this frame from the shape their rows held (HAIR_SIM_FLAG_KEEP_SHAPE)
+#define HAIR_SIM_METRIC_STALE_GUIDES 22u      // guides that went on from rows not written for this instance in the frame before (HAIR_GUIDE_STAMP); 0 unless the lending and the passes disagree
 #define HAIR_SIM_METRIC_LEVEL_GUIDES 24u      // HAIR_MAX_GUIDE_LEVELS rows: guides simulated this frame, by level
 #define HAIR_SIM_METRIC_COUNT 32u
 #define HAIR_SIM_METRIC_STRETCH_LIMIT 0.02f
@@ -304,7 +362,8 @@ static_assert(sizeof(HairSimFrameGPU) == 96u);
 static_assert(HAIR_SIM_METRIC_LEVEL_GUIDES + HAIR_MAX_GUIDE_LEVELS == HAIR_SIM_METRIC_COUNT);
 static_assert(sizeof(HairRootFrame) == 48u);
 static_assert(sizeof(HairRootFramePair) == 96u);
-static_assert(sizeof(HairFrameGPU) == 32u);
+static_assert(sizeof(HairRootCheckSample) == 8u);
+static_assert(sizeof(HairFrameGPU) == 48u);
 static_assert(sizeof(HairVisibleCluster) == 32u);
 static_assert(sizeof(HairPoolVertex) == 32u);
 static_assert((1u << HAIR_VIS_STRAND_BITS) == HAIR_MAX_STRANDS_PER_CLUSTER);

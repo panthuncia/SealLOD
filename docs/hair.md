@@ -9,17 +9,20 @@ Two libraries exist:
 - `HairCore`, the offline half: a static library with no device and no renderer dependency. It imports a groom,
   builds the arrays the GPU consumes, and reads and writes them as a `.groom` file. `HairCoreTests` checks it.
 - `HairPlugin`, the renderer half ([Runtime](#runtime)): it loads grooms, attaches them to scene entities and uploads
-  them. Every frame it writes each strand root's frame in world space, simulates as many of the guides as the view
-  asks for when [simulation](#simulation) is on, selects a level of detail per cluster for the main view, evaluates the selected
+  them. Every frame it selects a level of detail per cluster for the main view, simulates as many of the guides as the
+  view asks for when [simulation](#simulation) is on (and none of a groom the view does not show), evaluates the selected
   strands into a pool, rasterizes them into a hair visibility target, and resolves that target into the frame's surface
   data. The demo (`BasicRendererDemo`) registers it; SARP's renderer host does not.
 
 **Hair is drawn as an ordinary opaque surface with a placeholder material.** The [resolve](#the-resolve) gives every
 hair pixel a surface record, depth and a motion vector, so deferred shading lights it, shadows fall on it and the
-upscaler follows it. There is no hair BSDF, hair casts no shadow, and a strand is at least one pixel wide with no
-coverage or anti-aliasing of its own. Strands follow their roots rigidly unless simulation is turned on (`hair.sim`):
+upscaler follows it. There is no hair BSDF and hair casts no shadow. A strand thinner than a pixel is drawn into a
+one-pixel footprint and written there with the probability of its coverage ([The rasterizer](#the-rasterizer)), so
+that over the frames the upscaler integrates it has its true weight; a pixel still holds one opaque sample, hair or
+not. Strands follow their roots rigidly unless simulation is turned on (`hair.sim`):
 then the groom's guides are simulated on the GPU, collide with spheres and capsules, and the other strands follow them.
-How many guides are simulated follows how large the groom is on screen ([Simulation LOD](#simulation-lod)).
+How many guides are simulated follows how large the groom is on screen, and a groom the view does not show is not
+simulated ([Simulation LOD](#simulation-lod)).
 
 POC limits that shape the code: a whole groom is held in memory and on the GPU, there is no paging, streaming or
 culling hierarchy, and nothing is tuned for speed.
@@ -203,6 +206,7 @@ The tests are in [`GroomBuilderTests.cpp`](../Plugins/Hair/tests/GroomBuilderTes
 | Flagged source guides take the lowest ranks. | `CheckBuiltGroom`; `TestAuthoredGuides`; `TestImportedGroomBuilds` in [`AlembicGroomTests.cpp`](../Plugins/Hair/tests/AlembicGroomTests.cpp) |
 | Clusters partition the strands, hold 1 to 64 each, and are sorted by rank. | `CheckBuiltGroom`, `ValidateBuiltGroom` |
 | The drawn strand count never falls as `l` rises, per cluster and in total, is at least 1, and is all strands at `l = 1`. | `TestLodHelper`, `CheckBuiltGroom` |
+| The power form of the detail level (`HairLodDetailLevelPower`) is the spacing rule at exponent 1, never above it at a higher exponent, never below the floor, and still 1 from the same spacing up. | `TestSharedLodRules` |
 | The shared rule (`HairLodStrandCountShared`) is `HairLodStrandCount` and is the formula above. Whole strands plus the boundary strand's weight never fall and never jump as `l` rises; the weight is in (0, 1] and is 1 at `l = 1`. The drawn vertex level is at most the stored one, and the drawn level less the geomorph is the fractional level. | `TestSharedLodRules` |
 | The strands drawn at a lower `l` are a subset of those at a higher `l`, and are always the cluster's lowest ranks. | `CheckBuiltGroom` (rank-sorted clusters plus the prefix rule) |
 | Every strand of a cluster has `2^k + 1` points with `k` inside the settings' range, packed back to back. | `CheckBuiltGroom` |
@@ -255,14 +259,14 @@ for a plugin to register one, so the LOD controls are a command too.
 | `hair.attach` | `asset`, `entity` (a scene entity's name), optional `bone`, optional `color` (`[r, g, b]`, linear) and `roughness` | `instance` |
 | `hair.clear` | | Drops every instance and asset. |
 | `hair.selfcheck` | `enabled` (default true), `roots` per instance (default 8) | `enabled` |
-| `hair.lod` | Any of `error_pixels`, `max_width_scale`, `min_detail`, `force_detail`, `segment_pixels`, `freeze` | All six values. See [Selection](#selection). |
-| `hair.debug` | `view`: `off`, `cluster`, `detail`, `strand`, `rank` or `vertex_level` | `view`. See [Debug view](#debug-view). |
+| `hair.lod` | Any of `error_pixels`, `max_width_scale`, `min_detail`, `force_detail`, `segment_pixels`, `freeze`, `detail_exponent`, `coverage` (`off`, `white` or `interleaved`; `true` and `false` are `white` and `off`), `coverage_accumulate` | Every value. See [Selection](#selection) and [The rasterizer](#the-rasterizer). |
+| `hair.debug` | `view`: `off`, `cluster`, `detail`, `strand`, `rank`, `vertex_level` or `coverage` | `view`. See [Debug view](#debug-view). |
 | `hair.capture` | `path` (a `.bmp` file to write) | `state`: `pending`. `hair.stats` reports when it is written. |
 | `hair.probe` | `path` (a binary file to write) | `state`: `pending`. See [Probing the targets](#probing-the-targets). |
-| `hair.sim` | Any of `enabled`, `gravity` (`[x, y, z]`), `damping`, `shape_compliance`, `bend_compliance`, `stretch_compliance`, `step_seconds`, `substeps`, `max_steps`, `wind` (`[x, y, z]`), `gust_amplitude`, `gust_frequency`, `friction`, `collision_margin`, `teleport_distance`, `frame_seconds`, `lod_full_coverage`, `lod_level0_coverage`, `lod_off_coverage`, `lod_rate`, `lod_force_level`, `lod_point_budget`, `promote_seconds`, `demote_seconds`; `reset: true` | Every control, the step counters and each instance's last metrics. See [Simulation](#simulation) and [Simulation LOD](#simulation-lod). |
+| `hair.sim` | Any of `enabled`, `gravity` (`[x, y, z]`), `damping`, `shape_compliance`, `bend_compliance`, `stretch_compliance`, `step_seconds`, `substeps`, `max_steps`, `wind` (`[x, y, z]`), `gust_amplitude`, `gust_frequency`, `friction`, `collision_margin`, `teleport_distance`, `frame_seconds`, `lod_full_coverage`, `lod_level0_coverage`, `lod_off_coverage`, `lod_rate`, `lod_force_level`, `lod_point_budget`, `promote_seconds`, `demote_seconds`, `lod_view_grace_seconds`, `lod_settle_seconds`, `guide_point_budget`, `guide_keep_seconds`; `reset: true` | Every control, the step counters and each instance's last metrics. See [Simulation](#simulation), [Simulation LOD](#simulation-lod) and [Guide rows](#guide-rows). |
 | `hair.simlevel` | `instance`, `level` | `instance`, `level`. Forces one instance's simulation level; a negative level gives it back to `hair.sim`'s rule. For testing. |
 | `hair.colliders` | `instance`, `colliders`: up to 8 of `{center, radius}` (a sphere) or `{a, b, radius}` (a capsule), in the entity's mesh space | `instance`, `colliders` (the count). An empty list removes them. |
-| `hair.dump` | `buffer` (`pool_vertices`, `visible_clusters` or `guide_points`), `path`, optional `rows` | `state`: `pending`. See [Dumping buffers](#dumping-buffers). |
+| `hair.dump` | `buffer` (`pool_vertices`, `visible_clusters`, `guide_points`, `instances`, `clusters`, `strands` or `guide_bindings`), `path`, optional `rows` | `state`: `pending`. See [Dumping buffers](#dumping-buffers). |
 | `hair.stats` | `continuous` (optional): read the GPU counters and the simulation's metrics back every frame | See [Checking it](#checking-it). |
 
 - **Sources.** A `.groom` is loaded as it is. Everything else is built in memory with `BuildGroom` and default
@@ -284,7 +288,8 @@ for a plugin to register one, so the LOD controls are a command too.
   that brings the head's centre to the mesh's.
 - **Material.** `color` and `roughness` are the instance's [placeholder material](#the-resolve): by default a dark
   brown, `[0.09, 0.05, 0.03]`, at roughness 0.6. A `.hair` file's colours are not used.
-- **Nothing is freed one at a time.** Assets and instances only accumulate until `hair.clear`.
+- **Assets and instances are not freed one at a time.** They accumulate until `hair.clear`. What an instance costs
+  beyond its 96-byte row is guide state, which it borrows while it is simulated ([Guide rows](#guide-rows)).
 
 ### Attachment
 
@@ -314,10 +319,13 @@ mesh's positions, indices, joints and weights (or decodes them from the cluster 
 
 ### GPU data
 
-The runtime makes twenty-one pooled buffers when the first groom is loaded, at fixed sizes (`HairCapacities`, 673 MB
-at the defaults, sized for the [crowd scenario](#checking-it)), and never resizes them. A groom or an instance that does not fit is refused with an error
-that names the row count and the capacity. `Hair.VisibleClusters` and the two pool buffers hold one frame's selection
-and are filled on the GPU: what does not fit there is dropped for the frame and counted ([Selection](#selection)).
+The runtime makes twenty-two pooled buffers when the first groom is loaded, at fixed sizes (`HairCapacities`, 417 MB
+at the defaults), and never resizes them. A groom that does not fit the asset buffers, or an instance past the
+instance rows, is refused with an error that names the row count and the capacity. Three kinds of buffer are shared
+out at run time and can run short without anything being refused: `Hair.VisibleClusters` and the two pool buffers hold
+one frame's selection and are filled on the GPU (what does not fit is dropped for the frame and counted,
+[Selection](#selection)), and `Hair.GuidePoints` is lent to the instances that are simulated (an instance that gets
+none follows its roots rigidly and is counted, [Guide rows](#guide-rows)).
 
 | Buffer | Row | Default rows | Written |
 |---|---|---|---|
@@ -327,64 +335,145 @@ and are filled on the GPU: what does not fit there is dropped for the frame and 
 | `Hair.Points` | `HairPackedPoint` | 8,388,608 | once per asset |
 | `Hair.Instances` | `HairInstanceGPU` | 1,024 | when an instance's row changes |
 | `Hair.FrameState` | `HairFrameGPU` | 1 | every frame with an active instance |
-| `Hair.RootFrames` | `HairRootFramePair` | 1,048,576 | by the root-binding pass |
-| `Hair.Counters` | `uint` | 49 | by the root-binding, select, raster and resolve passes; reset by an upload every frame |
+| `Hair.Counters` | `uint` | 49 | by the select, evaluate, raster and resolve passes; reset by an upload every frame |
 | `Hair.VisibleClusters` | `HairVisibleCluster` | 65,535 | by the select pass |
 | `Hair.PoolVertices` | `HairPoolVertex` | 4,194,304 | by the evaluate pass |
 | `Hair.PoolSegmentIds` | `uint` | 4,194,304 | by the evaluate pass |
 | `Hair.Probe` | `uint` | 1,310,792 | by the probe pass, in a frame `hair.probe` asked for |
 | `Hair.GuidePointRanges` | `HairGuidePointRange` | 65,536 | once per asset |
-| `Hair.GuidePoints` | `HairGuidePoint` | 4,194,304 | by the simulate pass |
+| `Hair.GuidePoints` | `HairGuidePoint` | 2,097,152 | by the simulate and guide-level passes: the rows of the instances that are simulated |
 | `Hair.SimGroups` | `HairSimGroup` | 131,072 | every frame an instance is simulated: the thread groups of the simulate and guide-level passes |
 | `Hair.Colliders` | `HairColliderGPU` | 8,192 (8 per instance) | when an instance's colliders change |
 | `Hair.SimFrame` | `HairSimFrameGPU` | 1 | every frame |
 | `Hair.SimMetrics` | `uint` | 32,768 (32 per instance) | by the simulate, guide-level and evaluate passes; reset by an upload every frame the simulation is on |
+| `Hair.RootCheckList`, `Hair.RootCheck` | `HairRootCheckSample`, `HairRootFramePair` | 4,096 | the self-check's: an upload and the root-check pass, in a frame that samples |
 
-There is also one texture, `Hair.Visibility`: the [hair visibility target](#the-hair-visibility-target), made at the
-render resolution of the first frame and made again when that changes.
+There are also two textures, made at the render resolution of the first frame and made again when that changes:
+`Hair.Visibility`, the [hair visibility target](#the-hair-visibility-target), and `Hair.Coverage`, the
+[coverage target](#the-coverage-target).
+
+Where the 417 MB are: guide state 160 MB, the strand pool 128 MB and its segment ids 16 MB, the groom points 64 MB,
+strands and root bindings 32 MB, and 1 MB to 5 MB each for the rest. `hair.stats` reports every buffer's capacity,
+what is in use and the most that was ([Checking it](#checking-it)).
 
 - Assets sit back to back in the groom buffers. Indices inside an asset stay groom-relative (`strandOffset`,
   `pointOffset`, guide strand indices): a shader adds the instance's bases.
-- [`HairInstanceGPU`](../Plugins/Hair/include/Hair/HairRuntimeGPUTypes.h) holds an instance's bases and counts, its
-  first row in `Hair.RootFrames` (it owns one row per strand), and three references into the renderer's own buffers:
+- [`HairInstanceGPU`](../Plugins/Hair/include/Hair/HairRuntimeGPUTypes.h) holds an instance's bases and counts and
+  three references into the renderer's own buffers:
   its entity's row of `Builtin::PerObjectBuffer` (model and previous model matrix), its skinning instance slot
   (`SkinningInstanceInfo`, which locates the current and previous bone palettes in `BoneTransforms`) and the attach
   bone. The entity's transform is not copied: the shader reads the row the entity's mesh is drawn with. It also holds
-  the instance's placeholder material (base colour and roughness), its first row of guide state, its colliders' rows,
-  the simulation flags (`HAIR_SIM_FLAG_ENABLED`, `HAIR_SIM_FLAG_RESET`) and its simulation level: every shader reads
-  whether the instance is simulated from its row.
-- An instance owns one `HairGuidePoint` row for every point of every guide of its groom, whether or not the simulation
-  is on and whichever guides it simulates (135,168 rows for a groom of 4,096 guides at 33 points): the persistent
-  per-instance state. A guide's first row also holds its simulation LOD state (`guideState`, `guideBlend`). A guide keeps its
-  cluster's stored vertex level, so guides differ in point count; `Hair.GuidePointRanges` gives each guide's first row
-  and point count, by rank. An instance whose guides do not fit is refused at `hair.attach`.
-- All uploads go through the root-binding pass's own upload on the render thread
-  (`RenderGraphPass::UploadBufferData`), in the pass's `Update`. Nothing uses a deferred resize. That `Update`
+  the instance's placeholder material (base colour and roughness), its first row of guide state
+  (`HAIR_INVALID_INDEX` while it holds none), its colliders' rows,
+  the simulation flags (`HAIR_SIM_FLAG_ENABLED`, `HAIR_SIM_FLAG_RESET`, `HAIR_SIM_FLAG_KEEP_SHAPE`,
+  `HAIR_SIM_FLAG_UNSEEN`) and its simulation level: every shader reads whether the instance is simulated from its row.
+- **An instance owns nothing but that row.** No buffer holds root frames: every pass works out the ones it needs
+  ([Root frames](#root-frames)). Guide state is borrowed ([Guide rows](#guide-rows)).
+- A guide keeps its cluster's stored vertex level, so guides differ in point count; `Hair.GuidePointRanges` gives each
+  guide's first row and point count, by rank, relative to its instance's first row. A guide's first row also holds its
+  simulation LOD state (`guideState`, `guideBlend`), and its second the stamp of the frame its rows were last written
+  in and the instance they were written for (`HAIR_GUIDE_STAMP`).
+- All uploads go through one hair pass's own upload on the render thread
+  (`RenderGraphPass::UploadBufferData`), in the root-check pass's `Update`. Nothing uses a deferred resize: no buffer
+  is ever resized or made again (the two textures are, with the render resolution). That `Update`
   (`HairRuntime::UpdateFrame`) is the plugin's CPU work for the frame: it also uploads the LOD controls
-  (`HairFrameGPU`), zeroes the frame's counters and decides the frame's plan (`HairFramePlan`), which every hair pass
-  records from.
+  (`HairFrameGPU`), zeroes the frame's counters, lends and takes back guide rows and decides the frame's plan
+  (`HairFramePlan`), which every hair pass records from.
 - `FindSceneEntityRenderState` ([`Extensions/SceneEntityRenderState.h`](../BasicRenderer/include/BasicRenderer/Extensions/SceneEntityRenderState.h))
   is the renderer extension point this needed: it gives a scene entity's per-object row and skinning slot. The
   per-object buffer is versioned, and a frame can bind a version a few frames behind the scene, so the pass takes the
   frame's published version (`PublishedObjectBufferState`) and skips an instance whose row that version does not
   have yet.
 
+### Guide rows
+
+Guide state (`HairGuidePoint`, 80 bytes a guide point) is the one per-instance thing of any size: 2.6 MB for a groom of
+1,024 guides at 33 points, 10.3 MB for one of 4,096. It is lent out of `Hair.GuidePoints`, a contiguous range per
+instance, as many rows as its groom has guide points (every guide of a simulated instance has live rows, whichever of
+them the solver owns: [Simulation LOD](#simulation-lod)). The lending is the CPU's, once a frame, with the simulation's
+planning (`PlanSimLevels`, `AcquireGuideRows` in [`HairRuntime.cpp`](../Plugins/Hair/src/HairRuntime.cpp)):
+
+- **Taking.** An instance takes rows in the frame it starts being simulated, in view or to settle unseen. Its first
+  simulated frame writes every row (it starts from its rigid pose), so what the rows held before does not matter.
+- **Holding.** It holds them while it is simulated, and after it stops for being out of view: the rows are then the
+  shape it kept, which is what lets it go on seamlessly when a view shows it again
+  ([Following the view](#following-the-view)).
+- **Giving back, nothing lost.** At once when it stops with nothing to keep: its level went to 0 and it blended back
+  onto its rigid pose, the simulation was turned off, a reset while it was stopped, `hair.clear`. And when it holds a
+  kept shape but is now too small on screen to be simulated at all (its coverage asks for less than the level a groom
+  starts at): it would be drawn rigid if a view turned to it.
+- **Taken back, something lost (an eviction).** When an instance *in view* needs rows and none are free, or the budget
+  is reached, rows are taken from the instances no view shows, the smallest on screen first (by coverage: the size it
+  would have in view), whether it keeps a shape or is being simulated out of view (settling unseen, or in the quarter
+  second after leaving). With `guide_keep_seconds` above 0, a kept shape is also taken back once its instance has not
+  been simulated for that long. An evicted instance is not settled unseen again; it starts from its rigid pose when a
+  view next shows it, and is seen settling.
+- **Never between instances in view.** An instance in view keeps its rows. When the instances in view need more rows
+  than there are, the ones that asked last get none (within a frame the largest on screen ask first): they are
+  **starved**, follow their roots rigidly exactly as with the simulation off, ask again every frame, and start from
+  their rigid pose when rows come free. Nothing reads rows it was not lent.
+- **Settling unseen takes free rows only.** A groom that would settle out of view does not evict anything; without
+  free rows it is left unsettled and starts from its rigid pose if a view turns to it.
+- **Lowering the budget** below what is lent out takes rows back at once in the same order, and after the instances
+  out of view from the smallest in view, which then starve.
+
+| `hair.sim` field | Default | Meaning |
+|---|---|---|
+| `guide_point_budget` | 0 | The most rows lent out at once. 0: the buffer's capacity. |
+| `guide_keep_seconds` | 0 | Above 0: a kept shape is given up after this many simulated seconds without its instance being simulated. 0: it is kept until an instance in view needs the rows. |
+
+**Why kept shapes are not given up by age unless asked.** The buffer has a fixed size, so rows given back return no
+memory to anyone; they only make the next entry of that groom a visible settle from its rigid pose. Kept until the
+rows are needed, shapes are a cache that fills the buffer. The age limit is for a camera that travels through more
+grooms than the buffer holds: it frees the shapes left behind for grooms ahead to settle in unseen
+([On-demand memory measurements](#on-demand-memory-measurements) has both).
+
+**Why the smallest and not the oldest.** Taking the shape simulated longest ago was built first. With more grooms near
+enough to simulate than the buffer holds, a camera turning in place comes to them in turn, and the one simulated longest
+ago is the one it shows next: every entry was a start from the rigid pose, each of those is simulated for
+`lod_settle_seconds` whether or not it is still in view, and those starts evicted each other (measured below: 73
+grooms simulated for 21 in view, 1,468 evictions in a few seconds). By size, the same turn keeps the shapes of the
+large grooms and trades rows among the smallest.
+
+**The allocator** is first fit over a sorted list of free ranges, merged when ranges are freed. Ranges never move. A
+request can therefore fail with enough rows free in total but in pieces; it then evicts as if there were not enough,
+and an instance in view can starve on fragmentation alone. Grooms come in a few sizes (one per asset), so freed ranges
+are mostly reused whole.
+
+**Checked on the GPU.** The simulate and guide-level passes stamp row 1 of every guide they write with the instance
+and the frame (`HAIR_GUIDE_STAMP`). The evaluate pass counts the drawn strands of simulated instances that read a guide
+whose stamp is not this frame's and this instance's, or whose instance has no rows (`stale_guides_drawn`). The
+simulate and guide-level passes count the guides that go on from the state their rows hold (every guide but one that
+starts or is reset) and do not find there the stamp of this instance and the frame before (`stale_guides` in the
+simulation's metrics). Both are 0 unless the lending and the passes disagree: rows read after they were given to
+another groom, rows never written, a guide skipped by both passes, an instance that changed rows without starting
+again. A pass does nothing with an instance flagged simulated that has no rows.
+
+`hair.stats` reports the lending under `memory.guide_state` ([Checking it](#checking-it)).
+
+**What the capacity admits.** 2,097,152 rows are 62 grooms of 1,024 guides at 33 points, or 15 of the builder's
+default 4,096 guides, simulated or kept at once. `HairCapacities` is a constructor argument; the buffer is not grown at
+run time. Growing it would mean a new buffer and a copy of the live rows on the render thread's upload path, with every
+pass declaring again, as the visibility target is replaced; it was not built.
+
 ### Passes
 
 | Pass | Where | Shader |
 |---|---|---|
-| `Hair::RootBinding` | Before `CLodOpaque::HierarchicalCullingPass1` | [`hairRootBinding.hlsl`](../Plugins/Hair/shaders/hairRootBinding.hlsl) |
+| `Hair::Select` | Before `CLodOpaque::HierarchicalCullingPass1` | `HairSelectCS` in [`hairSelectEvaluate.hlsl`](../Plugins/Hair/shaders/hairSelectEvaluate.hlsl) |
+| `Hair::RootCheck` | After it | [`hairRootCheck.hlsl`](../Plugins/Hair/shaders/hairRootCheck.hlsl); it records only in a frame the self-check samples |
 | `Hair::Simulate` | After it | [`hairSimulate.hlsl`](../Plugins/Hair/shaders/hairSimulate.hlsl) |
 | `Hair::GuideLevels` | After it | [`hairGuideLevels.hlsl`](../Plugins/Hair/shaders/hairGuideLevels.hlsl) |
-| `Hair::Select` | After it | `HairSelectCS` in [`hairSelectEvaluate.hlsl`](../Plugins/Hair/shaders/hairSelectEvaluate.hlsl) |
-| `Hair::Evaluate` | After it | `HairEvaluateCS`, same file |
+| `Hair::Evaluate` | After it | `HairEvaluateCS` in `hairSelectEvaluate.hlsl` |
 | `Hair::Raster` | After `MaterialHistogramPass`, before `EvaluateMaterialGroupsPass` | [`hairRaster.hlsl`](../Plugins/Hair/shaders/hairRaster.hlsl) |
 | `Hair::Resolve` | After `EvaluateMaterialGroupsPass` and `CLodOpaque::LinearDepthCopyPass2`, before `CLodOpaque::LinearDepthDownsamplePass2` | `HairResolveCS` in [`hairResolve.hlsl`](../Plugins/Hair/shaders/hairResolve.hlsl) |
 | `Hair::Probe` | After `Hair::Resolve` | `HairProbeCS`, same file |
 | `Hair::DebugOverlay` | Overlay epoch, after `TonemappingPass`, before the present pass | [`hairDebugOverlay.hlsl`](../Plugins/Hair/shaders/hairDebugOverlay.hlsl) |
 
-- The first five need the roots and the main view's camera and nothing of the frame's opaque geometry, so they run
-  before culling.
+- The first five need the entities' transforms and the main view's camera and nothing of the frame's opaque geometry,
+  so they run before culling. Evaluation is last of them: it draws the strands selection chose from the guide state the
+  two simulation passes leave. `Hair::RootCheck` is where the plugin's CPU work for the frame runs
+  ([GPU data](#gpu-data)); on the GPU it does something only for the [self-check](#checking-it).
 - The rasterizer tests against the opaque visibility buffer, so it runs once that is complete. Every pass that writes
   the buffer is placed before `MaterialHistogramPass`, the first pass that reads the finished buffer. "After
   `MaterialHistogramPass`" is therefore after all of them, whatever the CLod configuration, without naming them.
@@ -401,23 +490,31 @@ render resolution of the first frame and made again when that changes.
 Each pass declares the plugin's buffers, which appear with the first groom, and declares again when the visibility
 target is replaced. Until then it records nothing.
 
-### The root-binding pass
+### Root frames
 
-`Hair::RootBinding` dispatches
-[`hairRootBinding.hlsl`](../Plugins/Hair/shaders/hairRootBinding.hlsl) once per active instance, one thread per root,
-and writes a `HairRootFramePair` per root: the root's position, normal and tangent **in world space**, for this frame
-and for the previous frame's matrices (the previous bone palette and the previous model matrix).
+A root's frame is its position, normal and tangent **in world space**, for this frame and for the previous frame's
+matrices (the previous bone palette and the previous model matrix):
 
 ```
 position = restPosition * skin * model          (row vectors, as the renderer skins a vertex)
 normal   = normalize(restNormal * skin3x3 * model3x3), tangent likewise
 ```
 
-`skin` is the identity in `rigid` mode. The pass does not follow skeleton LOD remaps (procedural wind's transient
-palettes). Normals use the matrices' upper 3x3 as they are, so a non-uniform scale skews them.
+`skin` is the identity in `rigid` mode. Skeleton LOD remaps (procedural wind's transient palettes) are not followed.
+Normals use the matrices' upper 3x3 as they are, so a non-uniform scale skews them.
 
-Each dispatch also adds one to `Hair.Counters[0]`, and each row records the frame number it was written in
-(`writtenFrame`).
+**No buffer holds root frames.** Every pass that needs one works it out, with the one function in
+[`hairRootFrame.hlsli`](../Plugins/Hair/shaders/hairRootFrame.hlsli) (`HairMakeRootFramePair`): the select pass for a
+cluster's first strand, the evaluate pass for each strand it draws, the simulate and guide-level passes for each guide
+they write. Its inputs are the root's binding (`HairRootBinding`), the entity's row of the per-object buffer and, for a
+skinned instance, the bone palettes: all the frame's own. So a root's frame is always this frame's and belongs to a root
+the frame uses, by construction, and an instance needs no storage for it.
+
+It used to be a pass and a buffer. First one dispatch per instance over every root, into a row per strand of every
+instance (0.67 ms and 92 MB for the crowd's million roots, wherever the camera looked); then two dispatches over the
+drawn strands and the simulated instances' guides, into the same rows, with each row stamped with its frame and the
+readers counting stale ones. Working the frame out where it is read costs less than writing and reading the row
+([On-demand memory measurements](#on-demand-memory-measurements)).
 
 ### Selection
 
@@ -430,7 +527,8 @@ Each dispatch also adds one to `Hair.Counters[0]`, and each row records the fram
 2. **Is frustum-tested** as a sphere against the camera's six view-space planes, like CLod's culling. Bounds cover
    strand centrelines at rest, so the radius is grown by 25% for strands that will move under simulation
    (`HAIR_CULL_RADIUS_MARGIN`) and by 1 cm for strand width (`HAIR_CULL_WIDTH_MARGIN`). There is no occlusion test.
-3. **Gets its detail level** `l = clamp(spacingPixels / errorPixels, minDetail, 1)` (`HairLodDetailLevel`). The spacing
+3. **Gets its detail level** `l = clamp((spacingPixels / errorPixels) ^ detailExponent, minDetail, 1)`
+   (`HairLodDetailLevelPower`; with the exponent at 1 it is `HairLodDetailLevel`). The spacing
    is `1 / sqrt(density)` from the cluster's aggregate (strands per cross-section area), or from the bounds when the
    aggregate has no area. It is projected as CLod projects geometric error: by view depth, not distance, at the near
    side of the bounds, with the same pixels-per-unit factor (`projection[1][1] * 0.5 * renderHeight`).
@@ -454,11 +552,14 @@ The controls (`hair.lod`), with their defaults:
 | Field | Default | Meaning |
 |---|---|---|
 | `error_pixels` | 1 | A cluster draws every strand while its strands are at least this far apart on screen. |
-| `max_width_scale` | 8 | `wMax`: the most a drawn strand is widened. |
+| `max_width_scale` | 64 | `wMax`: the most a drawn strand is widened. 64 is the most strands a cluster has, so a cluster down to its last strand still carries all its coverage. It was 8 before coverage, when the width did not show. |
 | `min_detail` | 0.02 | The lowest `l`. |
 | `force_detail` | 0 | Above 0, every cluster takes this `l`. For testing. |
 | `segment_pixels` | 4 | The length on screen a drawn segment aims for. |
 | `freeze` | false | Keep the last selection while the camera moves. The select pass does not run; the kept strands are still evaluated and rasterized from the current camera. A change in the active instances selects once more. |
+| `detail_exponent` | 1 | The power the spacing rule is raised to, 1 to 3. At 1 the drawn strands fall as one over the distance; at 2 as its square, like the area the groom covers on screen. The kept strands' width scale makes up the coverage, so `max_width_scale` has to allow it. |
+| `coverage` | `white` | How the rasterizer treats a strand thinner than its footprint: `off` writes every footprint pixel (a strand is at least a pixel wide and opaque, as before coverage existed); `white` and `interleaved` write a pixel with the probability of the strand's coverage there, and differ in the random pattern. See [The rasterizer](#the-rasterizer). |
+| `coverage_accumulate` | false | Add every segment's coverage into the [coverage target](#the-coverage-target). |
 
 ### Evaluation and the strand pool
 
@@ -471,13 +572,17 @@ Without simulation:
 
 - **Rigid following.** A rest-space point keeps its offset from the strand's root, expressed in the root's frame
   (tangent, bitangent, normal): `current root position + R * (point - rest root position) * scale`. `R` takes the rest
-  frame in `HairRootBinding` to the frame in `Hair.RootFrames`; `scale` is the entity's uniform scale, taken from the
+  frame in `HairRootBinding` to the [root's frame](#root-frames); `scale` is the entity's uniform scale, taken from the
   model matrix because root frames are unit vectors. The previous position uses the previous root frame and the
   previous model matrix.
 - **Vertex LOD.** Drawn vertex `j` is stored point `j << (k - level)`. Odd vertices are the ones the level below
   drops: they move to the midpoint of their two neighbours by the geomorph, and are gone when the level steps down.
-- **Width.** The stored diameter times `min(1 / l, wMax)`, and for the cluster's last drawn strand also times the
-  boundary weight, so a strand grows from nothing as `l` rises.
+- **Width.** The stored diameter times the width scale, and for the cluster's last drawn strand also times the
+  boundary weight, so a strand grows from nothing as `l` rises. With coverage on the scale is the exact one,
+  `min(N / clamp(l * (N + d), 1, N), wMax)` (`HairLodCoverageWidthScale`): the cluster's strands over the strands'
+  worth it draws, so the drawn widths always sum to the cluster's own, down to its last strand. With `coverage` `off`
+  it is `min(1 / l, wMax)` as before (`HairLodWidthScale`), which is the same thing but for the offset `d` and for a
+  cluster already down to one strand; under the one-pixel floor neither showed.
 - **Previous frame.** The previous position is this frame's selection at last frame's root. A strand that was not
   drawn last frame, or was drawn at another level, still gets one.
 
@@ -535,12 +640,14 @@ thread whose guide the instance's simulation level does not ask for returns at o
 that are simulated. The simulation is off by default, and `hair.sim {enabled: false}` gives back the rigid evaluation
 exactly.
 
-**State.** `HairGuidePoint`, in world space, so that root motion gives the hair inertia: the point's position, where
+**State.** `HairGuidePoint`, in rows the instance borrows while it is simulated ([Guide rows](#guide-rows)), in world
+space, so that root motion gives the hair inertia: the point's position, where
 the last substep started and how long that substep was (velocity is the difference over it), the simulated position at
 the end of the previous frame, and the point's rigid pose under this frame's root frame and under the previous
-frame's. A guide starts on its rigid pose, at rest, when its instance is first simulated, when the instance was not
-simulated in the frame before (not drawn, or the simulation was off), on `hair.sim {reset: true}`, and when its root
-moved further than `teleport_distance` in one frame.
+frame's. A guide starts on its rigid pose, at rest, when its instance is first simulated, on `hair.sim {reset: true}`
+or when the simulation is turned on, and when its root moved further than `teleport_distance` in one frame. An instance
+that was simulated before and not in the frame before (no view showed it, or its entity was not drawn) starts again
+from the shape its rows still hold, at rest ([Simulation LOD](#simulation-lod), "Following the view").
 
 **Time.** A fixed step (`step_seconds`, 1/60 s) of `substeps` substeps (4). The frame's time goes into an accumulator
 and whole steps come out of it; a frame takes at most `max_steps` (4), and the time a longer frame had beyond that is
@@ -620,6 +727,9 @@ and hair does not collide with hair.
 | `lod_force_level` | -1 | 0 and above: every instance takes this simulation level at once (8 is every guide of any groom). For testing. |
 | `lod_point_budget` | 0 | Above 0: the most guide points simulated over all instances. |
 | `promote_seconds`, `demote_seconds` | 0.25, 0.25 | How long a promoted guide is blended from, and a demoted one back onto, what its parents give it. 0: at once. |
+| `lod_view_grace_seconds` | 0.25 | How long an instance that no view shows any more is still simulated. |
+| `lod_settle_seconds` | 1.5 | How long an instance that starts from its rigid pose is simulated whether or not a view shows it. 0: an instance out of view is never started. |
+| `guide_point_budget`, `guide_keep_seconds` | 0, 0 | The most guide rows lent out at once (0: the buffer), and how long a kept shape is held (0: until the rows are needed). See [Guide rows](#guide-rows). |
 | `reset` | | `true` puts every guide back on its rigid pose and zeroes the step counters. |
 
 Compliances are per unit mass and per constraint, so the same values are stiffer on a groom with longer segments; they
@@ -634,7 +744,10 @@ two.
 | Field | Meaning |
 |---|---|
 | `frame`, `steps` | The frame the metrics are of, and the steps taken up to and including it. |
-| `guides`, `reset_guides` | Guides simulated (those being demoted included), and those put back on the rigid pose in that frame. `guides` is 0 for an instance the simulation level has turned off. |
+| `guides`, `reset_guides` | Guides simulated (those being demoted included), and those put back on the rigid pose in that frame. `guides` is 0 for an instance that is not simulated. |
+| `resumed_guides` | Guides that started in that frame from the shape their instance was left in when it stopped for being out of view. |
+| `stale_guides` | Guides that went on from rows not written for this instance in the frame before. 0 unless the lending of guide rows and the passes disagree ([Guide rows](#guide-rows)). |
+| `holds_rows`, `starved` | Whether the instance held guide rows in that frame (simulated, or keeping a shape), and whether it is in view and to be simulated but got none: it then follows its roots rigidly. |
 | `stretch_max`, `stretch_mean`, `stretched_guides` | `abs(length / rest length - 1)` of a guide segment: the largest, the mean over guides of each guide's mean, and the guides with a segment over 2%. |
 | `root_shift` | Metres: the furthest a guide's root was, when the frame began, from the frame's previous root frame. See below. |
 | `speed_max`, `speed_mean` | m/s: the fastest point, and the mean over guides of each guide's mean point speed. |
@@ -643,6 +756,7 @@ two.
 | `guide_roots`, `guide_root_error` | Drawn strands that are guides, simulated or not, and how far the evaluation left any of their first vertices from its root frame before it was put there. |
 | `strand_roots`, `strand_root_error` | The same for drawn strands interpolated from guides. |
 | `sim_level`, `target_level`, `coverage` | The instance's simulation level in that frame, what it is moving toward, and the coverage that was computed from (0 when the entity's matrix was not on the CPU). |
+| `in_view`, `view_extent` | Whether the main view shows any part of the groom's bounds, and the size on screen of the part it shows, in the coverage's units (1e9 when the camera is inside the bounds). |
 | `level_guides`, `simulated_points` | Guides simulated, by level, and the points they have. |
 | `evaluated_guides` | Guides not simulated: evaluated from their parents. With `guides` it is every guide of the groom. |
 | `blending_guides`, `promoted_guides`, `demoted_guides` | Simulated guides in a promotion or demotion blend; guides that became simulated in that frame; guides whose demotion ended in it. |
@@ -667,7 +781,8 @@ simulated state between steps for frames shorter than a step.
 
 ### Simulation LOD
 
-How many guides an instance simulates follows how large its groom is on screen. The guide-capable set is in levels
+How many guides an instance simulates follows how large its groom is on screen, and an instance the view does not
+show is not simulated at all ([Following the view](#following-the-view)). The guide-capable set is in levels
 (64, 192, 768 and 3,072 guides with the builder's defaults), and every guide above level 0 has up to three parents in
 the level below, with weights (`HairGuideBinding`). The runtime takes up to `HAIR_MAX_GUIDE_LEVELS` (8) levels.
 
@@ -701,21 +816,75 @@ In between `sFrac` is linear in the logarithm of the coverage. With four levels 
 each halving of the groom's size on screen: a level holds four times the guides of the one below, so the simulated
 guides per screen area stay roughly the same.
 
+That is for a groom wholly in view. One partly outside it takes the level of the part that is inside, and one wholly
+outside is not simulated ([Following the view](#following-the-view)).
+
 - **Rate.** `sFrac` moves toward what the coverage asks for by at most `lod_rate` (2) levels per simulated second.
 - **Staying put.** `sFrac` sets off only once its target is more than 0.02 levels away, and then goes all the way; an
   instance that is not simulated starts only when its coverage asks for a level of 0.25 or more. A groom at a steady
   distance therefore does not flicker between states.
 - **Starting.** An instance starts at its target level at once, with every guide on its rigid pose and at rest in
-  world space, which is where its strands were. Its guides do not take up the entity's velocity.
+  world space, which is where its strands were. Its guides do not take up the entity's velocity. (An instance that
+  stopped for being out of view starts differently: see below.)
 - **Stopping.** Once `sFrac` is 0 the instance stays simulated for `demote_seconds` and two more steps, while its
   level 0 guides blend back onto the rigid pose (below), and then stops.
-- **Forced levels.** `lod_force_level`, and `hair.simlevel` for one instance, apply at once, with no rate limit.
+- **Forced levels.** `lod_force_level`, and `hair.simlevel` for one instance, apply at once, with no rate limit, and
+  wherever the instance is: a forced level is simulated out of view too.
 - **Budget.** With `lod_point_budget` above 0, when the levels asked for would simulate more guide points than that
   over all instances, every instance's level is multiplied by one factor, found by bisection over each groom's sorted
   table of the level every guide is simulated from. A level is never scaled below level 0 alone, so the budget does not
   turn an instance off and cannot be met where the level 0 guides alone pass it.
-- The coverage uses the entity's matrix from the per-object buffer the frame binds, not an attach bone's. Without that
-  buffer's rows on the CPU the instance simulates every guide.
+- The coverage uses the entity's matrix from the per-object buffer the frame binds, and the attach bone's skin matrix
+  for an instance on a bone. Without that buffer's rows on the CPU the instance simulates every guide.
+
+#### Following the view
+
+`PlanSimLevels` asks one function, `OnScreenExtent` in [`HairRuntime.cpp`](../Plugins/Hair/src/HairRuntime.cpp), whether
+a view needs an instance's hair and how much of it: the size on screen, over the view's height, of the part of the
+groom's bounding sphere that is inside the view (the sphere's coverage times the smaller of the shares of its width and
+of its height that are on screen). 0 means no view shows any of it. There is one view, the main camera: hair casts no
+shadow and is in no reflection. A second view would be a second `HairView` in the frame's inputs and the larger of the
+two answers; nothing else knows how many views there are.
+
+- **The test** is the select pass's, on the CPU, in the same frame: the sphere against the main camera's six view-space
+  planes. The sphere is centred on the middle of the groom's rest bounds, through the entity's matrix (and the attach
+  bone's), and holds every cluster's bounding sphere. The select pass grows a cluster's sphere by 25%; this one is
+  grown by 50%, so an instance counts as in view a little before any strand of it can be drawn, and a frame's
+  difference between the CPU's camera or bones and the GPU's does not matter. The evaluate pass counts the strands it
+  draws of instances the CPU found out of view (`unseen_strands_drawn`): it has to be 0.
+- **Partly in view.** The level is the one the coverage gives while the visible part is at least as large as the rest
+  bounds' own coverage, and the level of the visible part's size below that, but never less than level 0 alone while
+  any part is in view and the coverage asks for level 1 or more. So a groom that slides out of the view loses levels as
+  it goes, guide by guide with the usual blends, and one that slides in gains them. It makes no difference which part
+  is in view: a head on screen with its hair off it and hair on screen with its head off it are both the sphere of the
+  whole groom, partly in view.
+- **Leaving.** An instance wholly out of view is still simulated for `lod_view_grace_seconds` (0.25), with level 0
+  alone as its target, and then stops as it is: it is not blended back to the rigid pose, nothing is drawn of it, and
+  its guide rows keep the shape it had. The grace is what keeps a groom at the edge of the view from stopping and
+  starting; a groom that comes back within it was never interrupted. It keeps those rows until an instance in view
+  needs them ([Guide rows](#guide-rows)); a groom whose rows were taken has no kept shape, and enters as one that was
+  never simulated but is not settled unseen first.
+- **Entering.** An instance that stopped that way starts again in the frame its sphere touches the view, before the
+  frame's strands are evaluated, from the shape it kept (`HAIR_SIM_FLAG_KEEP_SHAPE`): every guide the solver owned when
+  it stopped, and that the level still asks for, starts at rest with each point at the offset from its rigid pose that
+  it had; the others are evaluated from those. It starts at the level it stopped at (or its target, if lower), and the
+  level then rises at `lod_rate` with ordinary promotions. So a camera that turns to a groom, however fast, finds it in
+  the shape it last had, hanging and not on its rigid pose, and nothing is drawn of it before that frame. What is lost
+  is its motion: it starts at rest. The offsets are kept in world space and not turned with the head, so a head that
+  turned a long way while out of view starts from a shape that is wrong by that turn, and settles from there.
+- **Settling unseen.** An instance with no kept shape, which would be simulated if it were in view, is started out of
+  view too, at level 0 alone, and stops like any other once it has had `lod_settle_seconds` (1.5) of simulation since
+  it started from its rigid pose. Otherwise a groom that came near behind the camera, or was there when the simulation
+  was turned on, would be seen settling from its rigid pose when the camera turned to it. This is the one case in which
+  hair nobody sees is simulated: for a second and a half, once, at 64 guides a groom. With `lod_settle_seconds` 0 it is
+  not, and such a groom is seen settling. Settling unseen takes free guide rows only: when there are none the groom
+  is left as it is.
+- An instance that starts in view with no kept shape (a groom attached in view, the simulation turned on, a reset)
+  starts from its rigid pose and is seen settling, as before.
+- A groom whose roots follow their own joints (`per_root`) has no bounds on the CPU and always counts as in view.
+
+`hair.sim`'s metrics give each instance's `in_view` and `view_extent`, and `resumed_guides` in the frame it starts from
+a kept shape.
 
 **Guides the solver does not own.** `Hair::GuideLevels`
 ([`hairGuideLevels.hlsl`](../Plugins/Hair/shaders/hairGuideLevels.hlsl)) runs after the simulate pass: one dispatch per
@@ -786,12 +955,13 @@ for the other guides):
 | demotions, 0.25 s blend | 11.9 mm (mean 4.8 mm) | 12.6 mm (mean 4.8 mm) |
 | demotions, no blend | 65.6 mm (mean 10.9 mm) | 31.5 mm (mean 5.9 mm) |
 
-**Which guides the passes cover.** The guide-level pass covers every guide of a simulated instance: a thread whose
+**Which guides the passes cover.** Only instances that are simulated this frame: one that no view shows is in none
+of the lists. The guide-level pass covers every guide of a simulated instance: a thread whose
 guide is simulated and in no blend returns after reading three rows. The simulate pass covers an instance's guide
 levels 0 to `floor(h)`, where `h` is the highest `sFrac` the instance has had in the last `demote_seconds` (and a few
 steps): a guide of level `k` is simulated from `sFrac = k + randomOffset`, and one the level has stopped asking for is
-still simulated for `demote_seconds`. In the frame an instance starts or is reset it covers every guide, because that
-frame writes every guide's state. Inside the covered levels a thread whose guide is not simulated returns after reading
+still simulated for `demote_seconds`. In the frame an instance starts, starts again from a kept shape or is reset it
+covers every guide, because that frame writes every guide's state. Inside the covered levels a thread whose guide is not simulated returns after reading
 four rows (the instance, the guide's binding, its point range, its first point).
 
 Both passes used to be dispatched per instance (the guide-level pass per instance and level, with a barrier each). With
@@ -804,16 +974,20 @@ after.
   about as long as its slowest thread group however few groups have work. Reducing the level therefore reduces the
   pass's time by less than the guides it drops. The pass is one dispatch for every instance, so the floor is paid once
   a frame and not once per groom ([POC measurements](#poc-measurements)).
-- **The guide-level pass follows the scene's simulated grooms, not the simulated guides.** It evaluates every guide of
-  every simulated instance that the solver does not own, whether or not a drawn strand uses it.
-- **The simulation level follows distance, not visibility.** A groom behind the camera is simulated like one in front.
+- **The guide-level pass follows the simulated grooms, not the drawn strands.** It evaluates every guide of every
+  simulated instance that the solver does not own. Simulated instances are the ones in view, and measured, the strands
+  drawn of a simulated groom wholly in view depend on every one of its guides, or all but a few in a thousand, while
+  its guides are a seventh of its strands or fewer ([View-following measurements](#view-following-measurements)), so
+  marking the guides in use would save little. It would save about half on a groom that is half out of view, and on a
+  groom with as many guides as strands, in proportion to the strands the LOD drops.
+- **Visibility is the frustum's.** A groom behind a wall, or behind other grooms, is in view and is simulated.
 - Evaluated guides are not collided: a guide between parents on either side of a collider can pass through it. A
   promoted guide comes out of it over its blend.
 - When `sFrac` reaches 0 with the groom still large on screen (a forced level), the hair moves from its simulated shape
   to the rigid one in `demote_seconds`: a quick, visible settle, with no jump. At the default off coverage the groom is
   a few dozen pixels tall.
 - Parents are strictly in the level below, with inverse-distance weights, and the chord's rotation carries no twist.
-- One level per instance, from the main view only. A groom simulated for a shadow or a reflection has no say.
+- One level per instance, from the main view only (`OnScreenExtent` is where another view would be asked).
 
 ### The hair visibility target
 
@@ -842,17 +1016,53 @@ good for the frame that wrote them.
 
 - Both ends are projected with the main camera's view-projection, the one the opaque geometry was rasterized with. A
   segment behind the near plane is dropped; one that crosses it is clipped.
-- The segment is a screen-space trapezoid with round ends: a pixel is covered when its centre is within the segment's
-  half-width of the nearest point on the centreline. The half-width is interpolated between the two ends and is at
-  least half a pixel, so every strand is at least one pixel wide and has no gaps.
+- The segment's *footprint* is a screen-space trapezoid with round ends: a pixel is in it when its centre is within the
+  segment's half-width of the nearest point on the centreline. The half-width is interpolated between the two ends and
+  is at least half a pixel, so the footprint of every strand is at least one pixel wide and has no gaps: no strand is
+  missed, however thin.
 - Pixels are walked along the segment's longer screen axis, and in each column only those near the centreline are
   tested. A segment tests at most 4,096 pixels (`HAIR_RASTER_MAX_PIXELS_PER_SEGMENT`); one that needs more is cut short
   and counted in `segments_capped`.
-- A covered pixel's depth (perspective-correct along the segment) is compared with the opaque visibility buffer's
+- A footprint pixel's depth (perspective-correct along the segment) is compared with the opaque visibility buffer's
   depth field at that pixel. Hair at or behind the opaque surface is rejected and counted in `pixels_occluded`.
+- **Coverage.** The share of a footprint pixel the strand covers is its true width there (the pool's width: the LOD's
+  width scale and the boundary strand's fade included) over the footprint's: `min(width / max(width, 1 px), 1)`. A
+  footprint's pixel count follows its area, so the coverage summed over the footprint is the strand's true projected
+  area, whatever its direction on screen. A strand a pixel wide or more has coverage 1 and hard edges, as before.
+- **Stochastic acceptance** (`coverage` `white` or `interleaved`). The pixel is written only when a random number in
+  [0, 1) is below the coverage. The number is per pixel, per strand and per frame: it changes every frame, so the
+  temporal upscaler averages the outcomes into the strand's true weight, and it is independent between the strands over
+  one pixel, so several thin strands combine as independent occluders. The nearest *accepted* segment wins, so a pixel
+  shows strand `k` with probability `c_k` times the product of `1 - c_j` over the strands in front of it, which is what
+  compositing them front to back would give, and what is behind sparse hair (other hair, the scalp, the background)
+  shows through in the frames no strand is accepted. A strand of zero width (the boundary strand at the start of its
+  fade) is never written. `white` hashes the pixel, the strand and the frame (PCG). `interleaved` is interleaved
+  gradient noise over the pixels, shifted each frame, plus a hash of the strand, so the accepted pixels along one strand
+  are evenly spaced; measured, the two are not told apart after the upscaler
+  ([Partial coverage measurements](#partial-coverage-measurements)).
+- **Joints.** With coverage on, a strand's segments meet end to end: a pixel past one of a segment's ends belongs to the
+  neighbouring segment, and only the strand's own two ends are round. The round joints of the opaque form put the pixels
+  around every vertex in two footprints, which would count their coverage twice (about a fifth more for a segment four
+  pixels long). At a bend the two footprints overlap on the inside and leave a wedge on the outside, of equal areas to
+  first order. With `coverage` `off` the joints are round, exactly as before, and every footprint pixel in front of the
+  opaque surface is written.
 
-This is the simple form only: no tiles, no binning, no coverage and no anti-aliasing. The main view is assumed to be a
-perspective view (clip `w` is the linear depth).
+A pixel in which no strand is accepted holds no key: the resolve leaves it alone, and it keeps the surface, depth and
+motion vector of whatever opaque surface is behind the hair.
+
+This is the simple form only: no tiles, no binning, and no anti-aliasing of the edges of a strand wider than a pixel.
+The main view is assumed to be a perspective view (clip `w` is the linear depth).
+
+### The coverage target
+
+`Hair.Coverage` is an `R32_UInt` texture the size of the visibility target. With `coverage_accumulate` on, the
+rasterizer adds (`InterlockedAdd`) the coverage of every footprint pixel that is in front of the opaque surface, written
+or not, in units of 1/65536 (`HAIR_COVERAGE_UNIT`): the summed coverage of the hair over each pixel, overlaps counted,
+in the manner of the additive coverage layer of *Indiana Jones and the Great Circle*. It is cleared every frame. Nothing
+shades from it yet: it is for the `coverage` [debug view](#debug-view), for measurement, and for a later composite. The
+counters `pixels_covered` and `coverage_sum` ([Checking it](#checking-it)) are the same sum over the frame and do not
+need the target. With `coverage` `off` the sum still uses the end-to-end joint rule, so the two modes report the same
+coverage.
 
 ### The resolve
 
@@ -924,7 +1134,9 @@ then check the motion vectors and the depths ([Checking it](#checking-it)).
 
 `hair.dump` writes one of the plugin's buffers as the next frame leaves it to a binary file: the frame number (8
 bytes), then the buffer's rows, or its first `rows`. `pool_vertices` is the strand pool (`HairPoolVertex`),
-`visible_clusters` the frame's selection (`HairVisibleCluster`) and `guide_points` the guide state (`HairGuidePoint`).
+`visible_clusters` the frame's selection (`HairVisibleCluster`) and `guide_points` the guide state (`HairGuidePoint`):
+the whole buffer, in which an instance's rows start at the `guide_row_base` that `hair.stats` gives for it while it
+holds any ([Guide rows](#guide-rows)).
 Requests made before a frame are all read back after that same frame, with a `hair.probe` made then too, so a script
 can compare a frame's motion vectors with the pool they were made from, and one frame's pool with the next
 ([Checking it](#checking-it)). `hair.stats` counts the files (`dumps`: `pending`, `written`, `failed`). Each dump copies
@@ -942,6 +1154,7 @@ holding a hair segment and leaves the rest of the frame as it is. It draws over 
 | `strand` | One colour per strand. |
 | `rank` | The strand's rank in its groom: white is kept longest, blue is dropped first. |
 | `vertex_level` | One colour per drawn vertex level, darker as the geomorph nears the level below; odd segments are dimmed. |
+| `coverage` | The [coverage target](#the-coverage-target) over the whole frame: black where there is no hair, a grey level equal to the summed coverage up to 1, then from yellow (1) to red (64) by its doublings. The target is accumulated while this view is shown, whatever `coverage_accumulate` says. |
 | `off` | The pass records nothing. |
 
 `hair.capture` writes a presented frame (with the overlay, when one is on, and the menu) to a 32-bit `.bmp`. It reads the frame's
@@ -969,30 +1182,47 @@ compiled from memory, so it has no folder of its own to search. `scripts/deploy_
 | Field | Meaning |
 |---|---|
 | `assets`, `instances`, `attached_instances`, `active_instances`, `failed_instances` | Counts. An active instance was dispatched in the last frame. |
-| `strands`, `points`, `rows` | Rows used and their capacities, per pooled buffer. |
+| `strands`, `points`, `rows` | Rows used and their capacities, of the asset buffers, the instance rows and the guide state lent out. `instance_strands` is the strands summed over instances. |
 | `buffers_created`, `buffer_bytes` | The pooled buffers and their size. |
+| `memory` | `buffers`: for every pooled buffer its `row_bytes`, and capacity, use now and high-water mark in rows and bytes. `capacity_bytes`, `used_bytes` and `high_water_bytes` are the sums (the last is the sum of each buffer's own high-water mark: an upper bound on the most in use at once). For the buffers a frame fills on the GPU (the visible-cluster list and the strand pool) use is that of the newest frame read back, and the high-water mark is over the frames read back: every frame with `continuous` on. `guide_state`: the lending of guide rows, below. |
 | `asset_bytes_uploaded`, `instance_bytes_uploaded`, `bytes_uploaded`, `pending_upload_assets` | Upload totals. |
-| `frames`, `root_binding_dispatches` | Frames the pass was updated in, and the dispatches those frames asked for. |
-| `gpu_counter` | The last readback of the GPU's own dispatch count, with the CPU count and frame number of the frame it was read after. Each call asks for the next readback, so two calls a few frames apart see a fresh one. |
+| `frames`, `evaluate_dispatches` | Frames the plugin was updated in, and the evaluate dispatches those frames asked for. |
+| `gpu_counter` | The last readback of the GPU's own count of evaluate dispatches, with the CPU count and frame number of the frame it was read after. Each call asks for the next readback, so two calls a few frames apart see a fresh one. |
 | `gpu_frame` | The same readback's per-frame counters, below. |
 | `gpu_history` | With `continuous` on: the counters of the last 32 frames read back, oldest first. A frame's counters arrive a few frames after it, so a caller that polls once a frame sees every frame. |
 | `lod`, `debug_view`, `visibility_target`, `capture`, `probe`, `dumps` | The LOD controls, the debug view, the target's size, the last `hair.capture`, the last `hair.probe` and the `hair.dump` counts. |
 | `sim` | What `hair.sim` returns: the controls, the step counters and each instance's metrics ([Simulation](#simulation)). |
 | `self_check` | The self-check's last result and its worst since it was enabled. |
-| `instance_list` | Each instance's entity, bone, state, mode, material and error. |
+| `instance_list` | Each instance's entity, bone, state, mode, material and error, its `strands`, the guide rows it needs to be simulated (`guide_rows`) and its first row while it holds any (`guide_row_base`, -1 otherwise). |
+
+`memory.guide_state` ([Guide rows](#guide-rows)):
+
+| Field | Meaning |
+|---|---|
+| `capacity_rows`, `budget_rows`, `row_bytes` | The buffer, the most that may be lent out (`guide_point_budget`, or the capacity), and 80. |
+| `rows_in_use`, `rows_active`, `rows_kept` | Rows lent out now; those of instances simulated in the last frame; the rest, which are kept shapes. |
+| `high_water_rows`, `largest_free_rows` | The most rows lent out at once since the buffers were made, and the largest range a request could take now. |
+| `holders`, `active_holders`, `kept_holders` | Instances holding rows, simulated in the last frame, and keeping a shape. |
+| `allocations`, `releases` | Ranges lent, and ranges given back with nothing lost. |
+| `evictions`, `evictions_for_rows`, `evictions_by_age` | Ranges taken back with a kept shape or a running simulation lost: all of them, those taken for an instance in view or a lowered budget, and those taken by `guide_keep_seconds`. |
+| `allocation_failures`, `starved_instances` | Times an instance in view could not get rows (counted once each time it starts to starve), and the instances starved now: in view, to be simulated, following rigidly. |
+| `unsettled_instances` | Instances out of view that would settle unseen and found no free rows. |
 
 `gpu_frame` and each row of `gpu_history`:
 
 | Field | Meaning |
 |---|---|
 | `frame`, `camera_position`, `selected` | The frame, its main camera position, and whether it ran the select pass (false: frozen). |
+| `stale_guides_drawn`, `unseen_strands_drawn` | Drawn strands of a simulated instance that read guide rows not written in that frame for that instance ([Guide rows](#guide-rows)), and drawn strands of instances that are not simulated because the CPU found them in no view. Both are 0 unless the CPU and the passes disagree. |
 | `clusters_tested`, `clusters_visible` | Clusters the select pass looked at and kept. |
 | `instances_visible` | Instances with at least one cluster inside the frustum. |
 | `strands_selected`, `segments_selected` | Drawn strands and segments of the kept clusters. |
 | `pool_vertices`, `visible_clusters` | Rows used and capacity of the strand pool and the visible-cluster list. |
 | `overflow_clusters` | Visible clusters dropped because the pool or the list was full. |
+| `pixels_covered` | Footprint pixels in front of the opaque surface, counted once for each segment over them (with coverage, by the end-to-end joint rule). With `coverage` `off` every one of them is written. |
+| `coverage_sum` | The coverage of those pixels, summed: the hair's true projected area in pixels, overlaps counted. Each segment's share is rounded to 1/32 of a pixel, up or down at random in proportion. |
 | `segments_drawn` | Segments that wrote at least one pixel. |
-| `pixels_written` | Visibility writes. A pixel under several segments counts once for each. |
+| `pixels_written` | Visibility writes. A pixel under several segments counts once for each. With coverage on these are the accepted writes, and their mean over frames is `coverage_sum`. |
 | `pixels_occluded` | Covered pixels rejected by the opaque depth. |
 | `segments_capped` | Segments cut short at the per-segment pixel limit. |
 | `pixels_resolved` | Hair pixels the resolve wrote into the surface targets: at most `pixels_written`. |
@@ -1000,17 +1230,20 @@ compiled from memory, so it has no folder of its own to search. `scripts/deploy_
 While the LOD is frozen the selection counters are those of the frozen selection. The counters are zeroed by an upload
 at the start of the frame and read back after it.
 
-The **self-check** (`hair.selfcheck`, off by default) reads `Hair.RootFrames` back every fourth frame and compares a
-few roots per instance with the same arithmetic on the CPU. The CPU's inputs are the root bindings, the entity's row
+The **self-check** (`hair.selfcheck`, off by default) checks [root frames](#root-frames) against the CPU. Every fourth
+frame it lists a few roots per instance, spread across each groom and drawn or not (`Hair.RootCheckList`), and the
+root-check pass writes their frames into `Hair.RootCheck` with the function every hair pass uses; the CPU reads that
+back and compares it with the same arithmetic of its own. The CPU's inputs are the root bindings, the entity's row
 of the per-object buffer version the frame bound, and the skin matrices of the entity's pose (inverse bind times
 pose, this frame's and the previous frame's). It logs each comparison (`Hair self-check: frame ...`) and reports the
 largest position and direction differences, how far the roots moved between the two frames, and how many instances
-it could not compare because their rows were not written in that frame. Each check copies the whole buffer.
+it could not compare (the frame's per-object rows were not on the CPU, or the list was full: it holds 4,096 roots).
 
 [`Scripting/Scenarios/hair/hair_single.cs`](../Scripting/Scenarios/hair/hair_single.cs) is the end-to-end check of
 attachment: a
 drooping procedural groom on a moving sphere and a tuft on the swinging `tip` joint of `assets/skinned_bar.glb`, both
-drawn lit. It passes when both grooms are uploaded, the GPU ran exactly two dispatches per frame over 65 frames, the
+drawn lit. It passes when both grooms are uploaded, the GPU ran exactly one evaluate dispatch per frame over 65
+frames, no instance holds guide rows (nothing is simulated), the
 self-check agrees within 0.1 mm over at least ten checks, current and previous frames, with both instances moving, the
 resolve wrote hair pixels (no more than the rasterizer's visibility writes), and a capture of the frame was written.
 On the development machine the differences are about 2e-7. Captures go to `HAIR_CAPTURE_DIR`, or to `hair_captures` in
@@ -1105,9 +1338,12 @@ behind the last row, looks away from the grid, and then looks back at the whole 
 frame's counters are recorded as checks named `sample ...`: instances and clusters in view, drawn strands and segments,
 strand pool use, pixels written and resolved, and the simulation's instances, guides, guide points and the spread of
 `sFrac` over the instances. It passes when every head takes a groom and all are dispatched, grooms are drawn from the
-front with fewer strands than the scene has, nothing is selected or drawn facing away, every groom is in view from the
-far camera with under half the scene's strands drawn and none simulated, and the strand pool and the visible-cluster
-list never overflow. It writes three captures (near, middle of the fly-through, far).
+front with fewer strands than the scene has, nothing is selected or drawn facing away, and facing away no groom is
+simulated and no guide rows are in active use, every groom is in view from the
+far camera with under half the scene's strands drawn, none simulated and none holding guide rows, the strand pool and
+the visible-cluster list never overflow, every groom a view showed got the guide rows it asked for, and in no frame is
+a strand drawn from guide rows that were not written in that frame for its groom, or from a groom left unsimulated for
+being out of view. It writes three captures (near, middle of the fly-through, far).
 
 ```powershell
 BasicRenderer.exe --script scenarios\hair\hair_single.cs --script-exit --script-fixed-dt 0.0166667
@@ -1118,6 +1354,13 @@ BasicRenderer.exe --script scenarios\hair\hair_crowd.cs --script-exit --script-f
 ```
 
 `hair_sim_lod.cs` writes about 60 captures of 16 MB and, for a while, up to 400 MB of dumps.
+
+The simulation follows the view, and `hair_sim.cs` and `hair_sim_lod.cs` are about the solver and the levels: both
+check that their grooms were in view in every frame whose metrics they read.
+
+Every hair scenario passes `HAIR_COVERAGE`, when it is set in the environment, to `hair.lod` as `coverage`:
+`HAIR_COVERAGE=off` runs it with the opaque rasterizer. With coverage on, `hair_sim.cs` compares the rigid groom's pixel
+counters before and after the simulation to 2% and not to one part in 10,000: the written pixels are then random draws.
 
 **Measured for simulation LOD** (development machine, 2560x1600, fixed 1/60 s frames, default controls, the run at
 about 7 frames a second with the display asleep; the scripts that probed the motion vectors and compared the blends and
@@ -1636,7 +1879,12 @@ with distance.
 
 ### Weak points
 
-In order of what they cost the claims under test:
+As measured for the proof of concept, before partial coverage. Points 3 and 5 are what
+[Partial coverage measurements](#partial-coverage-measurements) is about: 5 no longer holds with coverage on, and 3 can
+now be traded against with `detail_exponent`. Point 1, and the root binding of point 2, are what
+[View-following measurements](#view-following-measurements) is about: the simulation and root binding now follow the
+view. The memory of point 2 is what [On-demand memory measurements](#on-demand-memory-measurements) is about: it is
+no longer held per instance. In order of what they cost the claims under test:
 
 1. **The simulation's cost follows the grooms nearby, not the hair on screen** (the fly-through, and 4.0 ms facing
    away). The simulation level is from distance alone, and the guide-level pass evaluates every guide of every simulated
@@ -1665,6 +1913,852 @@ In order of what they cost the claims under test:
   compare runs, and are not a perceptual measure.
 - Hair is still an opaque placeholder surface with no shadow of its own; none of the passes that would follow
   (shadows, a hair BSDF, layered visibility) is in these costs.
+
+## Partial coverage measurements
+
+Measured on 2026-11-27 for the first step after the proof of concept: analytic coverage in the rasterizer, used by
+stochastic acceptance into the one visibility layer ([The rasterizer](#the-rasterizer)), a coverage target, and a
+steeper detail rule. Same machine, conditions and method as [POC measurements](#poc-measurements): raster mode, DLSS
+at 2560x1600 in and out, the display awake, uncapped, times from the statistical profiler at a 3% half-width. "Off" is
+`coverage` `off`, which is the rasterizer of the proof of concept; "on" is `white` unless said. Counters are means over
+32 consecutive frames (the camera's jitter and the random pattern both change every frame). Image differences are mean
+absolute differences of 8-bit luma of presented frames, after the upscaler. The scripts are not in the tree.
+
+**What the counters mean here.** `pixels_resolved` is the hair pixels a frame shows: with coverage off, every pixel
+under any footprint; with it on, the pixels in which some strand was accepted, so its mean over frames is the hair's
+expected visible area. `coverage_sum` is the strands' true projected area with overlaps counted, an optical depth
+summed over the screen, and does not depend on the mode.
+
+### The test grooms are thin
+
+The first thing true coverage shows is what the grooms are. The proof of concept's dolly groom (24,000 strands of 80
+to 20 micrometres on a head a metre across) has 126,000 pixels of true strand area over the 593,000 pixels its
+one-pixel strands fill at 2 m: with coverage on it is a faint haze over a bare sphere. That is what such a groom is,
+and the one-pixel floor was drawing it five times too dense. The measurements below therefore use grooms with enough
+hair: the same groom with strands of 0.4 to 0.2 mm ("thin": 63% of the opaque pixels show hair at 2 m) and 1.6 to
+0.8 mm ("thick": 97%), the distance series' groom (30,000 strands of 88 to 44 micrometres on an 11 cm head, about 20 cm
+long: 74% at 0.8 m, 69% at 3.2 m, with the scalp showing through the crown where the hair lies one layer deep), and
+`wCurly` (50,000 strands: all of them at 0.8 m, 95% at 3.2 m). The crowd's grooms (8,000 to 12,000 such strands a head) are
+sparse too: from the crowd's near camera 119,000 pixels show hair against 259,000 opaque, and from the far one 2,600
+against 7,100. A groom authored against the opaque form needs more or wider strands to look the same with coverage.
+
+### The mechanisms are live
+
+The proof of concept's width test ([Continuity](#continuity)), which showed no pixel changing with the width scale or
+with a strand four times as wide. The thin groom; "hair pixels" is `pixels_resolved`, "area" is `coverage_sum`. These
+runs predate the exact width scale (below), so the compensated area is about 1% over the full groom's.
+
+| Distance | Strands drawn | Hair pixels, off (any width scale) | On, `max_width_scale` 8 | On, 1 | On, every strand drawn | Area, scale 8 | Area, scale 1 | Area, every strand |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2 m | 24,000 | 593,412 | 374,948 | 374,910 | 374,985 | 772,405 | 772,407 | 772,405 |
+| 8 m | 24,000 | 34,083 | 19,326 | 19,366 | 19,367 | 41,490 | 41,489 | 41,492 |
+| 16 m | 22,437 | 8,519 | 4,735 | 4,564 | 4,705 | 10,039 | 9,266 | 9,959 |
+| 24 m | 15,231 | 3,796 | 2,127 | 1,660 | 2,111 | 4,459 | 2,763 | 4,414 |
+| 32 m | 11,472 | 2,151 | 1,210 | 789 | 1,194 | 2,545 | 1,180 | 2,517 |
+| 48 m | 7,722 | 972 | 549 | 267 | 541 | 1,151 | 355 | 1,138 |
+| 80 m | 4,726 | 364 | 204 | 68 | 202 | 428 | 79 | 422 |
+
+- **Width compensation now does what it was for.** At 80 m a fifth of the strands are drawn. Without widening they
+  show a third of the hair pixels of the full groom (68 against 202); widened, the same (204). Off, the three columns
+  are one number at every distance, as the proof of concept found.
+- **Strand width shows.** The thick groom shows 29,509 hair pixels at 8 m and 310 at 80 m against the thin one's 19,326
+  and 204; off, both are 34,083 and 364.
+- **The opaque form over-covers.** Its hair pixels are 1.6 to 1.8 times what the thin groom's true coverage shows, at
+  every distance, and 5.6 times for the proof of concept's own strand widths.
+- `white` and `interleaved` gave the same means to within their frame-to-frame spread in every cell (not shown).
+- Accepted writes (`pixels_written`) equal `coverage_sum` to 0.1% in every cell: the acceptance is unbiased. From 8 m on they
+  are a twenty-fifth to a fiftieth of the opaque form's writes (20,100 against 430 at 80 m).
+- With coverage off the counters are those of the proof of concept's tables to the pixel (593,412, 34,083, 3,796, 364).
+
+### One strand leaving
+
+What the frame-mean metric of [Continuity](#continuity) could not see. A sparse groom (1,000 straight strands 0.28
+pixels wide at the root, well apart on screen), the camera still, and the forced detail level swept from 0.9 to 0.5 in
+160 steps, so that about two and a half strands of the groom leave per step, one cluster at a time. Each step waits 8
+frames and captures; the change from the step before is taken per 8x8 pixel block (a strand is local), clear of the
+menus. "Static" is the same state captured twice.
+
+| | Off | On |
+|---|---:|---:|
+| Strands drawn | 914 to 512 | 914 to 512 |
+| Footprint pixels (what the opaque form shows) | 119,726 to 67,558 | (not shown as such) |
+| True area, `coverage_sum` | 34,582 to 34,962 | 34,587 to 34,975 |
+| Largest block change in a step: median, 90th percentile, largest of the sweep | 15.2, 18.8, 21.8 | 2.3, 4.4, 4.4 |
+| Largest block change, static | 3.3 (4.5 at most) | 2.3 (4.4 at most) |
+| Blocks changing by more than 4 levels in a step, mean | 20.7 | 0.13 |
+
+With coverage off every step has a block that changes by 15 levels of 255 (a strand goes at its full one pixel in one
+frame, as the proof of concept said it must), and the groom loses 44% of its drawn pixels over the sweep while its
+true area is constant. With coverage on the largest change of any block in a step is the noise of a still image: the
+leaving strand fades by width, the kept ones widen, and neither can be found in the frames.
+
+### The detail rule
+
+With coverage real, the kept strands' width has to carry the dropped strands' coverage, and two things were in the
+way.
+
+- **`max_width_scale` 8 was the limiter, for the spacing rule too.** Beyond the distance where a cluster draws under an
+  eighth of its strands the widening stopped: at 51 m the distance series' groom kept 61% of its area with the strand
+  LOD alone (188 pixels of 307), and with `detail_exponent` 2 it kept 67% at 12.8 m and 21% at 25.6 m, visibly thinning
+  to the scalp. The default is now 64, the most strands a cluster holds.
+- **`1 / l` is not exactly the compensation.** It ignores the cluster's offset in the count (1% too wide on average)
+  and grows without bound once a cluster is down to its one strand (7% too much area at 25.6 m and 30% at 51 m under
+  exponent 2). The scale is now the cluster's strands over the strands' worth it draws
+  ([Evaluation](#evaluation-and-the-strand-pool)).
+
+With both, the strand LOD keeps the groom's area at every exponent tried: 4,688, 4,691, 4,699 and 4,686 pixels at
+12.8 m for exponents 1, 1.5, 2 and 3 against 4,694 for every strand, and within 0.3% at every other distance, for both
+grooms.
+
+Each setting against the full groom (every strand, no vertex LOD) from the same camera, coverage on in both, as
+[Curls under reduction](#curls-under-reduction) did; each image is the mean of 8 captures. "Strand LOD alone" turns the
+vertex LOD off. `max_width_scale` 64 throughout.
+
+The distance series' procedural groom:
+
+| Distance | Same image twice | Exponent | Strands | Segments | Footprint pixels | Hair pixels | Area | Difference | Strand LOD alone: difference |
+|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| 6.4 m | 1.42 | full | 30,000 | 960,000 | 1,073,942 | 5,334 | 18,646 | | |
+| | | 1 | 18,763 | 300,208 | 668,877 | 5,324 | 18,405 | 1.74 | 1.67 |
+| | | 1.5 | 15,085 | 241,360 | 540,287 | 5,320 | 18,408 | 1.84 | 1.83 |
+| | | 2 | 12,336 | 197,376 | 444,369 | 5,320 | 18,389 | 2.00 | 2.01 |
+| | | 3 | 8,687 | 138,992 | 316,912 | 5,339 | 18,381 | 2.46 | 2.39 |
+| 12.8 m | 1.36 | full | 30,000 | 960,000 | 543,714 | 1,344 | 4,694 | | |
+| | | 1 | 9,712 | 77,696 | 171,908 | 1,330 | 4,523 | 1.95 | 1.67 |
+| | | 1.5 | 5,765 | 46,120 | 102,683 | 1,334 | 4,525 | 2.16 | 1.77 |
+| | | 2 | 3,563 | 28,504 | 64,125 | 1,327 | 4,531 | 2.45 | 2.12 |
+| | | 3 | 1,769 | 14,152 | 32,435 | 1,338 | 4,516 | 3.70 | 3.36 |
+| 25.6 m | 1.37 | full | 30,000 | 960,000 | 278,467 | 343 | 1,194 | | |
+| | | 1 | 4,979 | 19,916 | 42,187 | 328 | 1,077 | 3.06 | 1.53 |
+| | | 1.5 | 2,201 | 8,804 | 18,707 | 329 | 1,079 | 3.17 | 1.87 |
+| | | 2 | 1,252 | 5,008 | 10,710 | 333 | 1,074 | 3.64 | 2.18 |
+| | | 3 | 1,060 | 4,240 | 9,024 | 331 | 1,074 | 3.76 | 2.28 |
+| 51.2 m | 0.66 | full | 30,000 | 960,000 | 144,420 | 90 | 307 | | |
+| | | 1 | 2,616 | 5,232 | 9,879 | 77 | 245 | 4.01 | 0.69 |
+| | | 1.5 | 1,124 | 2,248 | 4,298 | 79 | 244 | 3.90 | 0.79 |
+| | | 2 | 1,035 | 2,070 | 4,014 | 78 | 244 | 4.05 | 0.83 |
+| | | 3 | 1,024 | 2,048 | 3,982 | 78 | 244 | 4.03 | 0.83 |
+
+`wCurly`:
+
+| Distance | Same image twice | Exponent | Strands | Segments | Footprint pixels | Hair pixels | Area | Difference | Strand LOD alone: difference | Brightness | Brightness, strand LOD alone |
+|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 6.4 m | 0.73 | full | 50,000 | 1,600,000 | 3,368,679 | 5,008 | 273,077 | | | 209.1 | |
+| | | 1 | 35,336 | 821,936 | 2,298,236 | 4,979 | 265,020 | 1.58 | 0.97 | 209.7 | 209.1 |
+| | | 1.5 | 30,014 | 693,688 | 1,946,795 | 4,972 | 265,071 | 1.66 | 1.12 | 209.7 | 209.1 |
+| | | 2 | 25,799 | 592,368 | 1,668,540 | 4,964 | 265,016 | 1.82 | 1.28 | 209.9 | 209.2 |
+| | | 3 | 19,704 | 446,568 | 1,269,027 | 4,986 | 265,098 | 2.11 | 1.66 | 209.7 | 209.0 |
+| 12.8 m | 0.73 | full | 50,000 | 1,600,000 | 1,695,811 | 1,262 | 68,457 | | | 211.7 | |
+| | | 1 | 17,843 | 204,836 | 560,951 | 1,233 | 63,928 | 3.32 | 1.11 | 213.8 | 211.9 |
+| | | 1.5 | 10,886 | 124,048 | 340,968 | 1,238 | 63,943 | 3.37 | 1.37 | 213.7 | 211.6 |
+| | | 2 | 6,780 | 76,648 | 211,528 | 1,241 | 63,929 | 3.60 | 1.88 | 213.7 | 211.6 |
+| | | 3 | 2,914 | 32,552 | 101,567 | 1,252 | 64,306 | 5.14 | 4.50 | 212.9 | 211.1 |
+| 25.6 m | 0.79 | full | 50,000 | 1,600,000 | 863,450 | 326 | 17,394 | | | 214.0 | |
+| | | 1 | 9,123 | 52,202 | 141,345 | 310 | 15,710 | 4.24 | 1.15 | 217.0 | 214.0 |
+| | | 1.5 | 4,125 | 23,416 | 63,689 | 313 | 15,717 | 4.25 | 1.68 | 216.7 | 213.8 |
+| | | 2 | 2,062 | 11,674 | 31,827 | 312 | 15,725 | 5.20 | 2.92 | 216.9 | 214.3 |
+| | | 3 | 1,040 | 6,018 | 16,156 | 312 | 15,713 | 5.74 | 3.92 | 216.7 | 214.4 |
+| 51.2 m | 0.31 | full | 50,000 | 1,591,376 | 443,598 | 87 | 4,464 | | | 241.1 | |
+| | | 1 | 4,805 | 13,730 | 36,065 | 82 | 3,788 | 1.90 | 0.41 | 242.7 | 241.1 |
+| | | 1.5 | 1,771 | 5,031 | 13,276 | 82 | 3,788 | 1.97 | 0.72 | 242.8 | 241.2 |
+| | | 2 | 1,030 | 2,981 | 7,744 | 82 | 3,787 | 1.99 | 0.89 | 242.7 | 241.3 |
+| | | 3 | 1,024 | 2,969 | 7,709 | 82 | 3,788 | 1.94 | 0.90 | 242.7 | 241.2 |
+
+At 3.2 m every exponent draws 98% of the strands or more and every difference is the noise.
+
+- **Curls, strand LOD alone: the drift is gone.** The proof of concept measured the strand LOD alone at 3.30 levels from
+  the full groom at 12.8 m and 4.02 at 25.6 m, with the groom brighter and its fringe thinner (hair pixels down 5% and
+  9% with both LODs). With coverage it is 1.11 and 1.15 against 0.73 and 0.79 for the same image twice, the brightness
+  is the full groom's to 0.2 levels (211.9 against 211.7, 214.0 against 214.0), and the hair pixels are the full
+  groom's (1,263 and 327 against 1,262 and 326).
+- **What drift remains is the vertex LOD's.** With it on the groom is 2 to 3 levels brighter at 12.8 and 25.6 m, loses
+  7% and 10% of its area and 2% and 5% of its hair pixels, and differs by 3.3 and 4.2 levels, at every exponent. The
+  drawn level comes from the cluster's centreline ([Selection](#selection)), and curls drawn along their chords are
+  shorter strands: less area. The straight-ish procedural groom loses 4% at 12.8 m, 10% at 25.6 m and 20% at 51 m the
+  same way. Coverage made this measurable; nothing compensates for it yet (the width could carry the lost length).
+- **How far the exponent can go.** Against the spacing rule, with the strand LOD alone: 1.5 adds 0.1 to 0.5 levels
+  (0.10 and 0.34 on the procedural groom at 12.8 and 25.6 m, 0.26 and 0.53 on `wCurly`) for 39% to 56% fewer strands
+  there; 2 adds 0.45 to 1.8 for 62% to 77% fewer; 3 adds 0.75 to 3.4 and its fewer, wider strands read as grain (the
+  temporal noise falls as the image coarsens). The same image twice differs by 0.7 to 1.4. With the vertex LOD on, its
+  own difference hides most of this. From 51 m every exponent is at one strand a cluster (1,024) and they are the same.
+- **Proposed default: 1.5, with `max_width_scale` 64.** The shipped default of `detail_exponent` is still 1: the
+  evidence for 1.5 is that its cost is under the noise of the measurement on still images, which is not yet evidence
+  about motion, and what it buys in time is small (below). `max_width_scale` did change, because 8 loses coverage
+  under the rule as it was.
+
+### Cost
+
+`Hair::Raster` in ms, one groom by distance (the proof of concept's series), and the crowd. "Target" adds
+`coverage_accumulate`. Written pixels are the visibility writes.
+
+| | Off | On | On + target | Off + target | Written, off | Written, on |
+|---|---:|---:|---:|---:|---:|---:|
+| Procedural, 0.4 m | 1.30 | 1.00 | 1.62 | 2.07 | 15,773,294 | 5,212,475 |
+| Procedural, 0.8 m | 0.71 | 0.52 | 0.69 | | 9,054,521 | 1,275,080 |
+| Procedural, 1.6 m | 0.35 | 0.32 | 0.36 | | 4,802,250 | 302,913 |
+| Procedural, 3.2 m | 0.26 | 0.23 | 0.25 | 0.33 | 2,654,618 | 74,130 |
+| Procedural, 6.4 m | 0.14 | 0.13 | 0.13 | | 844,957 | 18,490 |
+| Procedural, 25.6 m | 0.08 | 0.07 | 0.07 | | 51,803 | 1,023 |
+| Procedural, 100 m | 0.07 | 0.07 | 0.07 | | 2,811 | 19 |
+| `wStraight`, 0.4 m | 4.92 | 4.90 | 10.37 | 10.41 | 65,784,446 | 65,133,147 |
+| `wStraight`, 0.8 m | 1.46 | 1.24 | 2.09 | | 23,094,581 | 15,039,867 |
+| `wStraight`, 1.6 m | 0.62 | 0.60 | 0.71 | | 11,709,798 | 3,676,148 |
+| `wStraight`, 3.2 m | 0.35 | 0.34 | 0.37 | 0.52 | 5,812,555 | 915,165 |
+| `wStraight`, 6.4 m | 0.18 | 0.16 | 0.17 | | 1,742,928 | 229,677 |
+| `wStraight`, 25.6 m | 0.09 | 0.08 | 0.09 | | 132,133 | 13,779 |
+| `wStraight`, 100 m | 0.07 | 0.07 | 0.07 | | 9,800 | 280 |
+| Crowd, near camera | 0.65 | 0.58 | 0.63 | 0.81 | 7,527,778 | 229,094 |
+| Crowd, far camera | 0.16 | 0.15 | 0.15 | 0.16 | 259,802 | 2,846 |
+
+- **Coverage itself costs nothing and saves a little.** The pass's time is the footprint pixels it tests and the
+  atomics it issues; an unaccepted pixel skips its `InterlockedMin`. On is 0 to 27% cheaper than off, most where
+  strands are thin on screen. The random number and the coverage arithmetic are not visible in the times.
+  `interleaved` reads as `white` (1.63 against 1.62 and 0.25 against 0.25 with the target, 0.62 against 0.63 in the
+  crowd).
+- **The coverage target is not a small fraction, so it is off by default.** It is a second atomic for every footprint
+  pixel in front of the opaque surface: +5.5 ms (2.1 times) with `wStraight` filling the view, +0.6 ms (1.6 times) for
+  the procedural groom there, +7% to +70% between 0.8 and 3.2 m, nothing measurable far away. The `coverage` debug
+  view turns it on while it is shown. A composite that needs it would have to pay this or bound the overdraw first
+  (weak point 4).
+- `Hair::Evaluate` does not change. `Hair::Resolve` read 0.73 against 0.68 ms for the procedural groom at 0.4 m, with a
+  fifth fewer hair pixels; why was not looked into. Elsewhere it is within 0.02 ms.
+
+The crowd under the detail rule, coverage on with the target (hair total is all seven passes, simulation off; root
+binding is 0.67 ms of it):
+
+| Camera | Exponent, `max_width_scale` | Strands drawn | Footprint pixels | Hair pixels | Evaluate | Raster | Hair total |
+|---|---|---:|---:|---:|---:|---:|---:|
+| near | off, 8 (the proof of concept) | 293,838 | 7,527,778 | 259,244 | 0.53 | 0.65 | 2.01 |
+| near | 1, 8 | 293,838 | 6,474,283 | 119,480 | 0.53 | 0.63 | 2.00 |
+| near | 1.5, 64 | 209,733 | 5,618,669 | 119,623 | 0.45 | 0.54 | 1.83 |
+| near | 2, 64 | 160,720 | 5,073,905 | 119,711 | 0.40 | 0.49 | 1.73 |
+| far | off, 8 (the proof of concept) | 99,004 | 259,802 | 7,149 | 0.19 | 0.16 | 1.10 |
+| far | 1, 8 | 99,004 | 236,325 | 2,002 | 0.19 | 0.15 | 1.10 |
+| far | 1.5, 64 | 36,623 | 86,256 | 2,603 | 0.17 | 0.13 | 1.05 |
+| far | 2, 64 | 24,245 | 58,828 | 2,654 | 0.16 | 0.13 | 1.04 |
+
+With the proposed default the crowd's hair is 1.83 ms from the near camera and 1.05 ms from the far one, 9% and 5%
+under the rule as it is, for 29% and 63% fewer strands. The far camera's hair pixels rise from 2,002
+to 2,603 because `max_width_scale` 8 was losing coverage there. Time is the smaller part of what the exponent buys:
+the floors (root binding, the clear, the dispatch over the pool) do not move. The strand pool does.
+
+### Temporal quality
+
+A pixel is hair in some frames and background in others, and the upscaler has to make a steady blend of it. Each
+figure is over the square around the groom. "Temporal noise" is the per-pixel standard deviation of luma over 8
+captures 3 frames apart with everything still, averaged over the square; "fine contrast" is the standard deviation of
+a Laplacian (what [Checking it](#checking-it) used for softness), still and with the head swaying 2 cm to each side
+every two seconds.
+
+| Groom, distance | Hair pixels, off | On | Temporal noise, off | On | 99th percentile pixel, off | On | Fine contrast still, off | On | Swaying, off | On |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Procedural, 0.8 m | 498,837 | 369,394 | 0.83 | 1.58 | 27.7 | 10.0 | 47.5 | 42.3 | 40.9 | 40.0 |
+| Procedural, 3.2 m | 30,911 | 21,419 | 0.13 | 1.22 | 1.0 | 7.2 | 22.6 | 15.0 | 14.7 | 12.8 |
+| Procedural, 12.8 m | 1,976 | 1,326 | 0.13 | 1.20 | 1.2 | 6.8 | 28.9 | 21.3 | 23.4 | 18.9 |
+| `wCurly`, 0.8 m | 354,002 | 356,996 | 0.90 | 1.00 | 32.4 | 22.2 | 46.4 | 44.1 | 40.3 | 39.5 |
+| `wCurly`, 3.2 m | 21,225 | 20,211 | 0.17 | 0.54 | 1.1 | 4.1 | 26.4 | 13.6 | 19.8 | 11.6 |
+| `wCurly`, 12.8 m | 1,327 | 1,233 | 0.19 | 0.54 | 1.2 | 4.1 | 31.0 | 22.1 | 26.5 | 20.9 |
+
+- **Still camera: a residue the upscaler does not remove.** In the middle and far views a still frame is three times
+  noisier with coverage on for the dense groom and nine times for the sparse one, where most pixels are a blend: about
+  half a level and one level of 255 on average, 4 to 7 at the worst hundredth of the pixels. In the captures it reads
+  as a fine, slow grain in the translucent parts (the fringe, and the scalp seen through thin hair), not as flicker of
+  the outline. Close up, where strands are a pixel wide or more, it is the opaque form's own (1.0 against 0.9), and the
+  worst pixels are calmer than the opaque form's crawling strand edges (22 against 32).
+- **What it looks like.** `wCurly` at 3.2 m: off is hard-edged, with wiry fly-aways a full pixel wide and a ragged,
+  stair-stepped outline; on is soft, the fly-aways are faint, and the outline feathers out as hair does. Half the fine
+  contrast is gone (13.6 against 26.4): most of that was aliasing, some of it is strand detail that one sample a pixel
+  cannot hold. At 12.8 m off is a blocky blob and on a smooth one of the same shape. Close up (0.8 m) the two differ
+  only at the fringe, where single strands go from solid lines to thinner, lighter ones. Dense hair does not let the
+  background through: where the full groom's strands stack up the first accepted strand is nearly always a strand.
+- **Moving.** With the head swaying, fine contrast with coverage on falls by 5% to 15% from still, against 13% to 35%
+  for the opaque form: the softened image has less to lose. No trail or second copy in the captures looked at. A camera sliding
+  0.6 m a second past a sparse groom 2 to 3.5 m away is the worst case found: the translucent fringe turns into
+  a streaky, grainy veil while the camera moves (one frame's accepted pixels, smeared, where the opaque form shows
+  separate strands), and what is behind it shows through unevenly. It settles when the camera stops. Two frames after the
+  stop the hair region is 5.5 levels from the converged image (3.3 for the opaque form), and two converged captures
+  30 frames apart differ by 2.1 against 0.4.
+- **Motion vectors.** `hair.probe` agrees as before with coverage on: for the moving groom 22,196 probed pixels,
+  expected motion 3.5 to 5.6 pixels, error 0.0016 pixels on average and 0.0052 at most; for the moving camera 43,462
+  pixels, 3.2 to 6.9 pixels, error 0.0023 and 0.0054. A pixel in which no strand was accepted has no hair in it that
+  frame: it holds the motion vector, depth and surface of the opaque surface behind, so in a blended pixel the upscaler
+  sees two motions and two depths alternate. That is where the residue and the veil under camera motion come from,
+  and no choice of random pattern changes it.
+- **`white` against `interleaved`.** Not told apart: temporal noise 0.60 against 0.60 and 0.49 against 0.49 on a
+  procedural groom at 12 and 48 m, 0.63 against 0.63 and 0.59 against 0.60 on `wCurly`, and the images are alike.
+
+### The dolly
+
+The dolly of [Continuity](#continuity) again (a capture at every second step, four frames after the camera moves), on
+the thin groom, with the selection live and frozen at the near end, and live with coverage off for reference.
+
+| LOD | Coverage | Strands, 2 m to 80 m | Mean difference 2-8 m | 8-20 m | 20-44 m | 44-80 m | Pairs over 1.25x | Largest ratio | Same camera twice: 2 m, 10 m, 21 m, 80 m |
+|---|---|---|---:|---:|---:|---:|---:|---:|---|
+| live | on | 24,000 to 4,726 | 0.8983 | 0.0644 | 0.0145 | 0.0081 | 2 | 1.50 | 0.525, 0.034, 0.011, 0.007 |
+| frozen | on | 24,000 to 24,000 | 0.8982 | 0.0648 | 0.0145 | 0.0080 | 5 | 1.39 | 0.515, 0.034, 0.009, 0.003 |
+| live | off | 24,000 to 4,726 | 1.3365 | 0.0821 | 0.0146 | 0.0082 | 6 | 1.56 | 0.110, 0.016, 0.006, 0.006 |
+
+- **Live and frozen agree to 1% in every band** with coverage on (they agreed to 9% without), and the frozen run again
+  has more outlying pairs than the live one. No outlying pair is shared between the two, and the ratio has no
+  correlation with the strands dropped or the clusters changing vertex level (-0.01 and -0.05). As before, the
+  outliers are all beyond 34 m, where a pair's difference is about a hundredth of a level and so is a still pair's.
+- **The still-camera residue shows here too:** two captures of one view differ by 0.52 levels at 2 m with coverage on
+  against 0.11 off, by 0.034 against 0.016 at 10 m, and by the same from about 28 m, where the groom is too small to
+  move the frame's mean.
+- This metric still bounds the whole image and not a strand; [One strand leaving](#one-strand-leaving) is the measure
+  of that.
+
+### What this says about the design
+
+Stochastic coverage into the one layer is good enough to build on for the level of detail, which is what it was for:
+the count and width mechanisms now act, a strand leaves without a trace, the strand LOD holds coverage, brightness and
+outline to the noise, and it costs nothing in the rasterizer. As the final image it is a trade and not a clear win.
+Dense hair looks better at every distance beyond arm's length (anti-aliased, with a true fringe). Sparse or
+translucent hair carries a grain when still and turns to a noisy veil under fast camera motion, because one opaque sample a pixel
+cannot hold a blend and the upscaler is given alternating depths and motions. That part is what the layered target
+with a hair composite would fix (hair blended over a stable opaque frame, with its own motion), and it is the reason to
+build it; the coverage arithmetic, the joint rule, the exact width scale and the coverage target carry over to it
+unchanged. Until then `coverage` `off` remains for content that needs the steadier image.
+
+Not addressed here: the vertex LOD's loss of area on curled strands, a strand wider than a pixel still has hard edges,
+hair still casts no shadow (thinner hair over an unshadowed scalp reads lighter than it should), and the grooms and
+scenarios were authored against the opaque form.
+
+**Scenarios.** All five pass with coverage on (the default) and with `HAIR_COVERAGE=off`, which every hair scenario
+reads and passes to `hair.lod`. With it off, the selection counters of every sampled frame are those of the runs before
+coverage. One check changed: `hair_sim.cs` compares the rigid groom's rasterizer counters before and after the
+simulation to one part in 10,000, and with coverage on the written and resolved pixels are random draws that differ by
+a few parts in a thousand between frames of one view, so there it allows 2%.
+
+## View-following measurements
+
+Measured on 2026-11-27 for the second step after the proof of concept: the simulation, the guide-level pass and root
+binding follow the view. Same machine, conditions and method as [POC measurements](#poc-measurements): raster mode,
+DLSS at 2560x1600 in and out, the display awake, uncapped, times from the statistical profiler at a 3% half-width with
+the camera held still (or turning at a steady rate, where said), `frame_seconds` 1/60, heads swaying 2 cm while
+simulated. "Before" is the tree as [Partial coverage measurements](#partial-coverage-measurements) left it, measured
+again in the same session; coverage is on (`white`) in both. The scripts are not in the tree.
+
+**What changed.** Three things, which show in separate columns below:
+
+1. *Root binding* runs after selection and writes the roots of the drawn strands and of simulated instances' guides
+   (the root-binding pass, since removed: [Root frames](#root-frames)), not every root of every instance. It is one dispatch (two with
+   simulation) whatever the number of grooms. The select pass works out its one root per cluster itself.
+2. *Simulation* is for instances a view shows ([Following the view](#following-the-view)): the CPU tests each
+   instance's bounds against the main camera's frustum every frame. An instance out of view stops after a quarter of a
+   second with its shape kept, and goes on from it in the frame it comes back.
+3. *The guide-level pass* was not changed: it covers the simulated instances, and those are now the ones in view. The
+   guides in use were measured and marking them was not built (below).
+
+### The crowd, before and after
+
+[`hair_crowd.cs`](../Scripting/Scenarios/hair/hair_crowd.cs)'s crowd, 100 grooms and 1,004,000 strands, from the three
+cameras of [Many grooms](#many-grooms-and-the-per-instance-dispatches). Times in ms.
+
+| Camera | Simulation | | In view | Strands drawn | Roots bound | Simulated grooms | Guides simulated | Guides evaluated | Root binding | Simulate | Guide levels | Select | Evaluate | Raster | Resolve | Hair total |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| near: 2 m in front, looking down the grid | off | before | 70 | 293,838 | 1,004,000 | 0 | 0 | 0 | 0.67 | 0.00 | 0.00 | 0.03 | 0.53 | 0.58 | 0.13 | **1.94** |
+| near: 2 m in front, looking down the grid | off | after | 70 | 293,838 | 293,838 | 0 | 0 | 0 | 0.13 | 0.00 | 0.00 | 0.03 | 0.53 | 0.58 | 0.13 | **1.40** |
+| near: 2 m in front, looking down the grid | on | before | 70 | 293,838 | 1,004,000 | 48 | 3,446 | 45,706 | 0.67 | 0.93 | 1.78 | 0.04 | 1.25 | 0.59 | 0.13 | **5.39** |
+| near: 2 m in front, looking down the grid | on | after | 70 | 293,838 | 320,462 | 26 | 2,006 | 24,618 | 0.16 | 0.63 | 0.96 | 0.03 | 1.26 | 0.59 | 0.13 | **3.76** |
+| behind the last row, facing away | off | before | 0 | 0 | 1,004,000 | 0 | 0 | 0 | 0.67 | 0.00 | 0.00 | 0.03 | 0.02 | 0.11 | 0.05 | **0.87** |
+| behind the last row, facing away | off | after | 0 | 0 | 0 | 0 | 0 | 0 | 0.02 | 0.00 | 0.00 | 0.03 | 0.02 | 0.11 | 0.05 | **0.22** |
+| behind the last row, facing away | on | before | 0 | 0 | 1,004,000 | 60 | 4,032 | 57,408 | 0.67 | 0.94 | 2.22 | 0.04 | 0.02 | 0.11 | 0.05 | **4.04** |
+| behind the last row, facing away | on | after | 0 | 0 | 0 | 0 | 0 | 0 | 0.02 | 0.00 | 0.00 | 0.03 | 0.02 | 0.11 | 0.05 | **0.22** |
+| 52 m in front, the whole grid small | off | before | 100 | 99,004 | 1,004,000 | 0 | 0 | 0 | 0.67 | 0.00 | 0.00 | 0.03 | 0.18 | 0.15 | 0.05 | **1.08** |
+| 52 m in front, the whole grid small | off | after | 100 | 99,004 | 99,004 | 0 | 0 | 0 | 0.06 | 0.00 | 0.00 | 0.03 | 0.17 | 0.15 | 0.05 | **0.47** |
+| 52 m in front, the whole grid small | on | before | 100 | 99,004 | 1,004,000 | 0 | 0 | 0 | 0.67 | 0.00 | 0.00 | 0.04 | 0.18 | 0.16 | 0.05 | **1.10** |
+| 52 m in front, the whole grid small | on | after | 100 | 99,004 | 99,004 | 0 | 0 | 0 | 0.07 | 0.00 | 0.00 | 0.03 | 0.18 | 0.15 | 0.05 | **0.48** |
+
+- **With the whole crowd behind the camera, hair costs 0.22 ms, simulated or not** (it was 4.04 ms simulated and
+  0.87 ms rigid). The simulate and guide-level passes record nothing. Root binding is 0.02 ms: one dispatch over the
+  22,528 clusters the frame could show, each thread group of which returns at once. What is left is the floors of
+  [Cost against distance](#cost-against-distance-one-groom): the select pass's 100 dispatches (0.03 ms), the
+  rasterizer's clear and its dispatch (0.11 ms) and the resolve's pass over every pixel (0.05 ms).
+- **Root binding follows the drawn strands:** about 0.4 ms per million roots written, over 0.02 ms. 0.13 ms for the
+  near camera's 293,838 strands and 0.06 ms for the far camera's 99,004, against 0.67 ms for every root. From the far
+  camera, where it was two thirds of hair's cost, hair goes from 1.08 to 0.47 ms. Skipping only the instances out of
+  view would have left the far camera where it was (every groom is in view there) and the near one at about 0.47 ms
+  (70 of 100 grooms in view): binding the drawn roots is what bought most of it.
+- **From the near camera the simulated crowd costs 3.76 ms, from 5.39 ms.** 22 of the 48 grooms that were simulated
+  were beside the camera and out of its view. The simulate pass is at its floor (0.63 ms; below), the guide-level pass
+  halves with the grooms, and evaluation, the rasterizer and the resolve are unchanged, as they should be.
+
+### The fly-through
+
+The nine cameras of the proof of concept's fly-through (z from 2.0 to -25.5 down the aisle, looking along -z), each
+held still. The claim to check was that the simulated crowd's cost falls as grooms leave the view; before, it rose.
+
+| Camera z | In view | Strands drawn | Hair pixels | Simulated grooms, before | after | Guides simulated, before | after | Guides evaluated, before | after | Hair total, simulation off, before | after | Root binding, before | after | Simulate, before | after | Guide levels, before | after | Hair total, before | after |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 2.0 | 70 | 293,850 | 113,619 | 48 | 26 | 3,445 | 2,006 | 45,707 | 24,618 | 1.97 | 1.43 | 0.68 | 0.16 | 0.94 | 0.63 | 1.78 | 0.96 | **5.39** | **3.74** |
+| -1.4 | 56 | 249,521 | 47,006 | 62 | 25 | 5,080 | 1,675 | 58,408 | 23,925 | 1.74 | 1.18 | 0.67 | 0.14 | 1.31 | 0.63 | 2.24 | 0.95 | **6.02** | **3.52** |
+| -4.9 | 44 | 226,294 | 68,145 | 73 | 23 | 6,204 | 1,720 | 68,548 | 21,832 | 1.92 | 1.36 | 0.67 | 0.14 | 1.66 | 0.62 | 2.64 | 0.85 | **7.03** | **3.70** |
+| -8.3 | 30 | 181,032 | 89,335 | 88 | 24 | 6,963 | 1,883 | 83,149 | 22,693 | 1.73 | 1.15 | 0.67 | 0.13 | 1.77 | 0.71 | 3.24 | 0.85 | **7.44** | **3.47** |
+| -11.8 | 18 | 117,283 | 40,716 | 97 | 18 | 7,527 | 1,268 | 91,801 | 17,164 | 1.49 | 0.91 | 0.67 | 0.10 | 1.71 | 0.63 | 3.54 | 0.74 | **7.33** | **2.88** |
+| -15.2 | 10 | 74,481 | 59,926 | 99 | 10 | 7,852 | 939 | 93,524 | 9,301 | 1.56 | 0.93 | 0.67 | 0.07 | 1.81 | 0.61 | 3.60 | 0.42 | **7.31** | **2.32** |
+| -18.6 | 4 | 29,408 | 14,767 | 97 | 4 | 7,405 | 395 | 91,923 | 3,701 | 1.08 | 0.44 | 0.67 | 0.04 | 1.82 | 0.59 | 3.54 | 0.21 | **6.57** | **1.37** |
+| -22.1 | 0 | 0 | 0 | 84 | 0 | 6,646 | 0 | 79,370 | 0 | 0.88 | 0.22 | 0.67 | 0.02 | 1.46 | 0.00 | 3.08 | 0.00 | **5.43** | **0.22** |
+| -25.5 | 0 | 0 | 0 | 72 | 0 | 4,801 | 0 | 68,927 | 0 | 0.88 | 0.22 | 0.67 | 0.02 | 1.19 | 0.00 | 2.66 | 0.00 | **4.74** | **0.22** |
+
+Before, hair went from 5.4 to 7.4 ms while the grooms in view went from 70 to 10, and was still 4.7 ms with none in
+view. Now it goes from 3.7 to 2.3 ms over the same cameras, 1.4 ms with four grooms in view and 0.22 ms with none. The
+simulated grooms are the ones in view that are near enough (26 of 70 at the first camera; from z = -11.8 every groom
+in view is). The simulate pass does not fall with them: it is 0.6 to 0.7 ms from 26 grooms down to 4, its floor.
+
+### Turning in place
+
+The camera in the middle of the crowd (z = -11.25), still and then turning about the vertical at a steady rate. The
+profiler's samples are spread over the turn; the counts are the range over six readings along it.
+
+| Camera | Simulation | | In view | Simulated grooms | Guides simulated | Guides evaluated | Root binding | Simulate | Guide levels | Evaluate | Hair total |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| still | on | before | 18 to 19 | 97 | 7,415 | 91,913 | 0.66 | 2.04 | 4.11 | 0.91 | **8.14** |
+| still | on | after | 18 to 19 | 21 | 1,403 | 20,101 | 0.10 | 0.63 | 0.82 | 0.91 | **2.89** |
+| still | off | before | 19 | 0 | 0 | 0 | 0.66 | 0.00 | 0.00 | 0.33 | **1.43** |
+| still | off | after | 19 | 0 | 0 | 0 | 0.08 | 0.00 | 0.00 | 0.33 | **0.83** |
+| turning 0.5 degrees a frame | on | before | 19 to 23 | 97 | 7,415 | 91,913 | 0.66 | 2.04 | 4.11 | 1.10 | **8.47** |
+| turning 0.5 degrees a frame | on | after | 19 to 23 | 21 to 23 | 1,625 to 1,781 | 19,879 to 21,884 | 0.11 | 0.77 | 0.86 | 1.12 | **3.42** |
+| 2 degrees a frame | on | before | 20 to 22 | 97 | 7,415 | 91,913 | 0.66 | 2.05 | 4.12 | 1.16 | **8.51** |
+| 2 degrees a frame | on | after | 19 to 23 | 26 to 30 | 1,931 to 2,281 | 24,692 to 28,439 | 0.12 | 0.91 | 1.09 | 1.09 | **3.74** |
+| 2 degrees a frame | off | before | 19 to 24 | 0 | 0 | 0 | 0.66 | 0.00 | 0.00 | 0.42 | **1.63** |
+| 2 degrees a frame | off | after | 19 to 24 | 0 | 0 | 0 | 0.09 | 0.00 | 0.00 | 0.41 | **1.02** |
+| 6 degrees a frame | on | before | 19 to 23 | 97 | 7,415 | 91,913 | 0.66 | 2.04 | 4.12 | 1.15 | **8.50** |
+| 6 degrees a frame | on | after | 20 to 23 | 42 to 43 | 2,919 to 3,037 | 40,089 to 41,085 | 0.12 | 1.13 | 1.61 | 1.11 | **4.51** |
+
+Before, 97 grooms were simulated wherever the camera looked: 8.1 to 8.5 ms. Now a still camera simulates the 21 it
+sees, 2.9 ms. Turning costs more the faster it is: a groom stays simulated for a quarter of a second after it leaves
+the view (`lod_view_grace_seconds`), and one that enters starts at the level it stopped at and takes up to a second
+to climb to its own, during which its other guides are evaluated. At 6 degrees a frame (a full turn a second at 60
+frames a second) 42 grooms are simulated for 20 to 23 in view, and hair is 4.5 ms: still about half of what it was.
+
+### Entering and leaving the view
+
+A scripted run at a fixed 1/60 s frame, with the crowd's grooms given strands four times as wide (0.35 to 0.18 mm, so
+that they read as hair with coverage on) and the camera 0.9 m in front of one head, facing away from it, between two
+rows. After six seconds: a turn of 180 degrees in six frames (30 degrees a frame) and back, the same in one frame (a
+cut) and back, the same at 3 degrees a frame and back, two full turns at 2 degrees a frame and three at 6. Then, for
+comparison, the first turn again with `lod_settle_seconds` 0 after a reset, so that the grooms behind the camera have
+no kept shape and start from their rigid pose when the camera reaches them. Every frame's counters and every
+instance's metrics were recorded: 2,772 frames.
+
+- **The CPU's view test and the GPU's selection agree.** In no frame was a strand drawn of a groom the CPU had left
+  unsimulated for being out of view (`unseen_strands_drawn`), in no frame was a strand drawn or a guide simulated or
+  evaluated with a root frame not written that frame (`stale_roots_drawn`, `stale_roots`). That includes the cut and
+  the turns at 30 degrees a frame.
+- **Every groom that entered did so from its kept shape, in the frame it entered.** 44 grooms started over the six
+  frames of the first turn and 19 in the one frame of the cut; none from its rigid pose, though none of them had been
+  in view before (they had settled unseen in the first second and a half). In the comparison run the same 44 started
+  from the rigid pose.
+- **No settle.** For the 19 grooms that came into view and stayed there, the mean distance of a groom's guides from
+  their rigid pose, which is 0 on the rigid pose and 13 to 19 mm settled:
+
+  | | At entry | 1.5 s later | Largest change in the first second | Its range over the next 2 s | Peak of the guides' mean speed, first half second | Next 2 s |
+  |---|---:|---:|---:|---:|---:|---:|
+  | kept shape, turn at 30 degrees a frame | 17.06 mm | 17.11 mm | 0.32 mm (0.54 at most) | 0.22 mm (0.65) | 21 mm/s (88) | 104 mm/s (113) |
+  | kept shape, cut | 17.10 mm | 17.13 mm | 0.23 mm (0.51) | 0.20 mm (0.35) | 83 mm/s (92) | 108 mm/s (118) |
+  | kept shape, turn at 3 degrees a frame | 17.14 mm | 17.13 mm | 0.29 mm (0.72) | 0.14 mm (0.24) | 95 mm/s (128) | 95 mm/s (99) |
+  | rigid pose (the comparison) | 0.00 mm | 17.01 mm | 22.72 mm (25.08) | 2.62 mm (2.74) | 278 mm/s (296) | 87 mm/s (89) |
+
+  (Medians over the grooms, the largest in brackets.) A groom that enters with its kept shape is within a third of a
+  millimetre of where it will be, and what it does in its first second is what it does in any other: the sway. From
+  the rigid pose it travels 23 mm in that second, at three times the speed of the sway.
+- **No jump.** The discontinuity measure of [Simulation LOD](#simulation-lod): the furthest any guide of a groom moves
+  in one frame, relative to its root, in the groom's first half second in view against the two seconds after. Kept
+  shape: 1.2 mm against 4.4 mm at the median over the grooms for the turn at 30 degrees a frame (24.0 against 29.9 mm
+  for the worst groom), 3.7 against 5.4 mm for the cut (14.7 against 16.6), 5.1 against 4.0 mm at 3 degrees a frame
+  (15.7 against 16.4), 4.0 against 4.2 mm turning at 6 degrees a frame (12.4 against 16.7). From the rigid pose: 10.4
+  against 5.3 mm (31.4 against 32.0). The first frame itself has no motion to measure, because nothing of the groom
+  was drawn in the frame before.
+- **The nearest groom** (0.9 m away, its bounds three quarters of the view's height) entered the first time at level
+  1, because unseen it had settled with level 0 alone, and reached its own level, 2.7, in 0.9 s by ordinary promotions:
+  for that long its other guides follow the 64 of level 0, which is the look of a lower simulation level and not a
+  pop. When the camera turned away it stayed simulated for a quarter of a second, in which its level fell by half a
+  level, and on the cut it entered at 2.2 with 434 guides going on from their own kept shape.
+- **The captures** (the frame before the turn, each of its six frames, each of the next twelve, and three later ones;
+  the simulation and the heads held still while each was written). With the kept shape the near groom is, in its
+  first whole frame on screen, a head of hair hanging straight down at the sides with a ragged fringe below, and it is
+  that in every later capture: the outline does not move from one to the next, and the sway shows only in the last
+  ones. From the rigid pose its first frame is visibly wider at the bottom, the sides standing off the head as the
+  groom was generated; over the next dozen frames they draw in, and at a third and two thirds of a second they have
+  swung out again past where they end up: the settle, seen. In both runs the first frame after the turn is grainy
+  along one side of the groom for that frame, which is the upscaler without history after a turn of 30 degrees and not
+  the hair.
+
+What remains visible: a groom that starts in view with no kept shape (attached in view, the simulation turned on, a
+reset) settles in view as before; a groom whose head turned far while it was out of view starts from a shape that is
+wrong by that turn; and a groom that enters has lost its motion, which with these gentle sways cannot be seen and
+under a wind would show as hair that takes a moment to start moving.
+
+### Guides in use
+
+Point 2 of this step: how many of the guides the guide-level pass evaluates does a drawn strand depend on, directly or
+through a guide evaluated from it? From a frame's selection and the groom data (`hair.dump`), with the automatic levels.
+One groom alone in view at a distance, the same half out of the side of the view, and the crowd. "Share of its roots"
+is drawn strands over the strands of the grooms that draw any: what root binding now writes over what an
+instance-level skip would.
+
+| Groom, view | Strands drawn | Share of its roots | Simulation level | Guides the solver owns | Guides evaluated | Evaluated guides a drawn strand depends on | Share of all guides in use |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| crowd groom (10,000 strands, 1,024 guides), 0.8 m | 10,000 | 100% | 2.84 | 902 | 122 | 122 (100.0%) | 100.0% |
+| crowd groom (10,000 strands, 1,024 guides), 1.6 m | 10,000 | 100% | 2.18 | 393 | 631 | 631 (100.0%) | 100.0% |
+| crowd groom (10,000 strands, 1,024 guides), 3.2 m | 10,000 | 100% | 1.51 | 180 | 844 | 844 (100.0%) | 100.0% |
+| crowd groom (10,000 strands, 1,024 guides), 6.4 m | 8,688 | 87% | 0.88 | 64 | 960 | 960 (100.0%) | 100.0% |
+| crowd groom (10,000 strands, 1,024 guides), 12.8 m | 4,870 | 49% | 0.40 | 64 | 960 | 960 (100.0%) | 100.0% |
+| crowd groom (10,000 strands, 1,024 guides), 25.6 m | 2,524 | 25% | off | | | | |
+| crowd groom (10,000 strands, 1,024 guides), 0.8 m, half out of view | 3,986 | 40% | 1.82 | 227 | 797 | 379 (47.6%) | 49.2% |
+| crowd groom (10,000 strands, 1,024 guides), 3.2 m, half out of view | 4,612 | 46% | 1.00 | 64 | 960 | 529 (55.1%) | 56.3% |
+| 30,000 strands, 4,096 guides, 0.8 m | 30,000 | 100% | 3.75 | 3,335 | 761 | 761 (100.0%) | 100.0% |
+| 30,000 strands, 4,096 guides, 1.6 m | 30,000 | 100% | 2.75 | 833 | 3,263 | 3,263 (100.0%) | 100.0% |
+| 30,000 strands, 4,096 guides, 3.2 m | 29,550 | 98% | 1.75 | 218 | 3,878 | 3,878 (100.0%) | 100.0% |
+| 30,000 strands, 4,096 guides, 6.4 m | 18,763 | 63% | 0.88 | 64 | 4,032 | 4,032 (100.0%) | 100.0% |
+| 30,000 strands, 4,096 guides, 12.8 m | 9,712 | 32% | 0.39 | 64 | 4,032 | 4,032 (100.0%) | 100.0% |
+| 30,000 strands, 4,096 guides, 25.6 m | 4,979 | 17% | off | | | | |
+| 30,000 strands, 4,096 guides, 0.8 m, half out of view | 11,310 | 38% | 2.30 | 495 | 3,601 | 1,570 (43.6%) | 44.7% |
+| 30,000 strands, 4,096 guides, 3.2 m, half out of view | 13,418 | 45% | 1.00 | 64 | 4,032 | 2,117 (52.5%) | 52.9% |
+| 4,000 strands, 4,000 guides, 0.8 m | 4,000 | 100% | 3.74 | 3,246 | 754 | 754 (100.0%) | 100.0% |
+| 4,000 strands, 4,000 guides, 1.6 m | 4,000 | 100% | 2.74 | 833 | 3,167 | 3,167 (100.0%) | 100.0% |
+| 4,000 strands, 4,000 guides, 3.2 m | 4,000 | 100% | 1.74 | 218 | 3,782 | 3,782 (100.0%) | 100.0% |
+| 4,000 strands, 4,000 guides, 6.4 m | 3,939 | 98% | 0.87 | 64 | 3,936 | 3,875 (98.5%) | 98.5% |
+| 4,000 strands, 4,000 guides, 12.8 m | 2,527 | 63% | 0.39 | 64 | 3,936 | 2,463 (62.6%) | 63.2% |
+| 4,000 strands, 4,000 guides, 25.6 m | 1,340 | 34% | off | | | | |
+| 4,000 strands, 4,000 guides, 0.8 m, half out of view | 2,189 | 55% | 2.48 | 631 | 3,369 | 1,867 (55.4%) | 56.2% |
+| 4,000 strands, 4,000 guides, 3.2 m, half out of view | 1,813 | 45% | 1.00 | 64 | 3,936 | 1,833 (46.6%) | 46.9% |
+| crowd near | 293,838 | 42% | up to 1.80 | 2,006 | 24,618 | 22,698 (92.2%) | 92.3% |
+| crowd far | 99,004 | 10% | off | | | | |
+| crowd fly z=-4.9 | 226,509 | 51% | up to 1.60 | 1,720 | 21,832 | 21,805 (99.9%) | 99.9% |
+| crowd fly z=-11.75 | 117,206 | 67% | up to 1.33 | 1,266 | 17,166 | 16,337 (95.2%) | 95.3% |
+| crowd fly z=-18.6 | 29,439 | 67% | up to 1.25 | 391 | 3,705 | 2,585 (69.8%) | 70.4% |
+
+- **A groom wholly in view uses every guide wherever it is simulated**, while its guides are a small share of its
+  strands (a tenth for the crowd's grooms, a seventh for the 30,000-strand one). Guides are the lowest ranks, the
+  strand LOD drops the highest, and a groom stops being simulated (coverage 0.03, between 18 and 25.6 m here) long
+  before the LOD is down to its guides. Marking would save nothing there.
+- **It would save on a groom with as many guides as strands:** the guides the LOD does not draw, from 2% at 6.4 m to
+  53% at 18 m, all in the range where only level 0 is simulated. That is about 0.08 ms for 2,000 guides, on a kind of
+  groom nothing here uses.
+- **It would save about half on a groom half out of view.** The level is already lower there (the visible part's),
+  and it is the solver's guides that the level drops, not the evaluated ones.
+- **In the crowd** the evaluated guides in use are 92% from the near camera, 99.9% and 95% along the fly-through, and
+  70% where four grooms straddle the edge of the view. On the near camera's 0.96 ms that would be 0.08 ms.
+
+So per-guide marking was not built: the per-instance gate is what there was to gain. The same numbers are the case
+for binding only the drawn roots: the drawn strands are 42% to 67% of the roots of the grooms in view from the crowd's
+cameras, and 10% from the far one.
+
+### What each pass's cost follows now
+
+| Pass | Follows on-screen hair? | What its cost follows, as measured |
+|---|---|---|
+| `Hair::RootBinding` | Yes | The roots written: the drawn strands, plus every guide of the simulated grooms. About 0.4 ms per million, over 0.02 ms for a dispatch as wide as the clusters that could be visible. |
+| `Hair::Simulate` | Yes, over a floor | The grooms in view that are near enough, and for a quarter of a second those that just left it. 0.6 to 0.7 ms from 4 simulated grooms to 26, 1.1 ms for 42 (turning fast): the floor of one thread's serial loop, as before. Nothing when no simulated groom is in view. |
+| `Hair::GuideLevels` | Mostly | Every guide of those grooms that the solver does not own: about 0.04 ms per thousand (0.96 ms for 24,618, 0.21 ms for 3,701). A groom partly in view has all its guides evaluated. |
+| `Hair::Select` | No, and it does not matter | Every cluster of every attached groom: 0.03 ms for 22,528, in 100 dispatches. |
+| `Hair::Evaluate`, `Hair::Raster`, `Hair::Resolve` | As before | Unchanged by this step. |
+
+What does not follow the view:
+
+- **The simulate pass's floor**, 0.6 ms as soon as one groom with 33-point guides is simulated.
+- **Visibility is the frustum's.** A groom behind a wall, or one of the crowd wholly behind others, is simulated and
+  its roots are bound. There is no occlusion test in selection either.
+- **The quarter second after leaving, and the climb after entering**, which is what a fast turn costs (above).
+- **Settling unseen:** a groom that comes near out of view is simulated at level 0 alone for a second and a half,
+  once. In the run above, turning the simulation on in the middle of the crowd simulated 95 grooms at first and the
+  20 in view (and near enough) from a second and a half on.
+- **The floors of the passes that draw**: 0.2 ms with no hair in view at all, and the select pass over every cluster.
+- **Memory.** Root frame rows and guide state rows are still held for every instance (302 MB for the crowd). A groom
+  out of view now needs neither its root frames nor, but for the shape it keeps, its guide state.
+
+(Both were done next: [On-demand memory measurements](#on-demand-memory-measurements).) For whoever allocates those on demand: root frames are written afresh every frame for exactly the roots the frame
+uses, so nothing in them needs keeping, and the three readers (simulate, guide levels, evaluate) could as well work a
+root's frame out as the select pass now does. Guide state is live only while an instance is simulated; the one thing
+kept across a stop is the shape (`simStateValid` on the CPU, `HAIR_SIM_FLAG_KEEP_SHAPE` on the GPU). Freeing an
+instance's rows means clearing that flag, and the instance then starts from its rigid pose, or settles unseen again if
+it is near.
+
+**Scenarios.** All five pass with coverage on and with `HAIR_COVERAGE=off`. Four checks changed with this step:
+
+- `hair_single.cs` expected two root-binding dispatches a frame (one per instance) and now expects one, and checks
+  that a root frame is written for every drawn strand and for no other, none of them stale.
+- `hair_single.cs` forces every strand to be drawn while the self-check runs: the check samples roots across each
+  groom, and root frames now exist for drawn strands only. The self-check itself skips a sampled root that was not
+  written.
+- `hair_crowd.cs` also checks that facing away no root frame is written and no groom is simulated, and that in no
+  frame is a strand drawn with a stale root frame or from a groom left unsimulated for being out of view.
+- `hair_sim.cs` and `hair_sim_lod.cs` also check that their grooms were in view in every frame whose metrics they
+  read. They were, in every phase, so both exercise the solver and the levels as before.
+
+`hair_sim_lod.cs` failed once in ten runs on "dollying away, the level never rises"; the other nine passed, and the
+cause was not found (on that dolly the level comes from the coverage alone, as before this step). The check now names
+the two samples when it fails.
+
+## On-demand memory measurements
+
+Measured on 2026-11-27 for the third step after the proof of concept: per-instance hair memory follows what is in use.
+Same machine, conditions and method as [View-following measurements](#view-following-measurements): raster mode, DLSS
+at 2560x1600 in and out, the display awake, uncapped, times from the statistical profiler at a 3% half-width with the
+camera held still (or turning at a steady rate, where said), `frame_seconds` 1/60, heads swaying 2 cm while simulated,
+coverage on (`white`). "Before" is the tree as that section left it, measured again in the same session. The scripts
+are not in the tree.
+
+**What changed.**
+
+1. *No root-frame buffer and no root-binding pass.* Every pass works out the root frames it needs
+   ([Root frames](#root-frames)). `Hair.RootFrames` (1,048,576 rows, 96 MB, a row per strand of every instance) is gone.
+2. *Guide state is lent* to the instances that are simulated or keep a shape, out of one buffer, and taken back by
+   stated rules ([Guide rows](#guide-rows)). An instance used to own rows for every guide point from `hair.attach` on,
+   and an instance that did not fit was refused.
+3. *Capacities.* `Hair.GuidePoints` went from 4,194,304 rows to 2,097,152. The pooled buffers are 417.1 MB, from
+   672.7 MB: 96 MB of root frames and 160 MB of guide state less, 0.4 MB of self-check buffers more.
+
+### Memory against the view
+
+[`hair_crowd.cs`](../Scripting/Scenarios/hair/hair_crowd.cs)'s crowd, 100 grooms of 1,024 guides, 1,004,000 strands.
+Before, the per-instance state was 302.1 MB wherever the camera was and whether or not anything was simulated (91.9 MB
+of root frames, 210.2 MB of guide state). Now it is the guide rows lent out, in MB:
+
+| Camera | Simulation | Before | Now in use | of which simulated now | of which kept shapes | Grooms holding rows (simulated + kept) |
+|---|---|---:|---:|---:|---:|---:|
+| near: 2 m in front, looking down the grid | off | 302.1 | 0.0 | 0.0 | 0.0 | 0 |
+| near: 2 m in front, looking down the grid | on | 302.1 | 99.9 | 52.4 | 47.6 | 26 + 22 |
+| behind the last row, facing away | off | 302.1 | 0.0 | 0.0 | 0.0 | 0 |
+| behind the last row, facing away | on | 302.1 | 88.1 | 0.0 | 88.1 | 0 + 42 |
+| 52 m in front, the whole grid small | either | 302.1 | 0.0 | 0.0 | 0.0 | 0 |
+
+Along the fly-through (the nine cameras of the earlier sections, each held still, simulation on), and turning in place
+in the middle of the crowd (z = -11.25; ranges over six readings along the turn):
+
+| Camera | In view | Simulated grooms | Guide rows simulated now (MB) | In use (MB) | Grooms holding rows (simulated + kept) | Unsettled |
+|---|---:|---:|---:|---:|---:|---:|
+| fly-through, z = 2.0 | 70 | 26 | 52.4 | 99.9 | 26 + 22 | 0 |
+| z = -1.4 | 56 | 25 | 51.6 | 128.7 | 25 + 37 | 0 |
+| z = -4.9 | 44 | 23 | 46.5 | 149.7 | 23 + 50 | 0 |
+| z = -8.3 | 30 | 24 | 47.2 | 157.4 | 24 + 52 | 5 |
+| z = -11.8 | 18 | 18 | 40.9 | 158.2 | 18 + 59 | 8 |
+| z = -15.2 | 10 | 10 | 22.1 | 158.2 | 10 + 67 | 7 |
+| z = -18.6 | 4 | 4 | 6.6 | 154.1 | 4 + 70 | 0 |
+| z = -22.1 | 0 | 0 | 0.0 | 115.0 | 0 + 56 | 0 |
+| z = -25.5 | 0 | 0 | 0.0 | 88.1 | 0 + 42 | 0 |
+| in the middle, still | 18 to 19 | 22 | 47.6 | 158.9 | 78 | 17 |
+| turning 0.5 degrees a frame | 20 to 24 | 21 to 24 | 43.1 to 48.3 | 156.7 to 158.2 | 75 to 77 | 0 to 4 |
+| turning 2 degrees a frame | 19 to 24 | 26 to 30 | 56.8 to 63.8 | 156.7 to 158.2 | 75 to 77 | 0 |
+| turning 6 degrees a frame | 21 to 22 | 37 to 40 | 79.6 to 83.0 | 156.7 to 158.2 | 75 to 77 | 0 |
+
+With the simulation off no rows are lent at any camera. "Unsettled" is the grooms out of view that would settle unseen
+and found no free rows.
+
+- **The rows of grooms simulated now follow the view**: 52 MB for the 26 simulated from the near camera, 7 MB for four,
+  nothing with none in view or none near enough, 83 MB turning at a full turn a second (40 simulated: the ones in view,
+  the ones in their quarter second of grace, and the ones still climbing).
+- **The rest of what is in use is kept shapes**, and that follows the grooms *near enough to simulate*, seen or not:
+  88 MB facing away from the grid with 42 grooms near enough behind the camera, nothing from 52 m where none is. That
+  is what [Following the view](#following-the-view) asks for, so that a turn finds settled hair, and it is the larger
+  share: the kept shapes fill the buffer wherever more grooms are near than it holds. In the middle of the crowd 95
+  grooms are near enough and the buffer holds 78 of them (159 MB of 160): 17 of the smallest are left unsettled, and
+  enter from their rigid pose.
+- **Capacity against the working set.** The most rows simulated at once over all of this is 1,087,416 (83 MB); the
+  buffer is 1.9 times that. At the old size (320 MB) every groom's rows fitted, so every groom near enough kept a
+  shape everywhere in this crowd; at this one the crowd's middle is over capacity by the 17. Halving it again
+  (1,048,576 rows) would leave the fastest turn 4% short of rows for the grooms in view.
+- **The other buffers** as the crowd used them at most, of their capacity: the strand pool 74.9 of 128 MB and its
+  segment ids 9.4 of 16; the groom points 7.9 of 64; strands and root bindings 4.9 of 32; visible clusters 0.7 of 2;
+  the rest 0.2 MB or less each, of 15 MB in all, 5 of it the probe buffer. `hair.stats` gives these per buffer.
+
+**The same crowd built with the builder's default 4,096 guides.** A 33-point groom then needs 135,168 guide rows
+(10.3 MB) and the straight one 38,992 (3.0 MB); the hundred would need 848 MB of guide state at once.
+Before this step `hair.attach` would have refused the crowd after 37 grooms or so, at 320 MB. Now all 100 attach, and the buffer
+admits the grooms it has rows for:
+
+| Camera | In view | Simulated grooms | Starved (in view, rigid) | Guide rows in use (MB) | Grooms holding rows (simulated + kept) | Hair total (ms) |
+|---|---:|---:|---:|---:|---:|---:|
+| near, simulation off | 70 | 0 | 0 | 0.0 | 0 | 1.23 |
+| near | 70 | 21 | 5 | 157.9 | 21 + 0 | 5.78 |
+| facing away | 0 | 0 | 0 | 154.9 | 0 + 20 | 0.21 |
+| far | 100 | 0 | 0 | 0.0 | 0 | 0.39 |
+| fly-through, z = -4.9 | 44 | 20 | 3 | 157.9 | 20 + 1 | 5.75 |
+| z = -11.8 | 18 | 16 | 2 | 143.0 | 16 + 0 | 4.87 |
+| z = -15.2 | 10 | 10 | 0 | 146.0 | 10 + 7 | 3.70 |
+| z = -18.6 | 4 | 4 | 0 | 146.0 | 4 + 13 | 1.75 |
+| in the middle, still | 18 to 19 | 18 | 3 | 148.9 | 18 + 0 | 4.81 |
+| turning 2 degrees a frame | 19 to 22 | 17 to 19 | 1 to 4 | 148.9 to 154.9 | 18 to 20 | 5.49 |
+| turning 6 degrees a frame | 21 to 22 | 17 to 20 | 1 to 4 | 146.0 to 154.9 | 17 to 20 | 5.47 |
+
+- **The buffer holds 17 to 21 such grooms**, and in this crowd more than that are in view and near enough from the
+  first seven fly-through cameras and in the middle: 1 to 5 grooms, the smallest on screen that asked, follow rigidly,
+  and are counted. From z = -15.2 on every groom in view is simulated and what is left holds kept shapes. The
+  invariant counters were 0 at every station.
+- **Turning over capacity is churn**: by the end of the 6-degrees-a-frame station 1,804 ranges had been taken back and
+  874 times a groom had started to starve. Every groom that enters takes the rows of one that left, starts from its
+  rigid pose, and no shape is ever kept. It is bounded (17 to 20 simulated, as when still) and nothing breaks, but
+  the hair that is simulated is settling most of the time.
+- **Hair costs 5.8 ms from the near camera, against 3.5 ms with 1,024 guides**, for about the same simulated guides
+  (2,028 against 2,006): the guide-level pass evaluates 84,000 guides instead of 24,600. Those evaluated guides are
+  also what the rows are spent on: 98% of the rows lent hold guides the solver does not own.
+
+### Root frames worked out where they are read
+
+The cost of the choice, against the root-binding pass of the step before. Only the four passes that touch root frames
+are shown; the others did not change. Times in ms.
+
+| Camera | Simulation | Roots the frame uses | Root binding, before | Evaluate, before | now | Simulate, before | now | Guide levels, before | now | The four, before | now |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| near | off | 293,838 | 0.13 | 0.52 | 0.48 | | | | | 0.65 | 0.48 |
+| near | on | 320,462 | 0.16 | 1.25 | 1.19 | 0.63 | 0.63 | 0.96 | 0.92 | 3.00 | 2.75 |
+| facing away | either | 0 | 0.02 | 0.02 | 0.02 | | | | | 0.04 | 0.02 |
+| far | off | 99,004 | 0.06 | 0.17 | 0.15 | | | | | 0.23 | 0.15 |
+| fly-through, z = -4.9 | on | 250,323 | 0.14 | 1.43 | 1.38 | 0.62 | 0.62 | 0.85 | 0.81 | 3.04 | 2.82 |
+| fly-through, z = -11.8 | on | 135,640 | 0.10 | 0.94 | 0.92 | 0.63 | 0.63 | 0.74 | 0.72 | 2.41 | 2.26 |
+| fly-through, z = -18.6 | on | 33,629 | 0.05 | 0.24 | 0.23 | 0.59 | 0.60 | 0.21 | 0.21 | 1.08 | 1.04 |
+
+- **Working a root's frame out costs less than reading its row.** The pass is gone (0.02 to 0.16 ms), and each of its
+  three readers got faster or stayed where it was: a rigid or bone-attached root's frame is two matrix products of
+  data the thread already has, against a 96-byte row from a buffer of a million. The crowd's hair is 3.49 ms from the
+  near camera with the simulation on, from 3.75 ms, and 1.22 ms with it off, from 1.39 ms.
+- So the per-frame buffer sized by the roots used, the other candidate, was not built: it could only add a pass and a
+  read back.
+- **Not measured: roots that follow their own joints** (`per_root`). There a root's frame is a blend of up to four
+  bone matrices, twice (this frame's and the previous), in each reader, where the pass did it once. No groom here
+  binds that way ([Attachment](#attachment) says why).
+
+**The invariant checks' cost.** The first build checked, in the guide-level pass, that each parent of an evaluated
+guide carried this frame's stamp: three more row reads a guide. That alone cost 0.14 ms from the near camera
+(`Hair::GuideLevels` 1.06 ms with it, 0.92 without, 0.96 before this step). It was replaced by the check on a guide's
+own rows, which the two passes read anyway; the evaluate pass's check of the guides a drawn strand reads is in the
+figures above.
+
+### Turning in place: time
+
+| Camera | Simulation | | In view | Simulated grooms | Root binding | Simulate | Guide levels | Evaluate | Hair total |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|
+| still | on | before | 19 | 22 | 0.10 | 0.63 | 0.87 | 0.90 | **2.94** |
+| still | on | now | 18 to 19 | 22 | none | 0.63 | 0.84 | 0.88 | **2.78** |
+| still | off | before | 19 | 0 | 0.08 | 0.00 | 0.00 | 0.32 | **0.83** |
+| still | off | now | 19 | 0 | none | 0.00 | 0.00 | 0.33 | **0.75** |
+| turning 0.5 degrees a frame | on | before | 19 to 23 | 22 to 24 | 0.11 | 0.77 | 0.86 | 1.08 | **3.39** |
+| turning 0.5 degrees a frame | on | now | 20 to 24 | 21 to 24 | none | 0.85 | 0.80 | 1.01 | **3.21** |
+| 2 degrees a frame | on | before | 19 to 23 | 26 to 29 | 0.11 | 0.92 | 1.07 | 1.09 | **3.75** |
+| 2 degrees a frame | on | now | 19 to 24 | 26 to 30 | none | 1.00 | 1.00 | 1.07 | **3.62** |
+| 6 degrees a frame | on | before | 21 to 22 | 42 to 44 | 0.12 | 1.12 | 1.61 | 1.11 | **4.50** |
+| 6 degrees a frame | on | now | 21 to 22 | 37 to 40 | none | 1.05 | 1.40 | 1.07 | **4.05** |
+
+The middle of the crowd is where the buffer is full, so this is the lending under pressure: over the three turning
+stations 23, 95 and 417 ranges were taken back for grooms entering the view (up to the last reading of each station;
+at 6 degrees a frame about one a frame), all from the smallest grooms out of view,
+and no groom in view went without rows. At 6 degrees a frame fewer grooms are simulated than before (37 to 40 against
+42 to 44): a small groom that has just left the view is the first to lose its rows, and with them its quarter second
+of grace.
+
+**Taking the oldest shape first thrashed here.** That was the first build's rule, measured in the same way: turning
+at 2 degrees a frame 47 to 48 grooms were simulated (26 to 29 before this step) and hair cost 4.84 ms (3.75); at 6
+degrees a frame 73 to 74 grooms (42 to 44), 6.43 ms (4.50), with 1,468 evictions by the end of that station.
+[Guide rows](#guide-rows) says why: in a turn the oldest shape is the next groom the camera comes to.
+
+### Rows taken back, and what an entry then looks like
+
+The scripted turn test of [Entering and leaving the view](#entering-and-leaving-the-view), again: the crowd with
+strands four times as wide, the camera in its middle 0.9 m from one head, a fixed 1/60 s frame, turns of 180 degrees in
+six frames and back, every frame's counters, every instance's metrics and the lending of guide rows recorded (3,272
+frames). Four regimes in turn:
+
+| Regime | Budget (rows) | Rows in use (MB) | Grooms holding rows | Entries from a kept shape / from the rigid pose, per turn | Evictions in the turn | Starved in view |
+|---|---:|---:|---:|---:|---:|---:|
+| defaults (the buffer, full) | 2,097,152 | 157 to 159 | 76 to 78 | 35 / 11 | 9 | 0 |
+| budget just above the grooms in view | 571,696 | 41 to 43 | 20 to 21 | 0 / 44 | 36 | 0 to 1 |
+| `guide_keep_seconds` 2, after 4 s | 2,097,152 | 41 at the start of the turn | 20 | 0 / 44 | 0 (75 by age before it) | 0 |
+| budget far below the grooms in view | 250,000 | 18 | 10 | 0 / 23 | 18 | 8 to 11 |
+
+- **The invariants stayed 0 in all 3,272 frames**: no drawn strand read guide rows that were not written that frame
+  for its groom (`stale_guides_drawn`), no guide went on from rows that were not its own of the frame before
+  (`stale_guides`), no strand was drawn of a groom left out for being out of view (`unseen_strands_drawn`).
+- **Rows are reused.** Of 656 ranges lent in the run, 555 lay over rows another groom had held before. The most rows
+  ever lent at once was 2,087,712 of 2,097,152.
+- **A groom that kept its shape enters as before this step; one that lost it settles in view.** For the grooms that
+  came into view and stayed, the mean distance of a groom's guides from their rigid pose (medians over the grooms, the
+  largest in brackets):
+
+  | Entry | Grooms | At entry | 1.5 s later | Largest change in the first second | Its range over the next 2 s | Largest motion of a guide in a frame, first half second | Next 2 s | Peak of the guides' mean speed, first half second | Next 2 s |
+  |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+  | kept shape (defaults) | 15 | 17.06 mm | 17.11 mm | 0.35 mm (0.58) | 0.24 mm (0.69) | 1.7 mm (26.1) | 5.4 mm (30.0) | 32 mm/s (87) | 107 mm/s (120) |
+  | rigid: never settled, the buffer was full (defaults) | 4 | 0.00 mm | 18.13 mm | 23.90 mm (25.08) | 2.74 mm (2.82) | 10.5 mm (11.2) | 11.6 mm (17.7) | 286 mm/s (294) | 112 mm/s (120) |
+  | rigid: evicted by the budget | 19 | 0.00 mm | 16.98 mm | 22.72 mm (25.08) | 2.64 mm (2.85) | 9.8 mm (32.0) | 6.3 mm (29.1) | 278 mm/s (296) | 108 mm/s (117) |
+  | rigid: evicted by age | 19 | 0.00 mm | 16.98 mm | 22.67 mm (25.14) | 2.60 mm (2.70) | 12.3 mm (22.6) | 5.9 mm (29.3) | 289 mm/s (318) | 99 mm/s (100) |
+
+  An evicted groom's entry is the step before's "rigid pose" comparison to the millimetre: it travels 23 mm in its
+  first second, at three times the speed of the sway, where a kept shape moves a third of a millimetre. Eviction costs
+  exactly the seamless entry, for that groom, once.
+- **At the defaults the entries from the rigid pose are the smallest grooms.** The four that stayed in view had a
+  coverage of 0.05 (the groom's bounds are 80 pixels tall, and its settle a few pixels); the nearest groom,
+  coverage 0.75, entered from its kept shape. Before this step all 44 entered from kept shapes, with a buffer twice
+  the size.
+- **The captures** of the turn under the small budget (the frame the turn ends and the twelve after it, the nearest
+  groom): in its first frame the hair stands off the head as the groom was generated, wide at the bottom; over the
+  next dozen frames it draws in. With the kept shape the same frames show the outline it has in every later one.
+
+### More grooms in view than rows
+
+With a budget of 250,000 rows (the last regime above) 19 to 22 grooms in view ask to be simulated and 10 get rows.
+
+- The 10 are the largest on screen at the moment the rows were handed out; the others follow their roots rigidly,
+  `starved` in their metrics, 8 to 11 of them at any time (`starved_instances`), and ask again every frame.
+  `allocation_failures` counted 10 when the budget was set, 21 more over a turn of 180 degrees and 78 over half a
+  spin: one each time a groom starts to starve.
+- Turning, a groom that enters takes the rows of one that left (18 evictions in six frames) or starves; a groom in
+  view never loses its rows to another. Spinning at 2 degrees a frame 10 to 13 are simulated and 6 to 15 starved.
+- The counters stay 0 throughout: a starved groom is drawn exactly as with the simulation off, and reads no guide row.
+- With the budget lifted every starved groom has rows within a frame and starts from its rigid pose, in view.
+- The same happens at the buffer's own size with no budget: every guide of every groom forced (`lod_force_level` 8)
+  asks for 2,754,576 rows of 2,097,152; in the debug-layer session 79 grooms were simulated and 21 starved.
+
+### What still does not follow the view
+
+| | Size | Why |
+|---|---:|---|
+| The buffers themselves | 417 MB | Fixed capacities, never resized: memory in use follows the view, memory held does not. |
+| Kept shapes | up to the guide buffer, 160 MB | Held for every groom near enough to simulate, seen or not, until the rows are needed. By design ([Guide rows](#guide-rows)); `guide_keep_seconds` trades them for visible settles. |
+| A simulated groom's whole guide set | 2.6 MB a groom of 1,024 guides, 10.3 MB of 4,096 | Rows are lent per instance, for every guide. A groom at level 1 simulates 64 guides and holds rows for all of them: the others' rows are evaluated state, rewritten every frame, kept for motion vectors and for promotion. |
+| Grooms hidden behind something | theirs | Visibility is the frustum's: an occluded groom is simulated and holds rows. |
+| The strand pool | 144 MB with its segment ids | Sized for the most a frame draws (75 MB used by this crowd at most). |
+| Groom assets | 13 MB for the crowd's four, in 102 MB of asset buffers | Loaded whole and kept; no streaming. |
+| The visibility and coverage targets | 31 MB and 16 MB at 2560x1600 | At the render resolution whether or not hair is on screen. |
+| The probe buffer | 5 MB | For `hair.probe`, allocated with the rest. |
+
+### Checks
+
+**A bug the counters found.** In the debug-layer session, lowering the budget below the rows of the grooms in view
+gave `stale_guides_drawn` 97 in one frame. A groom in view lost its rows to the budget and was lent other rows in the
+same frame; it had been simulated the frame before, so it was not started again, and went on from rows that held
+another groom's state. New rows now always start the instance again. The session was run again and stayed at 0.
+
+**Scenarios.** All five (seven runs: the sweep and the crowd with the simulation on and off) pass with coverage on and
+with `HAIR_COVERAGE=off`. Checks that changed with this step:
+
+- `hair_single.cs`: the dispatch it counts on the GPU is the evaluate pass's (there is no root-binding pass). The
+  checks that a root frame is written for every drawn strand and no other, none stale, are gone with the buffer; in
+  their place, strands are drawn, no drawn strand read guide rows it was not lent, and with the simulation off no
+  instance holds guide rows. It no longer forces every strand to be drawn for the self-check, which now asks for its
+  own roots.
+- `hair_crowd.cs`: "no root frame is written facing away" became "no guide rows are in active use facing away", and
+  the stale-root check became the stale-guide one. "Root frames were written for at least the drawn strands" is gone.
+  Added: from the far camera no groom holds guide rows; every groom in view got the rows it asked for (no failure, none
+  starved); rows were lent only while simulating and within the buffer; no guide went on from rows that were not its
+  own. The scene's strand count is read from `instance_strands`.
+- `hair_sim.cs` and `hair_sim_lod.cs`: added, no guide went on from rows that were not its own of the frame before,
+  and the groom never went without rows. Both read a groom's guide row count from `instance_list`.
+- `hair_sim_lod.cs` reads each groom's first guide row from `hair.stats` before it parses a dump of the guide state
+  (an instance's rows used to start where the one before ended), and requires the rows not to move during a swing.
+- `hair_lod_sweep.cs`: unchanged.
+
+`hair_sim_lod.cs`'s intermittent failure of the step before ("dollying away, the level never rises", 1 run in 10) did
+not recur in 5 runs here, so there is still no sample pair to show.
+
+**Debug layer.** A control-pipe session under the D3D12 debug layer: the crowd simulated; most of it put out of view
+and back by narrowing the field of view (`camera.set`), six times in quick succession; budgets of 700,000 and 250,000
+rows with the view changed under each; six far grooms forced on and off; the budget lifted; an age limit of 0.5 s;
+the self-check (100 instances, 800 roots, positions equal, directions to 7e-8); dumps; a frozen LOD; a reset; every
+guide of every groom forced; the simulation off; `hair.clear`. 288 ranges lent, 147 given back, 141 taken back, 67
+failures; the invariant counters 0 throughout. The validation messages are those of a run with no hair (the same
+ids), and none names a hair resource. The stage script that moves the camera is stopped by the layer's error 1047
+within a few frames (the renderer's packed buffers, as before), which is why the view was changed by field of view.
 
 ## Units and axes
 

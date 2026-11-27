@@ -1,6 +1,6 @@
 // Strand hair (docs/hair.md): two procedural grooms, one on a moving sphere (it follows the entity's transform) and one
 // on the swinging tip joint of a skinned bar (it follows the skeleton), drawn lit. The scenario checks that the grooms
-// reach the GPU, that the root-binding pass is dispatched for both instances in every frame, that the root frames it
+// reach the GPU, that the root-binding pass is dispatched over the drawn strands in every frame, that the root frames it
 // writes match the same arithmetic on the CPU, and that the resolve writes hair pixels; it captures the frame
 // (hair_single.bmp in HAIR_CAPTURE_DIR, or in hair_captures in the temporary directory).
 //   BasicRenderer.exe --script scenarios/hair/hair_single.cs --script-exit --script-fixed-dt 0.0166667
@@ -49,6 +49,7 @@ public sealed class HairSingle : Scenario
 
         var commands = ctx.Commands;
         commands.Invoke("hair.clear");
+        if (Environment.GetEnvironmentVariable("HAIR_COVERAGE") is string coverage) commands.Invoke("hair.lod", new { coverage }); // off: the opaque form
         uint scalp = commands.Invoke("hair.load", new {
             procedural = new { style = "wavy", strands = 4000, seed = 7, radius = 0.5, length = 0.7, droop = 5.0, root_width = 0.0005, tip_width = 0.0003 },
         }).GetProperty("asset").GetUInt32();
@@ -74,9 +75,9 @@ public sealed class HairSingle : Scenario
         ctx.Check(loaded.GetProperty("pending_upload_assets").GetUInt64() == 0, "every groom is uploaded");
         ctx.Check(loaded.GetProperty("asset_bytes_uploaded").GetUInt64() > 0, "groom bytes were uploaded");
 
-        // The GPU counts its own root-binding dispatches. A stats call returns the last readback of that counter and
-        // asks for the next one. Two readbacks some frames apart must differ by what the CPU asked for in between:
-        // one dispatch per instance per frame.
+        // The GPU counts its own evaluate dispatches. A stats call returns the last readback of that counter and asks
+        // for the next one. Two readbacks some frames apart must differ by what the CPU asked for in between: one
+        // dispatch a frame, over the drawn strands of every instance.
         await ctx.Frames(5);
         var first = commands.Invoke("hair.stats").GetProperty("gpu_counter");
         await ctx.Frames(60);
@@ -85,13 +86,24 @@ public sealed class HairSingle : Scenario
         var second = commands.Invoke("hair.stats").GetProperty("gpu_counter");
         ctx.Require(first.GetProperty("valid").GetBoolean() && second.GetProperty("valid").GetBoolean(), "the dispatch counter was read back");
         ulong frames = second.GetProperty("frame").GetUInt64() - first.GetProperty("frame").GetUInt64();
-        ulong asked = second.GetProperty("cpu_root_binding_dispatches").GetUInt64() - first.GetProperty("cpu_root_binding_dispatches").GetUInt64();
-        uint ran = unchecked(second.GetProperty("root_binding_dispatches").GetUInt32() - first.GetProperty("root_binding_dispatches").GetUInt32());
-        ctx.Log($"root binding over {frames} frames: {asked} dispatches asked for, {ran} ran on the GPU");
+        ulong asked = second.GetProperty("cpu_evaluate_dispatches").GetUInt64() - first.GetProperty("cpu_evaluate_dispatches").GetUInt64();
+        uint ran = unchecked(second.GetProperty("evaluate_dispatches").GetUInt32() - first.GetProperty("evaluate_dispatches").GetUInt32());
+        ctx.Log($"evaluation over {frames} frames: {asked} dispatches asked for, {ran} ran on the GPU");
         ctx.Check(frames >= 30, "the two readbacks are at least 30 frames apart");
-        ctx.Check(asked == 2 * frames, "two dispatches were asked for in every frame");
+        ctx.Check(asked == frames, "one dispatch was asked for in every frame");
         ctx.Check(ran == asked, "every dispatch asked for ran on the GPU");
+        var drawnFrame = commands.Invoke("hair.stats").GetProperty("gpu_frame");
+        ctx.Check(drawnFrame.GetProperty("strands_selected").GetUInt32() > 0, "strands are drawn");
+        ctx.Check(drawnFrame.GetProperty("stale_guides_drawn").GetUInt32() == 0 && drawnFrame.GetProperty("unseen_strands_drawn").GetUInt32() == 0,
+            "no drawn strand read guide rows it was not lent, and none is of an instance left out for being out of view");
+        // No root frame is stored: every pass works out the ones it needs, and an instance holds no guide rows unless
+        // it is simulated.
+        var guideState = commands.Invoke("hair.stats").GetProperty("memory").GetProperty("guide_state");
+        ctx.Check(guideState.GetProperty("rows_in_use").GetUInt32() == 0 && guideState.GetProperty("holders").GetUInt32() == 0,
+            $"with the simulation off no instance holds guide rows ({guideState.GetProperty("rows_in_use")} rows, {guideState.GetProperty("holders")} holders)");
 
+        // The self-check asks the GPU for the root frames of roots sampled across each groom, drawn or not, as every
+        // pass works them out, and compares them with the CPU's.
         commands.Invoke("hair.selfcheck", new { enabled = true, roots = 16 });
         await ctx.Frames(150);
         var stats = commands.Invoke("hair.stats");
@@ -119,6 +131,6 @@ public sealed class HairSingle : Scenario
         await Capture(ctx, "hair_single");
 
         ctx.Log($"hair: {stats.GetProperty("assets")} assets, {stats.GetProperty("instances")} instances, {stats.GetProperty("strands")} strands, " +
-            $"{stats.GetProperty("bytes_uploaded")} bytes uploaded, {stats.GetProperty("root_binding_dispatches")} root-binding dispatches in {stats.GetProperty("frames")} frames");
+            $"{stats.GetProperty("bytes_uploaded")} bytes uploaded, {stats.GetProperty("evaluate_dispatches")} evaluate dispatches in {stats.GetProperty("frames")} frames");
     }
 }

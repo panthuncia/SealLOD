@@ -10,8 +10,9 @@
 namespace br::hair {
 
 // The hair passes of a frame graph. Register it in the Visibility epoch (PipelineRecipe::AddExtension). It adds
-// Hair::RootBinding, Hair::Select and Hair::Evaluate before culling, Hair::Raster once the opaque visibility buffer is
-// complete, and the debug view Hair::DebugOverlay, which it gives to the Overlay epoch.
+// Hair::Select, Hair::RootCheck, Hair::Simulate, Hair::GuideLevels and Hair::Evaluate before culling, Hair::Raster once
+// the opaque visibility buffer is complete, Hair::Resolve and Hair::Probe after material evaluation, and the debug view
+// Hair::DebugOverlay, which it gives to the Overlay epoch.
 class HairExtension final : public org::IRenderGraphExtension {
 public:
     explicit HairExtension(std::shared_ptr<HairRuntime> runtime);

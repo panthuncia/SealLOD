@@ -175,11 +175,17 @@ lighting.
 [docs/hair.md](docs/hair.md) is the reference for the strand-hair proof of concept in `Plugins/Hair/`: the importers
 (procedural, `.hair`, Alembic grooms), the builder and its data model, the `.groom` file, the LOD invariants and the
 tests that prove them, and the runtime plugin (`HairPlugin`, registered by the demo): its commands, attachment modes,
-GPU buffers and passes (root binding, LOD selection, strand evaluation, the compute rasterizer into the hair visibility
+GPU buffers and passes (LOD selection, strand evaluation, the compute rasterizer into the hair visibility
 target, the resolve of that target into the canonical surface, depth and motion vectors, and a debug overlay). Hair is
-lit as an opaque surface with a placeholder material: there is no hair BSDF and no shadow cast by hair. It also covers
+lit as an opaque surface with a placeholder material: there is no hair BSDF and no shadow cast by hair. A strand thinner
+than a pixel is written with the probability of its coverage (`hair.lod` `coverage`; "Partial coverage measurements" has
+what that buys and costs). It also covers
 the opt-in simulation (`hair.sim`): guides simulated on the GPU with a fixed timestep, sphere and capsule colliders, and
-render strands interpolated from their guides. Its "POC measurements" section has the
+render strands interpolated from their guides. Simulation follows the view: a groom the main camera
+does not show is not simulated ("View-following measurements"). Per-instance memory follows it too: no buffer holds root
+frames (each pass works out the ones it needs), and guide state is lent to the instances that are simulated or keep a
+shape, out of a fixed buffer, with a rigid fallback when it runs out ("Guide rows", "On-demand memory measurements").
+Its "POC measurements" section has the
 many-groom scenario's numbers: cost against distance and groom count, memory, continuity and curls under reduction.
 
 [docs/clod-simplification-validation.md](docs/clod-simplification-validation.md) covers the opt-in validation of CLod

@@ -22,19 +22,21 @@ namespace br::hair {
 
 struct HairGpuBuffers; // src/HairGpuBuffers.h
 
-// Rows of the pooled GPU buffers. They are made once, at these sizes, when the first groom is loaded; a groom or an
-// instance that does not fit is refused. At the defaults they take about 673 MB.
+// Rows of the pooled GPU buffers. They are made once, at these sizes, when the first groom is loaded, and never
+// resized. A groom that does not fit the asset buffers, or an instance past `instances`, is refused. At the defaults
+// they take about 417 MB.
 struct HairCapacities {
     std::uint32_t clusters = 16384u;   // HairClusterHeader (80 B) + HairClusterAggregate (208 B)
     std::uint32_t strands = 262144u;   // HairStrandRecord (48 B) + HairRootBinding (80 B)
     std::uint32_t guides = 65536u;     // HairGuideBinding (32 B) + guide strand index (4 B)
     std::uint32_t points = 8388608u;   // HairPackedPoint (8 B)
     std::uint32_t instances = 1024u;   // HairInstanceGPU (96 B)
-    std::uint32_t rootFrames = 1048576u; // HairRootFramePair (96 B): the strands of every instance
     // Per frame, for the main view. A visible cluster that does not fit either is dropped and counted (HairGpuCounters).
     std::uint32_t visibleClusters = HAIR_MAX_VISIBLE_CLUSTERS; // HairVisibleCluster (32 B); the visibility key's limit
     std::uint32_t poolVertices = 4194304u; // HairPoolVertex (32 B) + segment id (4 B): the drawn vertices of a frame
-    std::uint32_t guidePoints = 4194304u;  // HairGuidePoint (80 B): the points of every guide of every instance
+    // HairGuidePoint (80 B): guide state, lent to the instances that are simulated or keep a shape (HairGuideRowStats).
+    // An instance that cannot get rows is not simulated: its strands follow their roots rigidly, and it is counted.
+    std::uint32_t guidePoints = 2097152u;
     std::uint32_t simGroups = 131072u;     // HairSimGroup (16 B): a frame's simulation thread groups, 64 guides each
 };
 
@@ -79,6 +81,21 @@ struct HairSimSettings {
     std::uint32_t lodPointBudget = 0u;
     float promoteSeconds = 0.25f; // how long a newly simulated guide's state is blended from what its parents give it
     float demoteSeconds = 0.25f;  // how long a guide is still simulated while its state is blended back onto that
+    // Simulation follows the view. An instance no view shows any part of stops being simulated once it has been out of
+    // view this long (a groom at the edge of the view does not start and stop), and has had lodSettleSeconds of
+    // simulation since it last started from its rigid pose. Its guide state is kept, and it goes on from that shape when
+    // a view shows it again.
+    float lodViewGraceSeconds = 0.25f;
+    // An instance that starts from its rigid pose is simulated this long whether or not a view shows it, at level 0
+    // alone while none does: the hair settles once, unseen, so that a view that turns to it later finds it settled. 0:
+    // an instance out of view is never started.
+    float lodSettleSeconds = 1.5f;
+    // Guide rows (HairGuideRowStats). The most rows of guide state lent out at once; 0: all of HairCapacities::guidePoints.
+    std::uint32_t guidePointBudget = 0u;
+    // > 0: an instance that stopped with its shape kept gives its rows back once it has not been simulated for this long
+    // (simulated seconds), and then starts from its rigid pose when a view shows it. 0: it keeps them until an instance
+    // in view needs rows, there are no free ones and it is the smallest on screen of those out of view.
+    float guideKeepSeconds = 0.0f;
     bool operator==(const HairSimSettings&) const = default;
 };
 
@@ -113,6 +130,10 @@ struct HairSimMetrics {
     std::uint32_t strandRoots = 0u;    // drawn strands interpolated from guides
     float strandRootError = 0.0f;
     std::uint32_t resetGuides = 0u;    // guides put back on the rest pose in that frame
+    std::uint32_t resumedGuides = 0u;  // guides that started in that frame from the shape the instance was left in
+    // Guides that went on from rows not written for this instance in the frame before: 0 unless the lending of guide
+    // rows and the passes disagree.
+    std::uint32_t staleGuides = 0u;
     // Furthest a guide's root was, when the frame began, from the root frame the renderer calls the previous one: above
     // rounding when the frame did not follow the one the guide was last simulated in (a scene version bound twice, or
     // skipped).
@@ -121,6 +142,12 @@ struct HairSimMetrics {
     float simLevel = 0.0f;    // sFrac in that frame; 0 with no guides: the instance was not simulated
     float targetLevel = 0.0f; // what its coverage (or the forced level, or the budget) asked for
     float coverage = 0.0f;    // the diameter of the groom's bounds on screen over the view's height; 0 when not known
+    // How much of that is inside a view (HairRuntime.cpp's OnScreenExtent): 0 when no view shows any part of the groom,
+    // and very large when the camera is inside its bounds or the bounds are not known on the CPU.
+    float viewExtent = 0.0f;
+    bool inView = false;      // viewExtent is above 0
+    bool holdsRows = false;   // it had guide rows in that frame: it was simulated, or keeps a shape
+    bool starved = false;     // a view shows it and its size asks for simulation, but it could not get guide rows: it follows rigidly
     std::uint32_t levelCount = 0u; // the groom's guide levels
     std::array<std::uint32_t, HAIR_MAX_GUIDE_LEVELS> levelGuides{}; // guides simulated, by level; `guides` is their sum
     std::uint32_t simulatedPoints = 0u; // points of the simulated guides
@@ -141,8 +168,57 @@ struct HairSimStatus {
     double droppedSeconds = 0.0;       // frame time not simulated because a frame hit maxStepsPerFrame
     std::uint64_t cappedFrames = 0u;   // frames that did
     std::uint32_t lastFrameSteps = 0u;
-    std::uint32_t guidePoints = 0u;    // rows of guide state in use
+    std::uint32_t guidePoints = 0u;    // rows of guide state lent out
     std::vector<HairSimMetrics> metrics; // the newest readback of each instance that has one
+};
+
+// Guide state is lent to instances out of one buffer (HairCapacities::guidePoints rows), a contiguous range each, as
+// many rows as the groom has guide points. An instance takes rows when it starts being simulated and holds them while it
+// is simulated or keeps the shape it stopped with. It gives them back:
+//   - at once, when it stops with nothing to keep (its level went to 0 and it blended back onto the rigid pose, the
+//     simulation was turned off, Clear), and when it has a kept shape but is now too small on screen to be simulated;
+//   - after HairSimSettings::guideKeepSeconds without being simulated, when that is set;
+//   - when an instance in view needs rows and none are free (or HairSimSettings::guidePointBudget is reached): from
+//     the instances no view shows, kept shapes and instances simulated out of view alike (settling unseen, or in the
+//     grace after leaving), the smallest on screen first.
+// An instance that loses rows that way (an eviction) starts from its rigid pose when a view next shows it. An instance
+// in view is never evicted for another, so when instances in view need more rows than there are, the ones that asked
+// last follow rigidly until rows come free (starved). An instance that would settle out of view takes free rows only.
+// Ranges are first-fit and merged when freed, never moved: a request can fail on fragmentation with enough rows free
+// in total, and then evicts as if there were not.
+struct HairGuideRowStats {
+    std::uint32_t capacityRows = 0u;
+    std::uint32_t budgetRows = 0u;        // the smaller of the capacity and HairSimSettings::guidePointBudget
+    std::uint32_t rowsInUse = 0u;         // lent out now
+    std::uint32_t rowsActive = 0u;        // of those, to instances simulated in the last frame
+    std::uint32_t highWaterRows = 0u;     // the most lent out at once, since the buffers were made
+    std::uint32_t largestFreeRows = 0u;   // the largest range a request can take now
+    std::uint32_t holders = 0u;           // instances holding rows
+    std::uint32_t activeHolders = 0u;     // simulated in the last frame
+    std::uint32_t starvedInstances = 0u;  // in view, to be simulated, without rows: following rigidly
+    std::uint32_t unsettledInstances = 0u; // out of view, would settle unseen, no free rows for it
+    std::uint64_t allocations = 0u;       // ranges lent
+    std::uint64_t releases = 0u;          // given back with nothing lost
+    std::uint64_t evictions = 0u;         // taken back with a kept shape or a running simulation lost
+    std::uint64_t evictionsForRows = 0u;  // ... because an instance in view needed rows, or the budget fell
+    std::uint64_t evictionsByAge = 0u;    // ... by guideKeepSeconds
+    std::uint64_t allocationFailures = 0u; // times an instance in view could not get rows (once per time it starts to starve)
+};
+
+// One pooled buffer's use: rows of rowBytes each.
+struct HairBufferUse {
+    std::string name;
+    std::uint32_t rowBytes = 0u;
+    std::uint64_t capacityRows = 0u;
+    std::uint64_t usedRows = 0u;      // now; for the buffers a frame fills on the GPU, in the newest frame read back
+    std::uint64_t highWaterRows = 0u; // the most since the buffers were made; for those buffers, over the frames read back
+};
+
+// How the rasterizer treats a strand thinner than its one-pixel footprint: HAIR_COVERAGE_* (HairRuntimeGPUTypes.h).
+enum class HairCoverageMode : std::uint32_t {
+    Off = HAIR_COVERAGE_OFF,                 // every footprint pixel is written: a strand is at least a pixel wide and opaque
+    White = HAIR_COVERAGE_WHITE,             // written with the probability of the strand's coverage: a hash per pixel, strand and frame
+    Interleaved = HAIR_COVERAGE_INTERLEAVED, // the same from interleaved gradient noise, shifted per frame and per strand
 };
 
 // The LOD controls. They are commands (hair.lod), not settings: a plugin cannot register a setting.
@@ -150,13 +226,23 @@ struct HairLodSettings {
     // A cluster draws all its strands while neighbouring strands are at least this many pixels apart, and a share in
     // proportion below that (HairLodDetailLevel).
     float errorPixels = 1.0f;
-    float maxWidthScale = 8.0f; // wMax: the most a drawn strand is widened to make up for dropped ones
+    // wMax: the most a drawn strand is widened to make up for dropped ones. At HAIR_MAX_STRANDS_PER_CLUSTER a cluster
+    // down to its last strand still carries all its coverage.
+    float maxWidthScale = 64.0f;
     float minDetail = 0.02f;    // lMin
     float forceDetail = 0.0f;   // > 0: every cluster takes this detail level; for testing
     float segmentPixels = 4.0f; // vertex LOD: the length on screen a drawn segment aims for
     // Keep the last selection (visible clusters, strand counts, vertex levels) while the camera moves. The kept strands
     // are still evaluated and rasterized every frame. A change to the active instances selects once more.
     bool freeze = false;
+    HairCoverageMode coverage = HairCoverageMode::White;
+    // Add every segment's coverage into the coverage target. Off by default: it costs one more atomic per footprint
+    // pixel, which doubles the rasterizer's time with a dense groom filling the view. The `coverage` debug view turns it
+    // on while it is shown, and the counters pixelsCovered and coverageSum do not need it.
+    bool accumulateCoverage = false;
+    // The detail level is (strand spacing on screen / errorPixels) to this power, in [1, 3]. 1: drawn strands fall as one
+    // over the distance. 2: as its square, like the area a groom covers; the width scale then has to make up the coverage.
+    float detailExponent = 1.0f;
     bool operator==(const HairLodSettings&) const = default;
 };
 
@@ -168,6 +254,7 @@ enum class HairDebugView : std::uint32_t {
     Strand = HAIR_DEBUG_VIEW_STRAND,
     Rank = HAIR_DEBUG_VIEW_RANK,
     VertexLevel = HAIR_DEBUG_VIEW_VERTEX_LEVEL,
+    Coverage = HAIR_DEBUG_VIEW_COVERAGE,
 };
 
 inline constexpr std::size_t kHairCounterHistoryFrames = 32u;
@@ -185,9 +272,13 @@ struct HairDebugCapture {
 // The GPU counters of one frame, read back after it (HAIR_COUNTER_* in HairRuntimeGPUTypes.h).
 struct HairGpuCounters {
     bool valid = false;
-    std::uint64_t frame = 0u;                    // the frame they were read after
-    std::uint32_t rootBindingDispatches = 0u;    // running; it starts at an arbitrary value: compare differences
-    std::uint64_t cpuRootBindingDispatches = 0u; // HairStats::rootBindingDispatches as of that frame
+    std::uint64_t frame = 0u;                 // the frame they were read after
+    std::uint32_t evaluateDispatches = 0u;    // running; it starts at an arbitrary value: compare differences
+    std::uint64_t cpuEvaluateDispatches = 0u; // HairStats::evaluateDispatches as of that frame
+    // Drawn strands of a simulated instance that read guide rows not written in that frame for that instance, or whose
+    // instance had no rows: 0 unless the lending of guide rows and the passes disagree.
+    std::uint32_t staleGuidesDrawn = 0u;
+    std::uint32_t unseenStrandsDrawn = 0u; // drawn strands of instances not simulated because no view showed them: 0 likewise
     // Selection. While the LOD is frozen these are the counts of the frozen selection.
     std::uint32_t clustersTested = 0u;
     std::uint32_t clustersVisible = 0u;  // kept clusters: at most the capacity of the list
@@ -197,6 +288,8 @@ struct HairGpuCounters {
     std::uint32_t poolVertices = 0u;     // pool rows in use: at most its capacity
     std::uint32_t overflowClusters = 0u; // visible clusters dropped because the pool or the list was full
     // Raster.
+    std::uint32_t pixelsCovered = 0u;  // footprint pixels in front of the opaque surface, counted for each segment
+    float coverageSum = 0.0f;          // their coverage, summed: the hair's true projected area in pixels, overlaps counted
     std::uint32_t segmentsDrawn = 0u;  // segments that wrote at least one pixel
     std::uint32_t pixelsWritten = 0u;  // visibility writes: a pixel under several segments counts for each
     std::uint32_t pixelsOccluded = 0u; // covered pixels behind the opaque depth
@@ -251,7 +344,11 @@ struct HairInstanceInfo {
     HairInstanceState state = HairInstanceState::Pending;
     HairAttachMode mode = HairAttachMode::Rigid;
     HairMaterial material;
-    bool active = false; // the root-binding pass ran for it in the last frame
+    bool active = false; // the last frame's passes covered it
+    std::uint32_t strands = 0u;
+    std::uint32_t guideRows = 0u; // the guide rows it needs to be simulated: its groom's guide points
+    // Its first row of guide state while it holds rows (simulated, or keeping a shape); HAIR_INVALID_INDEX otherwise.
+    std::uint32_t guideRowBase = HAIR_INVALID_INDEX;
     std::string error;
 };
 
@@ -264,7 +361,7 @@ struct HairSelfCheckStatus {
     std::uint64_t frame = 0u;
     std::uint32_t instances = 0u;        // compared
     std::uint32_t skinnedInstances = 0u; // of those, following a skeleton
-    // Not compared: their rows were not written in the checked frame, or the frame's per-object rows are not on the CPU.
+    // Not compared: the frame's per-object rows are not on the CPU, or the check list was full.
     std::uint32_t staleInstances = 0u;
     std::uint32_t roots = 0u;
     std::uint32_t previousRoots = 0u; // roots whose previous frame was compared too
@@ -294,17 +391,19 @@ struct HairStats {
     std::uint32_t strands = 0u;
     std::uint32_t guides = 0u;
     std::uint32_t points = 0u;
-    std::uint32_t rootFrames = 0u; // strands summed over instances
-    std::uint32_t guidePoints = 0u; // guide state rows summed over instances
+    std::uint32_t instanceStrands = 0u; // strands summed over instances
+    std::uint32_t guidePoints = 0u;     // guide state rows lent out (guideRows.rowsInUse)
     HairCapacities capacities;
     bool buffersCreated = false;
     std::uint64_t bufferBytes = 0u;           // GPU memory of the pooled buffers
+    std::vector<HairBufferUse> bufferUse;     // each pooled buffer: its capacity, what is in use and the most that was
+    HairGuideRowStats guideRows;
     std::uint64_t assetBytesUploaded = 0u;    // groom arrays, once per asset
     std::uint64_t instanceBytesUploaded = 0u; // instance rows, whenever one changes
     std::uint64_t pendingUploadAssets = 0u;
-    // The root-binding pass, counted on the CPU: frames it was updated in, and the dispatches those frames asked for.
+    // Counted on the CPU: frames the plugin was updated in, and the evaluate dispatches those frames asked for.
     std::uint64_t frames = 0u;
-    std::uint64_t rootBindingDispatches = 0u;
+    std::uint64_t evaluateDispatches = 0u;
     // The newest readback of the GPU counters. A Stats call asks for one more readback. With continuous counters on,
     // every frame is read back, and gpuCounterHistory holds the last kHairCounterHistoryFrames of them, oldest first: a
     // readback arrives a few frames after its frame, so a caller polling once a frame finds every frame in it.
@@ -333,10 +432,9 @@ struct HairFrameObjects {
     std::shared_ptr<const org::services::BufferImage> image;
 };
 
-// One instance a frame works on: the root-binding pass dispatches over its roots, the select pass over its clusters.
+// One instance a frame works on: the select pass dispatches over its clusters.
 struct HairInstanceDispatch {
     std::uint32_t instanceIndex = 0u;
-    std::uint32_t rootCount = 0u;
     std::uint32_t clusterCount = 0u;
     std::uint32_t guideCount = 0u;
     // Simulation LOD: whether the instance is simulated this frame, and its guide levels (level j owns ranks
@@ -364,7 +462,16 @@ struct HairFramePlan {
     std::uint32_t rasterRows = 0u;     // the most pool rows this frame can use
     HairDebugView debugView = HairDebugView::Off;
     bool probe = false; // run the probe pass this frame (CaptureProbe)
+    std::uint32_t rootCheckCount = 0u; // rows of the self-check's list this frame: the root-check pass writes their frames
     bool operator==(const HairFramePlan&) const = default;
+};
+
+// A perspective view that shows hair, as the simulation's planning needs it (HairRuntime.cpp's OnScreenExtent).
+struct HairView {
+    std::array<float, 16> view{};                 // world to view, row-major, for row vectors: the renderer's Camera::view
+    std::array<std::array<float, 4>, 6> planes{}; // its frustum in view space (Camera::clippingPlanes): inside is dot(xyz, p) + w >= 0
+    float projectionScaleX = 0.0f;                // projection[0][0] and [1][1]: a length over its depth, times these, is
+    float projectionScaleY = 0.0f;                // its share of half the view's width and height
 };
 
 // What a frame's update reads from the renderer.
@@ -375,19 +482,21 @@ struct HairFrameInputs {
     std::uint32_t renderHeight = 0u;
     Float3 cameraPosition{}; // of the main view, for HairGpuCounters
     float deltaSeconds = 0.0f; // the frame's time step: what the simulation's accumulator takes
-    float projectionScaleY = 0.0f; // the main view's projection[1][1]: a length over its distance, times this, is its share of half the view's height
+    // The views that show hair, for deciding which instances are simulated. Hair is in the main view only.
+    HairView mainView;
 };
 
-// How the runtime writes a buffer: the root-binding pass's upload, on the render thread.
+// How the runtime writes a buffer: a hair pass's own upload, on the render thread.
 using HairUpload = std::function<void(const std::shared_ptr<org::Buffer>& buffer, std::size_t byteOffset,
     const void* data, std::size_t byteCount)>;
 
 // Groom assets and their instances. An asset is the built arrays of one groom, uploaded once into the pooled buffers.
-// An instance attaches an asset to a scene entity (found by its Components::Name) and owns a range of root frames.
-// Nothing is ever freed one at a time: Clear drops everything.
+// An instance attaches an asset to a scene entity (found by its Components::Name); it owns nothing in GPU memory but its
+// row, and borrows guide state while it is simulated (HairGuideRowStats). Assets and instances are never freed one at a
+// time: Clear drops everything.
 //
 // Threads: Initialize and Shutdown on the thread that runs Renderer::Update (the render thread in the demo).
-// UpdateFrame on the render thread, from the root-binding pass's Update. Everything else from any thread.
+// UpdateFrame on the render thread, from the root-check pass's Update. Everything else from any thread.
 class HairRuntime {
 public:
     explicit HairRuntime(HairCapacities capacities = {});
@@ -446,7 +555,8 @@ public:
     bool CaptureProbe(const std::string& path, std::string& error);
     // Writes one of the plugin's buffers as the next frame leaves it to a binary file: the frame number (8 bytes), then
     // the first `rows` rows (0: all of them). `buffer` is "pool_vertices" (HairPoolVertex), "visible_clusters"
-    // (HairVisibleCluster) or "guide_points" (HairGuidePoint). Several requests made before a frame are read back after
+    // (HairVisibleCluster), "guide_points" (HairGuidePoint), "instances" (HairInstanceGPU), "clusters"
+    // (HairClusterHeader), "strands" (HairStrandRecord) or "guide_bindings" (HairGuideBinding). Several requests made before a frame are read back after
     // that same frame, with a CaptureProbe made then too. For checking the passes from outside; HairStats::dumps counts
     // the files written and failed. False with `error` set for an unknown buffer.
     bool DumpBuffer(const std::string& buffer, const std::string& path, std::uint32_t rows, std::string& error);
@@ -458,7 +568,7 @@ public:
     std::shared_ptr<const HairGpuBuffers> GpuBuffers() const;
     // The frame's CPU work: makes the buffers at the first groom and the visibility target at the frame's resolution,
     // uploads new grooms, changed instance rows and the frame state, resets the frame's GPU counters, finds each
-    // instance's rows for this frame and decides the frame's plan.
+    // instance's rows for this frame, lends and takes back guide rows, and decides the frame's plan.
     void UpdateFrame(const HairFrameInputs& inputs, const HairUpload& upload);
     // What the last UpdateFrame decided.
     HairFramePlan FramePlan() const;

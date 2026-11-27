@@ -17,6 +17,7 @@
 #define HAIR_VISIBILITY_HEIGHT UintRootConstant7
 #define HAIR_OUTPUT_WIDTH UintRootConstant8
 #define HAIR_OUTPUT_HEIGHT UintRootConstant9
+#define HAIR_COVERAGE UintRootConstant10         // Texture2D<uint>: the coverage target
 
 float4 HairDebugOverlayPS(FULLSCREEN_VS_OUTPUT input) : SV_Target
 {
@@ -24,6 +25,15 @@ float4 HairDebugOverlayPS(FULLSCREEN_VS_OUTPUT input) : SV_Target
     const float2 uv = input.position.xy / float2((float)HAIR_OUTPUT_WIDTH, (float)HAIR_OUTPUT_HEIGHT);
     const uint2 size = uint2(HAIR_VISIBILITY_WIDTH, HAIR_VISIBILITY_HEIGHT);
     const uint2 pixel = min((uint2)(uv * float2(size)), size - 1u);
+    if (HAIR_DEBUG_VIEW == HAIR_DEBUG_VIEW_COVERAGE)
+    {
+        // The whole frame, so that a capture measures it: black where no hair is, grey up to one pixel's worth of
+        // coverage (the grey level is the coverage), then from yellow to red by the doublings above that.
+        Texture2D<uint> hairCoverage = ResourceDescriptorHeap[HAIR_COVERAGE];
+        const float coverage = (float)hairCoverage[pixel] * (1.0f / HAIR_COVERAGE_UNIT);
+        const float3 over = lerp(float3(1.0f, 1.0f, 0.0f), float3(1.0f, 0.0f, 0.0f), saturate(log2(max(coverage, 1.0f)) / 6.0f));
+        return float4(coverage <= 1.0f ? coverage.xxx : over, 1.0f);
+    }
     Texture2D<uint64_t> hairVisibility = ResourceDescriptorHeap[HAIR_VISIBILITY];
     const uint64_t key = hairVisibility[pixel];
     if (key == 0xFFFFFFFFFFFFFFFFull)

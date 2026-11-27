@@ -44,6 +44,7 @@ void AppendPlanRevision(std::vector<uint64_t>& out, const HairFramePlan& plan)
     br::render::AppendRevision(out, plan.rasterRows);
     br::render::AppendRevision(out, plan.debugView);
     br::render::AppendRevision(out, plan.probe);
+    br::render::AppendRevision(out, plan.rootCheckCount);
 }
 
 // A hair pass declares the plugin's buffers, which appear with the first groom and whose visibility target is made
@@ -88,24 +89,26 @@ protected:
     br::PipelineState m_pipeline;
 };
 
-struct HairRootBindingBindings {
+struct HairRootCheckBindings {
     br::PipelineState pipeline;
-    org::DeclaredViewToken instances, rootBindings, rootFrames, counters, frameState;
+    org::DeclaredViewToken instances, rootBindings, rootCheck, rootCheckList, frameState;
     bool hasBuffers = false;
 };
 
-// One dispatch per active instance, one thread per root (hairRootBinding.hlsl). Its Update is the plugin's per-frame
-// work on the render thread: it makes the buffers at the first groom, uploads new grooms and changed instance rows,
-// resolves each instance's entity and decides the frame's plan for every hair pass.
-class HairRootBindingPass final : public HairPass<HairRootBindingPass, HairRootBindingBindings> {
+// The plugin's per-frame work on the render thread, in its Update: it makes the buffers at the first groom, uploads new
+// grooms and changed instance rows, resolves each instance's entity, lends guide rows and decides the frame's plan for
+// every hair pass. What it records is the self-check's (hair.selfcheck, hairRootCheck.hlsl): in a frame that samples,
+// the root frames of the listed roots into the check buffer. No buffer holds root frames otherwise: each pass works out
+// the ones it needs.
+class HairRootCheckPass final : public HairPass<HairRootCheckPass, HairRootCheckBindings> {
 public:
     using HairPass::HairPass;
 
-    HairRootBindingBindings Declare(org::PassBuilder& builder)
+    HairRootCheckBindings Declare(org::PassBuilder& builder)
     {
-        HairRootBindingBindings bindings{};
+        HairRootCheckBindings bindings{};
         bindings.pipeline = m_pipeline = br::render::DeclarePipeline(br::render::ComputePipeline(
-            L"HairShaders/hairRootBinding.hlsl", L"HairRootBindingCS", "Hair.RootBinding"));
+            L"HairShaders/hairRootCheck.hlsl", L"HairRootCheckCS", "Hair.RootCheck"));
         // Read by name in the shader (ResourceDescriptorIndex): the entities' transforms and the bone palettes.
         builder.ShaderResource(Builtin::PerObjectBuffer, Builtin::SkeletonResources::BoneTransforms,
             Builtin::SkeletonResources::SkinningInstanceInfo);
@@ -113,8 +116,8 @@ public:
             bindings.instances = builder.ShaderResource(buffers->instances).View();
             bindings.rootBindings = builder.ShaderResource(buffers->rootBindings).View();
             bindings.frameState = builder.ShaderResource(buffers->frameState).View();
-            bindings.rootFrames = builder.UnorderedAccess(buffers->rootFrames).View();
-            bindings.counters = builder.UnorderedAccess(buffers->counters).View();
+            bindings.rootCheckList = builder.ShaderResource(buffers->rootCheckList).View();
+            bindings.rootCheck = builder.UnorderedAccess(buffers->rootCheck).View();
             bindings.hasBuffers = true;
         }
         return bindings;
@@ -131,7 +134,15 @@ public:
         const auto& camera = context->primaryCamera.info.positionWorldSpace;
         inputs.cameraPosition = { camera.x, camera.y, camera.z };
         inputs.deltaSeconds = context->deltaTime;
-        inputs.projectionScaleY = DirectX::XMVectorGetY(context->primaryCamera.info.unjitteredProjection.r[1]);
+        // The main view, as the select pass's frustum test reads it from the camera buffer.
+        const CameraInfo& main = context->primaryCamera.info;
+        DirectX::XMStoreFloat4x4(reinterpret_cast<DirectX::XMFLOAT4X4*>(inputs.mainView.view.data()), main.view);
+        for (std::size_t plane = 0u; plane < inputs.mainView.planes.size(); ++plane) {
+            const DirectX::XMFLOAT4& source = main.clippingPlanes[plane].plane;
+            inputs.mainView.planes[plane] = { source.x, source.y, source.z, source.w };
+        }
+        inputs.mainView.projectionScaleX = DirectX::XMVectorGetX(main.unjitteredProjection.r[0]);
+        inputs.mainView.projectionScaleY = DirectX::XMVectorGetY(main.unjitteredProjection.r[1]);
         // The per-object buffer this frame binds, as the renderer published it.
         const auto publishedObjects = context->publishedRendererState
             ? context->publishedRendererState->drawRecords.payload.Get<br::render::PublishedObjectBufferState>()
@@ -147,25 +158,23 @@ public:
             });
     }
 
-    static void Record(const HairRootBindingBindings& bindings, const HairPassFrame& frame, org::PassRecordContext& recording)
+    static void Record(const HairRootCheckBindings& bindings, const HairPassFrame& frame, org::PassRecordContext& recording)
     {
-        if (!bindings.hasBuffers) return;
+        if (!bindings.hasBuffers || frame.plan.rootCheckCount == 0u) return;
         br::render::MiscConstants constants{};
         constants[0] = recording.Index(bindings.instances);
         constants[1] = recording.Index(bindings.rootBindings);
-        constants[2] = recording.Index(bindings.rootFrames);
-        constants[3] = recording.Index(bindings.counters);
+        constants[2] = recording.Index(bindings.rootCheck);
+        constants[3] = recording.Index(bindings.rootCheckList);
         constants[4] = recording.Index(bindings.frameState);
-        for (const auto& instance : frame.plan.instances) {
-            constants[5] = instance.instanceIndex;
-            br::render::DispatchCompute(recording, bindings.pipeline, constants, Groups(instance.rootCount));
-        }
+        constants[5] = frame.plan.rootCheckCount;
+        br::render::DispatchCompute(recording, bindings.pipeline, constants, Groups(frame.plan.rootCheckCount));
     }
 };
 
 struct HairSimulateBindings {
     br::PipelineState pipeline;
-    org::DeclaredViewToken instances, clusters, strands, rootBindings, rootFrames, points, guideStrandIndices, guidePointRanges,
+    org::DeclaredViewToken instances, clusters, strands, rootBindings, points, guideStrandIndices, guidePointRanges,
         guidePoints, colliders, simFrame, simMetrics, guideBindings, simGroups;
     bool hasBuffers = false;
 };
@@ -182,7 +191,7 @@ public:
         HairSimulateBindings bindings{};
         bindings.pipeline = m_pipeline = br::render::DeclarePipeline(br::render::ComputePipeline(
             L"HairShaders/hairSimulate.hlsl", L"HairSimulateCS", "Hair.Simulate"));
-        // For the colliders: the entities' transforms and the attach bones.
+        // For the guides' root frames and the colliders: the entities' transforms and the bone palettes.
         builder.ShaderResource(Builtin::PerObjectBuffer, Builtin::SkeletonResources::BoneTransforms,
             Builtin::SkeletonResources::SkinningInstanceInfo);
         if (const auto* buffers = DeclareBuffers()) {
@@ -190,7 +199,6 @@ public:
             bindings.clusters = builder.ShaderResource(buffers->clusters).View();
             bindings.strands = builder.ShaderResource(buffers->strands).View();
             bindings.rootBindings = builder.ShaderResource(buffers->rootBindings).View();
-            bindings.rootFrames = builder.ShaderResource(buffers->rootFrames).View();
             bindings.points = builder.ShaderResource(buffers->points).View();
             bindings.guideStrandIndices = builder.ShaderResource(buffers->guideStrandIndices).View();
             bindings.guidePointRanges = builder.ShaderResource(buffers->guidePointRanges).View();
@@ -213,7 +221,6 @@ public:
         constants[1] = recording.Index(bindings.clusters);
         constants[2] = recording.Index(bindings.strands);
         constants[3] = recording.Index(bindings.rootBindings);
-        constants[4] = recording.Index(bindings.rootFrames);
         constants[5] = recording.Index(bindings.points);
         constants[6] = recording.Index(bindings.guideStrandIndices);
         constants[7] = recording.Index(bindings.guidePointRanges);
@@ -242,13 +249,14 @@ public:
         HairSimulateBindings bindings{};
         bindings.pipeline = m_pipeline = br::render::DeclarePipeline(br::render::ComputePipeline(
             L"HairShaders/hairGuideLevels.hlsl", L"HairGuideLevelCS", "Hair.GuideLevels"));
-        builder.ShaderResource(Builtin::PerObjectBuffer);
+        // For the guides' root frames: the entities' transforms and the bone palettes.
+        builder.ShaderResource(Builtin::PerObjectBuffer, Builtin::SkeletonResources::BoneTransforms,
+            Builtin::SkeletonResources::SkinningInstanceInfo);
         if (const auto* buffers = DeclareBuffers()) {
             bindings.instances = builder.ShaderResource(buffers->instances).View();
             bindings.clusters = builder.ShaderResource(buffers->clusters).View();
             bindings.strands = builder.ShaderResource(buffers->strands).View();
             bindings.rootBindings = builder.ShaderResource(buffers->rootBindings).View();
-            bindings.rootFrames = builder.ShaderResource(buffers->rootFrames).View();
             bindings.points = builder.ShaderResource(buffers->points).View();
             bindings.guideStrandIndices = builder.ShaderResource(buffers->guideStrandIndices).View();
             bindings.guidePointRanges = builder.ShaderResource(buffers->guidePointRanges).View();
@@ -270,7 +278,6 @@ public:
         constants[1] = recording.Index(bindings.clusters);
         constants[2] = recording.Index(bindings.strands);
         constants[3] = recording.Index(bindings.rootBindings);
-        constants[4] = recording.Index(bindings.rootFrames);
         constants[5] = recording.Index(bindings.points);
         constants[6] = recording.Index(bindings.guideStrandIndices);
         constants[7] = recording.Index(bindings.guidePointRanges);
@@ -291,7 +298,7 @@ public:
 
 struct HairSelectBindings {
     br::PipelineState pipeline;
-    org::DeclaredViewToken instances, clusters, aggregates, rootBindings, rootFrames, frameState, counters, visibleClusters;
+    org::DeclaredViewToken instances, clusters, aggregates, rootBindings, frameState, counters, visibleClusters;
     bool hasBuffers = false;
 };
 
@@ -306,14 +313,16 @@ public:
         HairSelectBindings bindings{};
         bindings.pipeline = m_pipeline = br::render::DeclarePipeline(br::render::ComputePipeline(
             L"HairShaders/hairSelectEvaluate.hlsl", L"HairSelectCS", "Hair.Select"));
-        builder.ShaderResource(Builtin::PerObjectBuffer, Builtin::CameraBuffer);
+        // A cluster's bounds follow its first strand's root, which the pass works out itself: the entities' transforms
+        // and the bone palettes.
+        builder.ShaderResource(Builtin::PerObjectBuffer, Builtin::CameraBuffer, Builtin::SkeletonResources::BoneTransforms,
+            Builtin::SkeletonResources::SkinningInstanceInfo);
         builder.ConstantBuffer(Builtin::PerFrameBuffer);
         if (const auto* buffers = DeclareBuffers()) {
             bindings.instances = builder.ShaderResource(buffers->instances).View();
             bindings.clusters = builder.ShaderResource(buffers->clusters).View();
             bindings.aggregates = builder.ShaderResource(buffers->aggregates).View();
             bindings.rootBindings = builder.ShaderResource(buffers->rootBindings).View();
-            bindings.rootFrames = builder.ShaderResource(buffers->rootFrames).View();
             bindings.frameState = builder.ShaderResource(buffers->frameState).View();
             bindings.counters = builder.UnorderedAccess(buffers->counters).View();
             bindings.visibleClusters = builder.UnorderedAccess(buffers->visibleClusters).View();
@@ -330,7 +339,6 @@ public:
         constants[1] = recording.Index(bindings.clusters);
         constants[2] = recording.Index(bindings.aggregates);
         constants[3] = recording.Index(bindings.rootBindings);
-        constants[4] = recording.Index(bindings.rootFrames);
         constants[5] = recording.Index(bindings.frameState);
         constants[6] = recording.Index(bindings.counters);
         constants[7] = recording.Index(bindings.visibleClusters);
@@ -343,13 +351,14 @@ public:
 
 struct HairEvaluateBindings {
     br::PipelineState pipeline;
-    org::DeclaredViewToken instances, clusters, strands, rootBindings, rootFrames, points, frameState, counters, visibleClusters,
+    org::DeclaredViewToken instances, clusters, strands, rootBindings, points, frameState, counters, visibleClusters,
         poolVertices, poolSegmentIds, guidePoints, guidePointRanges, simMetrics;
     bool hasBuffers = false;
 };
 
 // Strand evaluation: one thread group per visible cluster, one thread per drawn strand (HairEvaluateCS). The GPU knows
-// how many clusters are visible; the dispatch covers the most there can be and the rest return at once.
+// how many clusters are visible; the dispatch covers the most there can be and the rest return at once. A thread works
+// out its strand's root frame itself.
 class HairEvaluatePass final : public HairPass<HairEvaluatePass, HairEvaluateBindings> {
 public:
     using HairPass::HairPass;
@@ -359,17 +368,17 @@ public:
         HairEvaluateBindings bindings{};
         bindings.pipeline = m_pipeline = br::render::DeclarePipeline(br::render::ComputePipeline(
             L"HairShaders/hairSelectEvaluate.hlsl", L"HairEvaluateCS", "Hair.Evaluate"));
-        builder.ShaderResource(Builtin::PerObjectBuffer, Builtin::CameraBuffer);
+        builder.ShaderResource(Builtin::PerObjectBuffer, Builtin::CameraBuffer, Builtin::SkeletonResources::BoneTransforms,
+            Builtin::SkeletonResources::SkinningInstanceInfo);
         builder.ConstantBuffer(Builtin::PerFrameBuffer);
         if (const auto* buffers = DeclareBuffers()) {
             bindings.instances = builder.ShaderResource(buffers->instances).View();
             bindings.clusters = builder.ShaderResource(buffers->clusters).View();
             bindings.strands = builder.ShaderResource(buffers->strands).View();
             bindings.rootBindings = builder.ShaderResource(buffers->rootBindings).View();
-            bindings.rootFrames = builder.ShaderResource(buffers->rootFrames).View();
             bindings.points = builder.ShaderResource(buffers->points).View();
             bindings.frameState = builder.ShaderResource(buffers->frameState).View();
-            bindings.counters = builder.ShaderResource(buffers->counters).View();
+            bindings.counters = builder.UnorderedAccess(buffers->counters).View(); // read, and the two checks' counters
             bindings.visibleClusters = builder.ShaderResource(buffers->visibleClusters).View();
             bindings.poolVertices = builder.UnorderedAccess(buffers->poolVertices).View();
             bindings.poolSegmentIds = builder.UnorderedAccess(buffers->poolSegmentIds).View();
@@ -389,7 +398,6 @@ public:
         constants[0] = recording.Index(bindings.instances);
         constants[1] = recording.Index(bindings.clusters);
         constants[3] = recording.Index(bindings.rootBindings);
-        constants[4] = recording.Index(bindings.rootFrames);
         constants[5] = recording.Index(bindings.frameState);
         constants[6] = recording.Index(bindings.counters);
         constants[7] = recording.Index(bindings.visibleClusters);
@@ -406,7 +414,8 @@ public:
 
 struct HairRasterBindings {
     br::PipelineState pipeline;
-    org::DeclaredViewToken frameState, counters, visibleClusters, poolVertices, poolSegmentIds, visibility, visibilityClear;
+    org::DeclaredViewToken frameState, counters, visibleClusters, poolVertices, poolSegmentIds, visibility, visibilityClear,
+        coverage, coverageClear;
     std::uint32_t width = 0u; // the declared target's size
     std::uint32_t height = 0u;
     bool hasBuffers = false;
@@ -436,6 +445,9 @@ public:
             const auto visibility = builder.UnorderedAccessClear(buffers->visibility);
             bindings.visibility = visibility.View(0);
             bindings.visibilityClear = visibility.View(1);
+            const auto coverage = builder.UnorderedAccessClear(buffers->coverage);
+            bindings.coverage = coverage.View(0);
+            bindings.coverageClear = coverage.View(1);
             bindings.width = buffers->visibilityWidth;
             bindings.height = buffers->visibilityHeight;
             bindings.hasBuffers = true;
@@ -448,6 +460,7 @@ public:
         if (!bindings.hasBuffers) return;
         // Every frame, drawn or not: all ones is "no hair".
         br::render::ClearUavUint(recording, bindings.visibility, bindings.visibilityClear, 0xFFFFFFFFu);
+        br::render::ClearUavUint(recording, bindings.coverage, bindings.coverageClear, 0u);
         const std::uint32_t groups = Groups(frame.plan.rasterRows);
         if (frame.plan.instances.empty() || groups == 0u) return;
         br::render::MiscConstants constants{};
@@ -460,6 +473,7 @@ public:
         constants[6] = bindings.width;
         constants[7] = bindings.height;
         constants[8] = kRasterGroupsPerRow;
+        constants[9] = recording.Index(bindings.coverage);
         br::render::DispatchCompute(recording, bindings.pipeline, constants, (std::min)(groups, kRasterGroupsPerRow),
             (groups + kRasterGroupsPerRow - 1u) / kRasterGroupsPerRow);
     }
@@ -572,7 +586,7 @@ public:
 
 struct HairDebugOverlayBindings {
     br::PipelineState pipeline;
-    org::DeclaredViewToken visibility, visibleClusters, instances, clusters, strands, target;
+    org::DeclaredViewToken visibility, coverage, visibleClusters, instances, clusters, strands, target;
     std::uint32_t width = 0u;
     std::uint32_t height = 0u;
     bool hasBuffers = false;
@@ -592,6 +606,7 @@ public:
         builder.ConstantBuffer(Builtin::PerFrameBuffer);
         if (const auto* buffers = DeclareBuffers()) {
             bindings.visibility = builder.ShaderResource(buffers->visibility).View();
+            bindings.coverage = builder.ShaderResource(buffers->coverage).View();
             bindings.visibleClusters = builder.ShaderResource(buffers->visibleClusters).View();
             bindings.instances = builder.ShaderResource(buffers->instances).View();
             bindings.clusters = builder.ShaderResource(buffers->clusters).View();
@@ -633,6 +648,7 @@ public:
         constants[7] = bindings.height;
         constants[8] = frame.outputWidth;
         constants[9] = frame.outputHeight;
+        constants[10] = recording.Index(bindings.coverage);
         br::render::DrawFullscreen(recording, bindings.pipeline, constants, br::render::ColorTarget(recording, bindings.target),
             frame.outputWidth, frame.outputHeight, "Hair Debug Overlay");
     }
@@ -682,13 +698,14 @@ HairExtension::HairExtension(std::shared_ptr<HairRuntime> runtime) : m_runtime(s
 
 void HairExtension::GatherStructuralPasses(org::RenderGraph& rg, std::vector<org::ExternalPassDesc>& out)
 {
-    // Before culling, where procedural wind writes its palettes. Selection and evaluation need the roots and the main
-    // view's camera, and nothing of the frame's opaque geometry.
+    // Before culling, where procedural wind writes its palettes. Selection and evaluation need the main view's camera and
+    // the entities' transforms, and nothing of the frame's opaque geometry. Evaluation is last: it draws the strands
+    // selection chose from the guide state the two simulation passes leave.
     const auto beforeCulling = org::ExternalInsertPoint::Before("CLodOpaque::HierarchicalCullingPass1");
-    out.push_back(org::ExternalPassDesc::Compute("Hair::RootBinding", std::make_shared<HairRootBindingPass>(m_runtime)).At(beforeCulling));
+    out.push_back(org::ExternalPassDesc::Compute("Hair::Select", std::make_shared<HairSelectPass>(m_runtime)).At(beforeCulling));
+    out.push_back(org::ExternalPassDesc::Compute("Hair::RootCheck", std::make_shared<HairRootCheckPass>(m_runtime)).At(beforeCulling));
     out.push_back(org::ExternalPassDesc::Compute("Hair::Simulate", std::make_shared<HairSimulatePass>(m_runtime)).At(beforeCulling));
     out.push_back(org::ExternalPassDesc::Compute("Hair::GuideLevels", std::make_shared<HairGuideLevelsPass>(m_runtime)).At(beforeCulling));
-    out.push_back(org::ExternalPassDesc::Compute("Hair::Select", std::make_shared<HairSelectPass>(m_runtime)).At(beforeCulling));
     out.push_back(org::ExternalPassDesc::Compute("Hair::Evaluate", std::make_shared<HairEvaluatePass>(m_runtime)).At(beforeCulling));
 
     // The rasterizer tests against the opaque visibility buffer, so it runs once that is complete. Every pass that
