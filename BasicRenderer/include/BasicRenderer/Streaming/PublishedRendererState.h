@@ -1,5 +1,7 @@
 #pragma once
 
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -324,6 +326,9 @@ public:
     [[nodiscard]] RendererStatePublisherStats Stats() const;
     // The active epoch, the candidate, each pending patch's state and the commit counts (start-stall report).
     [[nodiscard]] std::string DescribePending() const;
+    // Waits until a worker finishes a pending patch's preparation, at most timeout. The render thread calls it while frames
+    // wait for their first publications, so it does not spin on Update and post a new patch each time.
+    void WaitForPreparation(std::chrono::microseconds timeout) const;
     [[nodiscard]] std::shared_ptr<PublishedStateSource> ResourceSource() const { return m_source; }
     [[nodiscard]] const std::shared_ptr<VersionedBufferRuntime>& VersionedBuffers() const noexcept { return m_versionedBuffers; }
     void SetCandidateRejectedCallback(std::function<void(std::uint64_t)> callback);
@@ -331,12 +336,21 @@ public:
 private:
     mutable std::mutex m_mutex;
     RendererStateCandidate m_candidate;
+    // Counts finished worker preparations (WaitForPreparation). Shared, so a worker can signal it after the publisher is gone.
+    struct PreparationSignal {
+        std::mutex mutex;
+        std::condition_variable finished;
+        std::uint64_t count = 0;
+        void Notify();
+    };
+    std::shared_ptr<PreparationSignal> m_preparationSignal = std::make_shared<PreparationSignal>();
     struct PendingPatch {
         PublishedStatePatch patch;
         std::uint64_t submittedNs = 0;
         std::shared_ptr<const PublishedRendererState> base, prepared;
         ExecutablePreparation prepareExecutable;
         bool materializeOnWorker = false;
+        std::shared_ptr<PreparationSignal> signal;
         // started: its preparation runs on a worker. A newer patch does not cancel a started one (PublishPatch).
         std::atomic_bool ready{false}, cancelled{false}, failed{false}, started{false};
     };

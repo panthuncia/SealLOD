@@ -1119,7 +1119,8 @@ private:
             // resolution, without bloom (tonemapping adds that).
             constexpr const char* kAnchor = "TonemappingPass";
             if (const auto* statistics = graph->GetStatisticsService()) {
-                const auto& names = statistics->GetPassNames();
+                const auto passIndices = statistics->PassIndices();  // a copy: builds register passes on the build thread
+                const auto& names = passIndices->names;
                 if (!names.empty() && std::ranges::find(names, std::string(kAnchor)) == names.end()) {
                     throw std::runtime_error("the render graph has no TonemappingPass to read the HDR colour at");
                 }
@@ -1497,8 +1498,10 @@ private:
             Finish(renderer, "failed", "render graph statistics service is unavailable", hwnd, 6);
             return;
         }
-        const auto& names = service->GetPassNames();
-        const auto& stats = service->GetPassStats();
+        // A copy: builds register passes on the build thread.
+        const auto passStats = service->SnapshotPassStats();
+        const auto& names = passStats.names;
+        const auto& stats = passStats.stats;
         br::telemetry::sampling::SampleRecord sample;
         sample.ordinal = m_nextOrdinal;
         sample.before = BuildDemoSamplingReadiness(renderer);

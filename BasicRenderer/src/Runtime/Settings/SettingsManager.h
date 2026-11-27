@@ -130,6 +130,12 @@ public:
         return changed;
     }
 
+    // The name of the setting registered with this snapshot index, or empty (diagnostics).
+    std::string nameOfSnapshotIndex(std::size_t index) const {
+        for (const auto& [name, setting] : settings) if (setting->snapshotIndex == index) return name;
+        return {};
+    }
+
     // The type a setting was registered with, or null when there is no setting by that name.
     const std::type_info* tryGetSettingType(const std::string& name) const {
         const auto it = settings.find(name);

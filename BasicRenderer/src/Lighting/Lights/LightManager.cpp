@@ -681,7 +681,8 @@ void LightManager::PollCullingStats(org::RenderGraph* graph) {
 	if (!readbacks) return;
 	// Nothing writes the counters without the pass (no clustered lighting, path tracing).
 	if (const auto* statistics = graph->GetStatisticsService()) {
-		const auto& names = statistics->GetPassNames();
+		const auto passIndices = statistics->PassIndices();  // a copy: builds register passes on the build thread
+		const auto& names = passIndices->names;
 		if (!names.empty() && std::ranges::find(names, std::string("LightCullingPass")) == names.end()) return;
 	}
 	{

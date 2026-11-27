@@ -34,6 +34,7 @@ public:
 			if (const SettingsSnapshot* snapshot = br::settings_detail::t_activeSnapshot) {
 				if (void* copied = snapshot->Find(snapshotIndex)) return copied;
 			}
+			if (br::settings_detail::t_buildThread) br::settings_detail::ReportLiveBuildRead(snapshotIndex);
 			return &value;
 		};
 	}

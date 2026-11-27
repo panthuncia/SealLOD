@@ -46,15 +46,11 @@ class DebugSceneSnapshotService;
 class UpscalingGenerationService;
 
 // The frame graph host's epochs (M4 step 6): Visibility, Shading, Post and Overlay each run in a host epoch of their own (the
-// frame epoch's id), each a graph, executed in this order every frame. BASICRENDERER_FRAME_SPLIT (SetFrameSplit before the host
-// is made) picks fewer: 0 one host epoch holds the whole frame, 1 Visibility and Shading share Visibility's (step 5's layout),
-// 2 (default) all four.
+// frame epoch's id), each a graph, executed in this order every frame.
 constexpr uint32_t kFrameHostEpoch = kVisibilityEpoch;  // the first frame host epoch, Visibility's
-void SetFrameSplit(int split) noexcept;
-bool FrameSplit() noexcept;       // more than one host epoch
-int FrameSplitLevel() noexcept;   // 0, 1 or 2 (above)
+// The host epoch a frame epoch runs in: its own (Visibility's for anything that is not a frame epoch).
 uint32_t HostEpochOf(uint32_t frameEpoch) noexcept;
-// The frame host epochs in execution order: {1, 2, 3, 4} split, {1, 3, 4} at level 1, {1} not.
+// The frame host epochs in execution order: {1, 2, 3, 4}.
 const std::vector<uint32_t>& FrameHostEpochs() noexcept;
 // The bit of a host epoch in a FrameRevisions epoch mask.
 constexpr uint32_t HostEpochBit(uint32_t hostEpoch) noexcept { return 1u << hostEpoch; }

@@ -526,6 +526,7 @@ bool RendererStatePublisher::PublishPatch(PublishedStatePatch patch) {
         candidate->base = m_active;
         candidate->materializeOnWorker = static_cast<bool>(scheduler) || static_cast<bool>(m_prepareExecutable);
         candidate->prepareExecutable = m_prepareExecutable;
+        candidate->signal = m_preparationSignal;
     }
     const bool needsBuild = !inputs.empty();
     auto prepare = [candidate, inputs = std::move(inputs)]() mutable {
@@ -559,6 +560,7 @@ bool RendererStatePublisher::PublishPatch(PublishedStatePatch patch) {
             pending->failed.store(true, std::memory_order_relaxed);
         }
         pending->ready.store(true, std::memory_order_release);
+        if (pending->signal) pending->signal->Notify();
     };
     if (scheduler && (needsBuild || candidate->materializeOnWorker)) {
         // inputs have moved into the closure; its work is always immutable.
@@ -693,6 +695,7 @@ RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) 
                         pending->failed.store(true,std::memory_order_relaxed);
                     }
                     pending->ready.store(true,std::memory_order_release);
+                    if (pending->signal) pending->signal->Notify();
                 });
                 basic_telemetry::AddCounter("SARP.RendererStatePublisher.SuccessorRebuilds");
             }
@@ -856,7 +859,31 @@ RendererStateCommitResult RendererStatePublisher::Commit(std::size_t frameSlot) 
     return result;
 }
 
+void RendererStatePublisher::PreparationSignal::Notify() {
+    {
+        std::lock_guard lock(mutex);
+        ++count;
+    }
+    finished.notify_all();
+}
+
+void RendererStatePublisher::WaitForPreparation(std::chrono::microseconds timeout) const {
+    const auto signal = m_preparationSignal;
+    std::unique_lock signalLock(signal->mutex);
+    const auto seen = signal->count;
+    signalLock.unlock();
+    {
+        // A preparation that finished before the call is waiting for Commit already.
+        std::lock_guard lock(m_mutex);
+        if (std::ranges::any_of(m_patches, [](const auto& pending) { return pending->ready.load(std::memory_order_acquire); })) return;
+    }
+    signalLock.lock();
+    signal->finished.wait_for(signalLock, timeout, [&] { return signal->count != seen; });
+}
+
 std::string RendererStatePublisher::DescribePending() const {
+    const auto nowNs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
     std::lock_guard lock(m_mutex);
     auto text = std::format("active epoch {} candidate {} patches {}:", m_active ? m_active->epoch : 0u,
         static_cast<bool>(m_candidate.state), m_patches.size());
@@ -865,11 +892,11 @@ std::string RendererStatePublisher::DescribePending() const {
         for (std::size_t index = 0; index < pending->patch.fragments.size(); ++index) {
             if (pending->patch.fragments[index]) mask |= 1ull << index;
         }
-        text += std::format(" [fragments 0x{:x} source {} base {} ready {} failed {} cancelled {} worker {} baseIsActive {} prepared {}]",
-            mask, pending->patch.sourceEpoch, pending->base ? pending->base->epoch : 0u,
+        text += std::format(" [fragments 0x{:x} source {} base {} started {} ready {} failed {} cancelled {} worker {} baseIsActive {} prepared {} age {} ms]",
+            mask, pending->patch.sourceEpoch, pending->base ? pending->base->epoch : 0u, pending->started.load(std::memory_order_acquire),
             pending->ready.load(std::memory_order_acquire), pending->failed.load(std::memory_order_relaxed),
             pending->cancelled.load(std::memory_order_acquire), pending->materializeOnWorker, pending->base == m_active,
-            static_cast<bool>(pending->prepared));
+            static_cast<bool>(pending->prepared), (nowNs - pending->submittedNs) / 1'000'000u);
     }
     text += std::format("; committed {} rejected base {} regressions {} preconditions {} rebased {} candidates {}", m_stats.committed,
         m_stats.rejectedBaseEpoch, m_stats.rejectedFragmentRegressions, m_stats.rejectedPatchPreconditions, m_stats.rebasedPatches,

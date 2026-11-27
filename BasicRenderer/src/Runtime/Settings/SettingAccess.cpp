@@ -6,6 +6,42 @@
 
 #include "Runtime/Settings/SettingsManager.h"
 
+#include <cstdlib>
+#include <mutex>
+#include <sstream>
+#include <unordered_set>
+#if __has_include(<stacktrace>)
+#include <stacktrace>
+#endif
+#include <spdlog/spdlog.h>
+
+void br::settings_detail::ReportLiveBuildRead(std::size_t snapshotIndex)
+{
+    static const bool enabled = [] {
+        const char* value = std::getenv("BASICRENDERER_CHECK_BUILD_SETTINGS");
+        return value && value[0] == '1';
+    }();
+    if (!enabled) return;
+    static std::mutex mutex;
+    static std::unordered_set<std::size_t> reported;
+    {
+        std::scoped_lock lock(mutex);
+        if (!reported.insert(snapshotIndex).second) return;
+    }
+    std::string trace = "(no <stacktrace> support in this build)";
+#if defined(__cpp_lib_stacktrace) && (__cpp_lib_stacktrace >= 202011L)
+    try {
+        std::ostringstream stream;
+        stream << std::stacktrace::current(1, 24);
+        trace = stream.str();
+    } catch (...) {
+        trace = "(stacktrace capture failed)";
+    }
+#endif
+    spdlog::error("Setting '{}' read live on the frame-graph build thread:\n{}",
+        SettingsManager::GetInstance().nameOfSnapshotIndex(snapshotIndex), trace);
+}
+
 namespace br::extensions {
 
 float ReadFloatSetting(const std::string& name)

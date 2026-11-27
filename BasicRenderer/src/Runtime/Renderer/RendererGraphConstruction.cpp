@@ -6,7 +6,6 @@
 
 #include <chrono>
 #include "Runtime/Publication/PersistentRendererPublication.h"
-#include "OpenRenderGraph/GraphInstance.h"
 #include <BasicRenderer/Assets/ClusterLODTypes.h>
 
 #define _USE_MATH_DEFINES
@@ -165,11 +164,10 @@ std::string DescribeHostEpochs(const std::vector<uint32_t>& hosts) {
 }
 
 std::vector<uint32_t> Renderer::FrameGraphHostEpochs() const {
-    return m_useGraphInstance ? std::vector<uint32_t>{ br::render::kFrameHostEpoch } : br::render::FrameHostEpochs();
+    return br::render::FrameHostEpochs();
 }
 
 org::RenderGraph* Renderer::FrameGraph(uint32_t hostEpoch) {
-    if (m_useGraphInstance) return currentRenderGraph;
     return m_frameHost ? m_frameHost->Graph(hostEpoch) : nullptr;
 }
 
@@ -185,7 +183,6 @@ org::RenderGraph* Renderer::PresentationGraph() {
 // A build of several host epochs is attached as one staged set (FinishFrameBuild), so every epoch a change needs is in it.
 std::vector<uint32_t> Renderer::SelectBuildHostEpochs(uint32_t mask, bool shadowVariant) {
     const auto hosts = FrameGraphHostEpochs();
-    if (m_useGraphInstance) return hosts;
     uint32_t wanted = 0;
     for (const auto host : hosts)
         if ((mask & br::render::HostEpochBit(host)) || !m_frameHost->Graph(host)) wanted |= br::render::HostEpochBit(host);
@@ -195,8 +192,8 @@ std::vector<uint32_t> Renderer::SelectBuildHostEpochs(uint32_t mask, bool shadow
     // A Visibility build with the CLod shadow variant, or replacing a binding that had it, makes new CLod streaming buffers
     // (CLodExtension::BuildStreamingBinding), which Shading's graph (the streaming tail, the alpha variant) must be built with.
     // Both come from the build's own inputs (the makers MakeFrameExtensions made), so the two graphs go in one set.
-    const uint32_t shading = br::render::HostEpochBit(br::render::HostEpochOf(br::render::kShadingEpoch));
-    if ((wanted & visibility) && shading != visibility) {
+    const uint32_t shading = br::render::HostEpochBit(br::render::kShadingEpoch);
+    if (wanted & visibility) {
         const bool attachedShadow = m_frameInterface && m_frameInterface->clodStreaming && m_frameInterface->clodStreaming->HasVirtualShadowResources();
         if (shadowVariant || attachedShadow) wanted |= shading;
     }
@@ -249,7 +246,7 @@ bool Renderer::VirtualShadowMapsActive() const {
 void Renderer::ConsolidateFrameGraph() {
     BT_ZONE_SCOPE("Renderer::ConsolidateFrameGraph");
     // Failures of the attached graph's preparation, reported by the host (the callback logs them, RendererLifecycle).
-    if (m_frameHost && !m_useGraphInstance) m_frameHost->PollEpochFailures();
+    if (m_frameHost) m_frameHost->PollEpochFailures();
     // Pipelines declared outside a build (a pass redeclared at preparation) are not awaited: drop the finished ones.
     if (auto* pipelines = PSOManager::GetInstance().GetPipelineLibrary()) {
         for (const auto& failure : pipelines->DropSettledDeclared()) spdlog::error("Renderer: {}", failure);
@@ -269,7 +266,7 @@ void Renderer::ConsolidateFrameGraph() {
             const auto found = m_epochBuilds.find(host);
             const auto& build = found != m_epochBuilds.end() ? found->second : m_frameBuild;
             if (!graph || !build) continue;
-            if (const auto failure = CheckFrameEpochInterface(*graph, *build, m_frameBuildSerialAttached, m_useGraphInstance ? br::render::kNoFrameEpoch : host)) {
+            if (const auto failure = CheckFrameEpochInterface(*graph, *build, m_frameBuildSerialAttached, host)) {
                 if (!failure->empty()) spdlog::error("Renderer: the attached frame graph of host epoch {}: {}", host, *failure);
             } else {
                 checked = false;
@@ -282,7 +279,7 @@ void Renderer::ConsolidateFrameGraph() {
     }
     // With frame placement, a graph whose placements are in a pool generation another graph grew is built again. A graph placed
     // from an older frame placement takes the current one in place, at its next preparation (ORG), so it is not rebuilt.
-    if (m_framePlacement && currentRenderGraph && !m_frameRevisions.TopologyPending() && !FrameBuildInFlight()) {
+    if (currentRenderGraph && !m_frameRevisions.TopologyPending() && !FrameBuildInFlight()) {
         if (const auto stale = m_frameHost->StaleAliasPlacementEpochs(); !stale.empty()) {
             std::string epochs;
             uint32_t mask = 0;
@@ -310,7 +307,7 @@ void Renderer::StartAndRunFrameBuild() {
         job->reason += "; during its start: " + during.Describe();
         job->requests.Merge(std::move(during));
     }
-    // On the render thread: the first build (nothing renders meanwhile), the in-place graph, the synchronous fallback, and the
+    // On the render thread: the first build (nothing renders meanwhile), the synchronous fallback, and the
     // build after a GPU idle wait (resize, upscaler restart: the attached graph's resources are gone).
     const bool onRenderThread = !m_frameBuildWorker || !currentRenderGraph || m_nextFrameBuildSynchronous;
     m_nextFrameBuildSynchronous = false;
@@ -375,15 +372,6 @@ std::shared_ptr<br::render::FrameBuildJob> Renderer::StartFrameBuild(br::render:
     // so far completes (GraphHost::ReleaseRetiredGraphs), so its last frames overlap the build and the new graph's first frame.
     // Deferred deletions and descriptor releases retire by the runtime's frontier, which answers points on a retired graph's
     // timelines as reached; after-graph readback captures do the same (FrameReadbackCaptures::ProcessCompleted).
-    // A graph rebuilt in place (BASICRENDERER_FRAME_GRAPH_INSTANCE) has no old graph to hold its frames' objects: it still waits.
-    if (m_useGraphInstance) {
-        BT_ZONE_SCOPE("Renderer::StartFrameBuild::StallPipeline");
-        StallPipeline("a graph rebuilt in place (BASICRENDERER_FRAME_GRAPH_INSTANCE)");
-        if (m_readbackCaptures) m_readbackCaptures->ProcessCompleted();
-        org::DescriptorHeapManager::GetInstance().DrainDeferredReleasesAfterDeviceIdle();
-        PSOManager::GetInstance().DrainRetiredLivePipelinesAfterDeviceIdle();
-        org::DeletionManager::GetInstance().DrainAll();
-    }
 
         // The runtime's upload, upload policy and descriptor services were initialized with the runtime
         // (RendererLifecycle). They are not initialized again here: that would drop their pending work.
@@ -472,7 +460,7 @@ std::shared_ptr<br::render::FrameBuildJob> Renderer::StartFrameBuild(br::render:
         frameBuild.inputs.settings = std::move(settings);
         // The host's factories are fixed per id; only a change of the recipe's extension ids changes them. Owner thread, and
         // never while a build runs: a build takes the host's extension list when it starts.
-        if (!m_useGraphInstance) RegisterFrameHostExtensions(frameBuild.inputs.extensionIds, frameBuild.inputs.extensionEpochs);
+        RegisterFrameHostExtensions(frameBuild.inputs.extensionIds, frameBuild.inputs.extensionEpochs);
     }
     // The host epochs to build, once the inputs say which extensions the build makes (the CLod shadow variant). Nothing above
     // reads them: the declarations that do run in the build.
@@ -485,18 +473,14 @@ std::shared_ptr<br::render::FrameBuildJob> Renderer::StartFrameBuild(br::render:
         spdlog::warn("Renderer: the frame build's inputs wrote settings (its snapshot does not see these): {}", names);
         writes.clear();
     }
-    for (const auto host : frameBuild.hostEpochs) job->hostRequestsAtStart.push_back(m_useGraphInstance ? 0 : m_frameHost->RebuildRequests(host));
+    for (const auto host : frameBuild.hostEpochs) job->hostRequestsAtStart.push_back(m_frameHost->RebuildRequests(host));
     // Published-state resolvers capture against a manifest lease, as each frame's preparation does (RendererFrameUpdate).
     job->captureContext = std::make_shared<const org::ResolverCaptureContext>(m_context.publishedManifestLease,
         m_context.publishedRendererState ? m_context.publishedRendererState->bindingBundle : nullptr);
     // Staged recordings (M6 step 6): the frame the kept epochs' copies are recorded for, the build's update values with the last
-    // frame's render values. BASICRENDERER_STAGED_RECORDINGS=0 records none ahead.
-    static const bool stagedRecordings = [] {
-        const char* value = std::getenv("BASICRENDERER_STAGED_RECORDINGS");
-        return !(value && value[0] == '0');
-    }();
+    // frame's render values.
     const auto& lastUpdate = frameBuild.inputs.lastUpdate;
-    if (stagedRecordings && !m_useGraphInstance && lastUpdate && m_lastFrameRender && lastUpdate->frameNumber == m_lastFrameRender->frameNumber
+    if (lastUpdate && m_lastFrameRender && lastUpdate->frameNumber == m_lastFrameRender->frameNumber
         && lastUpdate->frameSlot == m_lastFrameRender->frameSlot) {
         // A build for new sizes (a resize, an upscaler change): its first frames have the build's render and output sizes, and the
         // light grid of that render size.
@@ -569,25 +553,7 @@ void Renderer::RunFrameBuild(br::render::FrameBuildJob& job) {
         // another build's.
         br::PipelineDeclarationScope declarations(PSOManager::GetInstance().GetPipelineLibrary());
         bool built = true;
-        if (m_useGraphInstance) {
-            // One graph, rebuilt in place on the render thread: it takes this build's new extension instances.
-            RendererECSManager::ScopedBuildWorldAccessCheck worldAccessCheck;
-            currentRenderGraph->ClearExtensions();
-            currentRenderGraph->RegisterExtension(std::make_unique<br::render::DeclarationGraphExtension>(
-                [this](org::RenderGraph& graph) { DeclareFrameProviders(graph); }), "BasicRenderer::Providers");
-            for (const auto& id : frameBuild.inputs.extensionIds) {
-                const auto maker = frameBuild.inputs.extensionMakers.find(id);
-                if (maker == frameBuild.inputs.extensionMakers.end() || !maker->second) continue;
-                if (auto extension = maker->second()) {
-                    currentRenderGraph->RegisterExtension(std::make_unique<br::render::EpochTaggedExtension>(std::move(extension),
-                        frameBuild.inputs.ExtensionEpoch(id), frameBuild.passEpochs), id);
-                }
-            }
-            currentRenderGraph->RegisterExtension(std::make_unique<br::render::DeclarationGraphExtension>(
-                [this](org::RenderGraph& graph) { DeclareFramePasses(graph); }), "BasicRenderer::Passes");
-            org::runtime::ScopedActiveGraphServices activeGraphServices(currentRenderGraph->GetUploadService(), currentRenderGraph->GetDescriptorService());
-            m_frameInstance->Rebuild([](org::RenderGraph& graph) { graph.PrepareExtensionsForBuild(); });
-        } else if (job.onRenderThread && !currentRenderGraph) {
+        if (job.onRenderThread && !currentRenderGraph) {
             // The first build, on the render thread: the host builds its graphs in place (its own build point). Nothing ran yet,
             // so there is no set to keep whole.
             spdlog::info("Renderer: frame graph build {} on the render thread (host epochs {}); why: {}", job.serial,
@@ -622,13 +588,12 @@ void Renderer::RunFrameBuild(br::render::FrameBuildJob& job) {
         }
         if (built) {
             // Every pass has a frame epoch, and what crosses epochs is logged (docs/frame_graph_composition_plan.md, M4).
-            const std::vector<uint32_t> hosts = m_useGraphInstance ? std::vector<uint32_t>{ br::render::kFrameHostEpoch } : frameBuild.hostEpochs;
-            for (const auto host : hosts) {
-                org::RenderGraph* graph = m_useGraphInstance ? currentRenderGraph : job.installed ? m_frameHost->Graph(host) : nullptr;
-                if (!m_useGraphInstance && !job.installed)
+            for (const auto host : frameBuild.hostEpochs) {
+                org::RenderGraph* graph = job.installed ? m_frameHost->Graph(host) : nullptr;
+                if (!job.installed)
                     for (auto& entry : job.graphs) if (entry.hostEpoch == host && entry.graph) graph = entry.graph->Graph();
                 if (!graph) continue;
-                if (auto failure = CheckFrameEpochInterface(*graph, *job.build, job.serial, m_useGraphInstance ? br::render::kNoFrameEpoch : host)) {
+                if (auto failure = CheckFrameEpochInterface(*graph, *job.build, job.serial, host)) {
                     if (!failure->empty()) {
                         job.error = std::move(*failure);
                         built = false;
@@ -644,7 +609,7 @@ void Renderer::RunFrameBuild(br::render::FrameBuildJob& job) {
         // GraphHost::PlaceEpochGraphs): the attach then only swaps them in. A graph whose placement would move a resource the
         // running graphs bind (a new version that moves a shared one) places at its attach, as before; its version's heaps are
         // allocated here all the same. Before the pipeline wait, so it overlaps the compiles.
-        if (built && !m_useGraphInstance && !job.installed && !job.graphs.empty()) {
+        if (built && !job.installed && !job.graphs.empty()) {
             BT_ZONE_SCOPE("Renderer::RunFrameBuild::PlaceTransients");
             std::vector<org::GraphHost::EpochGraph*> graphs;
             for (auto& entry : job.graphs) if (entry.graph) graphs.push_back(entry.graph.get());
@@ -669,7 +634,7 @@ void Renderer::RunFrameBuild(br::render::FrameBuildJob& job) {
         // build's thread, once its pipelines are in, so the first frames after the attach submit kept recordings instead of
         // recording on the render thread. The host records nothing for an epoch whose passes do not all report revisions
         // (Visibility, until it converts) and says why. Each copy's first run confirms its recording against its own frame data.
-        if (built && job.stagedFrame && !m_useGraphInstance && !job.installed && job.pipelineFailures.empty()) {
+        if (built && job.stagedFrame && !job.installed && job.pipelineFailures.empty()) {
             BT_ZONE_SCOPE("Renderer::RunFrameBuild::StagedRecordings");
             // By run (M7 step 2) when the attach resizes the swapchain: the first run's frame, then the later runs', each copy
             // recorded for the run that takes it (the drain frees every copy, so the new graph's runs take them in order). Every
@@ -691,8 +656,7 @@ void Renderer::RunFrameBuild(br::render::FrameBuildJob& job) {
             }
             for (auto& entry : job.graphs) {
                 if (!entry.graph || !entry.graph->Built()) continue;
-                if (job.swapsPrimaryDepth && entry.hostEpoch == br::render::HostEpochOf(br::render::kPostEpoch)
-                    && entry.hostEpoch != br::render::HostEpochOf(br::render::kVisibilityEpoch)) {
+                if (job.swapsPrimaryDepth && entry.hostEpoch == br::render::kPostEpoch) {
                     org::GraphHost::StagedRecordings skipped;
                     skipped.why = "not recorded: the attach changes the depth map group its depth history pass declares";
                     job.staged.push_back({ entry.hostEpoch, skipped });
@@ -707,7 +671,7 @@ void Renderer::RunFrameBuild(br::render::FrameBuildJob& job) {
                 }
                 uint32_t count = kEveryCopy;
                 if (stagedRunsOverride) count = stagedRunsOverride;
-                else if (entry.hostEpoch == br::render::HostEpochOf(br::render::kVisibilityEpoch)) count = 2u;
+                else if (entry.hostEpoch == br::render::kVisibilityEpoch) count = 2u;
                 job.staged.push_back({ entry.hostEpoch, m_frameHost->RecordStagedCopies(*entry.graph,
                     std::span<const org::UpdateExecutionContext>(runs.data(), (std::min<size_t>)(count, runs.size()))) });
             }
@@ -735,7 +699,7 @@ void Renderer::FinishFrameBuild(std::shared_ptr<br::render::FrameBuildJob> job) 
         spdlog::warn("Renderer: frame graph build {} wrote settings (its snapshot does not see these): {}", job->serial, names);
     }
     std::string failure = job->error;
-    if (failure.empty() && !m_useGraphInstance && !job->installed) {
+    if (failure.empty() && !job->installed) {
         if (job->graphs.size() != frameBuild.hostEpochs.size()) failure = "no graph was made for every host epoch";
         for (auto& entry : job->graphs) {
             if (!(entry.graph && entry.graph->Built())) {
@@ -749,7 +713,7 @@ void Renderer::FinishFrameBuild(std::shared_ptr<br::render::FrameBuildJob> job) 
         for (const auto& pipelineFailure : job->pipelineFailures) failure += "; " + pipelineFailure;
     }
     bool askAgain = false;
-    if (failure.empty() && !m_useGraphInstance && !job->installed && !m_frameHost->Graph(kUploadEpoch)) {
+    if (failure.empty() && !job->installed && !m_frameHost->Graph(kUploadEpoch)) {
         // The first build: the host's upload epoch (its upload pass alone) is built and attached first. The host points the
         // upload service at the registry of the graph it prepares (GraphHost::ExecuteFrame), and the frame's after this one.
         auto uploads = m_frameHost->BuildEpochGraph(kUploadEpoch, "first build");
@@ -760,7 +724,7 @@ void Renderer::FinishFrameBuild(std::shared_ptr<br::render::FrameBuildJob> job) 
     // The host epochs this build's graphs run in from now on.
     std::vector<uint32_t> attachedHosts;
     uint32_t refusedMask = 0;
-    if (failure.empty() && !m_useGraphInstance && !job->installed) {
+    if (failure.empty() && !job->installed) {
         // The build's graphs are one staged set (M4 step 7): each is staged (GraphHost::StageEpochGraph checks it and runs its
         // shared setup), then all are swapped in by one AttachStagedEpochGraphs at this consolidation point. A refusal of any
         // drops the whole set, so no frame runs some epochs of this build with others of an older one. Each old graph stops and
@@ -824,7 +788,7 @@ void Renderer::FinishFrameBuild(std::shared_ptr<br::render::FrameBuildJob> job) 
             if (std::find(attachedHosts.begin(), attachedHosts.end(), host) != attachedHosts.end()) ordered.push_back(host);
         attachedHosts = std::move(ordered);
     } else if (failure.empty()) {
-        attachedHosts = m_useGraphInstance ? std::vector<uint32_t>{ br::render::kFrameHostEpoch } : frameBuild.hostEpochs;
+        attachedHosts = frameBuild.hostEpochs;
     }
     const auto latencyMs = std::chrono::duration<double, std::milli>(begin - job->started).count();
     if (!failure.empty()) {
@@ -835,7 +799,7 @@ void Renderer::FinishFrameBuild(std::shared_ptr<br::render::FrameBuildJob> job) 
         ++m_graphBuildStats.failed;
         m_graphBuildStats.lastError = failure;
         // A graph the host's own build point installed is in place already: it cannot be kept from running.
-        const bool keep = currentRenderGraph && !m_useGraphInstance && !job->installed;
+        const bool keep = currentRenderGraph && !job->installed;
         spdlog::error("Renderer: frame graph build {} failed ({}): {}; why it was built: {}", job->serial,
             keep ? "the attached graphs keep rendering" : "there is no graph to keep", failure, job->reason);
         if (job->installed) {
@@ -852,13 +816,11 @@ void Renderer::FinishFrameBuild(std::shared_ptr<br::render::FrameBuildJob> job) 
         if (askAgain) m_frameRevisions.Restore(std::move(job->requests));
         return;
     }
-    if (!m_useGraphInstance) {
-        currentRenderGraph = m_frameHost->Graph(br::render::kFrameHostEpoch);
-        if (!currentRenderGraph) throw std::runtime_error("the frame graph host has no graph after its attach");
-    }
+    currentRenderGraph = m_frameHost->Graph(br::render::kFrameHostEpoch);
+    if (!currentRenderGraph) throw std::runtime_error("the frame graph host has no graph after its attach");
     m_frameBuild = job->build;
     m_frameBuildSerialAttached = job->serial;
-    if (!m_useGraphInstance) RecordAttachedBuildSet(job->serial, attachedHosts);
+    RecordAttachedBuildSet(job->serial, attachedHosts);
     m_frameEpochCheckDeferred = job->epochCheckDeferred;
     m_graphBuildSettings = frameBuild.inputs.settings;
     for (const auto host : attachedHosts) {
@@ -918,12 +880,10 @@ void Renderer::FinishFrameBuild(std::shared_ptr<br::render::FrameBuildJob> job) 
     // The epochs the host refused: built again.
     if (refusedMask) RequestGraphRebuild("refused at the attach of build " + std::to_string(job->serial), refusedMask);
     // The host's own requests (an extension added, recording timestamps switched) made after the build started.
-    if (!m_useGraphInstance) {
-        for (size_t index = 0; index < frameBuild.hostEpochs.size() && index < job->hostRequestsAtStart.size(); ++index) {
-            const auto host = frameBuild.hostEpochs[index];
-            if (m_frameHost->RebuildRequests(host) != job->hostRequestsAtStart[index] && m_frameHost->RebuildRequested(host))
-                RequestGraphRebuild("frame graph host: " + m_frameHost->RebuildReasons(host), br::render::HostEpochBit(host));
-        }
+    for (size_t index = 0; index < frameBuild.hostEpochs.size() && index < job->hostRequestsAtStart.size(); ++index) {
+        const auto host = frameBuild.hostEpochs[index];
+        if (m_frameHost->RebuildRequests(host) != job->hostRequestsAtStart[index] && m_frameHost->RebuildRequested(host))
+            RequestGraphRebuild("frame graph host: " + m_frameHost->RebuildReasons(host), br::render::HostEpochBit(host));
     }
     spdlog::info("Renderer: frame graph build {} attached (host epochs {}); built in {:.1f} ms {} ({:.1f} ms of it waiting for {} pipelines), {:.1f} ms after "
         "its start, {} frames rendered meanwhile; render thread {:.1f} ms before it and {:.1f} ms at its attach; transients of {} of {} graphs placed "
@@ -940,11 +900,11 @@ void Renderer::FinishFrameBuild(std::shared_ptr<br::render::FrameBuildJob> job) 
                 result.milliseconds, result.why.empty() ? std::string() : " (" + result.why + ")");
         }
         spdlog::info("Renderer: frame graph build {} staged recordings by host epoch: {}", job->serial, staged);
-    } else if (!job->stagedFrame && !m_useGraphInstance) {
+    } else if (!job->stagedFrame) {
         spdlog::info("Renderer: frame graph build {} recorded nothing ahead (no frame stands in for its first ones)", job->serial);
     }
     // What crosses the attached graphs, by identity (deferred for a graph built in place: it has no schedule yet).
-    if (!m_frameEpochCheckDeferred && !m_useGraphInstance) CheckFrameInterfaceAcrossGraphs(job->serial);
+    if (!m_frameEpochCheckDeferred) CheckFrameInterfaceAcrossGraphs(job->serial);
 }
 
 // The update values a build's passes declare from at Setup (FrameBuildInputs::lastUpdate): the last frame's, with the views
@@ -1231,8 +1191,7 @@ void Renderer::PublishFrameBuild(br::render::FrameBuild& build) {
         // build) and Shading's graph was not built with them, Shading is rebuilt: until then its tail submits nothing.
         const auto previous = m_frameInterface ? m_frameInterface->clodStreaming : nullptr;
         // SelectBuildHostEpochs puts Shading in such a build's set, so this is a fallback that should not run.
-        if (out.clodStreaming && previous && !out.clodStreaming->SharesBuffersWith(*previous) && !build.Declares(br::render::kShadingEpoch)
-            && br::render::HostEpochOf(br::render::kShadingEpoch) != br::render::HostEpochOf(br::render::kVisibilityEpoch)) {
+        if (out.clodStreaming && previous && !out.clodStreaming->SharesBuffersWith(*previous) && !build.Declares(br::render::kShadingEpoch)) {
             spdlog::warn("Renderer: a Visibility build replaced the CLod streaming buffers without a Shading graph in its set; Shading is "
                 "built again, and its streaming tail submits nothing until then");
             RequestGraphRebuild("CLod streaming buffers replaced by a Visibility build", br::render::HostEpochMaskOf({ br::render::kShadingEpoch }));
@@ -1250,12 +1209,12 @@ void Renderer::PublishFrameBuild(br::render::FrameBuild& build) {
 }
 
 std::string Renderer::DumpFrameGraphMemory() {
-    std::string reply = "{\"frame\":" + std::to_string(m_totalFramesRendered) + ",\"frame_placement\":" + (m_framePlacement ? "true" : "false");
+    std::string reply = "{\"frame\":" + std::to_string(m_totalFramesRendered) + ",\"frame_placement\":true";
     if (currentRenderGraph) {
         currentRenderGraph->WriteVramUsageDebugDumpNow(static_cast<uint32_t>(m_totalFramesRendered));
         reply += ",\"vram_dump\":true";
     }
-    if (m_frameHost && m_framePlacement) {
+    if (m_frameHost) {
         m_frameHost->LogFramePlacement(true);
         if (const auto version = m_frameHost->LatestFramePlacement()) {
             reply += ",\"frame_placement_version\":" + std::to_string(version->Id());
@@ -1547,7 +1506,7 @@ void Renderer::DeclareFrameProviders(org::RenderGraph& graph) {
         graph.RegisterResource(Builtin::Shadows::CLodReceiverHistory, frameInterface.vsmReceiverHistory);
     // The directional virtual shadow map, which Visibility's shadow variant writes and Shading's receivers (deferred shading, the
     // alpha variant) read: the renderer's objects, so a graph of another epoch binds what Visibility's graph writes even when it
-    // is rebuilt alone. Visibility's own graph (and the in-place graph, which has the variant) takes them from the variant.
+    // is rebuilt alone. Visibility's own graph takes them from the variant.
     const uint32_t hostEpoch = graph.PassEpochFilter();
     if (in.directionalVsm && hostEpoch != br::render::kNoFrameEpoch && hostEpoch != br::render::HostEpochOf(br::render::kVisibilityEpoch)) {
         const auto& vsm = *in.directionalVsm;
@@ -1940,8 +1899,8 @@ void Renderer::DeclareFramePasses(org::RenderGraph& graph) {
     const br::pipeline::PipelineRecipe& recipe = *in.recipe;
     const br::render::FramePassDeclaration declaration{ graph, *frameBuild, in, recipe };
     auto& passEpochs = *frameBuild->passEpochs;
-    // The host epoch this graph is built for (M4 step 5): it declares only the frame epochs that run in it. kNoFrameEpoch (the
-    // in-place graph): every epoch.
+    // The host epoch this graph is built for (M4 step 5): it declares only the frame epochs that run in it. kNoFrameEpoch (a graph
+    // with no epoch filter): every epoch.
     const uint32_t hostEpoch = graph.PassEpochFilter();
     // Runs one frame epoch's declarations, with the epoch current (ScopedDeclarationEpoch), and tags the passes they built
     // with it. An epoch the build does not declare, or that another host epoch's graph holds, is skipped.
@@ -2166,8 +2125,7 @@ void Renderer::MakeFrameExtensions(br::render::FrameBuild& build) {
 
     // The service persists; each graph gets its own extension over it.
     if (!m_frameIoService) {
-        m_frameIoService = std::make_shared<br::render::RenderGraphIOService>(*m_pTextureFactory, m_orgRuntime->Uploads(), *m_pMaterialManager);
-        m_frameIoService->SetAddsUploadPass(m_useGraphInstance);
+        m_frameIoService = std::make_shared<br::render::RenderGraphIOService>(*m_pTextureFactory, *m_pMaterialManager);
     }
     // Each extension's frame epoch (the M4 design's section 2). The IO extension's only work is its after-execution
     // readback; readback captures take the epoch of the pass each follows.

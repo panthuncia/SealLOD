@@ -86,27 +86,9 @@ ScopedDeclarationEpoch::~ScopedDeclarationEpoch() {
     t_declarationEpoch = m_previous;
 }
 
-namespace {
-std::atomic<int> g_frameSplit{ 2 };
-}
-
-void SetFrameSplit(int split) noexcept {
-    g_frameSplit.store(split < 0 ? 0 : split > 2 ? 2 : split, std::memory_order_relaxed);
-}
-
-bool FrameSplit() noexcept {
-    return g_frameSplit.load(std::memory_order_relaxed) != 0;
-}
-
-int FrameSplitLevel() noexcept {
-    return g_frameSplit.load(std::memory_order_relaxed);
-}
-
 uint32_t HostEpochOf(uint32_t frameEpoch) noexcept {
-    const int level = FrameSplitLevel();
-    if (level == 0) return kFrameHostEpoch;
     switch (frameEpoch) {
-    case kShadingEpoch: return level >= 2 ? kShadingEpoch : kFrameHostEpoch;
+    case kShadingEpoch: return kShadingEpoch;
     case kPostEpoch: return kPostEpoch;
     case kOverlayEpoch: return kOverlayEpoch;
     default: return kFrameHostEpoch;  // Visibility
@@ -115,10 +97,7 @@ uint32_t HostEpochOf(uint32_t frameEpoch) noexcept {
 
 const std::vector<uint32_t>& FrameHostEpochs() noexcept {
     static const std::vector<uint32_t> four{ kFrameHostEpoch, kShadingEpoch, kPostEpoch, kOverlayEpoch };
-    static const std::vector<uint32_t> three{ kFrameHostEpoch, kPostEpoch, kOverlayEpoch };
-    static const std::vector<uint32_t> one{ kFrameHostEpoch };
-    const int level = FrameSplitLevel();
-    return level >= 2 ? four : level == 1 ? three : one;
+    return four;
 }
 
 std::vector<uint32_t> HostEpochsOfMask(uint32_t mask) {

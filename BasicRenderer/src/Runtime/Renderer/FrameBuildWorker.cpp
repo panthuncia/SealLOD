@@ -5,6 +5,8 @@
 
 #include <windows.h>
 
+#include "Runtime/Settings/ISetting.h"
+
 namespace br::render {
 
 FrameBuildWorker::FrameBuildWorker(Run run) : m_run(std::move(run)) {
@@ -52,6 +54,7 @@ std::shared_ptr<FrameBuildJob> FrameBuildWorker::Wait() {
 
 void FrameBuildWorker::Loop() {
     SetThreadDescription(GetCurrentThread(), L"BR Frame Graph Build");
+    br::settings_detail::t_buildThread = true;
     for (;;) {
         std::shared_ptr<FrameBuildJob> job;
         {

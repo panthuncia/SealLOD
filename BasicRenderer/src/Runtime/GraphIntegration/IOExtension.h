@@ -12,14 +12,8 @@ public:
     explicit RenderGraphIOExtension(std::shared_ptr<br::render::RenderGraphIOService> service)
         : m_service(std::move(service)) {}
 
-    void OnRegistryReset(org::ResourceRegistry* registry) override {
-        m_service->SetRegistry(*registry);
-    }
-
-    void GatherStructuralPasses(org::RenderGraph&,
-        std::vector<org::ExternalPassDesc>& passes) override {
-        m_service->GatherStructuralPasses(passes);
-    }
+    // No structural passes: the upload pass comes from the graph's host (RenderGraphIOService).
+    void GatherStructuralPasses(org::RenderGraph&, std::vector<org::ExternalPassDesc>&) override {}
 
     void AfterExecute(org::RenderGraph& graph) override {
         m_service->AfterExecute(graph);

@@ -237,6 +237,20 @@ std::string Renderer::DescribeGraphRevisions() const {
             { "attached_output", { attached.output.x, attached.output.y } },
         };
     }
+    // M8 step 4: what a steady frame must not do (FrameGuardCounters), since the start. A window with no setting change shows
+    // none of these rise but frames.
+    {
+        const auto guards = GetFrameGuardCounters();
+        reply["guards"] = {
+            { "frames", guards.frames },
+            { "builds", guards.builds },
+            { "stale_repreparations", guards.staleRepreparations },
+            { "unnamed_rerecords", guards.unnamedRerecords },
+            { "stall_pipeline_calls", guards.stallPipelineCalls },
+            { "submission_drains", guards.submissionDrains },
+            { "device_waits", guards.deviceWaits },
+        };
+    }
     // M3 step 9: builds run on the build thread and are attached at the consolidation point.
     const auto& stats = m_graphBuildStats;
     const bool inFlight = FrameBuildInFlight();
@@ -1093,10 +1107,9 @@ void Renderer::SetSettings() {
         m_frameRevisions.RequestUpscaler("setting upscalingQualityMode");
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<bool>("enableDilatedMotionVectors", [this](const bool&) {
-        m_preFrameDeferredFunctions.defer([this]() {
-            UpscalingManager::GetInstance().RequestHistoryReset();
-            RequestGraphRebuild(std::string("setting ") + "enableDilatedMotionVectors", PostEpochs());
-        });
+        // A revision request like every other topology setting (M8 step 3); Update consumes it at its one point per frame.
+        UpscalingManager::GetInstance().RequestHistoryReset();
+        RequestGraphRebuild(std::string("setting ") + "enableDilatedMotionVectors", PostEpochs());
         }));
     m_settingsSubscriptions.push_back(settingsManager.addObserver<WindowResolutionPreset>(
         WindowResolutionPresetSettingName,

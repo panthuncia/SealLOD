@@ -12,11 +12,13 @@ void Menu::DrawPassTimingWindow() {
         return;
     }
 
-    auto& names = statisticsService->GetPassNames();
-    auto& techniquePaths = statisticsService->GetPassTechniquePaths();
-    auto& stats = statisticsService->GetPassStats();
+    // A copy: builds register passes on the build thread, which reallocates the live vectors.
+    const auto passStats = statisticsService->SnapshotPassStats();
+    auto& names = passStats.names;
+    auto& techniquePaths = passStats.techniquePaths;
+    auto& stats = passStats.stats;
     auto& meshStats = statisticsService->GetMeshStats();
-    auto& isGeom = statisticsService->GetIsGeometryPassVector();
+    auto& isGeom = passStats.isGeometryPass;
     static int maxStaleFrames = 240;
     static int viewMode = 0;
 

@@ -281,7 +281,10 @@ bool Renderer::ResizeSwapChain(UINT newWidth, UINT newHeight) {
     BT_ZONE_SCOPE("Renderer::ResizeSwapChain");
     // With the submission thread the presents run there: everything queued goes first, so no present is pending at the resize and
     // the frame fences below are on the queue. A resize at present that was asked for is answered by this one.
-    if (m_frameHost) m_frameHost->DrainSubmissions("swapchain resize");
+    if (m_frameHost) {
+        ++m_submissionDrains;
+        m_frameHost->DrainSubmissions("swapchain resize");
+    }
     m_pendingSwapchainResize.reset();
     // At the attach of the graphs built for the new size (M5 step 5). The backbuffers are used only by the presentation copies and
     // the presents, both on the graphics queue before each frame's fence: waiting for every slot's fence is waiting for the last of
@@ -346,12 +349,8 @@ bool Renderer::ResizeSwapChain(UINT newWidth, UINT newHeight) {
     SettingsManager::GetInstance().getSettingSetter<DirectX::XMUINT2>("outputResolution")({ newWidth, newHeight });
 
     // Inside Update (the consolidation point), after the frame took its slot: the frame continues on the image the resized
-    // swapchain gives, as a frame after a resize between frames did. Every slot's frame is complete (the waits above). With the
-    // submission thread the frame slot does not follow the image: the present reads the image itself.
-    if (!m_submissionThread) {
-        m_frameIndex = static_cast<uint8_t>(m_swapChain->CurrentImageIndex());
-        m_preparationFrameIndex = m_frameIndex;
-    }
+    // swapchain gives, as a frame after a resize between frames did. Every slot's frame is complete (the waits above). The frame
+    // slot does not follow the image: the present reads the image itself, on the submission thread.
 
     CreateRTVs();
     m_swapChainReady = true;
@@ -379,14 +378,12 @@ void Renderer::SwitchResolutionObjects(const std::shared_ptr<br::render::Resolut
     // The swapchain's size (outputResolution is written only where the swapchain is made or resized).
     const auto swapchainSize = settings.getSettingGetter<DirectX::XMUINT2>("outputResolution")();
     const bool resizeSwapchain = m_swapChain && (objects->recreateSwapchain || swapchainSize.x != objects->output.x || swapchainSize.y != objects->output.y);
-    if (resizeSwapchain && m_submissionThread && m_resizeAtPresent) {
+    if (resizeSwapchain) {
         // In this frame's present closure, before its presentation tail (ResizeSwapChainAtPresent): the wait for the old frames'
         // presents then overlaps this frame's work on the render thread instead of stalling it here. Readers of the size see the
         // new one from now on; the closure corrects it if the swapchain was made at another (EnqueuePresent).
         m_pendingSwapchainResize = PendingSwapchainResize{ objects->output.x, objects->output.y };
         settings.getSettingSetter<DirectX::XMUINT2>("outputResolution")(objects->output);
-    } else if (resizeSwapchain && !ResizeSwapChain(objects->output.x, objects->output.y)) {
-        spdlog::critical("Renderer: the swapchain could not be resized to {}x{} at the attach of the graphs built for it", objects->output.x, objects->output.y);
     }
     objects->recreateSwapchain = false;
     // The presentation copy reads the slot surfaces of the graphs that ran the frame: from this frame on, the new ones.

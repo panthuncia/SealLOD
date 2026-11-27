@@ -42,7 +42,7 @@ language server also reads them.
 BasicRenderer contains two dependency graphs with different responsibilities and lifetimes:
 
 1. The **async state graph** is a persistent CPU-side graph. It selects immutable artifact versions, waits on dependencies and GPU upload milestones, schedules producers, cancels superseded work, and hands completed manifest fragments to the publisher.
-2. The **frame render graph** is a per-accepted-frame GPU graph. OpenRenderGraph declares resource use, compiles queue/barrier/aliasing plans, prepares and records passes, submits queue work, and retires frame-owned state.
+2. The **frame render graph** is four persistent epoch graphs (Visibility, Shading, Post, Overlay) on one OpenRenderGraph `GraphHost`. They are built only when a revision asks, on a build thread, and attached between frames. Each accepted frame prepares the epochs' passes, records only stale batches of the kept recordings, submits queue work and presents on the host's submission thread, and retires frame-owned state. See [`../renderer-architecture.md`](../renderer-architecture.md), "The frame graph".
 
 The boundary between them is the immutable `PublishedRendererState` lease. A frame must not query mutable producers after crossing this boundary.
 

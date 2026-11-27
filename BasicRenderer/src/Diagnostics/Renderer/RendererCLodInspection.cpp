@@ -93,7 +93,8 @@ std::shared_ptr<Renderer::CLodInspectionRequest> Renderer::StartCLodInspectionFr
 	std::string anchor = kInspectionAnchorPass;
 	bool pathTraced = false;
 	if (const auto* statistics = currentRenderGraph->GetStatisticsService()) {
-		const auto& names = statistics->GetPassNames();
+		const auto passIndices = statistics->PassIndices();  // a copy: builds register passes on the build thread
+		const auto& names = passIndices->names;
 		if (!names.empty() && std::ranges::find(names, anchor) == names.end()) {
 			const auto candidate = std::ranges::find_if(names, [](const std::string& name) { return name.find("EvaluateMaterialGroups") != std::string::npos; });
 			// Path tracing replaces material evaluation and writes the surfaces itself; it has no visibility keys.

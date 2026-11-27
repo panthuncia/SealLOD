@@ -9,7 +9,6 @@
 #include "OpenRenderGraph/Runtime.h"
 #include <BasicRenderer/Renderer.h>
 #include "Runtime/GraphIntegration/FrameBuild.h"
-#include "OpenRenderGraph/GraphInstance.h"
 #include "OpenRenderGraph/GraphHost.h"
 #include "Runtime/StateGraph/AsyncStateGraph.h"
 #include "Runtime/Publication/PersistentRendererPublication.h"
@@ -988,33 +987,44 @@ void Renderer::Update(float elapsedSeconds) {
             lastBackpressureLog = now;
             spdlog::info("Renderer: frame waits for publications: material={} lights={} poses={}",
                 static_cast<bool>(publishedMaterialState), static_cast<bool>(updateData.lightTables), static_cast<bool>(updateData.poses));
-            // A material root that never publishes stops every frame (an intermittent Vulkan start stall, M5 step 8): after 5 s,
-            // say where the root waits.
-            static auto materialWaitSince = std::chrono::steady_clock::time_point{};
-            if (publishedMaterialState) {
-                materialWaitSince = {};
-            } else if (materialWaitSince == std::chrono::steady_clock::time_point{}) {
-                materialWaitSince = now;
-            } else if (now - materialWaitSince > std::chrono::seconds(5) && m_rendererStateRequests) {
-                const auto diagnostic = m_rendererStateRequests->Diagnose({ br::render::ArtifactKind::MaterialTable, 0, 0 });
-                spdlog::warn("Renderer: the material table root is not published: desiredRevision={} revision={} readiness={} "
-                    "stateAge={} ms blockers={} error='{}' chain='{}'",
-                    diagnostic.desiredRevision, diagnostic.artifact.revision, static_cast<unsigned>(diagnostic.artifact.readiness),
-                    diagnostic.stateAge.count() / 1000, diagnostic.blockers.size(), diagnostic.error, diagnostic.blockerChain);
-                spdlog::warn("Renderer: publication state: {}", m_rendererStateRequests->DescribePublication());
-                for (const auto& blocker : diagnostic.blockers) {
-                    const auto current = m_rendererStateRequests->Diagnose(blocker.key);
-                    spdlog::warn("Renderer: material table root blocker kind={} primary={} variant={} requiredRevision={} "
-                        "requiredReadiness={} currentRevision={} currentReadiness={} desiredRevision={} error='{}' chain='{}'",
-                        static_cast<unsigned>(blocker.key.kind), blocker.key.primaryID, blocker.key.variantID, blocker.minimumRevision,
-                        static_cast<unsigned>(blocker.requiredReadiness), current.artifact.revision,
-                        static_cast<unsigned>(current.artifact.readiness), current.desiredRevision, current.error, current.blockerChain);
+            // A root that never publishes stops every frame (the start stalls, M5 step 8, M7 step 8, M8 step 3): after 5 s,
+            // say where each missing root waits.
+            static auto publicationWaitSince = std::chrono::steady_clock::time_point{};
+            if (publicationWaitSince == std::chrono::steady_clock::time_point{}) {
+                publicationWaitSince = now;
+            } else if (now - publicationWaitSince > std::chrono::seconds(5) && m_rendererStateRequests) {
+                const std::pair<const char*, br::render::ArtifactKind> roots[] = {
+                    { "material table", br::render::ArtifactKind::MaterialTable },
+                    { "light table", br::render::ArtifactKind::LightTable },
+                    { "pose state", br::render::ArtifactKind::PoseState } };
+                const bool published[] = { static_cast<bool>(publishedMaterialState), static_cast<bool>(updateData.lightTables),
+                    static_cast<bool>(updateData.poses) };
+                for (std::size_t root = 0; root < std::size(roots); ++root) {
+                    if (published[root]) continue;
+                    const auto [name, kind] = roots[root];
+                    const auto diagnostic = m_rendererStateRequests->Diagnose({ kind, 0, 0 });
+                    spdlog::warn("Renderer: the {} root is not published: desiredRevision={} revision={} readiness={} "
+                        "stateAge={} ms blockers={} error='{}' chain='{}'", name,
+                        diagnostic.desiredRevision, diagnostic.artifact.revision, static_cast<unsigned>(diagnostic.artifact.readiness),
+                        diagnostic.stateAge.count() / 1000, diagnostic.blockers.size(), diagnostic.error, diagnostic.blockerChain);
+                    for (const auto& blocker : diagnostic.blockers) {
+                        const auto current = m_rendererStateRequests->Diagnose(blocker.key);
+                        spdlog::warn("Renderer: {} root blocker kind={} primary={} variant={} requiredRevision={} "
+                            "requiredReadiness={} currentRevision={} currentReadiness={} desiredRevision={} error='{}' chain='{}'", name,
+                            static_cast<unsigned>(blocker.key.kind), blocker.key.primaryID, blocker.key.variantID, blocker.minimumRevision,
+                            static_cast<unsigned>(blocker.requiredReadiness), current.artifact.revision,
+                            static_cast<unsigned>(current.artifact.readiness), current.desiredRevision, current.error, current.blockerChain);
+                    }
                 }
+                spdlog::warn("Renderer: publication state: {}", m_rendererStateRequests->DescribePublication());
             }
         }
         m_frameInputs.reset();
         // The publications may wait for uploads only a frame's upload pass submits: submit them without the frame.
         SubmitUploadsWithoutFrame();
+        // Wait for a preparation instead of returning to the next Update at once: each Update posts new light and pose
+        // intents, so a spinning render thread made a manifest and a patch every 0.2 ms and flooded the publisher (M8 step 3).
+        if (m_rendererStatePublisher) m_rendererStatePublisher->WaitForPreparation(std::chrono::milliseconds(2));
         basic_telemetry::AddCounter("SARP.FrameInputs.PublicationAdmissionBackpressure");
         basic_telemetry::SetGauge("SARP.FrameInputs.PublicationAdmissionReady", 0);
         return;
@@ -1667,8 +1677,6 @@ void Renderer::Update(float elapsedSeconds) {
         org::runtime::BeginUploadPolicyFrame();
     });
 
-    auto graphicsQueue = deviceManager.GetGraphicsQueue();
-    auto computeQueue = deviceManager.GetComputeQueue();
     runCapturedStage("FrameMaintenance", [&]() {
         if (currentRenderGraph) {
             BT_ZONE_SCOPE("Renderer::Update::FrameStatistics");
@@ -1677,16 +1685,11 @@ void Renderer::Update(float elapsedSeconds) {
                 // retired, per queue, and how much of the queue's span they leave idle.
                 constexpr double kHitchWaitMs = 50.0;
                 const bool hitch = m_lastWaitForFrameMs > kHitchWaitMs;
-                // The in-place graph has no host to retire runs: its slot is the frame's.
-                if (m_useGraphInstance) {
-                    statisticsService->OnFrameComplete(m_frameIndex, computeQueue);
-                    OnFrameHostRunCompleted(m_totalFramesRendered, *statisticsService);
-                    statisticsService->OnFrameComplete(m_frameIndex, graphicsQueue);
-                    OnFrameHostRunCompleted(m_totalFramesRendered, *statisticsService);
-                }
                 if (hitch) {
                     std::string hitchReport;
-                    const auto& names = statisticsService->GetPassNames();
+                    // A copy: builds register passes on the build thread (IStatisticsService::PassIndices).
+                    const auto passIndices = statisticsService->PassIndices();
+                    const auto& names = passIndices->names;
                     const auto describeQueue = [&](const char* queueName, std::vector<CompletedPassStamp> stamps) {
                         if (stamps.empty()) return;
                         uint64_t first = UINT64_MAX;

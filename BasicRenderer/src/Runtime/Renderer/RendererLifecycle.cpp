@@ -4,7 +4,6 @@
 
 #include "Assets/Textures/Pipeline/TexturePipelineArtifacts.h"
 #include "Runtime/GraphIntegration/TextureJobGraph.h"
-#include "OpenRenderGraph/GraphInstance.h"
 #include "OpenRenderGraph/GraphHost.h"
 #include "Runtime/Renderer/FrameBuildWorker.h"
 #include "Runtime/GraphIntegration/FrameBuild.h"
@@ -90,12 +89,8 @@ void Renderer::SignalFence(rhi::Queue commandQueue, uint8_t frameIndexToSignal) 
 }
 
 void Renderer::AdvanceFrameIndex() {
-    // With the submission thread the image is read where the present is made (EnqueuePresent): the slot goes round robin.
-    if (m_swapChain && !m_submissionThread) {
-        m_frameIndex = static_cast<uint8_t>(m_swapChain->CurrentImageIndex());
-    } else {
-        m_frameIndex = (m_frameIndex + 1) % m_numFramesInFlight;
-    }
+    // The swapchain image is read where the present is made, on the submission thread (EnqueuePresent): the slot goes round robin.
+    m_frameIndex = (m_frameIndex + 1) % m_numFramesInFlight;
     m_totalFramesRendered += 1;
 }
 
@@ -107,7 +102,10 @@ void Renderer::StallPipeline(std::string_view reason) {
     DiscardFrameBuildInFlight("a GPU idle wait");
     m_nextFrameBuildSynchronous = true;
     // What the submission thread holds goes to the queues first, presents included: the waits below then cover it.
-    if (m_frameHost) m_frameHost->DrainSubmissions("StallPipeline");
+    if (m_frameHost) {
+        ++m_submissionDrains;
+        m_frameHost->DrainSubmissions("StallPipeline");
+    }
     for (uint8_t i = 0; i < m_numFramesInFlight; ++i) {
         WaitForFrame(i);
     }
@@ -239,7 +237,6 @@ void Renderer::Cleanup() {
     ::ResourceManager::GetInstance().Cleanup();
     m_coreResourceProvider.Cleanup();
     // The host retires its graphs and waits only for their own work (the device is idle by now).
-    m_frameInstance.reset();
     if (m_frameHost) m_frameHost->DestroyGraph();
     m_frameHost.reset();
     m_frameHostExtensionIds.clear();
@@ -582,46 +579,26 @@ void Renderer::Initialize(
         org::GraphHost::Desc hostDesc{};
         hostDesc.runtime = m_orgRuntime;
         hostDesc.framesInFlight = m_numFramesInFlight;
-        m_useGraphInstance = br::runtime::renderer_settings::ReadTruthyEnvironmentFlag("BASICRENDERER_FRAME_GRAPH_INSTANCE");
         // M4 step 6: Visibility, Shading, Post and Overlay each in a host epoch's graph of its own, executed in that order every
-        // frame. BASICRENDERER_FRAME_SPLIT=0 keeps the whole frame in one graph, =1 Visibility and Shading in one (step 5); the
-        // in-place graph is one graph.
-        {
-            int split = 2;
-            if (const char* value = std::getenv("BASICRENDERER_FRAME_SPLIT"); value && value[0] >= '0' && value[0] <= '2') split = value[0] - '0';
-            br::render::SetFrameSplit(m_useGraphInstance ? 0 : split);
-        }
+        // frame.
         hostDesc.epochOrder = {kUploadEpoch};
         for (const auto host : br::render::FrameHostEpochs()) hostDesc.epochOrder.push_back(host);
         // A replaced graph is destroyed on the runtime's deleter thread, not in a frame (M4 step 2): about 10 ms in raster.
-        // BASICRENDERER_RETIRED_GRAPHS_ON_RENDER_THREAD=1 destroys it on the render thread, as before.
-        hostDesc.destroyRetiredGraphsDetached =
-            !br::runtime::renderer_settings::ReadTruthyEnvironmentFlag("BASICRENDERER_RETIRED_GRAPHS_ON_RENDER_THREAD");
+        hostDesc.destroyRetiredGraphsDetached = true;
         // ORG's frame placement (M4, decision D2): it places every epoch's transients from the frame's usage summaries, so a
-        // resource several epochs share is placed once over its whole span. On by default since it holds the single graph's
-        // aliasing (M4 step 4); BASICRENDERER_FRAME_PLACEMENT=0 turns it off.
-        m_framePlacement = !m_useGraphInstance && !br::runtime::renderer_settings::ReadFalsyEnvironmentFlag("BASICRENDERER_FRAME_PLACEMENT");
-        // The renderer builds its epochs itself, so it rebuilds the graphs whose placements went stale (ConsolidateFrameGraph).
-        hostDesc.reportStaleAliasPlacements = m_framePlacement;
+        // resource several epochs share is placed once over its whole span. The renderer builds its epochs itself, so it rebuilds
+        // the graphs whose placements went stale (ConsolidateFrameGraph).
+        hostDesc.reportStaleAliasPlacements = true;
         // M7 step 5: the frame's epochs are submitted on the host's submission thread (O-M7-1), external client submissions made
-        // meanwhile queue behind them (O-M7-3), seals are queued, and the present runs there too (EnqueuePresent). On by default
-        // since M7 step 6; BASICRENDERER_SUBMISSION_THREAD=0 submits and presents on the render thread, as before. Not with the
-        // in-place graph.
-        m_submissionThread = !m_useGraphInstance && !br::runtime::renderer_settings::ReadFalsyEnvironmentFlag("BASICRENDERER_SUBMISSION_THREAD");
-        if (m_submissionThread) {
-            hostDesc.submissionThread = true;
-            hostDesc.queuedSeals = true;
-            hostDesc.executeOnSubmissionThread = true;
-            m_presentShared = std::make_unique<PresentShared>();
-            m_resizeAtPresent = !br::runtime::renderer_settings::ReadFalsyEnvironmentFlag("BASICRENDERER_RESIZE_AT_PRESENT");
-        }
+        // meanwhile queue behind them (O-M7-3), seals are queued, and the present runs there too (EnqueuePresent). A swapchain
+        // resize at an attach is made in the present (RendererResources).
+        hostDesc.submissionThread = true;
+        hostDesc.queuedSeals = true;
+        hostDesc.executeOnSubmissionThread = true;
+        m_presentShared = std::make_unique<PresentShared>();
         m_frameHost = std::make_unique<org::GraphHost>(std::move(hostDesc));
-        if (m_submissionThread) {
-            // Device-wide waits made on other threads (MaterialTextureTransferService's failure path) drain the thread first.
-            DeviceManager::GetInstance().SetSubmissionDrain([host = m_frameHost.get()](const char* why) { host->DrainSubmissions(why); });
-            spdlog::info("Renderer: the frame host submits on its submission thread, and presents there (BASICRENDERER_SUBMISSION_THREAD); "
-                "swapchain resizes at an attach are made in the present {}", m_resizeAtPresent ? "(BASICRENDERER_RESIZE_AT_PRESENT)" : "off: at the attach");
-        }
+        // Device-wide waits made on other threads (MaterialTextureTransferService's failure path) drain the thread first.
+        DeviceManager::GetInstance().SetSubmissionDrain([host = m_frameHost.get()](const char* why) { host->DrainSubmissions(why); });
         m_frameHost->SetExplicitBuilds(true);
         // M6 step 3: kept recordings for the frame's synchronous epochs (GraphHost::SetKeptEpochs). Visibility, Shading and Post keep
         // theirs; Overlay records every frame (the menu changes every frame). A run submits its copy's kept recording while it is
@@ -630,7 +607,7 @@ void Renderer::Initialize(
         // carry their own pass timestamps. BASICRENDERER_KEPT_RECORDINGS=0 turns keeping off; so does an NVPerf capture
         // (BASICRENDERER_NVPERF_CAPTURE), whose pass ranges are recorded into the lists.
         m_frameHost->SetInlineAtExecution(true);
-        if (!m_useGraphInstance && !br::runtime::renderer_settings::ReadFalsyEnvironmentFlag("BASICRENDERER_KEPT_RECORDINGS")
+        if (!br::runtime::renderer_settings::ReadFalsyEnvironmentFlag("BASICRENDERER_KEPT_RECORDINGS")
             && !br::runtime::renderer_settings::ReadTruthyEnvironmentFlag("BASICRENDERER_NVPERF_CAPTURE")) {
             std::vector<uint32_t> kept;
             const uint32_t overlay = br::render::HostEpochOf(br::render::kOverlayEpoch);
@@ -640,11 +617,10 @@ void Renderer::Initialize(
             m_frameHost->SetRecordingTimestamps(true);
             // M6 step 7, batch reuse (O-M6-6): each batch of a kept recording is checked on its own, so an epoch with passes that
             // report no revision yet (Visibility, until it converts) still submits its other batches again and records only the
-            // batches with such passes. BASICRENDERER_KEPT_BATCH_REUSE=0 checks and reuses whole recordings, as before.
-            const bool batchReuse = !br::runtime::renderer_settings::ReadFalsyEnvironmentFlag("BASICRENDERER_KEPT_BATCH_REUSE");
-            m_frameHost->SetKeptBatchReuse(batchReuse);
-            spdlog::info("Renderer: kept recordings on for {} host epoch(s) (BASICRENDERER_KEPT_RECORDINGS), batch reuse {} (BASICRENDERER_KEPT_BATCH_REUSE)",
-                m_frameHost->KeptEpochs().size(), batchReuse ? "on" : "off");
+            // batches with such passes.
+            m_frameHost->SetKeptBatchReuse(true);
+            spdlog::info("Renderer: kept recordings on for {} host epoch(s) (BASICRENDERER_KEPT_RECORDINGS), batch reuse on",
+                m_frameHost->KeptEpochs().size());
             // M6 step 4, the revision audit (O-M6-7; decision D7: off unless set): BASICRENDERER_KEPT_RECORDING_AUDIT=N prepares a
             // kept epoch anyway at every N-th reuse of a copy and reports the passes whose frame data differs while their revision
             // is the same (the 600-frame log's "kept recording audit" line, renderer.revisions' recordings.audit).
@@ -658,7 +634,7 @@ void Renderer::Initialize(
         m_frameHost->SetCompletedFrameCallback([this](uint64_t hostFrame, const org::runtime::IStatisticsService& stats) {
             OnFrameHostRunCompleted(hostFrame, stats);
         });
-        if (m_framePlacement) {
+        {
             // The frame's host epochs in frame order: each graph's uses count at its position, so a transient two epochs use
             // is placed over the span between them and keeps its contents from the writing epoch to the reading one.
             std::vector<org::GraphHost::FramePosition> positions;
@@ -668,16 +644,14 @@ void Renderer::Initialize(
             org::GraphHost::FramePlacementSettings placement;
             placement.enabled = true;
             placement.logLifetimes = br::runtime::renderer_settings::ReadTruthyEnvironmentFlag("BASICRENDERER_FRAME_PLACEMENT_LOG");
-            // A rebuilt graph's new version keeps the running graphs' resources where they are (M4 step 9). =0 packs every new
-            // version from scratch, and the running graphs place again (step 8).
-            placement.keepRunning = !br::runtime::renderer_settings::ReadFalsyEnvironmentFlag("BASICRENDERER_FRAME_PLACEMENT_KEEP");
-            // A staged set's graphs publish their usage summaries before the first of them places (M5 step 6). =0: each with its plan.
-            placement.summariesFirst = !br::runtime::renderer_settings::ReadFalsyEnvironmentFlag("BASICRENDERER_FRAME_PLACEMENT_SUMMARIES_FIRST");
+            // A rebuilt graph's new version keeps the running graphs' resources where they are (M4 step 9).
+            placement.keepRunning = true;
+            // A staged set's graphs publish their usage summaries before the first of them places (M5 step 6).
+            placement.summariesFirst = true;
             // The worker's settled and trimmed versions are published once every graph prepared its re-placement on a worker (M5 step
-            // 7). =0: each graph re-places at its preparation, on the render thread.
-            placement.prepareReplacements = !br::runtime::renderer_settings::ReadFalsyEnvironmentFlag("BASICRENDERER_FRAME_PLACEMENT_PREPARED");
+            // 7).
+            placement.prepareReplacements = true;
             m_frameHost->SetFramePlacement(placement);
-            spdlog::info("Renderer: ORG frame placement on (BASICRENDERER_FRAME_PLACEMENT)");
         }
         // A failure of the attached graph's preparation, handed over by PollEpochFailures (ConsolidateFrameGraph). A build's own
         // failure comes back with its graph (BuildEpochGraph), not through here.
@@ -689,15 +663,10 @@ void Renderer::Initialize(
         });
         // M3 step 9: frame graphs are built on a thread of their own while the attached one keeps rendering.
         // BASICRENDERER_SYNC_FRAME_BUILD=1 builds them on the render thread, the same way, for debugging.
-        if (!m_useGraphInstance && !br::runtime::renderer_settings::ReadTruthyEnvironmentFlag("BASICRENDERER_SYNC_FRAME_BUILD")) {
+        if (!br::runtime::renderer_settings::ReadTruthyEnvironmentFlag("BASICRENDERER_SYNC_FRAME_BUILD")) {
             m_frameBuildWorker = std::make_unique<br::render::FrameBuildWorker>([this](br::render::FrameBuildJob& job) { RunFrameBuild(job); });
-        } else if (!m_useGraphInstance) {
+        } else {
             spdlog::warn("Renderer: BASICRENDERER_SYNC_FRAME_BUILD: frame graphs are built on the render thread");
-        }
-        if (m_useGraphInstance) {
-            spdlog::warn("Renderer: BASICRENDERER_FRAME_GRAPH_INSTANCE: the frame graph runs on a GraphInstance (diagnostics)");
-            m_frameInstance = org::GraphInstance::Adopt(m_orgRuntime, std::make_unique<org::RenderGraph>(m_orgRuntime));
-            currentRenderGraph = m_frameInstance->Graph();
         }
         if (DeviceManager::GetInstance().IsMultiRHIEnabled()) {
             spdlog::warn("Renderer: the frame graph host builds for the primary device only; peer-device passes run there");
@@ -738,12 +707,19 @@ void Renderer::Initialize(
         m_rendererStatePublisher->SetExecutablePreparation(br::render::PreparePersistentRendererPublication);
         spdlog::info("Persistent material/geometry publication preparation enabled; pass execution remains transitional");
     }
+    // A preparation is publication work: frames wait for it. As Background work in the serialized RendererState domain it ran
+    // only when no deferred commit was queued, or after 2 s, behind the preparations it superseded. At startup each Update
+    // spin queued a deferred commit (4-15 ms each) and a new patch, which cancelled the queued one before it started: no
+    // patch with the material, light or pose root ever started (the start stall, M8 step 3). The publication class runs
+    // ahead of those commits, and its own key keeps it FIFO only among preparations.
     m_rendererStatePublisher->SetPreparationScheduler([scope = m_rendererStateCommitScope](std::function<void()>&& work) {
-        return TaskSchedulerManager::GetInstance().Submit(scope, TaskLane::Background, TaskDomain::RendererState,
+        constexpr br::TaskTraceMetadata kPublicationPreparation{
+            .admissionKey = 0x5055424c50524550ull, .workClass = 0, .admissionGroup = br::render::RendererArtifactScheduling::admissionGroup };
+        return TaskSchedulerManager::GetInstance().Submit(scope, TaskLane::Streaming, TaskDomain::RendererState,
             "PublicationBindingBundles", [work = std::move(work)](const br::TaskContext& context) mutable {
                 auto operation = std::move(work);
                 if (!context.StopRequested()) operation();
-            });
+            }, kPublicationPreparation);
     });
     br::render::PublishedStateSource::SetProcessSource(m_rendererStatePublisher->ResourceSource());
     m_rendererStateRequests = std::make_unique<br::render::RendererStateRequestService>(

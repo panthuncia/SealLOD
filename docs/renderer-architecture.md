@@ -29,6 +29,50 @@ supply device, PSO, and buffer facilities; asset import uses processing and cach
 implementations; diagnostics reads feature state for menus and telemetry. Generic
 state-graph and scheduler code does not depend on feature managers.
 
+## The frame graph
+
+The renderer owns one `org::GraphHost` (`m_frameHost`, set up in `RendererLifecycle.cpp`).
+The frame is four host epochs, each a graph of its own, executed in this order every frame
+(`include/BasicRenderer/Extensions/FrameEpochs.h`): Visibility, Shading, Post and Overlay.
+A fifth epoch, `Renderer::kUploadEpoch`, holds only the host's upload pass. It runs on frames
+held back for publications (`SubmitUploadsWithoutFrame`).
+
+- **Revisions.** Nothing builds a graph inline. Settings, resizes, pipelines and capacity growth
+  post revisions (`FrameRevisions`, `RequestGraphRebuild`). The render thread consumes them once
+  a frame at the consolidation point, `Renderer::ConsolidateFrameGraph`.
+- **Builds.** A build runs on the build thread (`FrameBuildWorker`, `GraphHost::BuildEpochGraph`)
+  from a settings snapshot and a render-thread snapshot of its inputs (`MakeFrameBuild`). The
+  attached graphs keep rendering meanwhile. Its outputs are published at the attach
+  (`PublishFrameBuild`). The finished set attaches as one staged set
+  (`GraphHost::AttachStagedEpochGraphs`), so a frame never mixes graphs from two builds. A
+  replaced graph is destroyed on the runtime's deleter thread. `BASICRENDERER_SYNC_FRAME_BUILD=1`
+  runs the same build on the render thread, for debugging.
+- **Placement.** ORG's frame placement places every epoch's transients from the frame's usage
+  summaries, so a transient that several epochs share is placed once over its span. A build's
+  placement is staged on the build thread. Its version keeps the running graphs' resources where
+  they are.
+- **Kept recordings.** Visibility, Shading and Post keep their recordings
+  (`GraphHost::SetKeptEpochs`). A run reuses each batch while its passes' revisions are unchanged,
+  and records only stale batches, with a named reason. A build records the kept epochs' copies on
+  the build thread before the attach (staged recordings). Overlay records every frame.
+  `BASICRENDERER_KEPT_RECORDINGS=0` (and an NVPerf capture) turns keeping off.
+- **Resolution.** Window size and upscaler changes are a resolution revision, taken once a frame
+  with no build in flight. They build a staged set like any other revision. The attach switches the
+  resolution objects (`SwitchResolutionObjects`), and that frame's present resizes the swapchain
+  on the submission thread (`ResizeSwapChainAtPresent`), without a device wait.
+- **Submission.** The render thread runs each epoch's update and preparation (`ExecuteFrame`).
+  The host's submission thread does the uploads, admission, recording, queue submission and the
+  present (`EnqueuePresent`). `GetTotalFramesRendered` counts `Render` calls;
+  `GetPresentedFrames` counts presents that ran.
+- **Guards.** `GetFrameGuardCounters` counts builds, staged recordings found stale at their first
+  run, re-records with no named reason, `StallPipeline` calls, submission drains and device-wide
+  waits. In a steady frame they stay at zero; `renderer.revisions` reports them.
+  `StallPipeline` is called only at shutdown and shader reload. `BASICRENDERER_CHECK_BUILD_SETTINGS=1`
+  reports a live setting read on the build thread.
+
+ORG's side of this is in `OpenRenderGraph/docs/persistent-epochs.md`. The plan that built it is
+SARP's `docs/frame_graph_composition_plan.md`.
+
 ## Placement rules
 
 Folders are subfeature-first: `VirtualGeometry/Streaming/RenderPasses`, for example.

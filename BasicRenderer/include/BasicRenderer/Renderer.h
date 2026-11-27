@@ -74,7 +74,6 @@ class PixelBuffer;
 class RenderGraph;
 struct ScheduleTrace;
 class GraphHost;
-class GraphInstance;
 class Runtime;
 struct IRenderGraphExtension;
 struct UpdateExecutionContext;
@@ -222,11 +221,23 @@ public:
     br::render::SceneIngestionServices& GetSceneIngestionServices() { return m_sceneIngestionServices; }
     const br::render::SceneIngestionServices& GetSceneIngestionServices() const { return m_sceneIngestionServices; }
     uint64_t GetTotalFramesRendered() const { return m_totalFramesRendered; }
-    // Frames whose present has run (M7 step 5). With the submission thread (on by default; BASICRENDERER_SUBMISSION_THREAD=0
-    // turns it off) it can trail GetTotalFramesRendered, which counts Render calls, by the frame queued there; without, it
-    // equals it. Pace by this one: a frame counted here has been handed to the display.
+    // Frames whose present has run (M7 step 5). Presents run on the submission thread, so it can trail GetTotalFramesRendered,
+    // which counts Render calls, by the frame queued there. Pace by this one: a frame counted here has been handed to the
+    // display.
     uint64_t GetPresentedFrames() const { return m_presentShared ? m_presentShared->passed.load(std::memory_order_acquire) : m_totalFramesRendered; }
     org::RenderGraph* GetRenderGraph() { return currentRenderGraph; }
+    // What a steady frame must not do (M8 step 4), counted since the start. Render thread. renderer.revisions reports them as
+    // "guards"; the scene benchmark and the settings sweep fail when one rises in a window with no setting change.
+    struct FrameGuardCounters {
+        uint64_t frames = 0;               // Render calls (GetTotalFramesRendered)
+        uint64_t builds = 0;               // frame graph builds started
+        uint64_t staleRepreparations = 0;  // staged recordings found stale at their first run and recorded again there
+        uint64_t unnamedRerecords = 0;     // kept-copy runs that recorded with no reason named
+        uint64_t stallPipelineCalls = 0;   // StallPipeline: shutdown and shader reload only
+        uint64_t submissionDrains = 0;     // the renderer's own drains of the submission thread (StallPipeline, a swapchain resize)
+        uint64_t deviceWaits = 0;          // device-wide waits off the frame path (DeviceManager::DrainSubmissions, before a WaitIdle)
+    };
+    FrameGuardCounters GetFrameGuardCounters() const;
     // The path tracer's accumulation, for capturing a reference image. buffer is null unless the current graph path traces
     // with pathTracingAccumulate on. framesSinceRestart counts frames prepared since the last restart, so it can lead the
     // buffer's alpha (the sample count the GPU wrote) by the frames in flight; restarts counts restarts since graph build.
@@ -334,15 +345,11 @@ private:
     // The last Present's duration and return time, for the swapchain resize's log (how far ahead of the display the frames are).
     double m_lastPresentMs = 0.0;
     std::chrono::steady_clock::time_point m_lastPresentReturned{};
-    // M7 step 5, BASICRENDERER_SUBMISSION_THREAD (on by default since step 6; =0 turns it off): the frame host submits its
-    // epochs on its submission thread, and Render queues the frame's presentation tail, Present and the frame fence's signal
-    // behind them as one closure (EnqueuePresent). At most one present is queued ahead of the thread: Render waits for the
-    // previous one first. The frame slot then advances round robin, apart from the swapchain image, which the closure reads
-    // when it presents.
-    bool m_submissionThread = false;
-    // A resize at an attach is made in the attach frame's present closure, before its presentation tail, so the wait for the old
-    // frames' presents overlaps the render thread's next frame (BASICRENDERER_RESIZE_AT_PRESENT=0: at the attach, as before).
-    bool m_resizeAtPresent = false;
+    // M7 step 5: the frame host submits its epochs on its submission thread, and Render queues the frame's presentation tail,
+    // Present and the frame fence's signal behind them as one closure (EnqueuePresent). At most one present is queued ahead of
+    // the thread: Render waits for the previous one first. The frame slot advances round robin, apart from the swapchain image,
+    // which the closure reads when it presents. A resize at an attach is made in the attach frame's present closure, before its
+    // presentation tail, so the wait for the old frames' presents overlaps the render thread's next frame.
     struct PendingSwapchainResize { UINT width = 0, height = 0; };
     std::optional<PendingSwapchainResize> m_pendingSwapchainResize;
     // What the present closures report to the render thread.
@@ -400,22 +407,17 @@ private:
     std::unique_ptr<org::GraphHost> m_frameHost;
     // The AMD LPM constants every build shares (FrameBuildInputs::lpmConstants), made by the first build.
     std::shared_ptr<org::Resource> m_lpmConstants;
-    // Diagnostics (BASICRENDERER_FRAME_GRAPH_INSTANCE=1): the frame graph adopted by a GraphInstance instead, as before GraphHost.
-    std::unique_ptr<org::GraphInstance> m_frameInstance;
-    bool m_useGraphInstance = false;
     // The host's epochs: one that holds only the host's upload pass, run on frames the renderer holds back (publication
     // backpressure) so staged uploads still reach the GPU; and the frame's. The frame epochs (FrameEpochs.h) are the
-    // host's epoch ids, Visibility, Shading, Post and Overlay. Until the frame is split (M4 step 4) the Visibility epoch's
-    // graph holds the whole frame (br::render::HostEpochOf): kFrameEpoch is that epoch.
+    // host's epoch ids, Visibility, Shading, Post and Overlay, each a graph of its own (M4 step 6). kFrameEpoch is the first.
     static constexpr uint32_t kUploadEpoch = 0;
     static constexpr uint32_t kVisibilityEpoch = br::render::kVisibilityEpoch;
     static constexpr uint32_t kShadingEpoch = br::render::kShadingEpoch;
     static constexpr uint32_t kPostEpoch = br::render::kPostEpoch;
     static constexpr uint32_t kOverlayEpoch = br::render::kOverlayEpoch;
     static constexpr uint32_t kFrameEpoch = kVisibilityEpoch;
-    // ORG's frame placement over the frame epochs (GraphHost::SetFramePlacement): on unless BASICRENDERER_FRAME_PLACEMENT=0.
-    // Graphs take a new placement in place; graphs whose pool placements went stale are rebuilt (ConsolidateFrameGraph).
-    bool m_framePlacement = false;
+    // ORG's frame placement over the frame epochs (GraphHost::SetFramePlacement) is always on. Graphs take a new placement in
+    // place; graphs whose pool placements went stale are rebuilt (ConsolidateFrameGraph).
     // The host's graph. A build replaces it, so it is read again after each attach (FinishFrameBuild).
     org::RenderGraph* currentRenderGraph = nullptr;
     // The extension ids registered on the host, in build order, so a change of extensions removes the old ones. Each id's
@@ -459,8 +461,8 @@ private:
     uint64_t m_frameBuildSerialAttached = 0;
     bool m_frameEpochCheckDeferred = false;
     // Frame-graph builds run on this thread while the attached graph keeps rendering (M3 step 9); the render thread attaches a
-    // finished one at its consolidation point (ConsolidateFrameGraph). Null with BASICRENDERER_SYNC_FRAME_BUILD=1 and for the
-    // in-place graph (BASICRENDERER_FRAME_GRAPH_INSTANCE): those build on the render thread.
+    // finished one at its consolidation point (ConsolidateFrameGraph). Null with BASICRENDERER_SYNC_FRAME_BUILD=1: frame graphs
+    // then build on the render thread.
     std::unique_ptr<br::render::FrameBuildWorker> m_frameBuildWorker;
     // The next build runs on the render thread: after a GPU idle wait (resize, upscaler restart), the attached graph's
     // resources are gone and it must not render another frame.
@@ -486,7 +488,7 @@ private:
     std::string m_lastGraphBuildReasons;
     struct GraphBuildStatistics {
         uint64_t started = 0;
-        uint64_t onRenderThread = 0;   // built on the render thread (the first, synchronous ones, the in-place graph)
+        uint64_t onRenderThread = 0;   // built on the render thread (the first, synchronous ones)
         uint64_t failed = 0;           // failed or refused at the attach: the old graph kept
         uint64_t discarded = 0;        // dropped before the attach (a GPU idle wait, shutdown)
         uint64_t superseded = 0;       // attached while newer requests waited (a follow-up build answers them)
@@ -685,7 +687,7 @@ private:
     void UpdateFrameInterface(uint64_t primaryViewID);
     // The building thread, after a build: every pass has a frame epoch (an error names those that have none), and what
     // crosses epochs is logged. Nullopt while the graph has no schedule yet (a graph built in place, before its first frame).
-    // hostEpoch: the host epoch the graph is built for (kNoFrameEpoch: the in-place graph).
+    // hostEpoch: the host epoch the graph is built for (kNoFrameEpoch: a graph with no epoch filter).
     std::optional<std::string> CheckFrameEpochInterface(org::RenderGraph& graph, const br::render::FrameBuild& build, uint64_t serial,
         uint32_t hostEpoch);
     // Render thread, after an attach: what the attached host epochs' graphs share, by identity, and names that are separate
@@ -695,9 +697,9 @@ private:
     // the attach (a trace of every graph there cost about 1.2 ms of render thread per attach). Kept for the attached graphs only.
     std::mutex m_graphTraceMutex;
     std::unordered_map<const org::RenderGraph*, std::shared_ptr<const org::ScheduleTrace>> m_graphTraces;
-    // The frame host epochs (FrameBuild.h: {1, 3, 4} split), each a graph of the host; one for the in-place graph.
+    // The frame host epochs (FrameBuild.h: {1, 2, 3, 4}), each a graph of the host.
     std::vector<uint32_t> FrameGraphHostEpochs() const;
-    // A host epoch's graph (the in-place graph for any), null before its build.
+    // A host epoch's graph, null before its build.
     org::RenderGraph* FrameGraph(uint32_t hostEpoch);
     // The graph that presents: the last host epoch's (Overlay's, with PresentationReadyPass).
     org::RenderGraph* PresentationGraph();
@@ -785,6 +787,9 @@ private:
     void AddKeptStats(size_t index, uint32_t host);
     // The same since the start, by host epoch, for renderer.revisions' "recordings".
     std::map<uint32_t, FrameGraphExecutionTiming::Kept> m_keptRecordingTotals;
+    // FrameGuardCounters' own counts: kept-copy runs that recorded with no reason (AddKeptStats) and the renderer's drains.
+    uint64_t m_unnamedRerecords = 0;
+    uint64_t m_submissionDrains = 0;
     // Frames since the latest attach of frame graphs (FinishFrameBuild), for the first frames' line. UINT32_MAX: none yet.
     uint32_t m_framesSinceFrameGraphAttach = UINT32_MAX;
     // The frame placement version at the last frame's end, and the frames logged since it changed (diagnostic, M5 step 7).
@@ -866,7 +871,9 @@ private:
     // Whether the recipe the next build is made from writes Ray Reconstruction's guides.
     bool RayReconstructionGuidesForNextBuild() const;
 
-    // Waits for every frame slot and for the device to go idle. Shutdown, shader reload and the in-place graph only (M5 step 5).
+    // Waits for every frame slot and for the device to go idle. Its only callers are shutdown (Cleanup, twice) and shader reload
+    // (M5 step 5; M8 step 3 audit). Shader reload keeps it until kept and staged recordings hold pipeline generations (D6,
+    // deferred). Anything else is a regression: FrameGuardCounters::stallPipelineCalls fails a steady window.
     void StallPipeline(std::string_view reason);
 
 	void RunBeforeNextFrame(std::function<void()> fn) {
@@ -918,6 +925,9 @@ private:
     bool m_terrainRvtCountersReadbackPending = false;
     bool m_loggedTerrainRvtTelemetryEnabled = false;
 
+    // Work that must wait for the frame's safe point: a setting written again from inside its own observer (enablePathTracing),
+    // the window resolution preset, the environment switch, RunBeforeNextFrame. Graph work is a revision request instead
+    // (m_frameRevisions), never a closure here.
     DeferredFunctions m_preFrameDeferredFunctions;
     int32_t m_lastFrameTaskNodeIndex = -1;
     br::render::SceneRenderBridge m_sceneRenderBridge;

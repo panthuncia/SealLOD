@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <functional>
 #include <string>
 
@@ -72,15 +73,19 @@ public:
     }
 
     // A device-wide wait (WaitIdle) made off the render thread drains the frame host's submission thread first, so the wait covers
-    // what the frame handed it (BASICRENDERER_SUBMISSION_THREAD). The renderer sets it with its host and clears it at shutdown.
+    // what the frame handed it. The renderer sets it with its host and clears it at shutdown.
     void SetSubmissionDrain(std::function<void(const char*)> drain) { m_submissionDrain = std::move(drain); }
     void DrainSubmissions(const char* why) const {
+        m_submissionDrainCalls.fetch_add(1, std::memory_order_relaxed);
         if (m_submissionDrain) m_submissionDrain(why);
     }
+    // DrainSubmissions calls since the start: each is a device-wide wait (Renderer::FrameGuardCounters::deviceWaits).
+    uint64_t SubmissionDrainCalls() const noexcept { return m_submissionDrainCalls.load(std::memory_order_relaxed); }
 
 private:
     DeviceManager() = default;
     std::function<void(const char*)> m_submissionDrain;
+    mutable std::atomic<uint64_t> m_submissionDrainCalls{ 0 };
 
     void CheckGPUFeatures();
 

@@ -42,6 +42,12 @@ namespace br::settings_detail {
     inline thread_local std::vector<std::string> t_writesUnderSnapshot;
     // Nonzero while a SettingsWriteWatch is active: writes are recorded as under a snapshot, but reads stay live.
     inline thread_local int t_writeWatch = 0;
+    // Set on the frame-graph build thread (FrameBuildWorker). A getter that reads a live value there (no snapshot active, or
+    // a setting the snapshot has no copy of) is reported with BASICRENDERER_CHECK_BUILD_SETTINGS=1 (decision M8-D4): the
+    // render thread may be writing it.
+    inline thread_local bool t_buildThread = false;
+    // Logs the first live read of each setting on the build thread, with a stack trace (SettingAccess.cpp).
+    void ReportLiveBuildRead(std::size_t snapshotIndex);
 }
 
 // Records the settings this thread writes until the scope ends, without changing what getters read. For finding the writes
