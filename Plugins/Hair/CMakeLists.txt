@@ -10,7 +10,10 @@ add_library(HairCore STATIC
     include/Hair/GroomBuilder.h
     include/Hair/GroomFile.h
     include/Hair/GroomSource.h
+    include/Hair/HairBsdfShared.h
     include/Hair/HairFileReader.h
+    include/Hair/HairScatterShared.h
+    include/Hair/HairVolumeShared.h
     include/Hair/HairGPUTypes.h
     include/Hair/HairLod.h
     include/Hair/HairLodShared.h
@@ -31,7 +34,9 @@ target_link_libraries(HairCore PRIVATE Alembic::Alembic)
 add_executable(HairCoreTests
     tests/AlembicGroomTests.cpp
     tests/GroomBuilderTests.cpp
-    tests/HairCoreTests.cpp)
+    tests/HairBsdfTests.cpp
+    tests/HairCoreTests.cpp
+    tests/HairScatterTests.cpp)
 target_link_libraries(HairCoreTests PRIVATE HairCore Alembic::Alembic)
 add_test(NAME HairCoreTests COMMAND HairCoreTests)
 
@@ -54,21 +59,34 @@ target_link_libraries(HairPlugin PUBLIC HairCore BasicRenderer::BasicRenderer)
 # C++/HLSL headers they share with the plugin in HairShaders/Hair/.
 set(HAIR_SHADER_STAGE_DIR "${CMAKE_BINARY_DIR}/BasicRenderer/HairShaders")
 set(HAIR_SHADER_FILES
+    "${CMAKE_CURRENT_LIST_DIR}/shaders/hairBsdf.hlsli"
     "${CMAKE_CURRENT_LIST_DIR}/shaders/hairCommon.hlsli"
+    "${CMAKE_CURRENT_LIST_DIR}/shaders/hairComposite.hlsl"
     "${CMAKE_CURRENT_LIST_DIR}/shaders/hairDebugOverlay.hlsl"
     "${CMAKE_CURRENT_LIST_DIR}/shaders/hairGuideLevels.hlsl"
     "${CMAKE_CURRENT_LIST_DIR}/shaders/hairGuideSkin.hlsli"
+    "${CMAKE_CURRENT_LIST_DIR}/shaders/hairHit.hlsli"
     "${CMAKE_CURRENT_LIST_DIR}/shaders/hairRaster.hlsl"
+    "${CMAKE_CURRENT_LIST_DIR}/shaders/hairRasterCulled.hlsl"
     "${CMAKE_CURRENT_LIST_DIR}/shaders/hairResolve.hlsl"
     "${CMAKE_CURRENT_LIST_DIR}/shaders/hairRootCheck.hlsl"
     "${CMAKE_CURRENT_LIST_DIR}/shaders/hairRootFrame.hlsli"
     "${CMAKE_CURRENT_LIST_DIR}/shaders/hairSelectEvaluate.hlsl"
+    "${CMAKE_CURRENT_LIST_DIR}/shaders/hairShade.hlsl"
+    "${CMAKE_CURRENT_LIST_DIR}/shaders/hairShadeList.hlsl"
+    "${CMAKE_CURRENT_LIST_DIR}/shaders/hairShadow.hlsl"
+    "${CMAKE_CURRENT_LIST_DIR}/shaders/hairShading.hlsli"
     "${CMAKE_CURRENT_LIST_DIR}/shaders/hairSimulate.hlsl"
-    "${CMAKE_CURRENT_LIST_DIR}/shaders/hairStructs.hlsli")
+    "${CMAKE_CURRENT_LIST_DIR}/shaders/hairStructs.hlsli"
+    "${CMAKE_CURRENT_LIST_DIR}/shaders/hairVolume.hlsl"
+    "${CMAKE_CURRENT_LIST_DIR}/shaders/hairVolume.hlsli")
 set(HAIR_SHADER_SHARED_HEADERS
+    "${CMAKE_CURRENT_LIST_DIR}/include/Hair/HairBsdfShared.h"
     "${CMAKE_CURRENT_LIST_DIR}/include/Hair/HairGPUTypes.h"
     "${CMAKE_CURRENT_LIST_DIR}/include/Hair/HairLodShared.h"
-    "${CMAKE_CURRENT_LIST_DIR}/include/Hair/HairRuntimeGPUTypes.h")
+    "${CMAKE_CURRENT_LIST_DIR}/include/Hair/HairRuntimeGPUTypes.h"
+    "${CMAKE_CURRENT_LIST_DIR}/include/Hair/HairScatterShared.h"
+    "${CMAKE_CURRENT_LIST_DIR}/include/Hair/HairVolumeShared.h")
 set(HAIR_SHADER_STAGE_STAMP "${CMAKE_CURRENT_BINARY_DIR}/HairShaders.stamp")
 add_custom_command(
     OUTPUT "${HAIR_SHADER_STAGE_STAMP}"

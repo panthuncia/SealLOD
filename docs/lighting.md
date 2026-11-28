@@ -65,6 +65,11 @@ the OpenPBR BRDF (`EvaluateDirectLightContribution`), and accumulates:
 `lightFragment` (deferred, with debug outputs) and `lightFragmentColor` (forward and ray-hit paths) wrap it with
 image-based lighting and emission.
 
+One loop is not this one: strand hair's layered path lights strand vertices in `Plugins/Hair/shaders/hairShade.hlsl`
+with a loop of its own, because a fibre has no surface normal and takes light from behind. It is built from the same
+pieces (`EvaluateLightAtPoint`, `LightIncidentRadiance`, `EvaluateLightOcclusion`, and optionally the light grid's forward
+runs), so the light model and the shadow lookup stay single; see [hair.md](hair.md#the-layered-path).
+
 ### Visibility is the caller's to state
 
 The loop reads no root constants. Callers pass `DirectLightingOptions`:
@@ -263,6 +268,12 @@ one-texel depth bias. This is a hard shadow softened over one texel; `sourceRadi
 | Software raster | Every mip. One record per cluster; the rasterizer divides by w, interpolates 1/depth, and walks the face's mips, clamping each to its rectangle. Meshlets crossing the near plane go to the hardware path. |
 | Reyes | None. Displaced clusters render undisplaced through the hardware path. |
 | SARP grass (caster provider) | None. |
+| Strand hair (caster provider) | None. |
+
+A caster provider (`IVirtualShadowCasterProvider`, `Extensions/VirtualShadowCasterProvider.h`) is offered the sun's
+clipmaps and a depth write for them, not the faces. There are two: SARP's grass, a mesh-shader pass, and strand hair
+(`Plugins/Hair`, [hair.md](hair.md#shadow-casting)), which rasterizes strands from compute with their coverage dithered
+and tells in that section what a provider would need to draw into faces.
 
 ### Testing
 

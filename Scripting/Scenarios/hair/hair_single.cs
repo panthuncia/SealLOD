@@ -50,6 +50,7 @@ public sealed class HairSingle : Scenario
         var commands = ctx.Commands;
         commands.Invoke("hair.clear");
         if (Environment.GetEnvironmentVariable("HAIR_COVERAGE") is string coverage) commands.Invoke("hair.lod", new { coverage }); // off: the opaque form
+        if (Environment.GetEnvironmentVariable("HAIR_PATH") is string path) commands.Invoke("hair.render", new { path }); // layered: the composited path
         uint scalp = commands.Invoke("hair.load", new {
             procedural = new { style = "wavy", strands = 4000, seed = 7, radius = 0.5, length = 0.7, droop = 5.0, root_width = 0.0005, tip_width = 0.0003 },
         }).GetProperty("asset").GetUInt32();

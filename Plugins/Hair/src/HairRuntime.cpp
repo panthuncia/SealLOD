@@ -1,5 +1,8 @@
 #include "Hair/HairRuntime.h"
 
+#include "Hair/HairBsdfShared.h"
+#include "Hair/HairScatterShared.h"
+
 #include "HairGpuBuffers.h"
 
 #include "Hair/AlembicGroomReader.h"
@@ -10,6 +13,8 @@
 #include <BasicRenderer/Assets/Geometry/MeshInstance.h>
 #include <BasicRenderer/Diagnostics/ReadbackCaptures.h>
 #include <BasicRenderer/Extensions/SceneEntityRenderState.h>
+#include <BasicRenderer/Extensions/UpscalerReactiveMask.h>
+#include <BasicRenderer/Extensions/VirtualShadowCasterProvider.h>
 #include <BasicRenderer/Renderer.h>
 #include <BasicRenderer/Scene/Animation/Skeleton.h>
 #include <BasicRenderer/Scene/Components.h>
@@ -22,6 +27,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cctype>
 #include <cmath>
@@ -46,6 +52,7 @@ struct Asset {
     BuiltGroom groom;
     std::string source;
     std::uint32_t clusterBase = 0u;
+    float maxStrandWidth = 0.0f; // the widest strand's diameter, rest space
     std::uint32_t strandBase = 0u;
     std::uint32_t guideBase = 0u;
     std::uint32_t pointBase = 0u;
@@ -112,6 +119,9 @@ struct Instance {
     HairSimMetrics simMetrics;                 // the newest readback
     HairInstanceGPU gpu{};
     bool gpuValid = false; // `gpu` is what the instance buffer holds
+    // The material its rows of the scatter table were made for (PlanVolumes).
+    HairBsdfMaterial scatterMaterial{};
+    bool scatterValid = false;
     // Self-check only: the skin matrices (inverse bind * pose) the previous frame's dispatch read. One matrix in Bone
     // mode, the whole palette in PerRoot mode.
     std::vector<XMFLOAT4X4> previousSkin;
@@ -186,7 +196,10 @@ enum BufferId : std::size_t {
     kBufferClusters, kBufferAggregates, kBufferStrands, kBufferRootBindings, kBufferGuideBindings, kBufferGuideStrandIndices,
     kBufferGuidePointRanges, kBufferPoints, kBufferInstances, kBufferColliders, kBufferFrameState, kBufferSimFrame,
     kBufferCounters, kBufferSimMetrics, kBufferSimGroups, kBufferGuidePoints, kBufferVisibleClusters, kBufferPoolVertices,
-    kBufferPoolSegmentIds, kBufferRootCheckList, kBufferRootCheck, kBufferProbe, kBufferCount
+    kBufferPoolSegmentIds, kBufferRootCheckList, kBufferRootCheck, kBufferProbe, kBufferPoolColors, kBufferShadeList,
+    kBufferVolumes, kBufferVolumeVoxels, kBufferScatterTables, kBufferShadowClusters, kBufferShadowClusterMasks,
+    kBufferShadowPoolVertices, kBufferShadowPoolSegmentIds, kBufferRasterItems, kBufferPoolLate, kBufferRasterArgs,
+    kBufferClusterSeen, kBufferCount
 };
 
 std::string LowerExtension(const std::filesystem::path& path)
@@ -421,6 +434,32 @@ struct HairRuntime::State {
     std::vector<HairInstanceDispatch> selectedInstances;
     bool selectionValid = false;
     HairLodSettings lod;
+    HairRenderSettings render;
+    std::uint32_t rasterCulledFrames = 0u; // consecutive frames the culled rasterizer has drawn
+    float lastRasterWidthPixels = 0.0f;
+    HairVolumeSettings volume;
+    HairVolumeStats volumeStats;
+    std::vector<HairVolumeGPU> uploadedVolumes; // what the volume buffer holds
+    // Shadow casting (PlanShadows).
+    HairShadowSettings shadows;
+    HairShadowSettings shadowsDrawn;  // the controls the shadow map's cached pages were drawn with
+    HairShadowStats shadowStats;
+    std::shared_ptr<VirtualShadowInvalidationQueue> shadowQueue;
+    std::atomic<std::uint64_t> shadowPassFrame{ kNoFrame }; // the last frame a shadow pass of a live graph was updated in
+    std::atomic<float> shadowDynamicRadius{ 0.0f };         // what RequestedDynamicShadowRadius answers
+    // What each instance row cast its shadow from in the last frame: the sphere its groom was in and the matrix that
+    // put it there. Not the instances' own: hair.clear drops those, and the shadows they left have to be redrawn.
+    struct ShadowCaster {
+        bool valid = false;
+        bool simulated = false;
+        Float3 center{};
+        float radius = 0.0f;
+        XMFLOAT4X4 toWorld{};
+    };
+    std::vector<ShadowCaster> shadowCasters;
+    std::vector<std::pair<HairBsdfMaterial, HairScatterTable>> scatterCache; // the last tables made, by material
+    // The reactive mask this runtime gave the upscaler (Extensions/UpscalerReactiveMask.h), or null.
+    std::shared_ptr<org::PixelBuffer> registeredReactiveMask;
     HairDebugView debugView = HairDebugView::Off;
     br::render::SceneMutationSubscription sceneHook;
 
@@ -461,7 +500,7 @@ struct HairRuntime::State {
 
     void ResolvePendingInstances(Scene& scene);
     void CreateBuffers();
-    void EnsureVisibilityTarget(std::uint32_t width, std::uint32_t height);
+    void EnsureVisibilityTarget(std::uint32_t width, std::uint32_t height, bool layered);
     void UploadAsset(Asset& asset, const HairUpload& upload);
     void RequestCounterReadback(const std::shared_ptr<State>& self, const HairFrameInputs& inputs, bool selected);
     void RequestSelfCheck(const std::shared_ptr<State>& self, std::uint64_t frameNumber, std::vector<ExpectedRoot> expected);
@@ -473,6 +512,8 @@ struct HairRuntime::State {
     HairSimStatus DescribeSim();
     std::uint32_t PlanSimSteps(float deltaSeconds);
     void PlanSimLevels(const HairFrameInputs& inputs, float simulatedSeconds);
+    void PlanVolumes(const HairFrameInputs& inputs, const HairUpload& upload, HairFramePlan& plan);
+    void PlanShadows(const HairFrameInputs& inputs, HairFramePlan& plan, std::uint64_t planClusters, std::uint64_t planPoints);
     std::uint32_t GuideRowBudget() const
     {
         return sim.guidePointBudget != 0u ? (std::min)(sim.guidePointBudget, guideRows.capacity) : guideRows.capacity;
@@ -594,6 +635,11 @@ void HairRuntime::State::RefreshBufferUse()
     Use(kBufferSimGroups, lastSimGroups);
     Use(kBufferRootCheckList, lastRootChecks);
     Use(kBufferRootCheck, lastRootChecks);
+    Use(kBufferVolumes, uploadedVolumes.size());
+    Use(kBufferVolumeVoxels, volumeStats.voxels);
+    std::uint64_t scatterRows = 0u;
+    for (const auto& instance : instances) scatterRows += instance.scatterValid ? HAIR_SCATTER_TABLE_ROWS : 0u;
+    Use(kBufferScatterTables, scatterRows);
     bufferUse[kBufferGuidePoints].usedRows = guideRows.used;
     bufferUse[kBufferGuidePoints].highWaterRows = guideRows.highWater;
     // The visible-cluster list and the strand pool are filled on the GPU: the counter readback sets theirs. The probe
@@ -604,6 +650,11 @@ HairRuntime::HairRuntime(HairCapacities capacities)
     : m_state(std::make_shared<State>())
 {
     m_state->capacities = capacities;
+    // For A/B runs of tools that do not name a rasterizer: BR_HAIR_RASTER=direct starts with the direct one.
+    if (const char* raster = std::getenv("BR_HAIR_RASTER")) {
+        if (std::string_view(raster) == "direct") m_state->render.raster = HairRasterMode::Direct;
+        if (std::string_view(raster) == "culled") m_state->render.raster = HairRasterMode::Culled;
+    }
     m_state->guideRows.Reset(capacities.guidePoints);
 }
 
@@ -629,6 +680,8 @@ void HairRuntime::Shutdown()
     m_state->selectionValid = false;
     m_state->instances.clear();
     m_state->assets.clear();
+    if (m_state->registeredReactiveMask) br::render::SetUpscalerReactiveMask(nullptr);
+    m_state->registeredReactiveMask.reset();
     m_state->buffers.reset();
 }
 
@@ -680,6 +733,7 @@ std::optional<std::uint32_t> HairRuntime::LoadGroom(const HairGroomRequest& requ
         asset.guidePointRanges.push_back({ asset.guidePointCount, count });
         asset.guidePointCount += count;
     }
+    for (const HairStrandRecord& strand : groom.strands) asset.maxStrandWidth = (std::max)(asset.maxStrandWidth, strand.width);
     const Float3 boundsMiddle = (groom.boundsMin + groom.boundsMax) * 0.5f;
     for (const HairClusterHeader& cluster : groom.clusters) {
         asset.cullRadius = (std::max)(asset.cullRadius, Distance(cluster.boundsCenter, boundsMiddle) + cluster.boundsRadius);
@@ -845,10 +899,37 @@ HairStats HairRuntime::Stats()
     stats.dumpsFailed = state.dumpsFailed;
     stats.gpuCounterHistory.assign(state.counterHistory.begin(), state.counterHistory.end());
     stats.lod = state.lod;
+    stats.render = state.render;
+    stats.volume = state.volume;
+    stats.volumeStats = state.volumeStats;
+    stats.shadows = state.shadows;
+    stats.shadowStats = state.shadowStats;
     stats.debugView = state.debugView;
     if (state.buffers) {
         stats.visibilityWidth = state.buffers->visibilityWidth;
+        stats.rasterCulled = state.rasterCulledFrames != 0u;
+        stats.rasterWidthPixels = state.lastRasterWidthPixels;
         stats.visibilityHeight = state.buffers->visibilityHeight;
+        const std::uint64_t pixels = static_cast<std::uint64_t>(stats.visibilityWidth) * stats.visibilityHeight;
+        const auto target = [&](const std::shared_ptr<org::PixelBuffer>& texture, const char* name, std::uint32_t bytesPerPixel) {
+            if (texture) stats.targets.push_back(HairBufferUse{ name, static_cast<std::uint32_t>(pixels * bytesPerPixel), 1u, 1u, 1u });
+        };
+        target(state.buffers->visibility, "Hair.Visibility", 8u);
+        target(state.buffers->coverage, "Hair.Coverage", 4u);
+        target(state.buffers->layer1, "Hair.Layer1", 8u);
+        target(state.buffers->layer2, "Hair.Layer2", 8u);
+        target(state.buffers->compositeInfo, "Hair.CompositeInfo", 2u);
+        target(state.buffers->reactiveMask, "Hair.ReactiveMask", 1u);
+        target(state.buffers->coverageFar, "Hair.CoverageFar", 4u);
+        target(state.buffers->occlusion, "Hair.Occlusion", 8u);
+        target(state.buffers->splitGuess, "Hair.SplitGuess", 4u);
+        if (state.buffers->occlusionCoarse) {
+            const std::uint32_t tiles = ((stats.visibilityWidth + HAIR_RASTER_TILE_SIZE - 1u) / HAIR_RASTER_TILE_SIZE) *
+                ((stats.visibilityHeight + HAIR_RASTER_TILE_SIZE - 1u) / HAIR_RASTER_TILE_SIZE);
+            stats.targets.push_back(HairBufferUse{ "Hair.OcclusionCoarse", tiles * 4u, 1u, 1u, 1u });
+            stats.targets.push_back(HairBufferUse{ "Hair.TileFlags", tiles * 4u, 1u, 1u, 1u });
+            stats.targets.push_back(HairBufferUse{ "Hair.OcclusionHint", tiles * 4u, 1u, 1u, 1u });
+        }
     }
     stats.selfCheck = state.selfCheck;
     stats.sim = state.DescribeSim();
@@ -1198,6 +1279,394 @@ HairLodSettings HairRuntime::LodSettings() const
     return m_state->lod;
 }
 
+void HairRuntime::SetRenderSettings(const HairRenderSettings& settings)
+{
+    HairRenderSettings clamped = settings;
+    clamped.depthAlpha = std::clamp(settings.depthAlpha, 0.0f, 1.0f);
+    clamped.coverageSaturation = (std::max)(settings.coverageSaturation, 0.0f);
+    clamped.reactiveStrength = std::clamp(settings.reactiveStrength, 0.0f, 1.0f);
+    clamped.reactivePixels = (std::max)(settings.reactivePixels, 1.0e-3f);
+    clamped.ambient = (std::max)(settings.ambient, 0.0f);
+    clamped.saturation = std::clamp(settings.saturation, 4.0f, 1000.0f);
+    clamped.autoWidthPixels = (std::max)(settings.autoWidthPixels, 0.0f);
+    clamped.hiddenDetail = std::clamp(settings.hiddenDetail, 0.02f, 1.0f);
+    clamped.detailRateUp = std::clamp(settings.detailRateUp, 0.001f, 1.0f);
+    clamped.detailRateDown = std::clamp(settings.detailRateDown, 0.001f, 1.0f);
+    std::scoped_lock lock(m_state->mutex);
+    m_state->render = clamped;
+}
+
+HairRenderSettings HairRuntime::RenderSettings() const
+{
+    std::scoped_lock lock(m_state->mutex);
+    return m_state->render;
+}
+
+void HairRuntime::SetVolumeSettings(const HairVolumeSettings& settings)
+{
+    HairVolumeSettings clamped = settings;
+    clamped.voxelPixels = std::clamp(settings.voxelPixels, 0.5f, 256.0f);
+    clamped.maxResolution = std::clamp(settings.maxResolution, 2u, 256u);
+    clamped.steps = std::clamp(settings.steps, 1u, 64u);
+    clamped.environmentSteps = std::clamp(settings.environmentSteps, 1u, 64u);
+    clamped.bias = std::clamp(settings.bias, 0.0f, 8.0f);
+    clamped.densityFactor = std::clamp(settings.densityFactor, 0.0f, 1.0f);
+    clamped.margin = std::clamp(settings.margin, 0.0f, 2.0f);
+    clamped.scalpDepth = (std::min)(settings.scalpDepth, 16u);
+    std::scoped_lock lock(m_state->mutex);
+    m_state->volume = clamped;
+}
+
+HairVolumeSettings HairRuntime::VolumeSettings() const
+{
+    std::scoped_lock lock(m_state->mutex);
+    return m_state->volume;
+}
+
+void HairRuntime::SetShadowSettings(const HairShadowSettings& settings)
+{
+    HairShadowSettings clamped = settings;
+    clamped.detailScale = std::clamp(settings.detailScale, 0.25f, 64.0f);
+    clamped.forceDetail = std::clamp(settings.forceDetail, 0.0f, 1.0f);
+    clamped.receiverBias = std::clamp(settings.receiverBias, 0.0f, 1.0f);
+    clamped.dynamicRadius = std::clamp(settings.dynamicRadius, 0.0f, 10000.0f);
+    std::scoped_lock lock(m_state->mutex);
+    m_state->shadows = clamped;
+}
+
+HairShadowSettings HairRuntime::ShadowSettings() const
+{
+    std::scoped_lock lock(m_state->mutex);
+    return m_state->shadows;
+}
+
+void HairRuntime::SetShadowInvalidationQueue(std::shared_ptr<VirtualShadowInvalidationQueue> queue)
+{
+    std::scoped_lock lock(m_state->mutex);
+    m_state->shadowQueue = std::move(queue);
+}
+
+float HairRuntime::RequestedDynamicShadowRadius() const
+{
+    return m_state->shadowDynamicRadius.load(std::memory_order_relaxed);
+}
+
+void HairRuntime::NoteShadowPasses(std::uint64_t frameNumber)
+{
+    m_state->shadowPassFrame.store(frameNumber, std::memory_order_relaxed);
+}
+
+// Shadow casting for the frame: whether hair is drawn into the sun's shadow map, and which of the map's cached pages
+// have to be drawn again because the hair over them changed. Hair is a deformable caster (hairShadow.hlsl): near the
+// camera the shadow map redraws it every frame anyway, and the bounds enqueued here only reach the clipmaps beyond
+// that (VirtualShadowInvalidationQueue::Drain masks them). A groom's bounds are enqueued, where it was and where it
+// is, in a frame its matrix differs from the last frame's or it is simulated, when it starts or stops casting (attached,
+// cleared, the feature switched), and when a control that changes what is drawn changes. A groom that stands still
+// enqueues nothing.
+void HairRuntime::State::PlanShadows(const HairFrameInputs& inputs, HairFramePlan& plan, std::uint64_t planClusters, std::uint64_t planPoints)
+{
+    const std::uint64_t total = shadowStats.totalInvalidations;
+    const std::uint64_t dropped = shadowStats.droppedInvalidations;
+    shadowStats = HairShadowStats{};
+    shadowStats.totalInvalidations = total;
+    shadowStats.droppedInvalidations = dropped;
+    // A graph without a shadow map has no shadow passes: one of them notes every frame it is updated in.
+    const std::uint64_t passFrame = shadowPassFrame.load(std::memory_order_relaxed);
+    const bool mapPresent = passFrame != kNoFrame && passFrame + 2u >= inputs.frameNumber;
+    const bool active = shadows.enabled && render.path == HairRenderPath::Layered && mapPresent && !plan.instances.empty();
+    shadowDynamicRadius.store(shadows.enabled && render.path == HairRenderPath::Layered && !instances.empty() ? shadows.dynamicRadius : 0.0f,
+        std::memory_order_relaxed);
+
+    std::vector<ShadowCaster> casters;
+    if (active) {
+        casters.resize(instances.size());
+        for (const auto& dispatch : plan.instances) {
+            Instance& instance = instances[dispatch.instanceIndex];
+            const Asset& asset = assets[instance.info.asset];
+            const BuiltGroom& groom = asset.groom;
+            ShadowCaster& caster = casters[dispatch.instanceIndex];
+            ++shadowStats.instances;
+            // Where the groom is: the matrices PlanSimLevels reads. Without them it is redrawn every frame.
+            const auto entity = br::extensions::FindSceneEntityRenderState(instance.stableSceneID);
+            ObjectMatrices matrices{};
+            if (!entity || !inputs.objects.image || inputs.objects.rowStride < sizeof(ObjectMatrices) ||
+                !ReadImage(*inputs.objects.image, static_cast<std::size_t>(entity->perObjectBufferIndex) * inputs.objects.rowStride,
+                    &matrices, sizeof(matrices))) {
+                continue;
+            }
+            const XMMATRIX model = XMLoadFloat4x4(&matrices.model);
+            XMMATRIX toWorld = model;
+            bool posed = instance.info.mode == HairAttachMode::PerRoot;
+            if (instance.info.mode == HairAttachMode::Bone && instance.skeleton && entity->skinningInstanceSlot != HAIR_INVALID_INDEX) {
+                const auto pose = instance.skeleton->GetBoneMatrices();
+                const auto inverseBind = instance.skeleton->GetInverseBindMatrices();
+                if (instance.attachBone < (std::min)(pose.size(), inverseBind.size())) {
+                    toWorld = XMMatrixMultiply(XMMatrixMultiply(inverseBind[instance.attachBone], pose[instance.attachBone]), model);
+                }
+            }
+            const float scale = XMVectorGetX(XMVector3Length(model.r[0]));
+            caster.valid = true;
+            // A groom whose roots follow their own joints moves with a pose the CPU does not follow: as if simulated.
+            caster.simulated = dispatch.simulated != 0u || posed;
+            caster.center = Store(XMVector3Transform(XMVectorSetW(Load((groom.boundsMin + groom.boundsMax) * 0.5f), 1.0f), toWorld));
+            caster.radius = (asset.cullRadius * (1.0f + kSimViewRadiusMargin) + HAIR_CULL_WIDTH_MARGIN) * scale;
+            XMStoreFloat4x4(&caster.toWorld, toWorld);
+        }
+    }
+
+    const bool redrawAll = active && (shadows.detailScale != shadowsDrawn.detailScale || shadows.forceDetail != shadowsDrawn.forceDetail ||
+        shadows.coverage != shadowsDrawn.coverage);
+    if (active) shadowsDrawn = shadows;
+    const auto enqueue = [&](const ShadowCaster& caster) {
+        VirtualShadowInvalidationBounds bounds;
+        bounds.center = { caster.center.x, caster.center.y, caster.center.z };
+        bounds.radius = caster.radius;
+        bounds.mobility = VirtualShadowCasterMobility::SkinnedOrDeformable;
+        ++shadowStats.invalidations;
+        ++shadowStats.totalInvalidations;
+        if (!shadowQueue || !shadowQueue->Enqueue(bounds)) ++shadowStats.droppedInvalidations;
+    };
+    for (std::size_t index = 0u; index < (std::max)(casters.size(), shadowCasters.size()); ++index) {
+        static const ShadowCaster none;
+        const ShadowCaster& before = index < shadowCasters.size() ? shadowCasters[index] : none;
+        const ShadowCaster& now = index < casters.size() ? casters[index] : none;
+        if (!before.valid && !now.valid) continue;
+        const bool changed = redrawAll || before.valid != now.valid || before.simulated || now.simulated ||
+            std::memcmp(&before.toWorld, &now.toWorld, sizeof(XMFLOAT4X4)) != 0;
+        if (!changed) continue;
+        ++shadowStats.movedInstances;
+        if (before.valid) enqueue(before);
+        if (now.valid) enqueue(now);
+    }
+    shadowCasters = std::move(casters);
+
+    shadowStats.active = active;
+    plan.shadows = active;
+    plan.shadowEvaluateGroups = active ? static_cast<std::uint32_t>((std::min<std::uint64_t>)(planClusters, capacities.shadowClusters)) : 0u;
+    plan.shadowRasterRows = active ? static_cast<std::uint32_t>((std::min<std::uint64_t>)(planPoints, capacities.shadowPoolVertices)) : 0u;
+}
+
+// The frame's density volumes: which of the frame's instances get one, how fine, and where its voxels are. An instance
+// gets one when a view shows any of its groom (OnScreenExtent, as for the simulation). Its box is the groom's rest
+// bounds, grown by HairVolumeSettings::margin, in the space the groom's roots follow (the entity's, or the attach
+// bone's); its voxels are cubes whose side is voxelPixels on screen at the groom's distance, but no smaller than
+// gives maxResolution voxels along the box's longest side. The voxels are handed out in instance order from the start
+// of the voxel buffer, anew every frame: nothing of a volume outlives its frame. Over the budget, every voxel is made
+// larger by one factor; when even 2 voxels a side do not fit, the instances smallest on screen get none.
+//
+// It also keeps each instance's rows of the scatter table up to date with its material.
+void HairRuntime::State::PlanVolumes(const HairFrameInputs& inputs, const HairUpload& upload, HairFramePlan& plan)
+{
+    const std::uint32_t highWater = volumeStats.highWaterVoxels;
+    volumeStats = HairVolumeStats{};
+    volumeStats.highWaterVoxels = highWater;
+    volumeStats.capacityVoxels = capacities.volumeVoxels;
+    volumeStats.budgetVoxels = volume.voxelBudget != 0u ? (std::min)(volume.voxelBudget, capacities.volumeVoxels) : capacities.volumeVoxels;
+    for (auto& instance : instances) {
+        instance.info.volumeResolution = {};
+        instance.info.volumeVoxelSize = 0.0f;
+    }
+    std::vector<HairVolumeGPU> rows;
+    if (volume.enabled && render.path == HairRenderPath::Layered && !plan.instances.empty()) {
+        rows.resize(instances.size());
+        struct Candidate {
+            std::uint32_t index = 0u;
+            XMMATRIX toRest{};
+            Float3 boxMin{};
+            Float3 extent{}; // of the box, in world units
+            float scale = 1.0f;
+            float voxel = 0.0f; // metres, before the budget's factor
+            float viewExtent = 0.0f;
+        };
+        std::vector<Candidate> candidates;
+        for (const auto& dispatch : plan.instances) {
+            Instance& instance = instances[dispatch.instanceIndex];
+            const Asset& asset = assets[instance.info.asset];
+            const BuiltGroom& groom = asset.groom;
+
+            // Its rows of the scatter table, for the material its row of the instance buffer holds.
+            HairBsdfMaterial material;
+            material.sigmaA = instance.gpu.sigmaA;
+            material.betaM = instance.gpu.betaM;
+            material.betaN = instance.gpu.betaN;
+            material.alpha = instance.gpu.alpha;
+            material.eta = instance.gpu.eta;
+            if (!instance.scatterValid || std::memcmp(&material, &instance.scatterMaterial, sizeof(material)) != 0) {
+                // Instances share materials: a table made before is not made again.
+                auto cached = std::ranges::find_if(scatterCache,
+                    [&](const auto& entry) { return std::memcmp(&entry.first, &material, sizeof(material)) == 0; });
+                if (cached == scatterCache.end()) {
+                    if (scatterCache.size() >= 64u) scatterCache.erase(scatterCache.begin());
+                    scatterCache.emplace_back(material, HairScatterMakeTable(material));
+                    cached = scatterCache.end() - 1;
+                }
+                const HairScatterTable& table = cached->second;
+                upload(buffers->scatterTables, static_cast<std::size_t>(dispatch.instanceIndex) * HAIR_SCATTER_TABLE_ROWS * sizeof(HairScatterRow),
+                    table.data(), table.size() * sizeof(HairScatterRow));
+                instance.scatterMaterial = material;
+                instance.scatterValid = true;
+            }
+
+            // Where the groom is: the matrices PlanSimLevels reads. A groom whose roots follow their own joints is
+            // taken to follow its entity.
+            const auto entity = br::extensions::FindSceneEntityRenderState(instance.stableSceneID);
+            ObjectMatrices matrices{};
+            if (!entity || !inputs.objects.image || inputs.objects.rowStride < sizeof(ObjectMatrices) ||
+                !ReadImage(*inputs.objects.image, static_cast<std::size_t>(entity->perObjectBufferIndex) * inputs.objects.rowStride,
+                    &matrices, sizeof(matrices))) {
+                ++volumeStats.unknownInstances;
+                continue;
+            }
+            const XMMATRIX model = XMLoadFloat4x4(&matrices.model);
+            XMMATRIX toWorld = model;
+            if (instance.info.mode == HairAttachMode::Bone && instance.skeleton && entity->skinningInstanceSlot != HAIR_INVALID_INDEX) {
+                const auto pose = instance.skeleton->GetBoneMatrices();
+                const auto inverseBind = instance.skeleton->GetInverseBindMatrices();
+                if (instance.attachBone < (std::min)(pose.size(), inverseBind.size())) {
+                    toWorld = XMMatrixMultiply(XMMatrixMultiply(inverseBind[instance.attachBone], pose[instance.attachBone]), model);
+                }
+            }
+            Candidate candidate;
+            candidate.index = dispatch.instanceIndex;
+            candidate.scale = XMVectorGetX(XMVector3Length(model.r[0]));
+            const Float3 center = Store(XMVector3Transform(XMVectorSetW(Load((groom.boundsMin + groom.boundsMax) * 0.5f), 1.0f), toWorld));
+            candidate.viewExtent = OnScreenExtent(inputs, center,
+                (asset.cullRadius * (1.0f + kSimViewRadiusMargin) + HAIR_CULL_WIDTH_MARGIN) * candidate.scale);
+            if (!(candidate.viewExtent > 0.0f) || !(candidate.scale > 0.0f)) continue; // no view shows it
+            const Float3 size = groom.boundsMax - groom.boundsMin;
+            const float grow = volume.margin * (std::max)({ size.x, size.y, size.z });
+            candidate.boxMin = groom.boundsMin - Float3{ grow, grow, grow };
+            candidate.extent = (size + Float3{ 2.0f * grow, 2.0f * grow, 2.0f * grow }) * candidate.scale;
+            const float longest = (std::max)({ candidate.extent.x, candidate.extent.y, candidate.extent.z });
+            if (!(longest > 0.0f)) continue;
+            const float pixelsPerMetre = inputs.mainView.projectionScaleY * 0.5f * static_cast<float>(inputs.renderHeight) /
+                (std::max)(Distance(center, inputs.cameraPosition), 1.0e-3f);
+            candidate.voxel = (std::max)(volume.voxelPixels / (std::max)(pixelsPerMetre, 1.0e-6f),
+                1.0001f * longest / static_cast<float>(volume.maxResolution));
+            XMVECTOR determinant;
+            candidate.toRest = XMMatrixInverse(&determinant, toWorld);
+            candidates.push_back(candidate);
+        }
+
+        // A voxel is never larger than half the box's longest side: the coarsest volume has 2 voxels along it.
+        const auto voxelSize = [](const Candidate& candidate, float factor) {
+            return (std::min)(candidate.voxel * factor, 0.5f * (std::max)({ candidate.extent.x, candidate.extent.y, candidate.extent.z }));
+        };
+        const auto resolution = [&](const Candidate& candidate, float factor) {
+            const auto along = [&](float extent) {
+                return std::clamp(static_cast<std::uint32_t>(std::ceil(extent / voxelSize(candidate, factor))), 1u, volume.maxResolution);
+            };
+            return UInt3{ along(candidate.extent.x), along(candidate.extent.y), along(candidate.extent.z) };
+        };
+        const auto voxelCount = [&](float factor) {
+            std::uint64_t sum = 0u;
+            for (const Candidate& candidate : candidates) {
+                const UInt3 r = resolution(candidate, factor);
+                sum += static_cast<std::uint64_t>(r.x) * r.y * r.z;
+            }
+            return sum;
+        };
+        float factor = 1.0f;
+        const std::uint64_t budget = volumeStats.budgetVoxels;
+        if (voxelCount(1.0f) > budget) {
+            float fits = 2.0f;
+            while (voxelCount(fits) > budget && fits < 65536.0f) fits *= 2.0f;
+            if (voxelCount(fits) > budget) {
+                // Even the coarsest do not fit: the smallest on screen go without.
+                std::ranges::sort(candidates, [](const Candidate& a, const Candidate& b) { return a.viewExtent > b.viewExtent; });
+                while (!candidates.empty() && voxelCount(fits) > budget) {
+                    candidates.pop_back();
+                    ++volumeStats.droppedVolumes;
+                }
+            } else {
+                float over = 0.5f * fits;
+                for (int step = 0; step < 16; ++step) {
+                    const float middle = 0.5f * (fits + over);
+                    (voxelCount(middle) > budget ? over : fits) = middle;
+                }
+            }
+            factor = fits;
+        }
+        volumeStats.coarsening = factor;
+
+        std::uint32_t base = 0u;
+        for (const Candidate& candidate : candidates) {
+            const float voxel = voxelSize(candidate, factor);
+            HairVolumeGPU& row = rows[candidate.index];
+            row.resolution = resolution(candidate, factor);
+            row.voxelBase = base;
+            row.voxelSize = voxel;
+            base += row.resolution.x * row.resolution.y * row.resolution.z;
+            // World to rest space, to the box's corner, to voxels.
+            const float toVoxels = candidate.scale / voxel;
+            XMFLOAT4X4 worldToGrid;
+            XMStoreFloat4x4(&worldToGrid, XMMatrixMultiply(XMMatrixMultiply(candidate.toRest,
+                XMMatrixTranslation(-candidate.boxMin.x, -candidate.boxMin.y, -candidate.boxMin.z)),
+                XMMatrixScaling(toVoxels, toVoxels, toVoxels)));
+            row.worldToGrid0 = { worldToGrid._11, worldToGrid._21, worldToGrid._31, worldToGrid._41 };
+            row.worldToGrid1 = { worldToGrid._12, worldToGrid._22, worldToGrid._32, worldToGrid._42 };
+            row.worldToGrid2 = { worldToGrid._13, worldToGrid._23, worldToGrid._33, worldToGrid._43 };
+            Instance& instance = instances[candidate.index];
+            instance.info.volumeResolution = { row.resolution.x, row.resolution.y, row.resolution.z };
+            instance.info.volumeVoxelSize = voxel;
+            ++volumeStats.volumes;
+            volumeStats.largestResolution = (std::max)({ volumeStats.largestResolution, row.resolution.x, row.resolution.y, row.resolution.z });
+            volumeStats.smallestVoxel = volumeStats.volumes == 1u ? voxel : (std::min)(volumeStats.smallestVoxel, voxel);
+            volumeStats.largestVoxel = (std::max)(volumeStats.largestVoxel, voxel);
+        }
+        volumeStats.voxels = base;
+        volumeStats.highWaterVoxels = (std::max)(volumeStats.highWaterVoxels, base);
+        if (rows.size() != uploadedVolumes.size() ||
+            std::memcmp(rows.data(), uploadedVolumes.data(), rows.size() * sizeof(HairVolumeGPU)) != 0) {
+            upload(buffers->volumes, 0u, rows.data(), rows.size() * sizeof(HairVolumeGPU));
+        }
+        plan.volumeVoxels = base;
+        plan.volumeRows = static_cast<std::uint32_t>(rows.size());
+    }
+    uploadedVolumes = std::move(rows);
+    Use(kBufferVolumeVoxels, volumeStats.voxels);
+}
+
+namespace {
+
+struct MaterialPreset {
+    std::string_view name;
+    float melanin; // Chiang's pigment concentration: eumelanin and pheomelanin together
+    float redness; // the share of it that is pheomelanin
+};
+// Black and brown are the absorptions of pbrt-v4's figure 9.47 (eumelanin 8 and 2), blond its 0.143 rounded. The others
+// are ours, chosen by eye.
+constexpr MaterialPreset kMaterialPresets[] = {
+    { "black", 8.0f, 0.0f }, { "brown", 2.0f, 0.0f }, { "blond", 0.15f, 0.0f },
+    { "red", 0.6f, 0.9f },   { "grey", 0.03f, 0.0f }, { "white", 0.0f, 0.0f },
+};
+
+} // namespace
+
+bool ApplyHairMaterialPreset(std::string_view name, HairMaterial& material)
+{
+    for (const auto& preset : kMaterialPresets) {
+        if (preset.name != name) continue;
+        material.sigmaA = HairSigmaAFromMelaninRedness(preset.melanin, preset.redness);
+        return true;
+    }
+    return false;
+}
+
+const char* HairMaterialPresetNames() { return "black, brown, blond, red, grey or white"; }
+
+bool HairRuntime::SetInstanceMaterial(std::uint32_t instance, const HairMaterial& material, std::string& error)
+{
+    std::scoped_lock lock(m_state->mutex);
+    for (auto& candidate : m_state->instances) {
+        if (candidate.info.id != instance) continue;
+        candidate.info.material = material; // the next frame uploads the row that changed
+        return true;
+    }
+    error = "no hair instance " + std::to_string(instance);
+    return false;
+}
+
 void HairRuntime::SetDebugView(HairDebugView view)
 {
     std::scoped_lock lock(m_state->mutex);
@@ -1470,6 +1939,8 @@ void HairRuntime::State::CreateBuffers()
         make(kBufferVisibleClusters, capacities.visibleClusters, sizeof(HairVisibleCluster), true, "Hair.VisibleClusters");
     created->poolVertices = make(kBufferPoolVertices, capacities.poolVertices, sizeof(HairPoolVertex), true, "Hair.PoolVertices");
     created->poolSegmentIds = make(kBufferPoolSegmentIds, capacities.poolVertices, sizeof(std::uint32_t), true, "Hair.PoolSegmentIds");
+    created->poolColors = make(kBufferPoolColors, capacities.poolVertices, 2u * sizeof(std::uint32_t), true, "Hair.PoolColors");
+    created->shadeList = make(kBufferShadeList, capacities.poolVertices, sizeof(std::uint32_t), true, "Hair.ShadeList");
     created->probe = make(kBufferProbe, HAIR_PROBE_HEADER_WORDS + HAIR_PROBE_ROW_CAPACITY * HAIR_PROBE_ROW_WORDS,
         sizeof(std::uint32_t), true, "Hair.Probe");
     created->guidePointRanges = make(kBufferGuidePointRanges, capacities.guides, sizeof(HairGuidePointRange), false, "Hair.GuidePointRanges");
@@ -1480,6 +1951,22 @@ void HairRuntime::State::CreateBuffers()
     created->simMetrics =
         make(kBufferSimMetrics, capacities.instances * HAIR_SIM_METRIC_COUNT, sizeof(std::uint32_t), true, "Hair.SimMetrics");
     created->simGroups = make(kBufferSimGroups, capacities.simGroups, sizeof(HairSimGroup), false, "Hair.SimGroups");
+    created->volumes = make(kBufferVolumes, capacities.instances, sizeof(HairVolumeGPU), false, "Hair.Volumes");
+    created->volumeVoxels = make(kBufferVolumeVoxels, capacities.volumeVoxels, sizeof(std::uint32_t), true, "Hair.VolumeVoxels");
+    created->scatterTables = make(kBufferScatterTables, capacities.instances * HAIR_SCATTER_TABLE_ROWS, sizeof(HairScatterRow), false,
+        "Hair.ScatterTables");
+    created->shadowClusters =
+        make(kBufferShadowClusters, capacities.shadowClusters, sizeof(HairVisibleCluster), true, "Hair.ShadowClusters");
+    created->shadowClusterMasks =
+        make(kBufferShadowClusterMasks, capacities.shadowClusters, sizeof(std::uint32_t), true, "Hair.ShadowClusterMasks");
+    created->shadowPoolVertices =
+        make(kBufferShadowPoolVertices, capacities.shadowPoolVertices, sizeof(HairPoolVertex), true, "Hair.ShadowPoolVertices");
+    created->shadowPoolSegmentIds =
+        make(kBufferShadowPoolSegmentIds, capacities.shadowPoolVertices, sizeof(std::uint32_t), true, "Hair.ShadowPoolSegmentIds");
+    created->rasterItems = make(kBufferRasterItems, capacities.rasterItems, sizeof(std::uint32_t), true, "Hair.RasterItems");
+    created->poolLate = make(kBufferPoolLate, capacities.poolVertices, sizeof(std::uint32_t), true, "Hair.PoolLate");
+    created->rasterArgs = make(kBufferRasterArgs, 4u, sizeof(std::uint32_t), true, "Hair.RasterArgs");
+    created->clusterSeen = make(kBufferClusterSeen, capacities.clusterStamps * HAIR_CLUSTER_STATE_WORDS, sizeof(std::uint32_t), true, "Hair.ClusterState");
     buffers = std::move(created);
     bufferBytes = bytes;
     spdlog::info("Hair: created the pooled GPU buffers, {:.1f} MB", static_cast<double>(bytes) / (1024.0 * 1024.0));
@@ -1487,11 +1974,14 @@ void HairRuntime::State::CreateBuffers()
 
 // The hair visibility target is as large as the opaque visibility buffer it is tested against. At a new size the whole
 // buffer set is replaced by a copy holding the new target, so the passes declare again.
-void HairRuntime::State::EnsureVisibilityTarget(std::uint32_t width, std::uint32_t height)
+void HairRuntime::State::EnsureVisibilityTarget(std::uint32_t width, std::uint32_t height, bool layered)
 {
-    if (width == 0u || height == 0u || (buffers->visibility && buffers->visibilityWidth == width && buffers->visibilityHeight == height)) {
+    // The layered path's textures are made the first time the path is used, and kept.
+    if (width == 0u || height == 0u || (buffers->visibility && buffers->visibilityWidth == width && buffers->visibilityHeight == height &&
+        (!layered || buffers->layer1))) {
         return;
     }
+    layered = layered || buffers->layer1;
     org::TextureDescription description;
     description.channels = 2;
     description.format = rhi::Format::R32G32_UInt; // read and written as one uint64_t, as the opaque visibility buffer
@@ -1504,10 +1994,49 @@ void HairRuntime::State::EnsureVisibilityTarget(std::uint32_t width, std::uint32
     description.format = rhi::Format::R32_UInt;
     replaced->coverage = org::PixelBuffer::CreateShared(description);
     replaced->coverage->SetName("Hair.Coverage");
+    replaced->layer1 = replaced->layer2 = replaced->compositeInfo = replaced->reactiveMask = nullptr;
+    replaced->coverageFar = replaced->occlusion = replaced->splitGuess = replaced->occlusionCoarse = replaced->tileFlags = nullptr;
+    replaced->occlusionHint = nullptr;
+    if (layered) {
+        description.channels = 2;
+        description.format = rhi::Format::R32G32_UInt;
+        replaced->layer1 = org::PixelBuffer::CreateShared(description);
+        replaced->layer1->SetName("Hair.Layer1");
+        replaced->layer2 = org::PixelBuffer::CreateShared(description);
+        replaced->layer2->SetName("Hair.Layer2");
+        description.format = rhi::Format::R8G8_UNorm;
+        replaced->compositeInfo = org::PixelBuffer::CreateShared(description);
+        replaced->compositeInfo->SetName("Hair.CompositeInfo");
+        description.channels = 1;
+        description.format = rhi::Format::R8_UNorm;
+        replaced->reactiveMask = org::PixelBuffer::CreateShared(description);
+        replaced->reactiveMask->SetName("Hair.ReactiveMask");
+        // The culled rasterizer's.
+        description.format = rhi::Format::R32_UInt;
+        replaced->coverageFar = org::PixelBuffer::CreateShared(description);
+        replaced->coverageFar->SetName("Hair.CoverageFar");
+        replaced->splitGuess = org::PixelBuffer::CreateShared(description);
+        replaced->splitGuess->SetName("Hair.SplitGuess");
+        description.channels = 2;
+        description.format = rhi::Format::R32G32_UInt;
+        replaced->occlusion = org::PixelBuffer::CreateShared(description);
+        replaced->occlusion->SetName("Hair.Occlusion");
+        description.channels = 1;
+        description.format = rhi::Format::R32_UInt;
+        description.imageDimensions.clear();
+        description.imageDimensions.emplace_back((width + HAIR_RASTER_TILE_SIZE - 1u) / HAIR_RASTER_TILE_SIZE,
+            (height + HAIR_RASTER_TILE_SIZE - 1u) / HAIR_RASTER_TILE_SIZE, 0, 0);
+        replaced->occlusionCoarse = org::PixelBuffer::CreateShared(description);
+        replaced->occlusionCoarse->SetName("Hair.OcclusionCoarse");
+        replaced->tileFlags = org::PixelBuffer::CreateShared(description);
+        replaced->tileFlags->SetName("Hair.TileFlags");
+        replaced->occlusionHint = org::PixelBuffer::CreateShared(description);
+        replaced->occlusionHint->SetName("Hair.OcclusionHint");
+    }
     replaced->visibilityWidth = width;
     replaced->visibilityHeight = height;
     buffers = std::move(replaced);
-    spdlog::info("Hair: made the hair visibility target, {}x{}", width, height);
+    spdlog::info("Hair: made the hair visibility target{}, {}x{}", layered ? " and the layered path's targets" : "", width, height);
 }
 
 void HairRuntime::State::UploadAsset(Asset& asset, const HairUpload& upload)
@@ -1545,7 +2074,8 @@ void HairRuntime::State::RequestCounterReadback(const std::shared_ptr<State>& se
     request.selected = selected;
     readbacks->RequestReadbackCaptureAfterGraph(buffers->counters.get(), {},
         [state = std::weak_ptr<State>(self), request, visibleCapacity = capacities.visibleClusters,
-            poolCapacity = capacities.poolVertices](br::ReadbackCaptureResult&& result) {
+            poolCapacity = capacities.poolVertices, shadowClusterCapacity = capacities.shadowClusters,
+            shadowPoolCapacity = capacities.shadowPoolVertices](br::ReadbackCaptureResult&& result) {
             const auto locked = state.lock();
             if (!locked) return;
             std::scoped_lock lock(locked->mutex);
@@ -1575,9 +2105,67 @@ void HairRuntime::State::RequestCounterReadback(const std::shared_ptr<State>& se
             counters.pixelsOccluded = rows[HAIR_COUNTER_PIXELS_OCCLUDED];
             counters.segmentsCapped = rows[HAIR_COUNTER_SEGMENTS_CAPPED];
             counters.pixelsResolved = rows[HAIR_COUNTER_PIXELS_RESOLVED];
+            counters.layerRejected = rows[HAIR_COUNTER_LAYER_REJECTED];
+            counters.coverageSkipped = rows[HAIR_COUNTER_COVERAGE_SKIPPED];
+            for (std::uint32_t layer = 0u; layer < HAIR_LAYER_COUNT; ++layer) {
+                counters.layerPixels[layer] = rows[HAIR_COUNTER_LAYER_PIXELS + layer];
+            }
+            counters.remainderPixels = rows[HAIR_COUNTER_REMAINDER_PIXELS];
+            counters.remainderAlpha = static_cast<float>(rows[HAIR_COUNTER_REMAINDER_ALPHA]) / HAIR_ALPHA_COUNTER_UNIT;
+            counters.alphaSum = static_cast<float>(rows[HAIR_COUNTER_ALPHA_SUM]) / HAIR_ALPHA_COUNTER_UNIT;
+            counters.depthPixels = rows[HAIR_COUNTER_DEPTH_PIXELS];
+            counters.shadeList = rows[HAIR_COUNTER_SHADE_LIST];
+            counters.shadedVertices = rows[HAIR_COUNTER_SHADED_VERTICES];
+            counters.shadowLookups = rows[HAIR_COUNTER_SHADOW_LOOKUPS];
+            counters.shadowCoarser = rows[HAIR_COUNTER_SHADOW_COARSER];
+            counters.shadowMissing = rows[HAIR_COUNTER_SHADOW_MISSING];
+            counters.shadowCleared = rows[HAIR_COUNTER_SHADOW_CLEARED];
+            counters.volumeSegments = rows[HAIR_COUNTER_VOLUME_SEGMENTS];
+            counters.volumeDeposits = rows[HAIR_COUNTER_VOLUME_DEPOSITS];
+            counters.volumeOutside = rows[HAIR_COUNTER_VOLUME_OUTSIDE];
+            counters.clustersReduced = rows[HAIR_COUNTER_CLUSTERS_REDUCED];
+            counters.rasterItems = rows[HAIR_COUNTER_RASTER_ITEMS];
+            counters.rasterItemsOverflow = rows[HAIR_COUNTER_RASTER_ITEMS_OVERFLOW];
+            counters.chunks = rows[HAIR_COUNTER_CHUNKS];
+            counters.chunksLate = rows[HAIR_COUNTER_CHUNKS_LATE];
+            counters.chunksLateDrawn = rows[HAIR_COUNTER_CHUNKS_LATE_DRAWN];
+            counters.pixelsTested = rows[HAIR_COUNTER_PIXELS_TESTED];
+            counters.coverageAdds = rows[HAIR_COUNTER_COVERAGE_ADDS];
+            counters.hiddenWrites = rows[HAIR_COUNTER_HIDDEN_WRITES];
+            counters.pixelsSaturated = rows[HAIR_COUNTER_PIXELS_SATURATED];
+            counters.latePixelsWritten = rows[HAIR_COUNTER_LATE_PIXELS_WRITTEN];
+            counters.hairTiles = rows[HAIR_COUNTER_HAIR_TILES];
+            counters.clustersUnseen = rows[HAIR_COUNTER_CLUSTERS_UNSEEN];
+            counters.waveIterations = rows[HAIR_COUNTER_WAVE_ITERATIONS];
+            counters.volumeVertices = rows[HAIR_COUNTER_VOLUME_VERTICES];
+            counters.volumeMarches = rows[HAIR_COUNTER_VOLUME_MARCHES];
+            counters.volumeSteps = rows[HAIR_COUNTER_VOLUME_STEPS];
+            counters.shadowClustersTested = rows[HAIR_COUNTER_SHADOW_CLUSTERS_TESTED];
+            counters.shadowClusters = (std::min)(rows[HAIR_COUNTER_SHADOW_CLUSTERS], shadowClusterCapacity);
+            counters.shadowStrands = rows[HAIR_COUNTER_SHADOW_STRANDS];
+            counters.shadowSegments = rows[HAIR_COUNTER_SHADOW_SEGMENTS];
+            counters.shadowPoolVertices = (std::min)(rows[HAIR_COUNTER_SHADOW_POOL_VERTICES], shadowPoolCapacity);
+            counters.shadowOverflow = rows[HAIR_COUNTER_SHADOW_OVERFLOW];
+            counters.shadowUnseenStrands = rows[HAIR_COUNTER_SHADOW_UNSEEN_STRANDS];
+            counters.shadowStaleGuides = rows[HAIR_COUNTER_SHADOW_STALE_GUIDES];
+            counters.shadowSegmentsDrawn = rows[HAIR_COUNTER_SHADOW_SEGMENTS_DRAWN];
+            counters.shadowTexelsCovered = rows[HAIR_COUNTER_SHADOW_TEXELS_COVERED];
+            counters.shadowTexelsWritten = rows[HAIR_COUNTER_SHADOW_TEXELS_WRITTEN];
+            counters.shadowSegmentsCapped = rows[HAIR_COUNTER_SHADOW_SEGMENTS_CAPPED];
+            counters.shadowPagesAdmitted = rows[HAIR_COUNTER_SHADOW_PAGES_ADMITTED];
+            counters.shadowPagesInvalidated = rows[HAIR_COUNTER_SHADOW_PAGES_INVALIDATED];
+            counters.shadowClipmapMask = rows[HAIR_COUNTER_SHADOW_CLIPMAP_MASK];
+            locked->Use(kBufferShadowClusters, counters.shadowClusters);
+            locked->Use(kBufferShadowClusterMasks, counters.shadowClusters);
+            locked->Use(kBufferShadowPoolVertices, counters.shadowPoolVertices);
+            locked->Use(kBufferShadowPoolSegmentIds, counters.shadowPoolVertices);
             locked->Use(kBufferVisibleClusters, counters.clustersVisible);
             locked->Use(kBufferPoolVertices, counters.poolVertices);
             locked->Use(kBufferPoolSegmentIds, counters.poolVertices);
+            locked->Use(kBufferPoolColors, counters.shadedVertices);
+            locked->Use(kBufferShadeList, counters.shadeList);
+            locked->Use(kBufferRasterItems, (std::min)(counters.rasterItems, locked->capacities.rasterItems));
+            locked->Use(kBufferPoolLate, counters.chunks != 0u ? counters.poolVertices : 0u);
             // Readbacks of different frames can be in flight together: keep the newest, and the history in frame order.
             if (!locked->gpuCounters.valid || counters.frame >= locked->gpuCounters.frame) locked->gpuCounters = counters;
             if (!locked->continuousCounters) return;
@@ -1796,7 +2384,14 @@ void HairRuntime::UpdateFrame(const HairFrameInputs& inputs, const HairUpload& u
         if (state.assets.empty()) return; // no GPU memory until a groom is loaded
         state.CreateBuffers();
     }
-    state.EnsureVisibilityTarget(inputs.renderWidth, inputs.renderHeight);
+    const bool layered = state.render.path == HairRenderPath::Layered;
+    state.EnsureVisibilityTarget(inputs.renderWidth, inputs.renderHeight, layered);
+    // The upscaler takes the composite's reactive mask while the layered path is on and asks for it.
+    const auto reactiveMask = layered && state.render.reactiveMask ? state.buffers->reactiveMask : nullptr;
+    if (reactiveMask != state.registeredReactiveMask) {
+        br::render::SetUpscalerReactiveMask(reactiveMask);
+        state.registeredReactiveMask = reactiveMask;
+    }
     for (auto& asset : state.assets) {
         if (!asset.uploaded) state.UploadAsset(asset, upload);
     }
@@ -1827,9 +2422,12 @@ void HairRuntime::UpdateFrame(const HairFrameInputs& inputs, const HairUpload& u
     HairFramePlan plan;
     std::uint64_t planClusters = 0u;
     std::uint64_t planPoints = 0u;
+    std::uint32_t clusterStampBase = 0u; // instances keep their rows of the cluster stamps: they are only ever added
     for (std::uint32_t index = 0u; index < state.instances.size(); ++index) {
         auto& instance = state.instances[index];
         instance.info.active = false;
+        const std::uint32_t instanceStampBase = clusterStampBase;
+        clusterStampBase += static_cast<std::uint32_t>(state.assets[instance.info.asset].groom.clusters.size());
         if (instance.info.state != HairInstanceState::Attached) continue;
         const auto entity = br::extensions::FindSceneEntityRenderState(instance.stableSceneID);
         // Not drawn (yet, or any more), or this frame's per-object buffer does not have the entity's row yet.
@@ -1848,10 +2446,19 @@ void HairRuntime::UpdateFrame(const HairFrameInputs& inputs, const HairUpload& u
         gpu.pointBase = asset.pointBase;
         gpu.pointCount = static_cast<std::uint32_t>(groom.points.size());
         gpu.perObjectIndex = entity->perObjectBufferIndex;
+        gpu.clusterSeenBase = clusterStampBase <= state.capacities.clusterStamps ? instanceStampBase : HAIR_INVALID_INDEX;
         gpu.skinningInstanceSlot = skinned ? entity->skinningInstanceSlot : HAIR_INVALID_INDEX;
         gpu.attachBone = instance.info.mode == HairAttachMode::Bone ? instance.attachBone : HAIR_INVALID_INDEX;
-        gpu.baseColor = instance.info.material.baseColor;
-        gpu.roughness = instance.info.material.roughness;
+        const HairMaterial& material = instance.info.material;
+        gpu.baseColor = material.baseColor;
+        gpu.roughness = material.roughness;
+        gpu.sigmaA = Max(material.sigmaA, Float3{});
+        gpu.betaM = std::clamp(material.betaM, 0.0f, 1.0f);
+        gpu.betaN = std::clamp(material.betaN, 0.0f, 1.0f);
+        gpu.alpha = std::clamp(material.alphaDegrees, -10.0f, 10.0f) * (HAIR_BSDF_PI / 180.0f);
+        gpu.eta = std::clamp(material.eta, 1.01f, 3.0f);
+        gpu.melaninVariation = std::clamp(material.melaninVariation, 0.0f, 1.0f);
+        gpu.roughnessVariation = std::clamp(material.roughnessVariation, 0.0f, 1.0f);
         gpu.guidePointBase = instance.guideRowBase;
         gpu.colliderBase = index * HAIR_MAX_COLLIDERS_PER_INSTANCE;
         gpu.colliderCount = static_cast<std::uint32_t>(instance.colliders.size());
@@ -1986,6 +2593,37 @@ void HairRuntime::UpdateFrame(const HairFrameInputs& inputs, const HairUpload& u
     plan.evaluateGroups = static_cast<std::uint32_t>((std::min<std::uint64_t>)(planClusters, state.capacities.visibleClusters));
     plan.rasterRows = static_cast<std::uint32_t>((std::min<std::uint64_t>)(planPoints, state.capacities.poolVertices));
     plan.debugView = state.debugView;
+    plan.renderPath = state.render.path;
+    plan.reactiveMask = state.registeredReactiveMask != nullptr;
+    // Which rasterizer draws the layered path. Auto: the culled one while some groom in view has strands about a pixel
+    // wide at its middle (the widest strand of the groom, at the distance of the middle of its bounds), with a tenth of
+    // slack before it lets go.
+    plan.rasterWidthPixels = 0.0f;
+    for (const auto& dispatch : plan.instances) {
+        const Instance& instance = state.instances[dispatch.instanceIndex];
+        const Asset& asset = state.assets[instance.info.asset];
+        const auto entity = br::extensions::FindSceneEntityRenderState(instance.stableSceneID);
+        ObjectMatrices matrices{};
+        if (!entity || !inputs.objects.image || inputs.objects.rowStride < sizeof(ObjectMatrices) ||
+            !ReadImage(*inputs.objects.image, static_cast<std::size_t>(entity->perObjectBufferIndex) * inputs.objects.rowStride,
+                &matrices, sizeof(matrices))) {
+            continue;
+        }
+        const XMMATRIX model = XMLoadFloat4x4(&matrices.model);
+        const float scale = XMVectorGetX(XMVector3Length(model.r[0]));
+        const Float3 center = Store(XMVector3Transform(XMVectorSetW(Load((asset.groom.boundsMin + asset.groom.boundsMax) * 0.5f), 1.0f), model));
+        if (!(OnScreenExtent(inputs, center, (asset.cullRadius * (1.0f + kSimViewRadiusMargin) + HAIR_CULL_WIDTH_MARGIN) * scale) > 0.0f)) continue;
+        const float pixelsPerMetre = inputs.mainView.projectionScaleY * 0.5f * static_cast<float>(inputs.renderHeight) /
+            (std::max)(Distance(center, inputs.cameraPosition), 1.0e-3f);
+        plan.rasterWidthPixels = (std::max)(plan.rasterWidthPixels, asset.maxStrandWidth * scale * pixelsPerMetre);
+    }
+    const bool wasCulled = state.rasterCulledFrames != 0u;
+    const bool wantsCulled = state.render.raster == HairRasterMode::Culled ||
+        (state.render.raster == HairRasterMode::Auto && plan.rasterWidthPixels >= state.render.autoWidthPixels * (wasCulled ? 0.9f : 1.0f));
+    plan.rasterCulled = state.render.path == HairRenderPath::Layered && wantsCulled && state.buffers->occlusion != nullptr &&
+        !plan.instances.empty();
+    state.rasterCulledFrames = plan.rasterCulled ? (std::min)(state.rasterCulledFrames + 1u, 1000u) : 0u;
+    state.lastRasterWidthPixels = plan.rasterWidthPixels;
     plan.probe = !plan.instances.empty() && std::exchange(state.probeRequested, false);
     if (!checkList.empty()) {
         upload(state.buffers->rootCheckList, 0u, checkList.data(), checkList.size() * sizeof(HairRootCheckSample));
@@ -2023,6 +2661,8 @@ void HairRuntime::UpdateFrame(const HairFrameInputs& inputs, const HairUpload& u
         state.lastSimGroups = 0u;
     }
     state.Use(kBufferSimGroups, state.lastSimGroups);
+    state.PlanVolumes(inputs, upload, plan);
+    state.PlanShadows(inputs, plan, planClusters, planPoints);
     // The evaluate pass's dispatch, as it records it: one over the most clusters the frame can show.
     state.evaluateDispatches += plan.evaluateGroups != 0u ? 1u : 0u;
     state.plan = plan;
@@ -2068,6 +2708,68 @@ void HairRuntime::UpdateFrame(const HairFrameInputs& inputs, const HairUpload& u
     frame.coverageMode = static_cast<std::uint32_t>(state.lod.coverage);
     frame.coverageAccumulate = state.lod.accumulateCoverage || state.debugView == HairDebugView::Coverage ? 1u : 0u;
     frame.detailExponent = state.lod.detailExponent;
+    frame.renderPath = static_cast<std::uint32_t>(state.render.path);
+    frame.depthAlpha = state.render.depthAlpha;
+    frame.coverageSaturation = state.render.coverageSaturation;
+    frame.reactiveStrength = state.render.reactiveMask ? state.render.reactiveStrength : 0.0f;
+    frame.reactivePixels = state.render.reactivePixels;
+    frame.ambientScale = state.render.ambient;
+    frame.lightLookup = static_cast<std::uint32_t>(state.render.lights);
+    // The coverage rule is both rasterizers': they give the composite the same pixel.
+    if (state.render.path == HairRenderPath::Layered && state.render.opaqueCoverage) frame.rasterFlags |= HAIR_RASTER_FLAG_OPAQUE_COVERAGE;
+    if (plan.rasterCulled) {
+        frame.rasterFlags |= HAIR_RASTER_FLAG_CULLED;
+        if (state.rasterCulledFrames <= 3u) frame.rasterFlags |= HAIR_RASTER_FLAG_HOLD_DETAIL;
+        // A strand hides what is behind it only while it also saturates the coverage: the composite must not see the difference.
+        if (state.render.opaqueCoverage && state.render.occludeOpaque) frame.rasterFlags |= HAIR_RASTER_FLAG_OCCLUDE_OPAQUE;
+        if (state.render.occludeSaturated) frame.rasterFlags |= HAIR_RASTER_FLAG_OCCLUDE_SATURATED;
+        if ((static_cast<std::uint32_t>(state.render.firstPass) & 1u) != 0u) frame.rasterFlags |= HAIR_RASTER_FLAG_FIRST_PREVIOUS;
+        if ((static_cast<std::uint32_t>(state.render.firstPass) & 2u) != 0u) frame.rasterFlags |= HAIR_RASTER_FLAG_FIRST_PREFIX;
+        if (state.render.rasterProfile) frame.rasterFlags |= HAIR_RASTER_FLAG_PROFILE;
+        if (!state.render.latePass) frame.rasterFlags |= HAIR_RASTER_FLAG_SKIP_LATE;
+    }
+    frame.rasterItemCapacity = state.capacities.rasterItems;
+    frame.saturationUnits = static_cast<std::uint32_t>(state.render.saturation * HAIR_COVERAGE_UNIT);
+    frame.hiddenDetail = state.render.hiddenDetail;
+    frame.detailRateUp = state.render.detailRateUp;
+    frame.hintDecay = std::clamp(state.render.hintDecay, 0.0f, 0.99f);
+    frame.detailRateDown = state.render.detailRateDown;
+    frame.clusterSeenCapacity = state.capacities.clusterStamps;
+    // The debug views that show one part of the response alone, and those of the density volume.
+    switch (state.debugView) {
+    case HairDebugView::LobeR: frame.shadeMask = HAIR_LOBE_R; break;
+    case HairDebugView::LobeTT: frame.shadeMask = HAIR_LOBE_TT; break;
+    case HairDebugView::LobeTRT: frame.shadeMask = HAIR_LOBE_TRT; break;
+    case HairDebugView::Environment: frame.shadeMask = HAIR_SHADE_ENVIRONMENT; break;
+    case HairDebugView::Direct: frame.shadeMask = HAIR_LOBE_ALL; break;
+    case HairDebugView::Transmittance: frame.shadeMask = HAIR_SHADE_ALL | (HAIR_SHADE_DEBUG_TRANSMITTANCE << HAIR_SHADE_DEBUG_SHIFT); break;
+    case HairDebugView::FibreCount: frame.shadeMask = HAIR_SHADE_ALL | (HAIR_SHADE_DEBUG_FIBRE_COUNT << HAIR_SHADE_DEBUG_SHIFT); break;
+    case HairDebugView::ScatterGlobal: frame.shadeMask = HAIR_LOBE_ALL | (HAIR_SHADE_DEBUG_SCATTER_GLOBAL << HAIR_SHADE_DEBUG_SHIFT); break;
+    case HairDebugView::ScatterLocal: frame.shadeMask = HAIR_LOBE_ALL | (HAIR_SHADE_DEBUG_SCATTER_LOCAL << HAIR_SHADE_DEBUG_SHIFT); break;
+    case HairDebugView::VertexDensity: frame.shadeMask = HAIR_SHADE_ALL | (HAIR_SHADE_DEBUG_DENSITY << HAIR_SHADE_DEBUG_SHIFT); break;
+    default: frame.shadeMask = HAIR_SHADE_ALL; break;
+    }
+    // The density volumes, when this frame planned any rows (PlanVolumes).
+    if (plan.volumeRows != 0u) {
+        frame.volumeFlags = HAIR_VOLUME_FLAG_ENABLED | (state.volume.dualScattering ? HAIR_VOLUME_FLAG_DUAL_SCATTERING : 0u) |
+            (state.volume.trilinear ? HAIR_VOLUME_FLAG_TRILINEAR : 0u) | (state.volume.jitterPerFrame ? HAIR_VOLUME_FLAG_JITTER_FRAME : 0u);
+    }
+    frame.volumeSteps = state.volume.steps;
+    frame.volumeEnvironmentSteps = state.volume.environmentSteps;
+    frame.volumeBias = state.volume.bias;
+    frame.volumeDensityFactor = state.volume.densityFactor;
+    frame.volumeScalpDepth = state.volume.scalpDepth;
+    frame.volumeInstanceCount = plan.volumeRows;
+    // Shadow casting, when this frame draws hair into the shadow map (PlanShadows).
+    if (plan.shadows) {
+        frame.shadowFlags = HAIR_SHADOW_FLAG_ENABLED | (state.shadows.coverage == HairShadowCoverage::Temporal ? HAIR_SHADOW_FLAG_TEMPORAL : 0u) |
+            (state.shadows.coverage == HairShadowCoverage::Opaque ? HAIR_SHADOW_FLAG_OPAQUE : 0u);
+    }
+    frame.shadowDetailScale = state.shadows.detailScale;
+    frame.shadowForceDetail = state.shadows.forceDetail;
+    frame.shadowClusterCapacity = state.capacities.shadowClusters;
+    frame.shadowPoolCapacity = state.capacities.shadowPoolVertices;
+    frame.shadowReceiverBias = state.shadows.receiverBias;
     upload(state.buffers->frameState, 0u, &frame, sizeof(frame));
     // The frame's counters start at zero. A frozen selection keeps its counters with its list.
     static constexpr std::uint32_t zeros[HAIR_COUNTER_COUNT] = {};

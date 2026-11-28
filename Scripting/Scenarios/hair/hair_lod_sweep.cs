@@ -117,6 +117,7 @@ public sealed class HairLodSweep : Scenario
         commands.Invoke("hair.clear");
         commands.Invoke("hair.lod", new { error_pixels = 1.0, max_width_scale = 8.0, min_detail = 0.02, force_detail = 0.0, segment_pixels = 4.0, freeze = false });
         if (Environment.GetEnvironmentVariable("HAIR_COVERAGE") is string coverage) commands.Invoke("hair.lod", new { coverage }); // off: the opaque form
+        if (Environment.GetEnvironmentVariable("HAIR_PATH") is string path) commands.Invoke("hair.render", new { path }); // layered: the composited path
         uint asset = commands.Invoke("hair.load", new {
             procedural = new { style = "wavy", strands = 24000, seed = 11, radius = 0.5, length = 0.3 },
         }).GetProperty("asset").GetUInt32();
@@ -233,6 +234,21 @@ public sealed class HairLodSweep : Scenario
         ctx.Log($"outside the frustum: {away}");
         ctx.Check(away.ClustersVisible == 0 && away.Strands == 0 && away.PoolVertices == 0, "no cluster is selected with the groom behind the camera");
         ctx.Check(away.PixelsWritten == 0 && away.SegmentsDrawn == 0 && away.PixelsResolved == 0, "nothing is rasterized or resolved with the groom behind the camera");
+
+        // The layered path's two rasterizers, each forced at the same camera: the culled one, which skips hair behind
+        // hair, brings hair into the same pixels as the direct one. (Left to itself the path picks the direct one for
+        // this groom: its strands are a fraction of a pixel wide.) Every strand is kept in the pool for the comparison.
+        if (Environment.GetEnvironmentVariable("HAIR_PATH") == "layered") {
+            commands.Invoke("hair.render", new { raster = "direct" });
+            var direct = await SampleAt(ctx, Eye(2), Target, settleFrames: 12);
+            commands.Invoke("hair.render", new { raster = "culled", hidden_detail = 1.0 });
+            var culled = await SampleAt(ctx, Eye(2), Target, settleFrames: 12);
+            commands.Invoke("hair.render", new { raster = "auto", hidden_detail = 0.25 });
+            ctx.Log($"direct rasterizer: {direct}; culled rasterizer: {culled}");
+            ctx.Check(culled.Strands == direct.Strands && culled.Overflow == 0, $"the culled rasterizer is given the strands the direct one is ({culled.Strands} and {direct.Strands})");
+            ctx.Check(culled.PixelsWritten > 0 && Math.Abs((double)culled.PixelsResolved - direct.PixelsResolved) <= 0.005 * direct.PixelsResolved,
+                $"the culled rasterizer brings hair into the pixels the direct one does ({culled.PixelsResolved} and {direct.PixelsResolved})");
+        }
 
         // Behind an occluder: a 4 m cube between the camera and the groom. The groom is still in the frustum, so it is
         // selected and evaluated, and every covered pixel fails the opaque depth test.

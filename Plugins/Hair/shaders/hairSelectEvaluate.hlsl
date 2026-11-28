@@ -16,10 +16,14 @@
 #define HAIR_CLUSTERS UintRootConstant1         // StructuredBuffer<HairClusterHeader>
 #define HAIR_AGGREGATES UintRootConstant2       // StructuredBuffer<HairClusterAggregate>, select only
 #define HAIR_ROOT_BINDINGS UintRootConstant3    // StructuredBuffer<HairRootBinding>
+// Evaluate only. Not 0: the shadow view's evaluation (hairShadow.hlsl). The visible-cluster list and the pool bound are
+// then the shadow list and the shadow pool, counted by the shadow counters.
+#define HAIR_EVALUATE_SHADOW UintRootConstant4
 #define HAIR_FRAME_STATE UintRootConstant5      // StructuredBuffer<HairFrameGPU>
 #define HAIR_COUNTERS UintRootConstant6         // RWStructuredBuffer<uint>
 #define HAIR_VISIBLE_CLUSTERS UintRootConstant7 // RWStructuredBuffer<HairVisibleCluster> in select, read in evaluate
 #define HAIR_INSTANCE_INDEX UintRootConstant8   // select only
+#define HAIR_CLUSTER_SEEN UintRootConstant16    // RWStructuredBuffer<uint>, select only: the cluster state
 #define HAIR_STRANDS UintRootConstant9          // StructuredBuffer<HairStrandRecord>, evaluate only
 #define HAIR_POINTS UintRootConstant10          // StructuredBuffer<HairPackedPoint>, evaluate only
 #define HAIR_POOL_VERTICES UintRootConstant11   // RWStructuredBuffer<HairPoolVertex>, evaluate only
@@ -101,6 +105,41 @@ void HairSelectCS(uint3 dispatchThreadId : SV_DispatchThreadID)
         : 2.0f * cluster.boundsRadius * rsqrt((float)cluster.strandCount)) * scale;
     float detailLevel =
         HairLodDetailLevelPower(spacing * pixelsPerMetre, frame.lodErrorPixels, frame.minDetail, frame.detailExponent);
+    // A cluster that drew no pixel in the last frames (hairRasterCulled.hlsl stamps the ones that do) is hidden: behind
+    // the head, or behind hair that hides it. It stays in the pool, because the density volume is filled from the pool,
+    // but with a fraction of its strands. The scale moves a step a frame, so strands come and go by the boundary
+    // strand's fade, and a cluster that comes into view has all its strands within a few frames of its first pixel.
+    const float widthDetail = detailLevel;
+    const uint seenSlot = instance.clusterSeenBase != HAIR_INVALID_INDEX && instance.clusterSeenBase + clusterIndex < frame.clusterSeenCapacity
+        ? instance.clusterSeenBase + clusterIndex : HAIR_INVALID_INDEX;
+    uint clusterFlags = HAIR_VISIBLE_FLAG_SEEN;
+    if (seenSlot != HAIR_INVALID_INDEX && (frame.rasterFlags & HAIR_RASTER_FLAG_CULLED) != 0u)
+    {
+        RWStructuredBuffer<uint> clusterState = ResourceDescriptorHeap[HAIR_CLUSTER_SEEN];
+        const uint stateRow = seenSlot * HAIR_CLUSTER_STATE_WORDS;
+        const bool seen = frame.frameNumber - clusterState[stateRow + HAIR_CLUSTER_STATE_SEEN] <= 2u;
+        const float target = seen ? 1.0f : frame.hiddenDetail;
+        float scale = asfloat(clusterState[stateRow + HAIR_CLUSTER_STATE_SCALE]);
+        if (!(scale > 0.0f && scale <= 1.0f))
+        {
+            scale = 1.0f; // a cluster drawn for the first time
+        }
+        if ((frame.rasterFlags & HAIR_RASTER_FLAG_HOLD_DETAIL) == 0u)
+        {
+            scale = target > scale ? min(target, scale + frame.detailRateUp) : max(target, scale - frame.detailRateDown);
+        }
+        clusterState[stateRow + HAIR_CLUSTER_STATE_SCALE] = asuint(scale);
+        detailLevel = max(detailLevel * scale, frame.minDetail);
+        if (!seen)
+        {
+            clusterFlags = 0u;
+            InterlockedAdd(counters[HAIR_COUNTER_CLUSTERS_UNSEEN], 1u);
+        }
+        if (scale < 1.0f)
+        {
+            InterlockedAdd(counters[HAIR_COUNTER_CLUSTERS_REDUCED], 1u);
+        }
+    }
     if (frame.forceDetail > 0.0f)
     {
         detailLevel = min(frame.forceDetail, 1.0f);
@@ -145,6 +184,12 @@ void HairSelectCS(uint3 dispatchThreadId : SV_DispatchThreadID)
     visible.boundaryWeight = HairLodBoundaryWeight(detailLevel, cluster.strandCount, cluster.randomOffset);
     visible.vertexLevel = vertexLevel;
     visible.geomorph = HairLodGeomorph(fractionalLevel);
+    visible.seenSlot = seenSlot;
+    visible.flags = clusterFlags;
+    // The drawn strands keep the width of the level the cluster has in view; the volume's deposits make up the rest.
+    visible.widthDetail = frame.forceDetail > 0.0f ? detailLevel : widthDetail;
+    visible.densityScale = HairLodCoverageWidthScale(detailLevel, cluster.strandCount, cluster.randomOffset, frame.maxWidthScale) /
+        HairLodCoverageWidthScale(visible.widthDetail, cluster.strandCount, cluster.randomOffset, frame.maxWidthScale);
     visibleClusters[visibleIndex] = visible;
     InterlockedAdd(counters[HAIR_COUNTER_STRANDS_SELECTED], strandCount);
     InterlockedAdd(counters[HAIR_COUNTER_SEGMENTS_SELECTED], strandCount * segmentsPerStrand);
@@ -217,11 +262,13 @@ void HairEvaluateCS(uint3 groupId : SV_GroupID, uint strandIndex : SV_GroupIndex
     RWStructuredBuffer<uint> counters = ResourceDescriptorHeap[HAIR_COUNTERS];
     const HairFrameGPU frame = frameState[0];
     const uint visibleIndex = groupId.x;
-    if (visibleIndex == 0u && strandIndex == 0u)
+    const bool shadowView = HAIR_EVALUATE_SHADOW != 0u;
+    if (visibleIndex == 0u && strandIndex == 0u && !shadowView)
     {
         InterlockedAdd(counters[HAIR_COUNTER_EVALUATE_DISPATCHES], 1u);
     }
-    if (visibleIndex >= min(counters[HAIR_COUNTER_CLUSTERS_VISIBLE], frame.visibleClusterCapacity))
+    if (visibleIndex >= (shadowView ? min(counters[HAIR_COUNTER_SHADOW_CLUSTERS], frame.shadowClusterCapacity)
+        : min(counters[HAIR_COUNTER_CLUSTERS_VISIBLE], frame.visibleClusterCapacity)))
     {
         return;
     }
@@ -254,23 +301,27 @@ void HairEvaluateCS(uint3 groupId : SV_GroupID, uint strandIndex : SV_GroupIndex
 
     // Something that should not happen, counted: a drawn strand of an instance that is not simulated because the CPU
     // found it in no view.
+    // The shadow view draws such strands on purpose, on their rigid pose (a groom out of view still casts a shadow
+    // into it), and counts them as its own.
     if ((instance.simFlags & HAIR_SIM_FLAG_UNSEEN) != 0u)
     {
-        InterlockedAdd(counters[HAIR_COUNTER_UNSEEN_STRANDS_DRAWN], 1u);
+        InterlockedAdd(counters[shadowView ? HAIR_COUNTER_SHADOW_UNSEEN_STRANDS : HAIR_COUNTER_UNSEEN_STRANDS_DRAWN], 1u);
     }
     // A simulated instance holds guide rows. One that does not is counted and drawn rigid: nothing reads rows it was
     // not lent.
     const bool simulatedInstance = (instance.simFlags & HAIR_SIM_FLAG_ENABLED) != 0u;
+    const uint staleGuideCounter = shadowView ? HAIR_COUNTER_SHADOW_STALE_GUIDES : HAIR_COUNTER_STALE_GUIDES_DRAWN;
     if (simulatedInstance && instance.guidePointBase == HAIR_INVALID_INDEX)
     {
-        InterlockedAdd(counters[HAIR_COUNTER_STALE_GUIDES_DRAWN], 1u);
+        InterlockedAdd(counters[staleGuideCounter], 1u);
     }
 
     // The strand is widened to make up for the dropped ones; the cluster's last drawn strand fades in by width.
     // With coverage the scale is the exact one; without, the one-pixel floor hides the width and the rule is as it was.
-    float width = strand.width * (frame.coverageMode != HAIR_COVERAGE_OFF
-        ? HairLodCoverageWidthScale(visible.detailLevel, cluster.strandCount, cluster.randomOffset, frame.maxWidthScale)
-        : HairLodWidthScale(visible.detailLevel, frame.maxWidthScale));
+    // The layered path always draws coverage, whatever the mode says.
+    float width = strand.width * (frame.coverageMode != HAIR_COVERAGE_OFF || frame.renderPath == HAIR_PATH_LAYERED || shadowView
+        ? HairLodCoverageWidthScale(visible.widthDetail, cluster.strandCount, cluster.randomOffset, frame.maxWidthScale)
+        : HairLodWidthScale(visible.widthDetail, frame.maxWidthScale));
     if (strandIndex + 1u == visible.strandCount)
     {
         width *= visible.boundaryWeight;
@@ -322,7 +373,7 @@ void HairEvaluateCS(uint3 groupId : SV_GroupID, uint strandIndex : SV_GroupIndex
         }
         if (staleGuide)
         {
-            InterlockedAdd(counters[HAIR_COUNTER_STALE_GUIDES_DRAWN], 1u);
+            InterlockedAdd(counters[staleGuideCounter], 1u);
         }
 
         for (vertex = 0u; vertex <= segmentCount; ++vertex)
@@ -337,9 +388,12 @@ void HairEvaluateCS(uint3 groupId : SV_GroupID, uint strandIndex : SV_GroupIndex
                 // not the previous root frame when the entity's frames did not follow one another (hairSimulate.hlsl).
                 const uint metricBase = visible.instanceIndex * HAIR_SIM_METRIC_COUNT;
                 const float rootError = distance(evaluated.position, follow.position);
-                InterlockedAdd(metrics[metricBase + (simulated.isGuide ? HAIR_SIM_METRIC_GUIDE_ROOTS : HAIR_SIM_METRIC_STRAND_ROOTS)], 1u);
-                InterlockedMax(metrics[metricBase + (simulated.isGuide ? HAIR_SIM_METRIC_GUIDE_ROOT_ERROR : HAIR_SIM_METRIC_STRAND_ROOT_ERROR)],
-                    asuint(rootError));
+                if (!shadowView) // the metrics are of the strands the main view draws
+                {
+                    InterlockedAdd(metrics[metricBase + (simulated.isGuide ? HAIR_SIM_METRIC_GUIDE_ROOTS : HAIR_SIM_METRIC_STRAND_ROOTS)], 1u);
+                    InterlockedMax(metrics[metricBase + (simulated.isGuide ? HAIR_SIM_METRIC_GUIDE_ROOT_ERROR : HAIR_SIM_METRIC_STRAND_ROOT_ERROR)],
+                        asuint(rootError));
+                }
                 evaluated.position = follow.position;
             }
             else if ((vertex & 1u) != 0u && visible.geomorph > 0.0f)

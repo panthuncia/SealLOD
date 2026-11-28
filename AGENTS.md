@@ -176,10 +176,15 @@ lighting.
 (procedural, `.hair`, Alembic grooms), the builder and its data model, the `.groom` file, the LOD invariants and the
 tests that prove them, and the runtime plugin (`HairPlugin`, registered by the demo): its commands, attachment modes,
 GPU buffers and passes (LOD selection, strand evaluation, the compute rasterizer into the hair visibility
-target, the resolve of that target into the canonical surface, depth and motion vectors, and a debug overlay). Hair is
-lit as an opaque surface with a placeholder material: there is no hair BSDF and no shadow cast by hair. A strand thinner
-than a pixel is written with the probability of its coverage (`hair.lod` `coverage`; "Partial coverage measurements" has
-what that buys and costs). It also covers
+target, the resolve of that target into the canonical surface, depth and motion vectors, and a debug overlay). On that
+path, the default, hair is lit as an opaque surface with a placeholder material, and a strand thinner than a pixel is
+written with the probability of its coverage (`hair.lod` `coverage`; "Partial coverage measurements" has what that buys
+and costs). `hair.render {path: "layered"}` selects the other path: three depth-ordered layers and the summed coverage a
+pixel, every drawn strand vertex lit by hair's own light loop with a hair shading model (the R, TT and TRT lobes of the
+real-time Marschner model with Chiang's parameters, in `HairBsdfShared.h`, one text for the shader and the CPU tests;
+"The hair shading model", "Hair shading measurements"), and a composite over the lit frame that gives the upscaler
+hair's depth, motion and a reactive mask ("The layered path", "Layered path measurements"; the mask goes through
+`Extensions/UpscalerReactiveMask.h`). On that path hair shadows itself and takes light scattered between fibres through a density volume per groom, rebuilt every frame and marched from every lit vertex (`hair.volume`; dual scattering in `HairScatterShared.h`; "The density volume", "Multiple scattering", "Self-shadowing measurements"). On that path hair also casts the sun's shadow: `HairExtension` is a caster provider of the virtual shadow map (`hair.shadows`; a shadow view that keeps the clusters over shadow pages drawn this frame, a second, smaller strand pool, and a compute rasterizer that writes depth with coverage dithered; "Shadow casting", "Cast shadow measurements"). Spot and point lights get no shadow from hair, and on the surface path hair casts none. The layered path has two rasterizers: the direct one, a thread per segment, every strand drawn, and the culled one (`hairRasterCulled.hlsl`; `hair.render` `raster`, `auto` by default, which takes it where strands are about a pixel wide), which keeps a hidden depth per pixel that hair itself lowers, cuts segments into 8-pixel chunks, draws first what the frame before saw and then tests the rest against the frame's own hidden depths, and keeps a quarter of a hidden cluster's strands in the pool ("The culled rasterizer", "Hidden clusters", "Rasterizer cost measurements": 12.1 ms to 3.6 ms with a groom of wide strands filling the view, 1.9 ms when the camera is not jittered, which is how the profiler measures unless told otherwise, and no gain for hair of real width). It also covers
 the opt-in simulation (`hair.sim`): guides simulated on the GPU with a fixed timestep, sphere and capsule colliders, and
 render strands interpolated from their guides. Simulation follows the view: a groom the main camera
 does not show is not simulated ("View-following measurements"). Per-instance memory follows it too: no buffer holds root

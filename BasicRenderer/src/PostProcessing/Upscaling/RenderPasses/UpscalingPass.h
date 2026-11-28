@@ -6,6 +6,8 @@
 #include "BasicRenderer/Scene/Scene.h"
 #include "PostProcessing/Upscaling/UpscalingGenerationService.h"
 #include "Render/PreparedPass.h"
+#include "Interfaces/IDynamicDeclaredResources.h"
+#include "BasicRenderer/Extensions/UpscalerReactiveMask.h"
 
 // What the upscaler's SDK takes per run: the camera (matrices, jitter), the frame's number and elapsed time. Update writes them
 // each run, and Record reads them when the pass is recorded at execution, after Update in the same run: a kept recording of
@@ -27,18 +29,23 @@ struct UpscalingFrameData {
     std::shared_ptr<org::PixelBuffer> specularAlbedo;
     std::shared_ptr<org::PixelBuffer> normalRoughness;
     std::shared_ptr<org::PixelBuffer> specularHitDistance;
+    std::shared_ptr<org::PixelBuffer> reactiveMask; // an extension's (Extensions/UpscalerReactiveMask.h), or null
     bool operator==(const UpscalingFrameData&) const = default;
 };
 
 class UpscalingPass
-    : public org::TypedRenderGraphPass<UpscalingPass, UpscalingFrameData> {
+    : public org::TypedRenderGraphPass<UpscalingPass, UpscalingFrameData>, public org::IDynamicDeclaredResources {
 public:
     explicit UpscalingPass(
         std::shared_ptr<const br::render::UpscalingGenerationService> service)
         : m_service(std::move(service)) {}
 
+    // An extension gave the upscaler a reactive mask, replaced it or took it away: declare again.
+    bool DeclaredResourcesChanged() const override { return m_reactiveMask != br::render::GetUpscalerReactiveMask(); }
+
     void Declare(org::PassBuilder& declaration) {
         auto* builder = &declaration;
+        m_reactiveMask = br::render::GetUpscalerReactiveMask();
         // The SDK evaluation takes this run's values (UpscalingRunValues): recorded at execution, in a batch of its own.
         declaration.RecordAtExecution();
         // Upscalers produce only the full-resolution image in mip 0. Keep the
@@ -59,6 +66,7 @@ public:
                 Builtin::Color::HDRColorTarget,
                 motionVectors,
                 Builtin::PrimaryCamera::ProjectedDepthTexture);
+            if (m_reactiveMask) builder->ShaderResource(m_reactiveMask);
             builder->UnorderedAccess(upscaledHDR);
             return;
         }
@@ -97,6 +105,8 @@ public:
                 Builtin::PrimaryCamera::ProjectedDepthTexture,
                 upscaledHDR)
                 .InternalTransition(upscaledHDR, dx12StreamlineExitState);
+            // Super Resolution's bias-current-colour hint. Ray Reconstruction and no upscaling do not take it.
+            if (m_reactiveMask && upscalingMode == UpscalingMode::DLSS) builder->LegacyInterop(m_reactiveMask);
             if (upscalingMode == UpscalingMode::DLSSRayReconstruction) {
                 builder->LegacyInterop(
                     Builtin::Surface::BaseColorOpacity,
@@ -146,6 +156,7 @@ public:
             .specularAlbedo = m_pSpecularAlbedo,
             .normalRoughness = m_pNormalRoughness,
             .specularHitDistance = m_pSpecularHitDistance,
+            .reactiveMask = m_service->Mode() == UpscalingMode::DLSS || m_service->Mode() == UpscalingMode::FSR3 ? m_reactiveMask : nullptr,
         };
     }
     static void Record(const UpscalingFrameData& data, org::PassRecordContext& recording) {
@@ -158,6 +169,7 @@ public:
             .specularAlbedo = data.specularAlbedo.get(),
             .normalRoughness = data.normalRoughness.get(),
             .specularHitDistance = data.specularHitDistance.get(),
+            .reactiveMask = data.reactiveMask.get(),
         };
         const auto& run = *data.run;
         const bool written = data.service->Evaluate(recording.Commands(), run.camera,
@@ -205,6 +217,7 @@ private:
     std::shared_ptr<org::PixelBuffer> m_pSpecularAlbedo;
     std::shared_ptr<org::PixelBuffer> m_pNormalRoughness;
     std::shared_ptr<org::PixelBuffer> m_pSpecularHitDistance;
+    std::shared_ptr<org::PixelBuffer> m_reactiveMask; // the one this declaration names
 
     std::shared_ptr<const br::render::UpscalingGenerationService> m_service;
     std::shared_ptr<UpscalingRunValues> m_runValues = std::make_shared<UpscalingRunValues>();

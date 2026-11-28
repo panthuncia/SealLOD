@@ -19,6 +19,8 @@ using namespace br::hair;
 
 int RunGroomBuilderTests(); // GroomBuilderTests.cpp; returns its failed check count
 int RunAlembicGroomTests(); // AlembicGroomTests.cpp; likewise
+int RunHairBsdfTests();     // HairBsdfTests.cpp; likewise
+int RunHairScatterTests();  // HairScatterTests.cpp; likewise
 
 namespace {
 
@@ -521,6 +523,8 @@ int main()
     TestValidateGroomSource();
     g_failures += RunGroomBuilderTests();
     g_failures += RunAlembicGroomTests();
+    g_failures += RunHairBsdfTests();
+    g_failures += RunHairScatterTests();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " check(s) failed\n";

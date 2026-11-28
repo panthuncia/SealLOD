@@ -1,5 +1,9 @@
 #include "Hair/HairCommands.h"
 
+#include "Hair/HairBsdfShared.h"
+
+#include <BasicRenderer/Extensions/VirtualGeometry/CLodCommon.h>
+
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -75,7 +79,12 @@ struct DebugViewName {
 constexpr DebugViewName kDebugViews[] = {
     { "off", HairDebugView::Off },           { "cluster", HairDebugView::Cluster }, { "detail", HairDebugView::Detail },
     { "strand", HairDebugView::Strand },     { "rank", HairDebugView::Rank },       { "vertex_level", HairDebugView::VertexLevel },
-    { "coverage", HairDebugView::Coverage },
+    { "coverage", HairDebugView::Coverage }, { "layers", HairDebugView::Layers },   { "alpha", HairDebugView::Alpha },
+    { "reactive", HairDebugView::Reactive }, { "lobe_r", HairDebugView::LobeR },    { "lobe_tt", HairDebugView::LobeTT },
+    { "lobe_trt", HairDebugView::LobeTRT },  { "environment", HairDebugView::Environment }, { "direct", HairDebugView::Direct },
+    { "density", HairDebugView::Density },   { "transmittance", HairDebugView::Transmittance },
+    { "fibre_count", HairDebugView::FibreCount }, { "scatter_global", HairDebugView::ScatterGlobal },
+    { "scatter_local", HairDebugView::ScatterLocal }, { "vertex_density", HairDebugView::VertexDensity },
 };
 
 const char* DebugViewText(HairDebugView view)
@@ -112,6 +121,136 @@ Json DescribeLod(const HairLodSettings& lod)
     };
 }
 
+// The layered path's material, as hair.attach and hair.material take it.
+Json DescribeMaterial(const HairMaterial& material)
+{
+    return {
+        { "sigma_a", { material.sigmaA.x, material.sigmaA.y, material.sigmaA.z } },
+        { "beta_m", material.betaM },
+        { "beta_n", material.betaN },
+        { "alpha_degrees", material.alphaDegrees },
+        { "eta", material.eta },
+        { "melanin_variation", material.melaninVariation },
+        { "roughness_variation", material.roughnessVariation },
+    };
+}
+
+Json DescribeRender(const HairRenderSettings& render)
+{
+    return {
+        { "path", render.path == HairRenderPath::Layered ? "layered" : "surface" },
+        { "depth_alpha", render.depthAlpha },
+        { "coverage_saturation", render.coverageSaturation },
+        { "reactive", render.reactiveMask },
+        { "reactive_strength", render.reactiveStrength },
+        { "reactive_pixels", render.reactivePixels },
+        { "ambient", render.ambient },
+        { "lights", render.lights == HairLightLookup::Grid ? "grid" : "list" },
+        { "raster", render.raster == HairRasterMode::Culled ? "culled" : render.raster == HairRasterMode::Auto ? "auto" : "direct" },
+        { "auto_width_pixels", render.autoWidthPixels },
+        { "opaque_coverage", render.opaqueCoverage },
+        { "occlude_opaque", render.occludeOpaque },
+        { "occlude_saturated", render.occludeSaturated },
+        { "saturation", render.saturation },
+        { "first_pass", render.firstPass == HairFirstPass::All ? "all" : render.firstPass == HairFirstPass::Previous ? "previous"
+            : render.firstPass == HairFirstPass::Prefix ? "prefix" : "both" },
+        { "raster_profile", render.rasterProfile },
+        { "late_pass", render.latePass },
+        { "hint_decay", render.hintDecay },
+        { "hidden_detail", render.hiddenDetail },
+        { "detail_rate_up", render.detailRateUp },
+        { "detail_rate_down", render.detailRateDown },
+    };
+}
+
+const char* ShadowCoverageName(HairShadowCoverage coverage)
+{
+    return coverage == HairShadowCoverage::Opaque ? "opaque" : coverage == HairShadowCoverage::Fixed ? "fixed" : "temporal";
+}
+
+Json DescribeShadows(const HairShadowSettings& shadows, const HairShadowStats& stats)
+{
+    return {
+        { "enabled", shadows.enabled },
+        { "detail_scale", shadows.detailScale },
+        { "force_detail", shadows.forceDetail },
+        { "coverage", ShadowCoverageName(shadows.coverage) },
+        { "receiver_bias", shadows.receiverBias },
+        { "dynamic_radius", shadows.dynamicRadius },
+        // The last frame, on the CPU. The GPU's counts are in gpu_frame (shadow_*).
+        { "active", stats.active },
+        { "instances", stats.instances },
+        { "moved_instances", stats.movedInstances },
+        { "invalidations", stats.invalidations },
+        { "total_invalidations", stats.totalInvalidations },
+        { "dropped_invalidations", stats.droppedInvalidations },
+        // The shadow map's own: the sun's clipmaps in use, and how many of the finest it redraws deformable casters into every frame.
+        { "sun_clipmaps", g_clodSkinnedShadowActiveClipmapCount.load(std::memory_order_relaxed) },
+        { "dynamic_clipmaps", g_clodSkinnedShadowEffectiveDynamicClipmapCount.load(std::memory_order_relaxed) },
+    };
+}
+
+Json DescribeVolume(const HairVolumeSettings& volume, const HairVolumeStats& stats)
+{
+    return {
+        { "enabled", volume.enabled },
+        { "dual_scattering", volume.dualScattering },
+        { "voxel_pixels", volume.voxelPixels },
+        { "max_resolution", volume.maxResolution },
+        { "voxel_budget", volume.voxelBudget },
+        { "steps", volume.steps },
+        { "environment_steps", volume.environmentSteps },
+        { "bias", volume.bias },
+        { "density_factor", volume.densityFactor },
+        { "margin", volume.margin },
+        { "scalp_depth", volume.scalpDepth },
+        { "splat", volume.trilinear ? "trilinear" : "nearest" },
+        { "jitter", volume.jitterPerFrame ? "frame" : "vertex" },
+        // The last frame's volumes.
+        { "volumes", stats.volumes },
+        { "dropped_volumes", stats.droppedVolumes },
+        { "unknown_instances", stats.unknownInstances },
+        { "voxels", stats.voxels },
+        { "voxel_bytes", static_cast<std::uint64_t>(stats.voxels) * sizeof(std::uint32_t) },
+        { "capacity_voxels", stats.capacityVoxels },
+        { "budget_voxels", stats.budgetVoxels },
+        { "high_water_voxels", stats.highWaterVoxels },
+        { "coarsening", stats.coarsening },
+        { "largest_resolution", stats.largestResolution },
+        { "smallest_voxel", stats.smallestVoxel },
+        { "largest_voxel", stats.largestVoxel },
+    };
+}
+
+// An instance's material from a command's fields; a field not given keeps `material`'s value. `color` and `roughness`
+// are the surface path's placeholder. The layered path's absorption is the last of these that is given: `preset`,
+// `melanin` with `redness`, `hair_color` (the colour a head of such hair has, by Chiang's fit) or `sigma_a` itself.
+void ReadMaterial(const Json& args, HairMaterial& material)
+{
+    material.baseColor = ReadFloat3(args, "color", material.baseColor);
+    material.roughness = args.value("roughness", material.roughness);
+    material.betaM = args.value("beta_m", material.betaM);
+    material.betaN = args.value("beta_n", material.betaN);
+    material.alphaDegrees = args.value("alpha_degrees", material.alphaDegrees);
+    material.eta = args.value("eta", material.eta);
+    material.melaninVariation = args.value("melanin_variation", material.melaninVariation);
+    material.roughnessVariation = args.value("roughness_variation", material.roughnessVariation);
+    if (const auto preset = args.find("preset"); preset != args.end()) {
+        const std::string name = preset->get<std::string>();
+        if (!ApplyHairMaterialPreset(name, material)) {
+            throw std::runtime_error("unknown hair material preset " + name + ": expected " + HairMaterialPresetNames());
+        }
+    }
+    if (args.contains("melanin") || args.contains("redness")) {
+        material.sigmaA = HairSigmaAFromMelaninRedness((std::max)(args.value("melanin", 2.0f), 0.0f),
+            std::clamp(args.value("redness", 0.0f), 0.0f, 1.0f));
+    }
+    if (args.contains("hair_color")) {
+        material.sigmaA = HairSigmaAFromColor(ReadFloat3(args, "hair_color", Float3{ 0.5f, 0.5f, 0.5f }), std::clamp(material.betaN, 0.0f, 1.0f));
+    }
+    material.sigmaA = ReadFloat3(args, "sigma_a", material.sigmaA);
+}
+
 Json DescribeFrameCounters(const HairGpuCounters& counters, const HairCapacities& capacities)
 {
     return {
@@ -136,6 +275,56 @@ Json DescribeFrameCounters(const HairGpuCounters& counters, const HairCapacities
         { "pixels_occluded", counters.pixelsOccluded },
         { "segments_capped", counters.segmentsCapped },
         { "pixels_resolved", counters.pixelsResolved },
+        // The layered path.
+        { "layer_rejected", counters.layerRejected },
+        { "coverage_skipped", counters.coverageSkipped },
+        { "layer_pixels", counters.layerPixels },
+        { "remainder_pixels", counters.remainderPixels },
+        { "remainder_alpha", counters.remainderAlpha },
+        { "alpha_sum", counters.alphaSum },
+        { "depth_pixels", counters.depthPixels },
+        { "shade_list", counters.shadeList },
+        { "shaded_vertices", counters.shadedVertices },
+        { "shadow_lookups", counters.shadowLookups },
+        { "shadow_coarser", counters.shadowCoarser },
+        { "shadow_missing", counters.shadowMissing },
+        { "shadow_cleared", counters.shadowCleared },
+        // The density volumes.
+        { "volume_segments", counters.volumeSegments },
+        { "volume_deposits", counters.volumeDeposits },
+        { "volume_outside", counters.volumeOutside },
+        { "raster_items", counters.rasterItems },
+        { "raster_items_overflow", counters.rasterItemsOverflow },
+        { "chunks", counters.chunks },
+        { "chunks_late", counters.chunksLate },
+        { "chunks_late_drawn", counters.chunksLateDrawn },
+        { "pixels_tested", counters.pixelsTested },
+        { "coverage_adds", counters.coverageAdds },
+        { "hidden_writes", counters.hiddenWrites },
+        { "pixels_saturated", counters.pixelsSaturated },
+        { "late_pixels_written", counters.latePixelsWritten },
+        { "hair_tiles", counters.hairTiles },
+        { "clusters_unseen", counters.clustersUnseen },
+        { "clusters_reduced", counters.clustersReduced },
+        { "wave_iterations", counters.waveIterations },
+        { "volume_vertices", counters.volumeVertices },
+        { "volume_marches", counters.volumeMarches },
+        { "volume_steps", counters.volumeSteps },
+        { "shadow_clusters_tested", counters.shadowClustersTested },
+        { "shadow_clusters", counters.shadowClusters },
+        { "shadow_strands", counters.shadowStrands },
+        { "shadow_segments", counters.shadowSegments },
+        { "shadow_pool_vertices", counters.shadowPoolVertices },
+        { "shadow_overflow_clusters", counters.shadowOverflow },
+        { "shadow_unseen_strands", counters.shadowUnseenStrands },
+        { "shadow_stale_guides_drawn", counters.shadowStaleGuides },
+        { "shadow_segments_drawn", counters.shadowSegmentsDrawn },
+        { "shadow_texels_covered", counters.shadowTexelsCovered },
+        { "shadow_texels_written", counters.shadowTexelsWritten },
+        { "shadow_segments_capped", counters.shadowSegmentsCapped },
+        { "shadow_pages_admitted", counters.shadowPagesAdmitted },
+        { "shadow_pages_invalidated", counters.shadowPagesInvalidated },
+        { "shadow_clipmap_mask", counters.shadowClipmapMask },
     };
 }
 
@@ -327,8 +516,16 @@ Json DescribeStats(const HairStats& stats)
     for (const auto& frame : stats.gpuCounterHistory) history.push_back(DescribeFrameCounters(frame, stats.capacities));
     reply["gpu_history"] = std::move(history);
     reply["lod"] = DescribeLod(stats.lod);
+    reply["render"] = DescribeRender(stats.render);
+    reply["volume"] = DescribeVolume(stats.volume, stats.volumeStats);
+    reply["shadows"] = DescribeShadows(stats.shadows, stats.shadowStats);
+    Json targets = Json::array();
+    for (const HairBufferUse& target : stats.targets) targets.push_back({ { "name", target.name }, { "bytes", target.rowBytes } });
+    reply["targets"] = std::move(targets);
     reply["debug_view"] = DebugViewText(stats.debugView);
     reply["visibility_target"] = { stats.visibilityWidth, stats.visibilityHeight };
+    reply["raster_active"] = stats.rasterCulled ? "culled" : "direct";
+    reply["raster_width_pixels"] = stats.rasterWidthPixels;
     reply["capture"] = DescribeCapture(stats.debugCapture);
     reply["probe"] = DescribeCapture(stats.probe); // its width is the rows written
     reply["dumps"] = { { "pending", stats.dumpsPending }, { "written", stats.dumpsWritten }, { "failed", stats.dumpsFailed } };
@@ -367,11 +564,15 @@ Json DescribeStats(const HairStats& stats)
             { "mode", ModeName(instance.mode) },
             { "color", { instance.material.baseColor.x, instance.material.baseColor.y, instance.material.baseColor.z } },
             { "roughness", instance.material.roughness },
+            { "material", DescribeMaterial(instance.material) },
             { "active", instance.active },
             { "strands", instance.strands },
             { "guide_rows", instance.guideRows },
             // Its first row of guide state while it holds rows; -1 while it has none.
             { "guide_row_base", instance.guideRowBase == HAIR_INVALID_INDEX ? -1 : static_cast<std::int64_t>(instance.guideRowBase) },
+            // Its density volume in the last frame: voxels along each side (zeros: none) and a voxel's size, metres.
+            { "volume_resolution", instance.volumeResolution },
+            { "volume_voxel_size", instance.volumeVoxelSize },
             { "error", instance.error },
         });
     }
@@ -412,13 +613,31 @@ void RegisterHairCommands(br::diagnostics::ControlCommandRegistry& commands, std
         const auto asset = args.find("asset");
         if (asset == args.end() || !asset->is_number_unsigned()) throw std::runtime_error("hair.attach needs asset");
         HairMaterial material;
-        material.baseColor = ReadFloat3(args, "color", material.baseColor);
-        material.roughness = args.value("roughness", material.roughness);
+        ReadMaterial(args, material);
         std::string error;
         const auto instance = runtime->AttachGroom(asset->get<std::uint32_t>(), args.value("entity", std::string()),
             args.value("bone", std::string()), material, error);
         if (!instance) throw std::runtime_error(error);
         return Json{ { "instance", *instance } };
+    });
+    // Only the fields given change.
+    commands.Register("hair.material", [runtime](const br::diagnostics::ControlRequest& request) {
+        const Json& args = request.args;
+        const auto instance = args.find("instance");
+        if (instance == args.end() || !instance->is_number_unsigned()) throw std::runtime_error("hair.material needs instance");
+        const std::uint32_t id = instance->get<std::uint32_t>();
+        HairMaterial material;
+        bool found = false;
+        for (const auto& info : runtime->Stats().instanceInfo) {
+            if (info.id != id) continue;
+            material = info.material;
+            found = true;
+        }
+        if (!found) throw std::runtime_error("no hair instance " + std::to_string(id));
+        ReadMaterial(args, material);
+        std::string error;
+        if (!runtime->SetInstanceMaterial(id, material, error)) throw std::runtime_error(error);
+        return Json{ { "instance", id }, { "material", DescribeMaterial(material) } };
     });
     commands.Register("hair.clear", [runtime](const br::diagnostics::ControlRequest&) {
         runtime->Clear();
@@ -467,7 +686,103 @@ void RegisterHairCommands(br::diagnostics::ControlCommandRegistry& commands, std
                 return Json{ { "view", entry.name } };
             }
         }
-        throw std::runtime_error("unknown hair debug view " + name + ": expected off, cluster, detail, strand, rank, vertex_level or coverage");
+        throw std::runtime_error("unknown hair debug view " + name +
+            ": expected off, cluster, detail, strand, rank, vertex_level, coverage, layers, alpha, reactive, lobe_r, lobe_tt, "
+            "lobe_trt, environment, direct, density, transmittance, fibre_count, scatter_global, scatter_local or vertex_density");
+    });
+    // The density volumes. Only the fields given change.
+    commands.Register("hair.volume", [runtime](const br::diagnostics::ControlRequest& request) {
+        const Json& args = request.args;
+        HairVolumeSettings volume = runtime->VolumeSettings();
+        volume.enabled = args.value("enabled", volume.enabled);
+        volume.dualScattering = args.value("dual_scattering", volume.dualScattering);
+        volume.voxelPixels = args.value("voxel_pixels", volume.voxelPixels);
+        volume.maxResolution = args.value("max_resolution", volume.maxResolution);
+        volume.voxelBudget = args.value("voxel_budget", volume.voxelBudget);
+        volume.steps = args.value("steps", volume.steps);
+        volume.environmentSteps = args.value("environment_steps", volume.environmentSteps);
+        volume.bias = args.value("bias", volume.bias);
+        volume.densityFactor = args.value("density_factor", volume.densityFactor);
+        volume.margin = args.value("margin", volume.margin);
+        volume.scalpDepth = args.value("scalp_depth", volume.scalpDepth);
+        if (const auto splat = args.find("splat"); splat != args.end()) {
+            const std::string name = splat->get<std::string>();
+            if (name != "trilinear" && name != "nearest") throw std::runtime_error("unknown hair volume splat " + name + ": expected trilinear or nearest");
+            volume.trilinear = name == "trilinear";
+        }
+        if (const auto jitter = args.find("jitter"); jitter != args.end()) {
+            const std::string name = jitter->get<std::string>();
+            if (name != "vertex" && name != "frame") throw std::runtime_error("unknown hair volume jitter " + name + ": expected vertex or frame");
+            volume.jitterPerFrame = name == "frame";
+        }
+        runtime->SetVolumeSettings(volume);
+        return DescribeVolume(runtime->VolumeSettings(), runtime->Stats().volumeStats);
+    });
+    // Shadow casting. Only the fields given change.
+    commands.Register("hair.shadows", [runtime](const br::diagnostics::ControlRequest& request) {
+        const Json& args = request.args;
+        HairShadowSettings shadows = runtime->ShadowSettings();
+        shadows.enabled = args.value("enabled", shadows.enabled);
+        shadows.detailScale = args.value("detail_scale", shadows.detailScale);
+        shadows.forceDetail = args.value("force_detail", shadows.forceDetail);
+        shadows.receiverBias = args.value("receiver_bias", shadows.receiverBias);
+        shadows.dynamicRadius = args.value("dynamic_radius", shadows.dynamicRadius);
+        if (const auto coverage = args.find("coverage"); coverage != args.end()) {
+            const std::string name = coverage->get<std::string>();
+            if (name == "temporal") shadows.coverage = HairShadowCoverage::Temporal;
+            else if (name == "fixed") shadows.coverage = HairShadowCoverage::Fixed;
+            else if (name == "opaque") shadows.coverage = HairShadowCoverage::Opaque;
+            else throw std::runtime_error("unknown hair shadow coverage " + name + ": expected temporal, fixed or opaque");
+        }
+        runtime->SetShadowSettings(shadows);
+        return DescribeShadows(runtime->ShadowSettings(), runtime->Stats().shadowStats);
+    });
+    // Only the fields given change.
+    commands.Register("hair.render", [runtime](const br::diagnostics::ControlRequest& request) {
+        const Json& args = request.args;
+        HairRenderSettings render = runtime->RenderSettings();
+        if (const auto path = args.find("path"); path != args.end()) {
+            const std::string name = path->get<std::string>();
+            if (name != "surface" && name != "layered") throw std::runtime_error("unknown hair render path " + name + ": expected surface or layered");
+            render.path = name == "layered" ? HairRenderPath::Layered : HairRenderPath::Surface;
+        }
+        if (const auto lights = args.find("lights"); lights != args.end()) {
+            const std::string name = lights->get<std::string>();
+            if (name != "list" && name != "grid") throw std::runtime_error("unknown hair light lookup " + name + ": expected list or grid");
+            render.lights = name == "grid" ? HairLightLookup::Grid : HairLightLookup::List;
+        }
+        render.depthAlpha = args.value("depth_alpha", render.depthAlpha);
+        render.coverageSaturation = args.value("coverage_saturation", render.coverageSaturation);
+        render.reactiveMask = args.value("reactive", render.reactiveMask);
+        render.reactiveStrength = args.value("reactive_strength", render.reactiveStrength);
+        render.reactivePixels = args.value("reactive_pixels", render.reactivePixels);
+        render.ambient = args.value("ambient", render.ambient);
+        if (const auto raster = args.find("raster"); raster != args.end()) {
+            const std::string name = raster->get<std::string>();
+            if (name != "direct" && name != "culled" && name != "auto") throw std::runtime_error("unknown hair rasterizer " + name + ": expected auto, direct or culled");
+            render.raster = name == "culled" ? HairRasterMode::Culled : name == "auto" ? HairRasterMode::Auto : HairRasterMode::Direct;
+        }
+        if (const auto firstPass = args.find("first_pass"); firstPass != args.end()) {
+            const std::string name = firstPass->get<std::string>();
+            if (name == "all") render.firstPass = HairFirstPass::All;
+            else if (name == "previous") render.firstPass = HairFirstPass::Previous;
+            else if (name == "prefix") render.firstPass = HairFirstPass::Prefix;
+            else if (name == "both") render.firstPass = HairFirstPass::Both;
+            else throw std::runtime_error("unknown hair first pass " + name + ": expected all, previous, prefix or both");
+        }
+        render.opaqueCoverage = args.value("opaque_coverage", render.opaqueCoverage);
+        render.occludeOpaque = args.value("occlude_opaque", render.occludeOpaque);
+        render.occludeSaturated = args.value("occlude_saturated", render.occludeSaturated);
+        render.saturation = args.value("saturation", render.saturation);
+        render.autoWidthPixels = args.value("auto_width_pixels", render.autoWidthPixels);
+        render.rasterProfile = args.value("raster_profile", render.rasterProfile);
+        render.latePass = args.value("late_pass", render.latePass);
+        render.hintDecay = args.value("hint_decay", render.hintDecay);
+        render.hiddenDetail = args.value("hidden_detail", render.hiddenDetail);
+        render.detailRateUp = args.value("detail_rate_up", render.detailRateUp);
+        render.detailRateDown = args.value("detail_rate_down", render.detailRateDown);
+        runtime->SetRenderSettings(render);
+        return DescribeRender(runtime->RenderSettings());
     });
     // Only the fields given change. `reset` puts every guide back on its rest pose.
     commands.Register("hair.sim", [runtime](const br::diagnostics::ControlRequest& request) {

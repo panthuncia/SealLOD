@@ -305,6 +305,7 @@ public sealed class HairSimLod : Scenario
         commands.Invoke("hair.clear");
         commands.Invoke("hair.lod", new { error_pixels = 1.0, max_width_scale = 8.0, min_detail = 0.02, force_detail = 0.0, segment_pixels = 4.0, freeze = false });
         if (Environment.GetEnvironmentVariable("HAIR_COVERAGE") is string coverage) commands.Invoke("hair.lod", new { coverage }); // off: the opaque form
+        if (Environment.GetEnvironmentVariable("HAIR_PATH") is string path) commands.Invoke("hair.render", new { path }); // layered: the composited path
         commands.Invoke("hair.debug", new { view = "off" });
         // Every control, so an earlier session's values do not carry over. The level is forced to every guide to begin with.
         var controls = commands.Invoke("hair.sim", new {

@@ -29,6 +29,8 @@ struct UpscalingInputs {
     org::PixelBuffer* specularAlbedo = nullptr;
     org::PixelBuffer* normalRoughness = nullptr;
     org::PixelBuffer* specularHitDistance = nullptr;
+    // An extension's reactive mask (Extensions/UpscalerReactiveMask.h), or null.
+    org::PixelBuffer* reactiveMask = nullptr;
 };
 
 enum class UpscaleQualityMode {

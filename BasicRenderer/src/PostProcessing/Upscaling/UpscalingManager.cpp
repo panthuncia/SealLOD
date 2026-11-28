@@ -203,6 +203,26 @@ namespace {
 
 }
 
+// Extensions/UpscalerReactiveMask.h: the mask the upscaling pass declares and hands to the evaluation.
+namespace {
+std::mutex g_reactiveMaskMutex;
+std::shared_ptr<org::PixelBuffer> g_reactiveMask;
+}
+
+namespace br::render {
+
+void SetUpscalerReactiveMask(std::shared_ptr<org::PixelBuffer> mask) {
+    std::scoped_lock lock(g_reactiveMaskMutex);
+    g_reactiveMask = std::move(mask);
+}
+
+std::shared_ptr<org::PixelBuffer> GetUpscalerReactiveMask() {
+    std::scoped_lock lock(g_reactiveMaskMutex);
+    return g_reactiveMask;
+}
+
+} // namespace br::render
+
 void UpscalingManager::SyncSettingsFromSettingsManager()
 {
     m_upscalingMode = ReadUpscalingModeSetting(m_upscalingMode);
@@ -1130,6 +1150,9 @@ bool UpscalingManager::EvaluateDLSS(const UpscalerConfiguration& configuration, 
     sl::Resource colorOut{};
     sl::Resource depth{};
     sl::Resource mvec{};
+    // An extension's reactive mask (Extensions/UpscalerReactiveMask.h), for Super Resolution on D3D12: how far each pixel
+    // takes the current frame over its history.
+    org::PixelBuffer* pReactiveMask = !rayReconstruction && backend == rhi::Backend::D3D12 ? inputs.reactiveMask : nullptr;
     if (backend == rhi::Backend::Vulkan) {
         rhi::Device device = DeviceManager::GetInstance().GetDevice();
         const rhi::DescriptorSlot colorInView = pHDRTarget->GetSRVInfo(0).slot;
@@ -1237,11 +1260,17 @@ bool UpscalingManager::EvaluateDLSS(const UpscalerConfiguration& configuration, 
         sl::ResourceTag normalRoughnessTag = sl::ResourceTag{ &normalRoughness, sl::kBufferTypeNormalRoughness, sl::ResourceLifecycle::eValidUntilPresent, &renderExtent };
         sl::ResourceTag specularHitDistanceTag = sl::ResourceTag{ &specularHitDistance, sl::kBufferTypeSpecularHitDistance, sl::ResourceLifecycle::eValidUntilPresent, &renderExtent };
 
+        sl::Resource reactiveMask = makeGuideResource(pReactiveMask);
+        sl::ResourceTag reactiveMaskTag = sl::ResourceTag{ &reactiveMask, sl::kBufferTypeBiasCurrentColorHint, sl::ResourceLifecycle::eValidUntilPresent, &renderExtent };
+
+        // The upscale's own five, then either Ray Reconstruction's guides or Super Resolution's optional reactive mask.
+        constexpr uint32_t kUpscaleOnlyInputCount = 5;
         const sl::BaseStructure* evaluateInputs[] = {
             &myViewport, &depthTag, &mvecTag, &colorInTag, &colorOutTag,
             &diffuseAlbedoTag, &specularAlbedoTag, &normalRoughnessTag, &specularHitDistanceTag };
-        constexpr uint32_t kUpscaleOnlyInputCount = 5;
-        const uint32_t evaluateInputCount = rayReconstruction ? _countof(evaluateInputs) : kUpscaleOnlyInputCount;
+        if (pReactiveMask) evaluateInputs[kUpscaleOnlyInputCount] = &reactiveMaskTag;
+        const uint32_t evaluateInputCount = rayReconstruction ? _countof(evaluateInputs)
+            : kUpscaleOnlyInputCount + (pReactiveMask ? 1u : 0u);
         const sl::Feature evaluatedFeature = rayReconstruction ? sl::kFeatureDLSS_RR : sl::kFeatureDLSS;
         const auto evaluateResult = [&] {
             BT_ZONE_SCOPE("UpscalingManager::EvaluateDLSS::slEvaluateFeature");
@@ -1328,7 +1357,10 @@ void UpscalingManager::EvaluateFSR3(const UpscalerConfiguration& configuration, 
     dispatchUpscale.depth = fidelityfx_backend::api::GetResource(backend, pDepthTexture, L"UpscaleDepth", FFX_API_RESOURCE_STATE_COMPUTE_READ);
     dispatchUpscale.motionVectors = fidelityfx_backend::api::GetResource(backend, pMotionVectors, L"UpscaleMotionVectors", FFX_API_RESOURCE_STATE_COMPUTE_READ);
     dispatchUpscale.output = fidelityfx_backend::api::GetResource(backend, pUpscaledHDRTarget, L"UpscaleColorOut", FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
-    //dispatchUpscale.reactive;
+    // An extension's reactive mask (Extensions/UpscalerReactiveMask.h). The transparency and composition mask stays unset.
+    if (inputs.reactiveMask) {
+        dispatchUpscale.reactive = fidelityfx_backend::api::GetResource(backend, inputs.reactiveMask, L"UpscaleReactiveMask", FFX_API_RESOURCE_STATE_COMPUTE_READ);
+    }
     //dispatchUpscale.transparencyAndComposition;
 
     auto renderRes = configuration.RenderResolution();

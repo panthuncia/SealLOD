@@ -11,21 +11,39 @@ Two libraries exist:
 - `HairPlugin`, the renderer half ([Runtime](#runtime)): it loads grooms, attaches them to scene entities and uploads
   them. Every frame it selects a level of detail per cluster for the main view, simulates as many of the guides as the
   view asks for when [simulation](#simulation) is on (and none of a groom the view does not show), evaluates the selected
-  strands into a pool, rasterizes them into a hair visibility target, and resolves that target into the frame's surface
-  data. The demo (`BasicRendererDemo`) registers it; SARP's renderer host does not.
+  strands into a pool, rasterizes them into a hair visibility target, and brings that target into the frame by one of
+  two paths. The demo (`BasicRendererDemo`) registers it; SARP's renderer host does not.
 
-**Hair is drawn as an ordinary opaque surface with a placeholder material.** The [resolve](#the-resolve) gives every
-hair pixel a surface record, depth and a motion vector, so deferred shading lights it, shadows fall on it and the
-upscaler follows it. There is no hair BSDF and hair casts no shadow. A strand thinner than a pixel is drawn into a
-one-pixel footprint and written there with the probability of its coverage ([The rasterizer](#the-rasterizer)), so
-that over the frames the upscaler integrates it has its true weight; a pixel still holds one opaque sample, hair or
-not. Strands follow their roots rigidly unless simulation is turned on (`hair.sim`):
+**Two paths bring hair into the frame, chosen with `hair.render`.** On the layered path hair shadows itself and casts
+the sun's shadow on everything else; on the surface path it casts none.
+
+- **The surface path** (the default) draws hair as an ordinary opaque surface with a placeholder material. The
+  [resolve](#the-resolve) gives every hair pixel a surface record, depth and a motion vector, so deferred shading lights
+  it, shadows fall on it and the upscaler follows it. A strand thinner than a pixel is drawn into a one-pixel footprint
+  and written there with the probability of its coverage ([The rasterizer](#the-rasterizer)), so that over the frames
+  the upscaler integrates it has its true weight; a pixel still holds one opaque sample, hair or not.
+- **The layered path** keeps a pixel's three nearest strands and the summed coverage of all of them, lights every drawn
+  strand vertex with a light loop of hair's own, and blends the layers over the lit frame
+  ([The layered path](#the-layered-path)). Nothing is accepted at random, hair is not in the frame's surface data, and
+  only the pixels hair mostly covers take its depth and motion vector. A fibre's response to light is hair's own
+  ([The hair shading model](#the-hair-shading-model)): the R, TT and TRT lobes of the real-time Marschner model, with a
+  material per groom. Hair shadows itself there, and light scattered from fibre to fibre is accounted for, through a
+  volume of hair density per groom that is rebuilt every frame ([The density volume](#the-density-volume),
+  [Multiple scattering](#multiple-scattering)). [Layered path measurements](#layered-path-measurements) has what the
+  path buys and costs against the surface path, [Hair shading measurements](#hair-shading-measurements) what the model
+  looks like and costs, and [Self-shadowing measurements](#self-shadowing-measurements) the same for the volume. On
+  this path hair is also drawn into the sun's virtual shadow map, with its coverage dithered
+  ([Shadow casting](#shadow-casting), [Cast shadow measurements](#cast-shadow-measurements)); spot and point lights get
+  no shadow from hair.
+
+Strands follow their roots rigidly unless simulation is turned on (`hair.sim`):
 then the groom's guides are simulated on the GPU, collide with spheres and capsules, and the other strands follow them.
 How many guides are simulated follows how large the groom is on screen, and a groom the view does not show is not
 simulated ([Simulation LOD](#simulation-lod)).
 
 POC limits that shape the code: a whole groom is held in memory and on the GPU, there is no paging, streaming or
-culling hierarchy, and nothing is tuned for speed.
+culling hierarchy, and little is tuned for speed: the layered path's rasterizer is, for hair that hides hair
+([The culled rasterizer](#the-culled-rasterizer), [Rasterizer cost measurements](#rasterizer-cost-measurements)).
 
 ## Pipeline
 
@@ -256,11 +274,15 @@ for a plugin to register one, so the LOD controls are a command too.
 | Command | Fields | Reply |
 |---|---|---|
 | `hair.load` | `path` (a `.groom`, `.hair` or `.abc` file), or `procedural`: `{style, strands, seed, points, length, radius, center, axis, cap_angle_degrees, root_width, tip_width, wave_amplitude, wave_count, droop, down}`. For `.hair` and `.abc`: `unit_scale`, `up_axis` (`"y"` or `"z"`), `offset` (`[x, y, z]`). For everything but a `.groom`: `max_guides`, `max_vertex_level` (the builder's `maxGuideCount` and `maxVertexLevel`). | `asset` |
-| `hair.attach` | `asset`, `entity` (a scene entity's name), optional `bone`, optional `color` (`[r, g, b]`, linear) and `roughness` | `instance` |
+| `hair.attach` | `asset`, `entity` (a scene entity's name), optional `bone`, and the material: `color` (`[r, g, b]`, linear) and `roughness` for the surface path; for the layered path `preset`, `melanin`, `redness`, `hair_color`, `sigma_a`, `beta_m`, `beta_n`, `alpha_degrees`, `eta`, `melanin_variation`, `roughness_variation` ([Material parameters](#material-parameters)) | `instance` |
+| `hair.material` | `instance`, and any of `hair.attach`'s material fields: only those given change | `instance`, `material` |
 | `hair.clear` | | Drops every instance and asset. |
 | `hair.selfcheck` | `enabled` (default true), `roots` per instance (default 8) | `enabled` |
 | `hair.lod` | Any of `error_pixels`, `max_width_scale`, `min_detail`, `force_detail`, `segment_pixels`, `freeze`, `detail_exponent`, `coverage` (`off`, `white` or `interleaved`; `true` and `false` are `white` and `off`), `coverage_accumulate` | Every value. See [Selection](#selection) and [The rasterizer](#the-rasterizer). |
-| `hair.debug` | `view`: `off`, `cluster`, `detail`, `strand`, `rank`, `vertex_level` or `coverage` | `view`. See [Debug view](#debug-view). |
+| `hair.render` | Any of `path` (`surface` or `layered`), `depth_alpha`, `coverage_saturation`, `reactive`, `reactive_strength`, `reactive_pixels`, `ambient`, `lights` (`list` or `grid`), and the layered path's rasterizer: `raster` (`auto`, `direct` or `culled`), `auto_width_pixels`, `first_pass` (`previous`, `prefix`, `both` or `all`), `opaque_coverage`, `occlude_opaque`, `occlude_saturated`, `saturation`, `hidden_detail`, `detail_rate_up`, `detail_rate_down`, `hint_decay`, `raster_profile`, `late_pass` | Every value. See [The layered path](#the-layered-path) and [The culled rasterizer](#the-culled-rasterizer). |
+| `hair.volume` | Any of `enabled`, `dual_scattering`, `voxel_pixels`, `max_resolution`, `voxel_budget`, `steps`, `environment_steps`, `bias`, `density_factor`, `margin`, `scalp_depth`, `splat` (`trilinear` or `nearest`), `jitter` (`vertex` or `frame`) | Every value, and the last frame's volumes. See [The density volume](#the-density-volume). |
+| `hair.shadows` | Any of `enabled`, `detail_scale`, `force_detail`, `coverage` (`temporal`, `fixed` or `opaque`), `receiver_bias`, `dynamic_radius` | Every value, and the last frame's shadow casting on the CPU. See [Shadow casting](#shadow-casting). |
+| `hair.debug` | `view`: `off`, `cluster`, `detail`, `strand`, `rank`, `vertex_level`, `coverage`, `layers`, `alpha`, `reactive`, `lobe_r`, `lobe_tt`, `lobe_trt`, `environment`, `direct`, `density`, `transmittance`, `fibre_count`, `scatter_global`, `scatter_local` or `vertex_density` | `view`. See [Debug view](#debug-view). |
 | `hair.capture` | `path` (a `.bmp` file to write) | `state`: `pending`. `hair.stats` reports when it is written. |
 | `hair.probe` | `path` (a binary file to write) | `state`: `pending`. See [Probing the targets](#probing-the-targets). |
 | `hair.sim` | Any of `enabled`, `gravity` (`[x, y, z]`), `damping`, `shape_compliance`, `bend_compliance`, `stretch_compliance`, `step_seconds`, `substeps`, `max_steps`, `wind` (`[x, y, z]`), `gust_amplitude`, `gust_frequency`, `friction`, `collision_margin`, `teleport_distance`, `frame_seconds`, `lod_full_coverage`, `lod_level0_coverage`, `lod_off_coverage`, `lod_rate`, `lod_force_level`, `lod_point_budget`, `promote_seconds`, `demote_seconds`, `lod_view_grace_seconds`, `lod_settle_seconds`, `guide_point_budget`, `guide_keep_seconds`; `reset: true` | Every control, the step counters and each instance's last metrics. See [Simulation](#simulation), [Simulation LOD](#simulation-lod) and [Guide rows](#guide-rows). |
@@ -286,8 +308,10 @@ for a plugin to register one, so the LOD controls are a command too.
 - **Placing a file groom.** A groom's rest space is its entity's mesh space, so the entity's scale applies to it, and
   the file's origin is rarely where the entity's is: pass `unit_scale` divided by the entity's scale, and an `offset`
   that brings the head's centre to the mesh's.
-- **Material.** `color` and `roughness` are the instance's [placeholder material](#the-resolve): by default a dark
-  brown, `[0.09, 0.05, 0.03]`, at roughness 0.6. A `.hair` file's colours are not used.
+- **Material.** Each path has its own. `color` and `roughness` are the surface path's placeholder
+  ([the resolve](#the-resolve)): by default a dark brown, `[0.09, 0.05, 0.03]`, at roughness 0.6. The layered path takes
+  the fibre's scattering parameters ([Material parameters](#material-parameters)): by default brown hair. `hair.material`
+  changes an instance's material afterwards. A `.hair` file's colours are not used.
 - **Assets and instances are not freed one at a time.** They accumulate until `hair.clear`. What an instance costs
   beyond its 96-byte row is guide state, which it borrows while it is simulated ([Guide rows](#guide-rows)).
 
@@ -319,13 +343,15 @@ mesh's positions, indices, joints and weights (or decodes them from the cluster 
 
 ### GPU data
 
-The runtime makes twenty-two pooled buffers when the first groom is loaded, at fixed sizes (`HairCapacities`, 417 MB
+The runtime makes thirty-five pooled buffers when the first groom is loaded, at fixed sizes (`HairCapacities`, 568 MB
 at the defaults), and never resizes them. A groom that does not fit the asset buffers, or an instance past the
 instance rows, is refused with an error that names the row count and the capacity. Three kinds of buffer are shared
 out at run time and can run short without anything being refused: `Hair.VisibleClusters` and the two pool buffers hold
 one frame's selection and are filled on the GPU (what does not fit is dropped for the frame and counted,
 [Selection](#selection)), and `Hair.GuidePoints` is lent to the instances that are simulated (an instance that gets
-none follows its roots rigidly and is counted, [Guide rows](#guide-rows)).
+none follows its roots rigidly and is counted, [Guide rows](#guide-rows)). `Hair.VolumeVoxels` is shared out anew every
+frame among the grooms a view shows (when they do not go round, every volume is made coarser,
+[The density volume](#the-density-volume)).
 
 | Buffer | Row | Default rows | Written |
 |---|---|---|---|
@@ -335,11 +361,22 @@ none follows its roots rigidly and is counted, [Guide rows](#guide-rows)).
 | `Hair.Points` | `HairPackedPoint` | 8,388,608 | once per asset |
 | `Hair.Instances` | `HairInstanceGPU` | 1,024 | when an instance's row changes |
 | `Hair.FrameState` | `HairFrameGPU` | 1 | every frame with an active instance |
-| `Hair.Counters` | `uint` | 49 | by the select, evaluate, raster and resolve passes; reset by an upload every frame |
-| `Hair.VisibleClusters` | `HairVisibleCluster` | 65,535 | by the select pass |
+| `Hair.Counters` | `uint` | 84 | by the select, evaluate, raster, shade-list, resolve, shade and composite passes and the three shadow passes; reset by an upload every frame |
+| `Hair.VisibleClusters` | `HairVisibleCluster` (48 B) | 65,535 | by the select pass |
 | `Hair.PoolVertices` | `HairPoolVertex` | 4,194,304 | by the evaluate pass |
 | `Hair.PoolSegmentIds` | `uint` | 4,194,304 | by the evaluate pass |
+| `Hair.PoolColors` | `uint2` (three half floats) | 4,194,304 | on the layered path: the rasterizer marks the rows to light, the shade pass writes their lit colours |
+| `Hair.ShadeList` | `uint` | 4,194,304 | on the layered path, by the shade-list pass: the pool rows the rasterizer marked this frame |
 | `Hair.Probe` | `uint` | 1,310,792 | by the probe pass, in a frame `hair.probe` asked for |
+| `Hair.RasterItems` | `uint` | 8,388,608 | by the [culled rasterizer](#the-culled-rasterizer)'s classify pass: the chunks its first pass draws |
+| `Hair.PoolLate` | `uint` | 4,194,304 | by the same pass: each pool row's chunks left for the late pass |
+| `Hair.RasterArgs` | `uint` | 4 | by the same pass: the first pass's dispatch size |
+| `Hair.ClusterState` | `uint` | 1,048,576 (4 per cluster of every instance, 262,144 clusters) | by the culled rasterizer and the select pass: when each cluster last drew a pixel, and its detail scale |
+| `Hair.Volumes` | `HairVolumeGPU` | 1,024 | on the layered path with the density volume on: every frame the volumes change, a row per instance row |
+| `Hair.VolumeVoxels` | `uint` | 2,097,152 | by the voxelize pass: the voxels of the frame's volumes |
+| `Hair.ScatterTables` | `HairScatterRow` | 16,384 (16 per instance) | when an instance's material changes |
+| `Hair.ShadowClusters`, `Hair.ShadowClusterMasks` | `HairVisibleCluster`, `uint` | 65,535 | by the shadow select pass, in a frame that draws hair into the shadow map: the clusters the shadow view keeps and the clipmaps each is drawn into |
+| `Hair.ShadowPoolVertices`, `Hair.ShadowPoolSegmentIds` | `HairPoolVertex`, `uint` | 1,048,576 | by the shadow evaluate pass: the shadow view's strands |
 | `Hair.GuidePointRanges` | `HairGuidePointRange` | 65,536 | once per asset |
 | `Hair.GuidePoints` | `HairGuidePoint` | 2,097,152 | by the simulate and guide-level passes: the rows of the instances that are simulated |
 | `Hair.SimGroups` | `HairSimGroup` | 131,072 | every frame an instance is simulated: the thread groups of the simulate and guide-level passes |
@@ -350,10 +387,18 @@ none follows its roots rigidly and is counted, [Guide rows](#guide-rows)).
 
 There are also two textures, made at the render resolution of the first frame and made again when that changes:
 `Hair.Visibility`, the [hair visibility target](#the-hair-visibility-target), and `Hair.Coverage`, the
-[coverage target](#the-coverage-target).
+[coverage target](#the-coverage-target). The [layered path](#the-layered-path) adds four of the same size the first
+time it is turned on, and keeps them: `Hair.Layer1` and `Hair.Layer2` (a pixel's second and third layers, in the
+visibility target's format), `Hair.CompositeInfo` (`R8G8_UNorm`: the composited hair alpha and a few bits about the
+pixel) and `Hair.ReactiveMask` (`R8_UNorm`: what the upscaler is given). At 2560x1600 the first two are 31.3 and 15.6 MB
+and the layered path's four 74.2 MB (31.3, 31.3, 7.8 and 3.9). With them come the
+[culled rasterizer](#the-culled-rasterizer)'s six, 63 MB more: `Hair.CoverageFar` (`R32_UInt`, 15.6 MB), `Hair.Occlusion`
+(`R32G32_UInt`, 31.3 MB), `Hair.SplitGuess` (`R32_UInt`, 15.6 MB), and `Hair.OcclusionCoarse`, `Hair.OcclusionHint` and
+`Hair.TileFlags` (`R32_UInt`, a texel per 8x8 pixels, 0.25 MB each). `hair.stats` lists them (`targets`).
 
-Where the 417 MB are: guide state 160 MB, the strand pool 128 MB and its segment ids 16 MB, the groom points 64 MB,
-strands and root bindings 32 MB, and 1 MB to 5 MB each for the rest. `hair.stats` reports every buffer's capacity,
+Where the 568 MB are: guide state 160 MB, the strand pool 128 MB, its segment ids 16 MB, its colours 32 MB and the
+shade list 16 MB, the culled rasterizer's item list 32 MB, late masks 16 MB and cluster state 4 MB, the groom points 64 MB, the shadow view's pool, ids and list 38 MB, strands and root bindings 32 MB,
+the density volumes' voxels 8 MB, and 1 MB to 5 MB each for the rest. `hair.stats` reports every buffer's capacity,
 what is in use and the most that was ([Checking it](#checking-it)).
 
 - Assets sit back to back in the groom buffers. Indices inside an asset stay groom-relative (`strandOffset`,
@@ -363,7 +408,8 @@ what is in use and the most that was ([Checking it](#checking-it)).
   its entity's row of `Builtin::PerObjectBuffer` (model and previous model matrix), its skinning instance slot
   (`SkinningInstanceInfo`, which locates the current and previous bone palettes in `BoneTransforms`) and the attach
   bone. The entity's transform is not copied: the shader reads the row the entity's mesh is drawn with. It also holds
-  the instance's placeholder material (base colour and roughness), its first row of guide state
+  the instance's materials (the surface path's base colour and roughness, the layered path's fibre parameters and
+  per-strand variation: [Material parameters](#material-parameters)), its first row of guide state
   (`HAIR_INVALID_INDEX` while it holds none), its colliders' rows,
   the simulation flags (`HAIR_SIM_FLAG_ENABLED`, `HAIR_SIM_FLAG_RESET`, `HAIR_SIM_FLAG_KEEP_SHAPE`,
   `HAIR_SIM_FLAG_UNSEEN`) and its simulation level: every shader reads whether the instance is simulated from its row.
@@ -465,9 +511,16 @@ pass declaring again, as the visibility target is replaced; it was not built.
 | `Hair::Simulate` | After it | [`hairSimulate.hlsl`](../Plugins/Hair/shaders/hairSimulate.hlsl) |
 | `Hair::GuideLevels` | After it | [`hairGuideLevels.hlsl`](../Plugins/Hair/shaders/hairGuideLevels.hlsl) |
 | `Hair::Evaluate` | After it | `HairEvaluateCS` in `hairSelectEvaluate.hlsl` |
-| `Hair::Raster` | After `MaterialHistogramPass`, before `EvaluateMaterialGroupsPass` | [`hairRaster.hlsl`](../Plugins/Hair/shaders/hairRaster.hlsl) |
-| `Hair::Resolve` | After `EvaluateMaterialGroupsPass` and `CLodOpaque::LinearDepthCopyPass2`, before `CLodOpaque::LinearDepthDownsamplePass2` | `HairResolveCS` in [`hairResolve.hlsl`](../Plugins/Hair/shaders/hairResolve.hlsl) |
-| `Hair::Probe` | After `Hair::Resolve` | `HairProbeCS`, same file |
+| `Hair::Voxelize` | After `Hair::Evaluate`, before `CLodOpaque::HierarchicalCullingPass1` | `HairVolumeClearCS` and `HairVoxelizeCS` in [`hairVolume.hlsl`](../Plugins/Hair/shaders/hairVolume.hlsl); the layered path only, in a frame that has density volumes |
+| `Hair::ShadowSelect`, `Hair::ShadowEvaluate`, `Hair::ShadowRaster` | In the shadow map's chain, where it gathers its caster providers' raster passes (before its `VirtualShadowFinalizeFallbackPagesPass`); only in a graph with a virtual shadow map | `HairShadowSelectCS` and `HairShadowRasterCS` in [`hairShadow.hlsl`](../Plugins/Hair/shaders/hairShadow.hlsl), `HairEvaluateCS` between them; the layered path only, with `hair.shadows` on |
+| `Hair::Classify` | After `MaterialHistogramPass`, before `Hair::Raster` | `HairClassifyCS`, `HairRasterArgsCS` and `HairOcclusionInitCS` in [`hairRasterCulled.hlsl`](../Plugins/Hair/shaders/hairRasterCulled.hlsl); only in a frame the [culled rasterizer](#the-culled-rasterizer) draws |
+| `Hair::Raster` | After `MaterialHistogramPass`, before `EvaluateMaterialGroupsPass` | [`hairRaster.hlsl`](../Plugins/Hair/shaders/hairRaster.hlsl), or in a frame the culled rasterizer draws `HairRasterItemsCS`, `HairOcclusionUpdateCS`, `HairOcclusionHintCS` and `HairRasterLateCS` in `hairRasterCulled.hlsl` |
+| `Hair::Resolve` | After `EvaluateMaterialGroupsPass` and `CLodOpaque::LinearDepthCopyPass2`, before `CLodOpaque::LinearDepthDownsamplePass2` | `HairResolveCS` in [`hairResolve.hlsl`](../Plugins/Hair/shaders/hairResolve.hlsl); the surface path only |
+| `Hair::Probe` | After `Hair::Resolve` | `HairProbeCS`, same file; the surface path only |
+| `Hair::ShadeList` | After `Hair::Raster`, before `EvaluateMaterialGroupsPass` | [`hairShadeList.hlsl`](../Plugins/Hair/shaders/hairShadeList.hlsl); the layered path only |
+| `Hair::Shade` | Shading epoch, after `DeferredShadingPass` and the reflection passes, before `Hair::Composite` | [`hairShade.hlsl`](../Plugins/Hair/shaders/hairShade.hlsl); the layered path only |
+| `Hair::Composite` | Shading epoch, after `DeferredShadingPass` and the reflection passes | [`hairComposite.hlsl`](../Plugins/Hair/shaders/hairComposite.hlsl); the layered path only |
+| `Hair::CompositeProbe` | After `Hair::Composite` | `HairProbeCS`; the layered path only |
 | `Hair::DebugOverlay` | Overlay epoch, after `TonemappingPass`, before the present pass | [`hairDebugOverlay.hlsl`](../Plugins/Hair/shaders/hairDebugOverlay.hlsl) |
 
 - The first five need the entities' transforms and the main view's camera and nothing of the frame's opaque geometry,
@@ -486,6 +539,20 @@ pass declaring again, as the visibility target is replaced; it was not built.
   depth copy does not have these anchors, and the resolve's place among the depth passes is then not pinned.
 - The overlay is a debug view, so it is forwarded to the Overlay epoch (`ExternalPassDesc::Epoch`), as procedural
   wind's skeleton view is.
+- The layered path's passes are forwarded to the Shading epoch. They need the lit opaque frame (the deferred pass also
+  draws the sky) with its reflections added, the light buffers and the virtual shadow map's pages, and they must run
+  before the Post epoch's motion vector dilation and upscaler, which read what the composite writes. The anchors are
+  `DeferredShadingPass` and, when the reflection settings are on, the screen-space or ray traced reflection passes and
+  their composite. The renderer's own transparents name `SkyboxPass` and the screen-space reflection passes as theirs
+  (`MakeTransparentCompositeInsertPoint` in `CLodAlphaVariant.cpp`); the first no longer exists, and the demo's recipe
+  has neither. The order of the hair composite against those other transparents is not pinned.
+- Both paths' passes are in every graph. Which of them record is decided per frame from the plan
+  (`HairFramePlan::renderPath`), so `hair.render` switches path without a graph rebuild.
+- The three shadow passes are not placed by the extension: the shadow map asks its caster providers for them
+  (`IVirtualShadowCasterProvider::GatherVirtualShadowRasterPasses`) and chains them after its own page management
+  ([Shadow casting](#shadow-casting)). They read the guide state the simulation passes left and write nothing the
+  main view's passes read. Their place against `Hair::Simulate` and `Hair::GuideLevels` is not pinned by a
+  constraint; `shadow_stale_guides_drawn` counts a shadow strand that read guide rows not written in its frame.
 
 Each pass declares the plugin's buffers, which appear with the first groom, and declares again when the visibility
 target is replaced. Until then it records nothing.
@@ -534,6 +601,8 @@ readers counting stale ones. Working the frame out where it is read costs less t
    side of the bounds, with the same pixels-per-unit factor (`projection[1][1] * 0.5 * renderHeight`).
 4. **Gets its drawn strand count** from `l` by the rule above, and the weight of its last drawn strand
    (`HairLodBoundaryWeight`): the fraction of a strand that `l * (N + d)` has over the strands before it.
+   On the layered path, in a frame the [culled rasterizer](#the-culled-rasterizer) draws, `l` is then multiplied by the
+   cluster's **detail scale** ([Hidden clusters](#hidden-clusters)), and kept at `min_detail` or above.
 5. **Gets its drawn vertex level.** The fractional level is `f = log2(lengthPixels / segmentPixels)`, clamped to
    `[0, k]`, where the length is that of the aggregate's centreline. The drawn level is `ceil(f)` and the geomorph is
    `ceil(f) - f`. The centreline of a curly cluster is shorter than its strands, so curls drop levels earlier than their
@@ -544,7 +613,8 @@ A cluster that passes the frustum test also sets its instance's bit in the count
 `instances_visible` comes from.
 
 A `HairVisibleCluster` row holds the instance, the cluster, the drawn strand count, the pool range, `l`, the boundary
-weight, the vertex level and the geomorph. Neither allocator gives anything back: when the pool or the list is full,
+weight, the vertex level and the geomorph, and the cluster's row of the cluster state with whether it drew a pixel
+lately ([Hidden clusters](#hidden-clusters)). Neither allocator gives anything back: when the pool or the list is full,
 that cluster and every later one of the frame is dropped and counted in `overflow_clusters`.
 
 The controls (`hair.lod`), with their defaults:
@@ -842,8 +912,9 @@ outside is not simulated ([Following the view](#following-the-view)).
 `PlanSimLevels` asks one function, `OnScreenExtent` in [`HairRuntime.cpp`](../Plugins/Hair/src/HairRuntime.cpp), whether
 a view needs an instance's hair and how much of it: the size on screen, over the view's height, of the part of the
 groom's bounding sphere that is inside the view (the sphere's coverage times the smaller of the shares of its width and
-of its height that are on screen). 0 means no view shows any of it. There is one view, the main camera: hair casts no
-shadow and is in no reflection. A second view would be a second `HairView` in the frame's inputs and the larger of the
+of its height that are on screen). 0 means no view shows any of it. There is one view, the main camera: hair is in no
+reflection, and the shadow view does not count (a groom only its shadow shows is not simulated and casts the shadow of
+its rigid pose: [Shadow casting](#shadow-casting)). A second view would be a second `HairView` in the frame's inputs and the larger of the
 two answers; nothing else knows how many views there are.
 
 - **The test** is the select pass's, on the CPU, in the same frame: the sphere against the main camera's six view-space
@@ -1010,6 +1081,10 @@ id is `HAIR_INVALID_INDEX`. The constants are in
 its instance, its cluster, then the cluster's `strandOffset` plus the strand index. Visible-cluster indices are only
 good for the frame that wrote them.
 
+On the [layered path](#the-layered-path) the target is the nearest of a pixel's three layers: `Hair.Layer1` and
+`Hair.Layer2` hold the same kind of key for its second and third nearest segments, all ones where there is none. So
+everything that reads the nearest key (the debug views, the probe) works on both paths.
+
 ### The rasterizer
 
 `Hair::Raster` runs one thread per pool row. A row that starts a segment draws it:
@@ -1050,16 +1125,172 @@ good for the frame that wrote them.
 A pixel in which no strand is accepted holds no key: the resolve leaves it alone, and it keeps the surface, depth and
 motion vector of whatever opaque surface is behind the hair.
 
-This is the simple form only: no tiles, no binning, and no anti-aliasing of the edges of a strand wider than a pixel.
-The main view is assumed to be a perspective view (clip `w` is the linear depth).
+**On the layered path** nothing is accepted at random, whatever `coverage` says, and the joints are always end to end:
+
+- **Three layers.** Every owned footprint pixel in front of the opaque surface, of a strand with any width, offers its
+  key to the pixel's layers by a chain of `InterlockedMin`. The write to the first layer returns what the layer held;
+  the larger of that and the key goes on to the second layer, and the larger of those to the third. Each step keeps the
+  smaller value and passes the other on, so whatever the order the threads run in, the three layers end holding the
+  pixel's three smallest keys, nearest first.
+- **Early reject against the third layer.** Before the chain the key is compared with the third layer by a plain load,
+  as Indiana Jones does. That layer only falls during the pass, so a key not below the value read can never be one of
+  the pixel's three nearest: a stale read can only fail to reject, which costs the three atomics it would have saved,
+  and never rejects a key that belongs. In a dense groom most footprint pixels are behind three strands already and
+  stop here (`layer_rejected`).
+- **Coverage is always added**, rejected or not, into the [coverage target](#the-coverage-target): the composite needs
+  the sum over every strand. A strand that covers its pixel whole (coverage 1) adds 16 pixels' worth, not 1
+  (`opaque_coverage`, on): nothing shows through it, so the pixel is opaque from it on wherever among the pixel's
+  strands it lies, and the composite's remainder says so. Before, such a strand behind the third layer counted as
+  `1 - exp(-1)`, 63% opaque. With `coverage_saturation` above 0 a pixel whose sum has reached that many pixels' worth
+  takes no more (`coverage_skipped`): the same kind of plain load, of a value that only rises.
+- **Marks for the shade pass.** A segment that offers a key to any pixel's layers marks its two rows of
+  `Hair.PoolColors` with the frame's number. Only such a segment can be in a layer when the pass ends (a key that ends
+  in a layer was below the third layer when it was compared), so the shade pass lights the marked vertices and no
+  others. `Hair::ShadeList` then gathers the marked rows into `Hair.ShadeList`
+  ([The layered path](#the-layered-path)).
+
+This is the simple form, the **direct rasterizer**: no tiles, no binning, and no anti-aliasing of the edges of a strand
+wider than a pixel. Every strand of the pool is drawn, hidden or not. The main view is assumed to be a perspective view
+(clip `w` is the linear depth). The surface path always uses it; the layered path uses it or the culled rasterizer.
+
+### The culled rasterizer
+
+The direct rasterizer's cost follows every strand of the pool, and in a close groom nearly all of them are behind
+other hair: with `wStraight` filling the view it visits 35 footprint pixels for each pixel that shows hair.
+[`hairRasterCulled.hlsl`](../Plugins/Hair/shaders/hairRasterCulled.hlsl) fills the same targets from the same
+footprints, pixel for pixel, and skips hair that hair hides. It draws the layered path when `hair.render` `raster` is
+`culled`, or `auto` (the default) and a groom in view has strands at least `auto_width_pixels` (0.75) wide on screen at
+its middle; `direct` never uses it. [Rasterizer cost measurements](#rasterizer-cost-measurements) has what it buys,
+where it loses and why the rule is the strand width.
+
+**The hidden depth.** `Hair.Occlusion` holds, for every pixel, the depth from which hair adds nothing to the pixel. It
+starts each frame as the opaque surface's depth (`HairOcclusionInitCS`), and hair lowers it during the pass in two
+ways:
+
+- **A strand that covers its pixel whole** (coverage 1: a strand a pixel wide or more) lets nothing through. The hidden
+  depth falls to its depth (`occlude_opaque`). It adds nothing to the coverage sums: the pixel is marked saturated, and
+  the composite takes the remainder of a marked pixel as fully opaque. In the layers it takes its own place only; what
+  it pushes out of a layer is behind it and is dropped.
+- **Saturated coverage** (`occlude_saturated`). Every pixel has a *split depth*, a guess carried from the frame before
+  (`Hair.SplitGuess`). Coverage is summed apart in front of it (`Hair.Coverage`) and behind it (`Hair.CoverageFar`).
+  When the sum in front reaches `saturation` (10 pixels' worth) the hair in front of the split depth alone hides what
+  is behind it, to within `exp(-(saturation - 3))` of the pixel, whatever is behind: the hidden depth falls to the
+  split depth, and the pixel is marked saturated. The guess moves from frame to frame toward the nearest depth that
+  saturates (`HairOcclusionUpdateCS`: nearer while the sum in front is over twice the saturation, further while it is
+  under it and the whole sum is not). A wrong guess costs time and not the image: too near and the pixel does not
+  saturate, too far and less is skipped.
+
+A footprint pixel at or behind the hidden depth is skipped: no coverage add, no layer write. The hidden depth only
+falls during a pass and is read by a plain load, so a stale read draws a pixel it could have skipped, and never skips
+one it should have drawn.
+
+**Why the composite cannot tell.** A strand that covers the pixel whole is either in the pixel's three layers, and then
+the layers are opaque with it and nothing behind is blended, or behind them, and then the remainder is opaque (the
+coverage rule of [The rasterizer](#the-rasterizer), which the direct rasterizer applies too). Hair behind such a strand
+adds nothing in either case. Hair behind a saturated split depth adds to a remainder that is already `1 - exp(-7)` or
+more. So the two rasterizers give the composite the same pixel, to that tolerance; the layers a pixel holds behind an
+opaque one can differ and are not looked at.
+
+**Chunks and tiles.** A segment is cut into chunks of 8 pixels along its major axis, aligned to screen tiles of 8x8
+pixels (`HAIR_RASTER_TILE_SIZE`). A chunk is the unit of work: one thread draws one chunk, so the lanes of a wave have
+work of the same length (0.64 to 0.80 of the lanes are busy in the measured views), and a hidden chunk costs one test
+and none of its pixels. `Hair.OcclusionCoarse` holds the largest hidden depth of each tile; a chunk whose nearest
+point is behind that in every tile it touches is hidden. Within a column of a chunk only the pixels whose centre can be
+inside the footprint are looked at (the centreline's place in the column, plus or minus the half-width times
+`sqrt(1 + slope^2)`): about one pixel looked at for each pixel of the footprint, where the direct rasterizer's wider
+column bound looks at three.
+
+**Two passes, and the frame before as a guess only.**
+
+1. `HairClassifyCS` (pass `Hair::Classify`), one thread per pool row, sorts the row's chunks. The **first pass** gets
+   those that are probably in front (`first_pass`): `previous`, the default, takes the chunks that the tile depths of
+   the last frames do not hide (`Hair.OcclusionHint`, below), of clusters that drew a pixel in the last two frames;
+   `prefix` takes the first eighth of each cluster's drawn strands, which the rank order spreads evenly over the
+   cluster; `both` either; `all` every chunk, with no late pass. The chunks go into `Hair.RasterItems` (a pool row and a
+   chunk number in a `uint`), a wave taking its rows of the list with one atomic; the others are a bit each in the row's
+   late mask (`Hair.PoolLate`; a segment longer than 31 chunks shares the last bit among the rest, which then go
+   together).
+2. `HairRasterItemsCS`, one thread per item, by an indirect dispatch of the list's length (`HairRasterArgsCS`).
+3. `HairOcclusionUpdateCS`, one thread group per tile, takes the largest hidden depth of the tile's pixels as the
+   first pass left them. A tile no chunk touched hides nothing. `HairOcclusionHintCS` then folds it into the guess for
+   the next frames: a tile's guess rises at once to a larger depth and comes back down to a smaller one keeping
+   `hint_decay` (0.8) of the difference a frame, so it is the largest tile depth of the last dozen frames or so.
+4. `HairRasterLateCS`, one thread per pool row with a late mask, tests each late chunk against **this frame's** tile
+   depths and draws it if it is not hidden.
+
+**Why the guess spans frames.** The camera is jittered by a fraction of a pixel every frame for the upscaler, and each
+jitter looks through different gaps between strands, so a tile's largest hidden depth is not the same from one frame
+to the next even in a still view. With the last frame's depths alone as the guess, the first pass leaves pixels without
+the strand that hides them, such a tile then hides nothing, and the late pass walks every late chunk over it. With the
+span the first pass is larger and the late pass nearly idle; the time is the same either way
+([Rasterizer cost measurements](#rasterizer-cost-measurements)), and about twice what a camera without jitter costs.
+
+Nothing waits a frame to be seen. What the first pass leaves out is tested against the hidden depths of the frame
+being drawn, which are exact, so hair that comes into view (a camera cut, a head turn, hair swinging open, a groom
+entering) is drawn in the frame it does; `late_pixels_written` counts it. A bad guess makes the first pass draw too
+little and the late pass, which is the slower one for the same work (its threads have segments of different lengths),
+draw the rest. When the item list is full the chunks that do not fit are left to the late pass
+(`raster_items_overflow`).
+
+**Marks.** A segment that writes a layer marks its two pool rows for the shade pass, as in the direct rasterizer. Far
+fewer segments do: a hidden strand is never lit.
+
+#### Hidden clusters
+
+The select pass needs to know which clusters the camera does not see: they still have to be in the pool, because the
+[density volume](#the-density-volume) is filled from it, but not with every strand. `Hair.ClusterState` keeps two
+things per cluster of every instance (`HairInstanceGPU::clusterSeenBase` is an instance's first cluster):
+
+- the frame it last drew a footprint pixel in front of the hidden depth (the rasterizer's stamp);
+- its **detail scale**, which the select pass moves a step a frame toward a target and multiplies the cluster's detail
+  level `l` by: 1 for a cluster that drew a pixel in the last two frames, and `hidden_detail` (0.25) for one that drew
+  none, behind the head or under hair that hides it.
+
+A hidden cluster at a quarter of its detail keeps a quarter of its strands in the pool, **at the width they have at
+the cluster's own level** (`HairVisibleCluster::widthDetail`): they are the first strands of the ones it would draw in
+view, not fewer and wider ones. A hidden cluster drawn fat would poke through the hair that hides it, be seen, be drawn
+thin again and hide again; that was built first and measured (below). What the voxelizer deposits for each kept
+strand is scaled up instead (`densityScale`, the ratio of the two levels' width scales), so the density in the volume
+is the whole cluster's. Evaluation, classification, the late pass's tests and voxelization all cost a hidden cluster's
+kept strands only.
+
+The scale rises by `detail_rate_up` (0.25) a frame and falls by `detail_rate_down` (0.02), and strands come and go by
+the boundary strand's fade, as with any change of `l`. A cluster that comes into view is drawn in that frame with the
+strands it kept, at their true width, and has all of them four frames later: for those frames it is thinner than it
+should be, by up to three quarters of its strands. The scale is held for the first three frames after the culled
+rasterizer takes over from the direct one, whose frames leave no stamps. In frames the direct rasterizer draws the
+scale is not applied.
+
+| `hair.render` field | Default | Meaning |
+|---|---|---|
+| `raster` | `auto` | `direct`, `culled`, or `auto`: the culled rasterizer in a frame where a groom in view has strands at least `auto_width_pixels` wide, the direct one otherwise (it lets go a tenth below). `BR_HAIR_RASTER=direct` or `culled` in the environment sets the start value. |
+| `auto_width_pixels` | 0.75 | The strand width on screen (the groom's widest strand, at the distance of the middle of its bounds) from which `auto` takes the culled rasterizer. |
+| `first_pass` | `previous` | Which chunks the first pass draws: `previous`, `prefix`, `both`, or `all` (no late pass). |
+| `opaque_coverage` | true | A strand that covers its pixel whole saturates the pixel's coverage. Both rasterizers. Off: it adds 1, as before, and `occlude_opaque` is off with it. |
+| `occlude_opaque` | true | Such a strand hides the hair behind it. |
+| `occlude_saturated`, `saturation` | true, 10 | A pixel whose coverage in front of its split depth reaches `saturation` pixels' worth hides the hair behind that depth. |
+| `hidden_detail` | 0.25 | The share of its strands a cluster keeps in the pool while no pixel shows it. 1: all. |
+| `detail_rate_up`, `detail_rate_down` | 0.25, 0.02 | How far the scale moves in a frame. |
+| `hint_decay` | 0.8 | How long the first pass's guess remembers a tile's larger hidden depths: the share of the difference kept a frame. 0: the last frame's depths alone. |
+| `raster_profile` | false | Count the loop iterations of the two passes' waves (`wave_iterations`). |
+| `late_pass` | true | False, for measurement only: the late pass draws nothing, and hair the first pass left out is missing. |
+
+**Not built:** a guess that survives the camera's jitter (one per jitter phase, or a first pass ordered front to back); a limit on the segments drawn in a frame or over a screen tile; 32-bit layer keys; occlusion baked into
+the groom; a sort of the first pass's chunks by tile, or batching of pixel writes across a wave; any use of the hidden
+depths by the shadow view, which has its own selection.
+
+
 
 ### The coverage target
 
 `Hair.Coverage` is an `R32_UInt` texture the size of the visibility target. With `coverage_accumulate` on, the
 rasterizer adds (`InterlockedAdd`) the coverage of every footprint pixel that is in front of the opaque surface, written
 or not, in units of 1/65536 (`HAIR_COVERAGE_UNIT`): the summed coverage of the hair over each pixel, overlaps counted,
-in the manner of the additive coverage layer of *Indiana Jones and the Great Circle*. It is cleared every frame. Nothing
-shades from it yet: it is for the `coverage` [debug view](#debug-view), for measurement, and for a later composite. The
+in the manner of the additive coverage layer of *Indiana Jones and the Great Circle*. It is cleared every frame. On
+the surface path nothing shades from it: it is for the `coverage` [debug view](#debug-view) and for measurement, and is
+off unless asked for. On the [layered path](#the-layered-path) it is always accumulated, and the composite takes from it
+the coverage of the hair beyond a pixel's three layers. The culled rasterizer sums coverage in two targets, this one
+for the hair in front of a pixel's split depth and `Hair.CoverageFar` for the rest, and the composite adds them. The
 counters `pixels_covered` and `coverage_sum` ([Checking it](#checking-it)) are the same sum over the frame and do not
 need the target. With `coverage` `off` the sum still uses the end-to-end joint rule, so the two modes report the same
 coverage.
@@ -1116,9 +1347,636 @@ and previous view and unjittered projection, the convention of the renderer's ow
 position is this frame's selection at last frame's root, so a level-of-detail change does not appear as motion.
 
 **Shadows.** Hair receives shadows: the virtual shadow map marks pages from the linear depth the resolve wrote, and
-deferred shading looks them up at the hair pixel's position. Hair casts none: it is in no shadow view.
+deferred shading looks them up at the hair pixel's position. On this path hair casts none
+([Shadow casting](#shadow-casting) is the layered path's).
 
 **Cost.** `Hair.Counters` row 16 counts the pixels resolved in a frame (`pixels_resolved`).
+
+### The layered path
+
+`hair.render {path: "layered"}` turns the resolve off and three things on: the rasterizer keeps
+[three layers](#the-rasterizer) a pixel and always accumulates the [coverage target](#the-coverage-target),
+`Hair::Shade` lights every drawn strand vertex, and `Hair::Composite` blends the layers over the lit frame. The scheme
+is that of *Strand Hair in Indiana Jones and the Great Circle* (SIGGRAPH 2025, Advances in Real-Time Rendering); where
+this differs from it, it says so.
+
+**Shading, per strand vertex.** `Hair::Shade` writes a lit colour into `Hair.PoolColors`, parallel to the pool (three
+half floats in a `uint2`), for the rows the rasterizer marked this frame: the vertices of every segment that reached
+some pixel's layers ([The rasterizer](#the-rasterizer)). The mark is the frame's number in the row's fourth half, which
+a colour leaves zero. Vertices of segments behind the opaque surface or behind three strands everywhere are not lit; the
+marked ones are, whether or not their segment is still in a layer at the end.
+
+- **The shade list.** The marked rows are scattered through the pool, under half of it in the views measured, and a
+  pass that walks the pool and skips the others runs most of its thread waves with idle lanes. `Hair::ShadeList` runs
+  one thread per pool row right after the rasterizer and appends the marked rows to `Hair.ShadeList` (one atomic a
+  wave; the order is the pool's within a wave); `Hair::Shade` then runs one thread per row of the list. The GPU alone
+  knows the list's length (`shade_list` in the counters), so the shade pass's dispatch covers the most rows the frame's
+  pool can use and the groups past the end of the list return at once: there is no indirect dispatch. The list is the
+  frame's set of lit vertices, and the rows the density volume's marches start from.
+
+- **The shading point is the vertex, on the strand's centreline.** A strand has one colour across its width. A strand
+  many pixels wide is therefore not shaded as round (the surface path turns its normal across the strand), and a
+  shadow's edge is resolved along a strand only, at the spacing of its vertices: `segment_pixels` on screen, 4 pixels by
+  default. The tangent is the direction between the vertex's two neighbours on its strand.
+- **The light loop is hair's own** (`HairShadeCS`), built from the renderer's lower-level pieces: `EvaluateLightAtPoint`
+  and `LightIncidentRadiance` (`lightModel.hlsli`) for what a light delivers, and `EvaluateLightOcclusion`
+  (`lighting.hlsli`) for its shadow. The renderer's loop (`EvaluateDirectLighting`) is the surface model's and returns
+  nothing for a light behind the surface; a fibre has no behind.
+- **The response is one function,** `HairEvaluateBsdf(tangent, view, light, material, path, lobeMask)` in
+  [`hairBsdf.hlsli`](../Plugins/Hair/shaders/hairBsdf.hlsli): the radiance toward the viewer per unit of irradiance
+  arriving from the light on a plane facing it, so the cosine is included
+  ([The hair shading model](#the-hair-shading-model)). `path` (`HairLightPath`) is what the hair between the light and
+  the vertex, and around the vertex, does to it: the number of fibres in the way, which the vertex counts by marching
+  its groom's [density volume](#the-density-volume) toward the light, and the groom's scatter table
+  ([Multiple scattering](#multiple-scattering)). **This is how hair shadows itself.** An instance without a volume
+  (`hair.volume {enabled: false}`, or no voxels left for it) is lit by every light in full, as before the volume
+  existed: the far side of its groom is as bright as the near side.
+- **The material** is the vertex's strand's: its instance's, with the strand's own offsets of absorption and roughness
+  ([Material parameters](#material-parameters)).
+- **Which lights** (`lights`). `list`, the default, walks every active light and tests its range. `grid` reads the
+  vertex's froxel in the [light grid](lighting.md#the-light-grid), its forward run, which exists only in a recipe with
+  `ClusterLodAlphaTechnique`. The demo's recipe has none: there the forward run is the opaque run, a froxel in front of
+  the nearest opaque surface holds no light at all, the sun included, and `grid` leaves hair in front of the sky or the
+  floor unlit in tile-sized blocks (measured below). `list` is right in every recipe and costs a range test per light
+  per vertex. A vertex off screen or behind an opaque surface also has no froxel of its own, which `list` does not care
+  about.
+- **Shadows** are looked up at the vertex with the "normal" the lookup wants set to the direction of the light, so its
+  receiver offset moves the lookup a few shadow texels toward the light. Hair receives the sun's
+  [virtual shadow map](lighting.md) and spot and point lights' faces. **The shadow map only holds the pages that pixels
+  of the frame's depth buffer asked for, and on this path hair is not in that buffer** when pages are marked. A vertex
+  whose page nothing asked for is looked up in up to two coarser clipmaps (`shadow_coarser`); with no page there either
+  it is lit (`shadow_missing`), as is one that reads a texel nothing was drawn into (`shadow_cleared`). The error is
+  therefore always toward light, never a false shadow. Pages are marked through buffers private to the shadow map's
+  passes, so hair cannot ask for its own without a core change; the counters bound it instead
+  ([Layered path measurements](#layered-path-measurements): no vertex in any measured view found no page). The lookup's
+  soft-shadow rays are randomized per pixel and frame; a vertex uses the pixel it projects to.
+- **The environment** is the same response integrated against the renderer's image-based light, by four directions
+  ([The environment](#the-environment)), each occluded by a march of the density volume that way, times `ambient`. It
+  is added only in a frame that has image-based lighting.
+- In stochastic lighting mode there is no shadow map and no entry for a receiver that is not a surface: hair is lit by
+  every light, unshadowed.
+
+**The composite.** `Hair::Composite` runs one thread per pixel. For each layer a pixel holds, nearest first, it finds
+the hit again (`HairReconstructHit` in [`hairHit.hlsli`](../Plugins/Hair/shaders/hairHit.hlsli), shared with the
+resolve), takes the layer's coverage `c` from its segment and width with the rasterizer's own arithmetic (the true
+width over the footprint's, at least a pixel), and its colour `L` from the two vertex colours of the segment,
+interpolated at the hit. Then:
+
+```
+front:      colour = sum over layers of T * c_i * L_i,   T = product of (1 - c_j) over the layers in front
+remainder:  r = coverage target - (c_1 + c_2 + c_3)                      (only where all three layers are held)
+            a = T_3 * (1 - exp(-r))                                      T_3: what the three layers let through
+            colour += a * (sum of w_i * L_i) / (sum of w_i),   w_i = c_i * 0.25 ^ (3 - i)
+alpha = 1 - T_3 + a;   scene colour = colour + scene colour * (1 - alpha)
+```
+
+- The three layers are blended exactly, so a pixel under three strands or fewer has no remainder and no approximation.
+  A layer behind one that covers the pixel whole is not looked up: nothing of it shows.
+- In a frame the culled rasterizer drew, a pixel whose hidden depth hair lowered is opaque from that depth on, and its
+  remainder is taken as saturated whatever the sums hold: the hair skipped behind that depth is not in them.
+- **The remainder** is the hair beyond the third layer, of which only the summed coverage is known. It is lit as a
+  weighted average of the three samples that favours the farther ones, with the weights of the Indiana Jones deck
+  (slide "Coverage reconstruction", read from the rendered slide: `w_i = C_i * 0.25^(3 - i)`).
+- **Where this differs from the deck:** the deck converts the whole sum to a total coverage with a fitted quadratic
+  (`x - 0.5 x saturate(0.5 x)`, chosen because it looks more voluminous than the better fit) and subtracts the front
+  three's. Here the sum is converted only for what the three layers do not account for, as thin occluders overlapping at
+  random (`exp`), so that the front is exact and the two agree where there is no fourth strand. One strand of coverage 1
+  beyond the third layer is under-counted by this (63% where it is 100%).
+- Hair is blended premultiplied over `Builtin::Color::HDRColorTarget`, after the opaque frame is lit, and so over the
+  sky and over anything in front of which the rasterizer's opaque depth test let it through.
+
+**Depth and motion.** A pixel whose hair alpha is at least `depth_alpha` (0.5) takes hair's, in the forms the passes
+after the composite read: `Builtin::Surface::Motion` (current minus previous position in NDC without jitter, as the
+resolve writes it) and `Builtin::PrimaryCamera::ProjectedDepthTexture`, both from the pixel's **nearest** layer, as
+Unreal's default takes them. Below the threshold the pixel keeps the motion vector and depth of what is behind the
+hair. The readers are motion vector dilation, the upscaler and the lens passes. The linear depth map is not written:
+everything that read it ran before the composite, and what reads it afterwards is the next frame's history, which would
+then cull and reproject against hair that only half covers its pixels. `Builtin::Surface::DeviceDepth` is not written
+either.
+
+**The reactive mask.** One motion vector cannot describe a pixel that is part hair and part background when the two
+move differently. `Hair.ReactiveMask` says where: `reactive_strength` times the share of the pixel that does not move as
+its motion vector says (the background's share where the pixel took hair's vector, hair's share where it did not),
+times how far apart the two motions are, reaching 1 at `reactive_pixels`. Still hair over a still background is not
+reactive at all. The upscaler gets it through an extension point this step added to the renderer,
+[`Extensions/UpscalerReactiveMask.h`](../BasicRenderer/include/BasicRenderer/Extensions/UpscalerReactiveMask.h):
+`br::render::SetUpscalerReactiveMask(texture)` names a render-resolution single-channel texture that the upscaling pass
+then declares and hands to DLSS Super Resolution as its bias-current-colour hint and to FSR as its reactive mask; null
+(the default) takes it away, and DLSS Ray Reconstruction and no upscaling ignore it. The runtime sets it while the
+layered path is on with `reactive` true and clears it otherwise.
+
+| `hair.render` field | Default | Meaning |
+|---|---|---|
+| `path` | `surface` | `surface`: the resolve. `layered`: this section. |
+| `depth_alpha` | 0.5 | The hair alpha from which a pixel takes hair's depth and motion vector. |
+| `coverage_saturation` | 0 | Above 0: the coverage target stops taking adds at this many pixels' worth. The alpha it then gives is 1 to within `exp(-(saturation - 3))`. 0: never. |
+| `reactive` | true | Give the upscaler the reactive mask. |
+| `reactive_strength`, `reactive_pixels` | 1, 1 | The mask's scale, and the motion difference in pixels at which it is reached. |
+| `ambient` | 1 | Scale of the environment term. |
+| `lights` | `list` | `list`: every active light. `grid`: the light grid's forward runs (a recipe with CLod alpha only). |
+| `raster` and the rasterizer's other controls | `auto` | Which rasterizer draws the path, and how: [The culled rasterizer](#the-culled-rasterizer). |
+
+**What the rest of the frame sees.** Hair is in none of the surface targets, the linear depth or the opaque visibility
+buffer, so everything before the composite works on the scene without hair: virtual shadow page marking, ambient
+occlusion (hair gets none and casts none on the scalp), the light grid's depth bounds, deferred shading, stochastic
+lighting, screen-space and ray traced reflections (hair is in no reflection, and reflects nothing but the diffuse
+environment), and the specular image-based light. After it, bloom and the tonemapper see hair as part of the scene
+colour, and the upscaler, motion vector dilation and the lens passes see its depth and motion where it took them.
+[Layered path measurements](#layered-path-measurements) has captures and numbers.
+
+**Not there yet:** shadows cast by hair from spot and point lights, and on the head it grows on at the shadow map's
+default resolution ([Shadow casting](#shadow-casting)), any
+anti-aliasing of a strand wider than a pixel (it has hard edges, as on the surface path), sorting against the
+renderer's other transparents, and more than one motion vector a pixel.
+
+### The density volume
+
+On the layered path every groom a view shows gets, every frame, a box of voxels holding how much hair is where
+(`hair.volume`). The shade pass marches it from every lit vertex toward every light and toward the environment's
+directions and counts the fibres in the way; what that count does to the light is
+[Multiple scattering](#multiple-scattering). Nothing of a volume outlives its frame.
+
+**Which grooms, and how fine** (`PlanVolumes` in [`HairRuntime.cpp`](../Plugins/Hair/src/HairRuntime.cpp), on the CPU,
+once a frame). An instance gets a volume when a view shows any of its groom: the test the simulation uses
+(`OnScreenExtent`, [Following the view](#following-the-view)). Its box is the groom's rest bounds grown on every side
+by `margin` (a tenth of their longest side), in the space the roots follow: the entity's, or the attach bone's, so the
+grid moves with the head and hair at rest stays in the same voxels. A groom whose roots follow their own joints
+(`per_root`) is taken to follow its entity. The voxels are cubes. Their side is `voxel_pixels` (8) on screen at the
+groom's distance, but no smaller than gives `max_resolution` (96) voxels along the box's longest side: a groom far away
+has few, large voxels, and one that fills the view stops at 96.
+
+**The budget.** The volumes' voxels are consecutive ranges of one buffer, `Hair.VolumeVoxels` (2,097,152 voxels of 4
+bytes), handed out in instance order from its start, anew every frame. `voxel_budget` (0: the buffer) is the most all
+of them may take. Over it, every volume's voxels are enlarged by one factor, found by bisection, until they fit
+(`coarsening` in `hair.volume`'s reply); a volume is never coarser than 2 voxels along its longest side, and if those do
+not fit either, the instances smallest on screen get no volume (`dropped_volumes`) and are lit as without one, by every light in full.
+An instance whose entity's matrices the CPU does not have that frame gets none either (`unknown_instances`). There is
+no sharing of one volume between far grooms: a far groom's own volume is a few dozen voxels.
+
+**What a voxel holds** (`HairVolumeGPU` in
+[`HairRuntimeGPUTypes.h`](../Plugins/Hair/include/Hair/HairRuntimeGPUTypes.h)): one `uint`.
+
+- Bits 30..0, the fibre density: the summed length times diameter of the segments in the voxel over the voxel's volume
+  (the projected area of fibre per volume, 1/m), in units of 1/4096 per metre. A ray crosses, per metre, that density
+  times the sine of its angle to the fibres; the volume keeps no directions, and a march uses the mean of that sine over
+  directions, pi / 4 (`HAIR_VOLUME_ISOTROPIC_SINE`).
+- Bit 31, the scalp: see below.
+
+**Filling it.** `Hair::Voxelize` ([`hairVolume.hlsl`](../Plugins/Hair/shaders/hairVolume.hlsl)) runs after evaluation:
+it zeroes the voxels in use and then runs one thread per row of the strand pool, like the rasterizer. A row that starts
+a segment deposits the segment's length times its diameter at one point per voxel of its length (four at most).
+
+- **From the pool, not from what was rasterized.** The pool holds every strand selection kept for the frame, whether
+  the rasterizer then finds it in front of other hair or not, at the frame's level of detail and where the simulation
+  left it. A groom's interior is in its volume however little of it is seen.
+- **The same density at every level of detail.** A diameter is the pool's, which carries the LOD's width scale: the
+  strands a cluster draws have the summed width of all its strands (`HairLodCoverageWidthScale`,
+  [Evaluation](#evaluation-and-the-strand-pool)), so length times diameter summed over the drawn strands is that of the
+  whole groom, and the boundary strand's deposit fades in with its width.
+- **Spread over eight voxels.** A deposit is shared by the eight voxels around it by its distance to their centres
+  (`splat` `trilinear`), so the density is smooth across voxels and hair that moves through the grid changes it
+  gradually. `nearest` gives it all to one voxel, at an eighth of the atomic adds.
+- **Whole units.** A share is rounded down or up at random in proportion to its fraction, by a number that is the same
+  every frame for the same pool row, so the sum over a voxel's many segments is right and does not flicker.
+- Hair outside the box is not in the volume (`volume_outside` counts its segments).
+
+**The scalp.** The volume holds hair only, and what hair grows on is opaque: light from the far side of a head does
+not reach the hair on the near side. For the sun the shadow map says so; for the environment's directions and for
+lights without a shadow map nothing did. So a strand's first segment marks the voxels under its root as scalp
+(`scalp_depth`, 3 voxels, starting 2 voxels along the strand's own direction into the head): a shell under the skin
+wherever hair grows, and a march that reads it ends there with nothing arriving. It starts 2 voxels down so that no
+voxel a strand vertex can be in is marked. Where no hair grows (a face, a bald patch) there is no shell.
+
+**Marching it** (`HairMarchVolume` in [`hairVolume.hlsli`](../Plugins/Hair/shaders/hairVolume.hlsli)). From the vertex
+toward the light, from `bias` (1) voxels along the ray to where the ray leaves the box (or reaches a spot or point
+light), in `steps` (8) samples toward a light and `environment_steps` (4) toward an environment direction. Sample `i`
+of `n` is at the fraction `((i + offset) / n)^2` of that distance and stands for the stretch between the squares
+around it: short steps at the vertex, where the hair that shadows it most is, long ones toward the far side. The
+first two samples are interpolated between the eight voxels around them; the others read one voxel. `offset` is the
+vertex's own number in [0, 1), the same in every frame and at every level of detail that draws the vertex (`jitter`
+`vertex`; `frame` changes it every frame), and each march of a vertex takes a different one.
+
+- **Why the bias.** The deposits are spread over a voxel either side of the hair, so a vertex on the lit face of a
+  groom reads hair between itself and the light that is really beside and behind it. Skipping the first voxel of the
+  ray takes most of that away, and with it whatever really is within a voxel of the vertex.
+- **What a voxel cannot hold.** A layer of hair thinner than a voxel is one density to every vertex in it: the
+  outermost fibre and the innermost get the same count. The measurements
+  ([Self-shadowing measurements](#self-shadowing-measurements)) say what that costs.
+
+The arithmetic of deposits and marches is [`HairVolumeShared.h`](../Plugins/Hair/include/Hair/HairVolumeShared.h),
+one text for the shaders and for `HairCoreTests`, which builds and marches a slab of known density with it.
+
+| `hair.volume` field | Default | Meaning |
+|---|---|---|
+| `enabled` | true | Off: no volume is built, and hair is lit exactly as before the volume existed. |
+| `dual_scattering` | true | Off: the fibres in the way only shadow (the light that met none arrives, nothing else). |
+| `voxel_pixels` | 8 | The side of a voxel on screen at the groom's distance. |
+| `max_resolution` | 96 | The most voxels along a volume's longest side. |
+| `voxel_budget` | 0 | The most voxels over all volumes; 0: the buffer's 2,097,152. |
+| `steps`, `environment_steps` | 8, 4 | Samples of a march toward a light, and toward an environment direction. |
+| `bias` | 1 | Voxels a march skips at its start. |
+| `density_factor` | 0.7 | Zinke et al.'s `d_f` and `d_b` ([Multiple scattering](#multiple-scattering)). |
+| `margin` | 0.1 | The box's growth beyond the groom's rest bounds, as a share of their longest side. |
+| `scalp_depth` | 3 | Voxels of scalp shell under every root; 0: none. |
+| `splat` | `trilinear` | How a deposit is shared between voxels. |
+| `jitter` | `vertex` | Whether a march's offset is the vertex's own always, or new every frame. |
+
+The reply also has the last frame's `volumes`, `voxels`, `voxel_bytes`, `capacity_voxels`, `budget_voxels`,
+`high_water_voxels`, `coarsening`, `largest_resolution`, `smallest_voxel`, `largest_voxel` (metres), `dropped_volumes`
+and `unknown_instances`; `hair.stats` has them under `volume`, and each instance's `volume_resolution` and
+`volume_voxel_size`.
+
+**Not built:** directions in the volume (a mean tangent or an orientation moment, for an extinction that depends on
+the angle between the ray and the fibres); a lookup of the volume from opaque surfaces (hair's shadow on the head);
+the volume as input to the simulation (hair against hair): `Hair::Voxelize` runs after `Hair::Simulate`, so a solver
+would read the previous frame's volume or the pass would have to move.
+
+### Shadow casting
+
+On the layered path hair is drawn into the sun's [virtual shadow map](lighting.md) (`hair.shadows`, on by default), so
+it shadows the ground, the head it grows on and everything else that takes the sun's shadow through the deferred path.
+`HairExtension` is a caster provider of the shadow map
+([`Extensions/VirtualShadowCasterProvider.h`](../BasicRenderer/include/BasicRenderer/Extensions/VirtualShadowCasterProvider.h),
+as SARP's grass is): a graph that has a shadow map gathers three passes from it, which run once the shadow map has
+decided which pages take depth this frame and before anything looks a shadow up. Everything is in
+[`hairShadow.hlsl`](../Plugins/Hair/shaders/hairShadow.hlsl). No core file was changed for it. On the surface path hair
+casts no shadow.
+
+**What the provider reaches.** The sun's clipmaps only: 22 orthographic views around the camera, each twice as coarse
+as the one before, in pages of 128 texels that exist only where a pixel of the main view asked for one. A page holds
+one depth a texel. Spot and point lights' faces are not offered to a provider (below).
+
+**Which hair** (`Hair::ShadowSelect`, `HairShadowSelectCS`). One dispatch per active instance, one thread per cluster,
+like the main view's select pass, and independent of it: whether the main view shows a cluster plays no part. A cluster
+is kept when its bounding sphere, seen from the sun, lies over a page that some clipmap draws this frame (the shadow
+map's active-block lists, as grass culls). That is what "its shadow can reach the view" comes to: the shadow map only has
+pages under receivers the main view shows, so a groom behind the camera whose shadow falls in front of it is kept, and a
+groom in view whose shadow falls on nothing in view is kept only for the pages of its own head. Pages are coarse (128
+texels: metres across near the camera), so "over a drawn page" is generous.
+
+- **Detail from the shadow texel.** The main view's rule with the shadow texel in the pixel's place:
+  `l = clamp((spacingTexels / (errorPixels * detailScale)) ^ detailExponent, minDetail, 1)`, the texel being the finest
+  one among the clipmaps the cluster was kept for. `detail_scale` (2) counts a shadow texel as that many: the shadow
+  view draws the strands the main view would at twice the distance. Width compensation is the main view's
+  (`HairLodCoverageWidthScale`), so a cluster drawn with fewer strands covers the same share of texels.
+- **Vertex level from the texel alone.** `f = log2(lengthTexels / segmentPixels)`, without `detail_scale`: a strand
+  that bends, drawn with fewer vertices, runs along its chords inside the shape it has, and its shadow is smaller
+  ([Cast shadow measurements](#cast-shadow-measurements): a fifth less on the floor at half the vertices). Fewer strands
+  cost nothing of the kind.
+- **One level for every clipmap** a cluster is drawn into, the finest one's. A coarser clipmap gets more strands than it
+  needs; their widths still sum to the cluster's.
+
+**A list and a pool of its own.** The kept clusters go to `Hair.ShadowClusters` (rows of `HairVisibleCluster`, with the
+clipmaps each is drawn into in `Hair.ShadowClusterMasks`) and take ranges of `Hair.ShadowPoolVertices`, a second pool a
+quarter the size of the main view's (1,048,576 rows; 38 MB with its segment ids and the list). The main view's pool is
+not reused: its strands are chosen for the screen (more of them, at a finer vertex level, and none for a cluster outside
+the frustum), and reading a prefix of them would have tied the two selections together. What the second pool costs is
+its memory and a second evaluation of the strands the shadow view keeps: 3,553 of a 50,000-strand groom near the camera.
+A cluster that does not fit either is dropped for the frame and counted (`shadow_overflow_clusters`).
+
+**Evaluation** (`Hair::ShadowEvaluate`). The evaluate pass's own shader, `HairEvaluateCS`, run over the shadow list
+into the shadow pool (`HAIR_EVALUATE_SHADOW`): the strands are where the main view's are, simulated when their instance
+is, from the same guide rows of the same frame. An instance no view shows is not simulated
+([Following the view](#following-the-view)) and the shadow view does not change that: **a groom out of view casts the
+shadow of its rigid pose**, whether or not it keeps a simulated shape. When the camera turns to it, its simulation
+starts again (from the kept shape, if it has one) and the shadow takes the simulated shape in that frame; with the
+default pull toward the rest pose the two differ by the hair's sag, millimetres to a centimetre or two. Such strands are
+counted (`shadow_unseen_strands`), and the main view's check on them (`unseen_strands_drawn`) stays its own.
+
+**The rasterizer** (`Hair::ShadowRaster`, `HairShadowRasterCS`). One thread per row of the shadow pool; a row that
+starts a segment draws it into every clipmap its cluster was kept for. Both ends are projected with the clipmap's view,
+and the segment is walked as in the main view: a strip at least one texel wide, the strand's segments meeting end to
+end. A segment whose strip touches no page that takes depth this frame stops there. Depth is the linear depth along the
+light, written with the caster helper's encoding and atomic minimum (`VirtualShadowCasterWriteDepthAtVirtualTexel`),
+which also marks the page as holding content.
+
+**Coverage.** A page holds one depth a texel and hair is not opaque to light, so a texel of the strip is written with
+the probability of the strand's coverage of it: its true width (the pool's, with the level of detail's scale) over the
+strip's. Strands over a texel are independent, so the share of texels left open under a layer of hair is the share of
+light it lets through, and the shadow lookup's rays and the upscaler average that into a partial shadow.
+
+- `temporal` (the default): the random number is of the texel, the strand, the clipmap and the frame. Where hair is
+  redrawn every frame the pattern is new every frame, and what the receiver shows is the upscaler's average: smooth in
+  a still view (measured below).
+- `fixed`: of the texel, the strand and the clipmap. Nothing crawls, and a sparse layer is a field of texel-sized
+  blocks, each several pixels across: shadow texels are larger than pixels (below).
+- `opaque`: every texel of the strip is written. A strand then shadows as if a texel wide, however thin it is.
+
+**Layers, caching and invalidation.** Hair is a deformable caster (`VirtualShadowCasterMobility::SkinnedOrDeformable`).
+The shadow map keeps two layers. In the clipmaps it classes as dynamic (those within the largest radius any caster
+asks for; 12 of the 22 in the demo) a deformable caster writes the dynamic layer, which every frame starts as a copy of
+the cached depth of the rigid casters and is drawn again: there hair's shadow is this frame's, by construction, and
+`temporal` has a new pattern each frame. In the other clipmaps hair writes the cached pages themselves, when the shadow
+map draws them; a cached page holds the pattern of the frame it was drawn in, whichever the mode, and a stale shadow
+until it is drawn again.
+
+- `HairExtension::GetRequestedDynamicShadowRadius` asks for `dynamic_radius` (16 m) while hair casts shadows. The demo's
+  own radius (procedural wind's reach) is larger, so there the request changes nothing.
+- `HairRuntime` (`PlanShadows`, once a frame on the CPU) enqueues bounds on the shadow map's invalidation queue for a
+  groom whose matrix differs from the last frame's, that is simulated, that starts or stops casting (attached, cleared,
+  the feature or the path switched), and for every groom when a control that changes what is drawn changes: its bounding
+  sphere where it was and where it is. A groom that stands still enqueues nothing. The queue only applies a deformable
+  caster's bounds to the clipmaps that are not dynamic, so near the camera they cost nothing. A simulated groom counts
+  as moving in every frame, whether its hair moves or not: the CPU does not know.
+
+**Hair's own shading: no double shadow.** The [density volume](#the-density-volume) already shadows hair with hair, and
+the shade pass multiplies that with the shadow map's answer. With hair in the map a vertex would be shadowed by its own
+groom twice, so a vertex that has a volume asks the map two narrower questions (`hairShade.hlsl`):
+
+- *What is in the way outside my groom's box?* The same lookup as before (`EvaluateLightOcclusion`, soft), started at
+  the point where the ray to the sun leaves the volume's box. A clipmap is orthographic, so that moves the receiver
+  along the light and changes nothing else: every occluder outside the box shadows as it did, another groom's hair
+  included, and nothing inside the box is seen.
+- *What opaque thing is in the way inside the box?* The head, above all. The renderer's single-texel lookup
+  (`CLodVirtualShadowLookupDirectionalOcclusion`) is given the shadow map's **cached pages** in place of the frame's:
+  in a dynamic clipmap those hold the rigid casters and no hair. An occluder there, nearer the sun than the vertex by
+  more than `receiver_bias` plus two texels and no farther than the box's edge, shadows the vertex fully. The cached
+  pages have no name a pass can declare; the extension hands the shade pass the texture the provider interface gave it.
+
+What this leaves: the second answer is one texel's, hard where the first is soft; it does not know casters that are
+themselves drawn into the dynamic layer, so **a skinned head shadows its own hair only through the volume's scalp
+shell**, which a march can step over; in a clipmap that is not dynamic the cached pages hold hair too and the second
+question is not asked. A vertex without a volume (the volume off, or out of budget) is looked up as before, and is then
+shadowed by the hair in the map, its own groom's included. A third way was built first and removed: leaving one texel in
+sixteen free of hair for hair receivers to read. At the shadow map's resolution those texels are plain holes in the
+shadow on the ground.
+
+**What the shadow map's resolution allows.** In the demo's configuration a receiver near the camera reads the fifth
+clipmap or a coarser one, whose texel is about 2 cm, a dozen screen pixels at 2.5 m; and a receiver's lookup starts
+two texels off its surface. So a groom's shadow on the ground is its silhouette resolved to 2 cm, and **hair within
+about 4 cm of the head casts nothing on it**: the scalp under hair is as lit as without this. With the shadow map's
+level-of-detail bias lowered until a texel is under 2 mm (`clodDirectionalVirtualShadowAutoLodBias` off,
+`clodDirectionalVirtualShadowLodBias` 2), the shadow appears on the head; the measurements have both.
+
+| `hair.shadows` field | Default | Meaning |
+|---|---|---|
+| `enabled` | true | Off: hair is in no shadow map, the three passes record nothing, and hair is lit exactly as before. |
+| `detail_scale` | 2 | A shadow texel counts as this many when the shadow view picks a cluster's strand count. |
+| `force_detail` | 0 | Above 0: every cluster takes this `l` in the shadow view (its vertex level stays the texel's). For testing. |
+| `coverage` | `temporal` | `temporal`, `fixed` or `opaque`: above. |
+| `receiver_bias` | 0.005 | Metres, on top of two texels, by which an opaque occluder inside a groom's box must be nearer the sun than a hair vertex to shadow it. 1 turns that read off in effect. |
+| `dynamic_radius` | 16 | The distance from the camera within which hair asks the shadow map to redraw deformable casters every frame. |
+
+The reply also has the last frame's `active` (hair was drawn into the shadow map), `instances`, `moved_instances`,
+`invalidations` (bounds enqueued), `total_invalidations`, `dropped_invalidations` (the queue was full), and the shadow
+map's own `sun_clipmaps` and `dynamic_clipmaps`. The GPU's counts are in `gpu_frame` ([Checking it](#checking-it)).
+
+**Spot and point lights.** Hair casts no shadow from them, and the provider interface cannot give it one: it hands a
+provider the sun's clipmaps and a depth write for them. A provider that drew into local faces would need, from the
+core: the faces themselves in the build context (how many are live, each face's slices, its light, its near and far
+plane, whether it is a cube face, whether it is dynamic, and its perspective view, which the compact shadow camera
+buffer a provider gets today does not hold); a depth write for a face that maps the face's coordinates into each mip's
+rectangle on its canvas and writes **every mip the caster covers**, which is the rule every raster path of the faces
+keeps ([lighting.md](lighting.md#pages)) and what the software rasterizer does there (it divides by w, interpolates
+1/depth and walks the mips); active-block lists that cover the faces' slices; and invalidation bounds that reach faces
+(the queue's mask names the sun's clipmaps). The density volume could stand in for those lights on opaque receivers
+instead: a full-screen pass that marches each groom's volume from the opaque pixel toward each local light in range and
+keeps a transmittance per pixel and light. The volume has what that needs; the deferred pass does not: its light loop
+takes occlusion known beforehand for the sun alone (`DirectLightingOptions::sunOcclusion`), so the core would have to
+take a per-light occlusion term from an extension. Neither was built.
+
+**Not built:** a level of detail per clipmap; shadows of simulated hair for grooms out of view; the shadow of hair on
+the surface path; transmitted colour (a shadow is grey, whatever the hair's).
+
+### The hair shading model
+
+A fibre's response to light on the layered path is the real-time form of Marschner et al.'s model: three lobes, **R**
+(reflected off the cuticle: white, the primary highlight), **TT** (through the fibre: coloured, forward, what makes hair
+glow against the light) and **TRT** (through, reflected inside and out again: more strongly coloured, the secondary
+highlight), each the product of a longitudinal function M of the two inclinations to the fibre, a distribution D around
+the fibre and an attenuation A (Fresnel and absorption). The surface path does not use it.
+
+**One text for the shader and the CPU.** The scattering function is
+[`HairBsdfShared.h`](../Plugins/Hair/include/Hair/HairBsdfShared.h), written like `HairLodShared.h` to compile as HLSL and
+as C++: [`hairBsdf.hlsli`](../Plugins/Hair/shaders/hairBsdf.hlsli) includes it for the shade pass and adds a strand's
+material and the entry point, and `HairCoreTests` compiles the same file and checks it
+([`HairBsdfTests.cpp`](../Plugins/Hair/tests/HairBsdfTests.cpp)). So the shader and the reference cannot differ, and there
+is no GPU self-check for it. `hairBsdf.hlsli` also declares `HairSampleBsdf` and `HairPdfBsdf` for a path tracer; they
+have no bodies.
+
+**Conventions.** `tangent` runs from root to tip; `view` and `light` point away from the shading point; the inclination
+of a direction is its angle above the plane normal to the fibre, toward the tip (`sin(theta) = dot(tangent, direction)`);
+`phi` is the angle between the two directions around the fibre. `HairBsdfEvaluate` returns the radiance toward the
+viewer per unit of irradiance from the light on a plane facing the light: the sum of M A D over the lobes, which is
+pbrt's `f` times `|cos(theta_i)|`. A caller multiplies by the light's incident radiance and no cosine. The model is
+far-field (integrated across the fibre's width): one colour across a strand.
+
+**Where each part comes from.** "Karis" is *Physically Based Hair Shading in Unreal* (SIGGRAPH 2016 course), "Frostbite"
+*Strand-based Hair Rendering in Frostbite* (SIGGRAPH 2019), "pbrt" pbrt-v4's `HairBxDF` (Chiang et al. 2016's model);
+slide numbers are the PDFs' pages. "Ours" is neither's.
+
+| Part | Form | Source |
+|---|---|---|
+| M, every lobe | A Gaussian in `sin(theta_i) + sin(theta_o)` about the lobe's shift, normalized over `sin(theta_i)` | Karis, slide 18 |
+| ... its width | Standard deviation `0.726 b + 0.812 b^2 + 3.7 b^20` for R (`b` = `beta_m`), half of it for TT, twice for TRT | pbrt (`v`, `v / 4`, `4 v` as variances); Karis slide 44 has the same ratios |
+| ... its shift | `-sin(2 alpha)` for R, `sin(alpha)` for TT, `sin(4 alpha)` for TRT | pbrt's multiples of the tilt; Karis slide 44's multiples and signs (`-2 Shift`, `Shift`, `4 Shift`) |
+| ... scaled for the view | Each lobe divided by the share of its Gaussian that lies on real directions (`sin(theta_i)` in [-1, 1]) for the view, at most ten times | Ours. Without it a view along the fibre loses the part of the lobe past grazing: R kept a third of pbrt's energy at 70 degrees |
+| D, R | `cos(phi / 2) / 4` | Karis, slide 20 |
+| A, R | Schlick's Fresnel at half the angle between the directions, `F0 = ((1 - eta) / (1 + eta))^2` | Karis, slide 20 |
+| D, TT | A logistic about `phi = pi`, normalized over the circle (pbrt's `TrimmedLogistic`), of scale `sqrt(0.35^2 + s^2)` with `s` Chiang's `sqrt(pi / 8) (0.265 b + 1.194 b^2 + 5.372 b^22)` (`b` = `beta_n`) | Karis slide 29 for 0.35, the smooth fibre; pbrt for `s`; combining them is ours (Frostbite uses a fitted table that is not published) |
+| A, TT | `(1 - f)^2 T`, with `T = exp(-sigma_a 2 / cos(theta_t))`, the path through the middle of the fibre, and `f` Schlick's Fresnel averaged over the fibre's width in closed form | Karis slide 23 for the form; Frostbite slide 17 for the path at `h = 0`; pbrt for `T`; the averaged Fresnel is ours (at `h = 0` the lobe returns up to 10% more than the fibre receives) |
+| D, TRT | `0.75 exp(kappa (cos(phi) - 1))` normalized as a von Mises lobe, `kappa = 17 clamp(1.5 (1 - beta_n), 0.15, 1)` | Karis slide 32 (`exp(17 cos(phi) - 16.78)`, three quarters of a logistic of scale 0.15); Frostbite slide 21 for the widening with `beta_n`; keeping its integral at three quarters is ours (Frostbite's form goes to zero as `beta_n` nears 1) |
+| A, TRT | `(1 - f)^2 f T^2` at `h = sqrt(3) / 2`, with `T = exp(-sigma_a 2 cos(gamma_t) / cos(theta_t))`, `sin(gamma_t) = h / eta'`, `eta' = sqrt(eta^2 - sin^2(theta_d)) / cos(theta_d)` | Karis slides 23, 26 and 32; Frostbite slide 21; pbrt for `T` |
+
+`theta_d` is half the difference of the two inclinations and `theta_t` its refraction into the fibre. Karis's own
+absorption terms (his base colour raised to a power, slides 28 and 32) and his fitted offset for TT (slide 25) are not
+used: absorption is the physical one, so that the material is Chiang's.
+
+**Checked against the sources.** The constants this step was handed as recalled, against Karis's slides read as
+rendered pages:
+
+| Constant | Found | Used |
+|---|---|---|
+| Roughness per lobe: `Roughness^2`, half, twice | Slide 44 | The ratios, on Chiang's mapping of `beta_m` |
+| Shift per lobe: `-2 Shift`, `Shift`, `4 Shift` | Slide 44 | Yes, with `Shift = sin(alpha)` |
+| `Shift` = 0.035 | Not on any slide. It is `sin(2 degrees)` (0.0349), and 2 degrees is the tilt pbrt's text calls typical | As the default tilt, 2 degrees |
+| `F0` = 0.046 | The number is not on a slide; the formula is (slide 20) and gives 0.0465 at `eta` 1.55 | The formula |
+| `eta' ~ 1.19 / cos(theta_d) + 0.36 cos(theta_d)` | Slide 26, for `eta` 1.55, "error < 0.68%". Checked: 0.675% at most up to 85 degrees | The exact form, since `eta` is a parameter |
+| `h_TT ~ (1 + a (0.6 - 0.8 cos(phi))) cos(phi / 2)` | Slide 25 | No (Frostbite's `h = 0`) |
+| `D_TT ~ exp(-3.65 cos(phi) - 3.98)` | Slide 29, a logistic of scale 0.35 about `pi`. Checked: within 0.017 of it (peak 0.71) | The logistic itself, widened by `beta_n` |
+| `D_TRT ~ exp(17 cos(phi) - 16.78)` | Slide 32, three quarters of a logistic of scale 0.15. Checked: integral 0.763; ours is within 0.022 of it (peak 1.25) at `beta_n` 0 | Yes, as the concentration 17 and the integral 0.75 |
+| `T_TRT = C^(0.8 / cos(theta_d))`, `T_TT = C^(sqrt(1 - h^2 a^2) / (2 cos(theta_d)))` | Slides 32 and 28 | No |
+| Environment: the lobes with `R` scaled by `saturate(dot(light, view) + 1)`, TT removed | Slide 48 | Yes ([The environment](#the-environment)) |
+
+Not read: Unreal's shader source (it is not public; its per-lobe scale factors are therefore not used), and Marschner
+et al. 2003 (the conventions are taken from Karis's and pbrt's). pbrt's formulas are from its source
+(`bxdfs.h`, `bxdfs.cpp`, `util/math.h`, `util/scattering.h`); of its book chapter the first half was read.
+
+#### Material parameters
+
+The parameters are Chiang's, one for one what pbrt's `HairBxDF` takes, so a path tracer can use the same material.
+They are per instance (`HairInstanceGPU`), set by `hair.attach` and `hair.material`.
+
+| Field | Default | `HairBxDF` | Meaning |
+|---|---|---|---|
+| `sigma_a` (`[r, g, b]`) | brown, `[0.838, 1.394, 2.74]` | `sigma_a` | Absorption coefficient of the fibre's interior per colour channel, per fibre diameter. |
+| `beta_m` | 0.3 | `beta_m` | Longitudinal roughness, 0 to 1 (0.05 at least in the shader: hair is lit at strand vertices). |
+| `beta_n` | 0.3 | `beta_n` | Azimuthal roughness, 0 to 1. |
+| `alpha_degrees` | 2 | `alpha` | The cuticle scales' tilt. |
+| `eta` | 1.55 | `eta` | Index of refraction. |
+
+pbrt's sixth argument, `h`, the offset across the fibre, has no counterpart: this model is integrated over it. The
+tangent here runs from root to tip and R's cone of directions is turned toward the root (on hair draped over a head the
+white highlight then sits toward the tips from the coloured one, as in the captures); a path tracer must give its
+`HairBxDF` the curve direction that turns R the same way.
+
+`sigma_a` can be given directly, or as one of (the last one given wins):
+
+- `preset`: `black`, `brown`, `blond`, `red`, `grey` or `white`, an amount of melanin and its redness: 8 and 0, 2 and 0,
+  0.15 and 0, 0.6 and 0.9, 0.03 and 0, 0 and 0. Black and brown are the absorptions pbrt's text shows for black and brown
+  hair (figure 9.47), blond its 0.143 rounded; red, grey and white were chosen by eye.
+- `melanin` and `redness`: `sigma_a = eumelanin (0.419, 0.697, 1.37) + pheomelanin (0.187, 0.4, 1.05)`, Chiang's
+  coefficients (pbrt's `SigmaAFromConcentration`), with `eumelanin = melanin (1 - redness)` and
+  `pheomelanin = melanin redness`. The split by `redness` is ours; the two concentrations are pbrt's.
+- `hair_color` (`[r, g, b]`): the colour a head of such hair shows after multiple scattering, by Chiang's fit (pbrt's
+  `SigmaAFromReflectance`): `sigma_a = (ln(c) / (5.969 - 0.215 b + 2.532 b^2 - 10.73 b^3 + 5.574 b^4 + 0.245 b^5))^2`
+  with `b` = `beta_n`. Without multiple scattering, which this step does not have, hair shaded with it is darker than
+  the colour.
+
+`melanin_variation` (0.15) and `roughness_variation` (0.1) make strands differ: a strand's absorption is `sigma_a`
+times `1 + melanin_variation r` and its `beta_m` is `beta_m` times `1 + roughness_variation r'`, with `r` and `r'` in
+[-1, 1) from a hash of the strand's cluster and its place in it, the same in every frame and at every level of detail.
+
+#### Multiple scattering
+
+Light reaches a fibre through other fibres, and leaves a groom after bouncing between them: that is what makes light
+hair light. [`HairScatterShared.h`](../Plugins/Hair/include/Hair/HairScatterShared.h), one text for the shader and the
+tests like the scattering function, is the dual scattering approximation of Zinke, Yuksel, Weber and Keyser (*Dual
+Scattering Approximation for Fast Multiple Scattering in Hair*, SIGGRAPH 2008; "Zinke" below). `HairEvaluateBsdf`
+calls it with the fibre count the vertex's march found.
+
+- **Global.** Of a light's radiance, the share `exp(-n)` reaches the fibre having met none of the `n` fibres expected
+  in the way (*direct*), and lights it through its own three lobes. The share `T_f - exp(-n)`, with
+  `T_f = exp(-n (1 - a_f))`, arrives scattered forward by every fibre it met, coloured by them (`a_f` is the fibre's
+  average forward attenuation, per colour channel), spread around the fibre over the half circle facing the light and
+  along the fibre by a variance `sigma_f^2` that grows with the fibres met. It lights the fibre through the same lobes,
+  each longitudinal function widened by that variance and each azimuthal distribution averaged over that half circle
+  (Zinke's `N^G`), times the density factor `d_f`.
+- **Local.** The fibres around the shading point scatter light back toward the viewer. That is one more lobe of the
+  response (Zinke's `f_back`), of attenuation `A_b`, shift `Delta_b` and variance `sigma_b^2` computed from the fibre's
+  average forward and backward attenuations, shifts and spreads (Zinke's equations 14, 16 and 17), broad around the
+  fibre, times `d_b`. It is lit by the direct and the forward scattered light both.
+- **The scatter table.** `a_f`, `a_b`, the shifts and the variances depend on the material and on the light's
+  inclination to the fibre. `HairScatterMakeRow` computes them on the CPU by summing the scattering function itself
+  over the outgoing directions of the half away from the light and of the half toward it (Zinke's equations 6 and 12);
+  16 rows per instance (`Hair.ScatterTables`), for inclinations of 0 to 85 degrees, made when the instance's material
+  changes (2,000 to 9,000 evaluations a row, tables cached by material) and interpolated by the shader. The table is of
+  the instance's material: a strand's own offsets of absorption and roughness are not in it.
+
+Where it departs from the paper:
+
+| | The paper | Here | Why |
+|---|---|---|---|
+| Fibres in the way | An integer count; lit either directly (none) or by forward scattered light | The expected count `n`, a real number, with the fibres met Poisson distributed about it: direct share `exp(-n)`, `T_f = exp(-n (1 - a_f))`, and `n a_f / (1 - exp(-n a_f))` scattering events on average for the scattered share | The count comes from a density, and the paper's two cases are the limits |
+| Units | Gaussians in the half angle, Marschner's normalization (`2 / pi`, `cos^2`) | Gaussians in `sin(theta_i) + sin(theta_o)`, every lobe keeping its integral: the backscattering lobe integrates to `d_b A_b`; shifts and variances measured in that variable from the lobes | The scattering function's own units ([Conventions](#the-hair-shading-model)) |
+| The `pi` on `f_back` under scattered light (Figure 5) | There | Not carried over | It belongs to the normalization of the paper's `N^G` table |
+| `N^G` | A precomputed table; equation 25 as printed does not say over which half circle | Each distribution averaged over the half circle centred on the light: closed forms for TT and TRT, four samples for R with its Fresnel term | No table to store or filter |
+| Variance of a half | The average of the lobes' variances | The variance of the light the half receives, which also holds the spread of the lobes' means and what the end of the range cuts off | It is what the brute-force sum gives |
+| Backscattering lobe around the fibre | Constant over the half circle facing the light | `(1 + cos(phi)) / (2 pi)` | The same without an edge |
+| A wide backscattering lobe | | Scaled back to its integral where part of its Gaussian lies past the fibre's axis, as the fibre's own lobes are | Otherwise light hair loses a fifth of it |
+| Density factors | `d_f` = `d_b` = 0.7, "between 0.6 and 0.8" | The same, `density_factor` | |
+| Fibres along the path | The inclination at each fibre met | The light's inclination at the shading point for all of them | The volume keeps no directions |
+
+Not from the paper at all: the scalp shell, the bias, and the isotropic sine of [the density volume](#the-density-volume).
+
+#### The environment
+
+`HairBsdfEnvironmentSample` gives four directions and a weight for each; the shade pass sums weight times the
+environment's radiance along the direction. The radiance is the renderer's second-order spherical harmonics of the
+environment, which are kept convolved with a cosine lobe: the irradiance of a surface facing the direction over pi, a
+wide blur of the environment (the prefiltered environment map is 8 bits and clips the sky, and is not used).
+
+Because that radiance varies slowly, the longitudinal functions integrate out, and each lobe is left on the cone of
+directions the fibre mirrors the view into: R as `cos(phi / 2) / 4` times its Fresnel term around that cone, by one
+direction for each quarter of the circle (at the quarter's centre of `cos(phi / 2)`, weighted by the quarter's
+integral), and TRT's three quarters of its attenuation on the two directions nearer the viewer.
+
+**With a density volume** each of the four directions is marched like a light (`environment_steps` samples) and takes
+the weight `HairBsdfEnvironmentWeightDual` gives it for the fibres that way: the lobes' weights above, times the light
+that arrives (direct and forward scattered, as for a light; nothing is widened, the environment being smooth already),
+plus the backscattering lobe's share of that quarter of the circle. Karis's two stand-ins for occlusion (slide 48) are
+gone there: R is whole, and TT is in, half of its attenuation on each of the two directions on the far side of the
+fibre. What they stood for is now the fibre count that way and the [scalp shell](#the-density-volume): behind a fibre
+on a head is the head.
+
+**Without one** (`hair.volume {enabled: false}`, an instance over the budget) nothing occludes the environment, and
+the two stand-ins are still what the weights are: TT is left out (it is the environment straight behind the fibre,
+which on a head is the head), and R is scaled by `saturate(dot(light, view) + 1)`, which fades the light from behind
+the fibre.
+
+Four directions were kept: they are what the lobes' quadrature around the fibre needs (two for R and TRT on the
+viewer's side, two for R and TT on the far side), and their marches are half the length of a light's.
+
+#### What the tests establish
+
+[`HairScatterTests.cpp`](../Plugins/Hair/tests/HairScatterTests.cpp), on the texts the shaders compile
+(`HairScatterShared.h`, `HairVolumeShared.h`; the numbers are the tests' own output):
+
+- **The scatter table against the integral.** The table's rows, read as the shader reads them at 0, 30 and 60 degrees,
+  against the same sum done finely in double precision (1,200 by 96 directions), for white, blond, brown and black
+  hair and for smoother and rougher blond and brown: attenuations within 0.74% (0.49% up to 30 degrees), spreads
+  within 0.47%, shifts within 0.002. Across the fibre the green channel's `a_f` is 0.873 for white hair, 0.714 for
+  blond, 0.084 for brown and 0.033 for black, and `a_b` 0.109, 0.089, 0.035 and 0.033; the backscattering lobe's `A_b`
+  is 0.422, 0.096 and under 0.001 for brown and black. (A first table, each lobe integrated around the fibre on its own
+  cone with the lobe's own shift and width, was within 1% at 0 degrees and 16% to 53% off at 60, where the lobes are
+  cut off by the fibre's axis; the table is the brute-force sum for that reason.)
+- **Dual scattering:** never negative or not finite over 60,000 random materials, directions, fibre counts and part
+  masks; with no fibre in the way the direct part is the single fibre's response bit for bit; the parts add up; more
+  fibres in the way never means more light; the backscattering lobe's energy is `d_b A_b` to 3%. Energy toward a view
+  across the fibre, summed over light directions, green: white hair 0.98 from its own lobes plus 0.28 backscattered
+  in the open, 0.91 in all behind one fibre, 0.51 behind four, 0.09 behind sixteen; blond 0.87, 0.55, 0.19, 0.005;
+  brown 0.12, 0.05, 0.003; black 0.066, 0.025, 0.001. Behind four fibres black hair has 2% of its light in the open and
+  blond 22%.
+- **The density volume, a slab of known density** (4,000 parallel fibres of 80 micrometres in a 2 cm slab, 5 mm
+  voxels), built and marched on the CPU with the shaders' arithmetic: the voxels hold 99.2% of length times diameter
+  over a voxel's volume (the rest is rounding and the box's ends); a march across the slab counts 1.53, 1.60, 1.59 and
+  1.58 fibres with 4, 8, 16 and 64 steps where the density says 1.571, at 24 degrees 1.74 where it says 1.72, and
+  **1.57 for the same slab drawn with a fifth of the strands, each five times as wide**. Between rays and offsets the
+  count varies by 0.57 (one standard deviation) at 8 steps and 0.30 at 16 for this slab, which the march meets far from
+  its start, where its steps are as long as the slab is thick. From the slab's lit face toward the light, where there
+  is no hair, a march reads 0.087 fibres without bias, 0.022 at half a voxel and 0.007 at one; from the middle of the
+  slab, where 0.785 are in the way, 0.79, 0.60 and 0.39: the bias takes away what is within a voxel.
+
+`HairBsdfTests.cpp`, on the shader's own text (the numbers are the tests' own output):
+
+- **Never negative, never not finite:** 200,000 random materials, tangents and direction pairs, each lobe mask.
+- **White furnace** (no absorption, integrated over every incident direction): R + TT + TRT is at most 1.002 and at
+  least 0.757 over `beta_m` and `beta_n` in {0.1, 0.3, 0.6, 0.9} and view inclinations of 0 to 85 degrees; the test
+  allows 1.01. At the defaults it is 0.982 looking across the fibre, 0.936 at 60 degrees and 0.757 at 85. The shortfall
+  is the orders after TRT, which the model does not have (pbrt gives them 0.6% at 0 degrees and 5% at 70), and the
+  lobes' approximations at grazing views.
+- **Reciprocity.** Before the lobes are scaled for the view the response is exactly the same with the two directions
+  swapped (so the BSDF itself, the response over `cos(theta_i)`, differs by the ratio of the two cosines, as pbrt's
+  does). The scaling for the view breaks that: of random pairs of directions with a response above 0.001, 57% differ by
+  more than 5% when swapped, and the worst by the scaling's limit of ten times. The pairs are uniform in
+  `sin(theta)`, so most have one direction near the fibre's axis. At the default roughness the scale for a view
+  across the fibre, and at 30, 45, 60 and 75 degrees from that, is 1.00, 1.08, 1.29, 1.70 and 2.22 for R, 1.00, 1.00,
+  1.01, 1.14 and 1.47 for TT, and 1.10, 1.17, 1.30, 1.47 and 1.62 for TRT.
+- **Absorption is monotonic in melanin:** in 20,000 random configurations no channel of the response rises with more
+  melanin, and the albedo falls: at the defaults and 30 degrees, (0.983, 0.983, 0.983) with none, (0.865, 0.796, 0.653)
+  for blond, (0.222, 0.120, 0.077) for brown, (0.075, 0.074, 0.074) for black, which is R alone.
+- **The mappings** are pbrt's expressions, and the black and brown presets its figure's absorptions.
+- **Against pbrt.** `HairBxDF::f` was transcribed into the test (with what it calls), in double precision, and averaged
+  over the offset across the fibre. Each lobe's energy, ours / pbrt's, green channel, defaults:
+
+  | Hair | View inclination | R | TT | TRT | pbrt's later orders |
+  |---|---|---|---|---|---|
+  | white | 0 | 0.066 / 0.069 | 0.864 / 0.866 | 0.052 / 0.056 | 0.006 |
+  | white | 40 | 0.085 / 0.095 | 0.829 / 0.822 | 0.067 / 0.069 | 0.011 |
+  | white | 70 | 0.172 / 0.271 | 0.619 / 0.546 | 0.090 / 0.131 | 0.053 |
+  | blond | 0 | 0.066 / 0.069 | 0.701 / 0.713 | 0.037 / 0.039 | 0.004 |
+  | blond | 40 | 0.085 / 0.095 | 0.659 / 0.661 | 0.045 / 0.045 | 0.006 |
+  | blond | 70 | 0.172 / 0.271 | 0.479 / 0.421 | 0.057 / 0.078 | 0.022 |
+  | brown | 0 | 0.066 / 0.069 | 0.053 / 0.066 | 0.000 / 0.000 | 0.000 |
+  | brown | 40 | 0.085 / 0.095 | 0.039 / 0.045 | 0.000 / 0.000 | 0.000 |
+  | brown | 70 | 0.172 / 0.271 | 0.020 / 0.017 | 0.000 / 0.000 | 0.000 |
+
+  Within 5% of pbrt lobe by lobe up to 40 degrees but for brown's TT (20% under at 0: the path through the middle is
+  the longest) and R at 40 (11% under). At 70 degrees R is 37% under (Schlick's Fresnel against the exact one, and
+  what the Gaussian still loses), TT 13% over and TRT 30% under. Only energies are compared, not the lobes' shapes.
+- **The environment's four directions** against the integral they stand for, for environments that vary as
+  second-order harmonics do: 7.8% off on average over 24 random cases, 31% at worst, 22% at worst under a uniform sky
+  (views near the fibre's axis, where the Fresnel term changes fastest around the cone).
 
 ### Probing the targets
 
@@ -1129,6 +1987,11 @@ the frame's view and unjittered projection matrices and the previous frame's. Th
 the frame and writes it to the file as it is; `HairRuntimeGPUTypes.h` gives the layout (`HAIR_PROBE_*`), and
 `hair.stats` reports `probe.state` and, as `probe.width`, the rows written. A script that knows how the scene moved can
 then check the motion vectors and the depths ([Checking it](#checking-it)).
+
+On the layered path the probe is `Hair::CompositeProbe`, after the composite, at the pixels that hold a nearest layer.
+The same row then ends with the composited hair alpha and whether the pixel took hair's depth and motion vector (1 or
+0), in place of the normal's length and the roughness; the linear depth and surface device depth it copies are those of
+what is behind the hair.
 
 ### Dumping buffers
 
@@ -1155,6 +2018,17 @@ holding a hair segment and leaves the rest of the frame as it is. It draws over 
 | `rank` | The strand's rank in its groom: white is kept longest, blue is dropped first. |
 | `vertex_level` | One colour per drawn vertex level, darker as the geomorph nears the level below; odd segments are dimmed. |
 | `coverage` | The [coverage target](#the-coverage-target) over the whole frame: black where there is no hair, a grey level equal to the summed coverage up to 1, then from yellow (1) to red (64) by its doublings. The target is accumulated while this view is shown, whatever `coverage_accumulate` says. |
+| `layers` | The layered path's, over the whole frame: the layers a pixel holds. Black none, blue one, green two, yellow three, red three with coverage beyond them (a remainder). Black on the surface path. |
+| `alpha` | The layered path's, over the whole frame: the composited hair alpha as a grey level. Black on the surface path. |
+| `reactive` | The layered path's, over the whole frame: the reactive mask the composite wrote for the upscaler, as a grey level. Black on the surface path. |
+| `lobe_r`, `lobe_tt`, `lobe_trt` | The layered path's: hair lit by the lights through that lobe of its response alone, without the environment. These five are drawn by the shade pass, not over the frame: the hair in the frame is what changes. |
+| `environment` | The layered path's: hair lit by the environment term alone. |
+| `direct` | The layered path's: hair lit by the lights through all three lobes, without the environment. |
+| `density` | Over the whole frame: the density volumes as a maximum projection, the densest voxel along each pixel's ray as the fibres a ray crosses in one voxel's length there (white at 2), over a dim grey where the ray is inside a volume's box; blue where the ray meets the scalp shell. |
+| `transmittance` | The layered path's, drawn by the shade pass like the five above: what reaches each vertex of the first light through the hair (`T_f`, per colour channel; with `dual_scattering` off the direct share). The shadow map is not in it. |
+| `fibre_count` | The fibres between each vertex and the first light: black none, through red (5) and yellow (11) to white at 16. |
+| `scatter_global`, `scatter_local` | Hair lit by the lights through the forward scattered light alone, and through the backscattering lobe alone. |
+| `vertex_density` | The volume's density in each vertex's own voxel (white at 2 fibres a voxel's length); blue in a scalp voxel. |
 | `off` | The pass records nothing. |
 
 `hair.capture` writes a presented frame (with the overlay, when one is on, and the menu) to a 32-bit `.bmp`. It reads the frame's
@@ -1165,11 +2039,19 @@ locked, where a screen capture is black. The file is written a few frames later:
 ### Shaders
 
 The shaders are in [`Plugins/Hair/shaders/`](../Plugins/Hair/shaders). The build stages them into `HairShaders/` in
-the renderer's runtime root (beside `shaders/`), with `HairGPUTypes.h`, `HairRuntimeGPUTypes.h` and `HairLodShared.h` in
-`HairShaders/Hair/`; they are compiled at run time like the renderer's. `hairStructs.hlsli` includes the three headers,
+the renderer's runtime root (beside `shaders/`), with `HairGPUTypes.h`, `HairRuntimeGPUTypes.h`, `HairLodShared.h`,
+`HairBsdfShared.h`, `HairScatterShared.h` and `HairVolumeShared.h` in `HairShaders/Hair/`; they are compiled at run time like the renderer's. `hairStructs.hlsli` includes the three headers,
 and `hairCommon.hlsli` adds what the simulate, guide-level, select, evaluate, raster, resolve and debug shaders share (the
 main camera, root following, point decoding, the visibility key, which guides are simulated and how they blend), and
-`hairGuideSkin.hlsli` how a point follows a guide, for the evaluate and guide-level shaders.
+`hairGuideSkin.hlsli` how a point follows a guide, for the evaluate and guide-level shaders. `hairHit.hlsli` finds a
+pixel's point on its strand again from a key, for the resolve and the composite, and `hairShading.hlsli` holds the
+marks and the packing of a vertex colour, for the rasterizer, the shade passes and the composite. `hairBsdf.hlsli` is
+the fibre's response to light for the shade pass: it includes `Hair/HairBsdfShared.h`, the scattering function itself,
+which `HairCoreTests` compiles as C++ ([The hair shading model](#the-hair-shading-model)), and
+`Hair/HairScatterShared.h`, multiple scattering, shared the same way. `hairRasterCulled.hlsl` is the layered path's [culled rasterizer](#the-culled-rasterizer). `hairVolume.hlsl` clears and fills the density
+volumes and `hairVolume.hlsli` reads and marches them, for the shade pass and the density view, both on
+`Hair/HairVolumeShared.h`. `hairShadow.hlsl` is the shadow view's selection and its rasterizer into the virtual shadow
+map's pages; it includes the renderer's `clodVirtualShadowClipmap.hlsli` and `virtualShadowCaster.hlsli`. `hairShade.hlsl` includes the renderer's `lighting.hlsli`.
 A shader includes it by its path from the runtime root (`"HairShaders/hairStructs.hlsli"`): the main file is
 compiled from memory, so it has no folder of its own to search. `scripts/deploy_demo.ps1` copies the folder.
 
@@ -1190,10 +2072,13 @@ compiled from memory, so it has no folder of its own to search. `scripts/deploy_
 | `gpu_counter` | The last readback of the GPU's own count of evaluate dispatches, with the CPU count and frame number of the frame it was read after. Each call asks for the next readback, so two calls a few frames apart see a fresh one. |
 | `gpu_frame` | The same readback's per-frame counters, below. |
 | `gpu_history` | With `continuous` on: the counters of the last 32 frames read back, oldest first. A frame's counters arrive a few frames after it, so a caller that polls once a frame sees every frame. |
-| `lod`, `debug_view`, `visibility_target`, `capture`, `probe`, `dumps` | The LOD controls, the debug view, the target's size, the last `hair.capture`, the last `hair.probe` and the `hair.dump` counts. |
+| `volume` | What `hair.volume` returns: the density volume controls and the last frame's volumes ([The density volume](#the-density-volume)). |
+| `shadows` | What `hair.shadows` returns: the shadow casting controls and the last frame's shadow casting on the CPU ([Shadow casting](#shadow-casting)). |
+| `lod`, `render`, `debug_view`, `visibility_target`, `targets`, `capture`, `probe`, `dumps` | The LOD controls, the rendering controls (`hair.render`), the debug view, the target's size, every texture the plugin holds with its bytes, the last `hair.capture`, the last `hair.probe` and the `hair.dump` counts. |
+| `raster_active`, `raster_width_pixels` | Which rasterizer drew the last frame's layered path (`direct` or `culled`), and the strand width on screen the `auto` rule saw: the widest strand of a groom in view, at the distance of the middle of its bounds. |
 | `sim` | What `hair.sim` returns: the controls, the step counters and each instance's metrics ([Simulation](#simulation)). |
 | `self_check` | The self-check's last result and its worst since it was enabled. |
-| `instance_list` | Each instance's entity, bone, state, mode, material and error, its `strands`, the guide rows it needs to be simulated (`guide_rows`) and its first row while it holds any (`guide_row_base`, -1 otherwise). |
+| `instance_list` | Each instance's entity, bone, state, mode, materials (`color` and `roughness`; `material`, the layered path's) and error, its `strands`, the guide rows it needs to be simulated (`guide_rows`) and its first row while it holds any (`guide_row_base`, -1 otherwise). |
 
 `memory.guide_state` ([Guide rows](#guide-rows)):
 
@@ -1225,7 +2110,29 @@ compiled from memory, so it has no folder of its own to search. `scripts/deploy_
 | `pixels_written` | Visibility writes. A pixel under several segments counts once for each. With coverage on these are the accepted writes, and their mean over frames is `coverage_sum`. |
 | `pixels_occluded` | Covered pixels rejected by the opaque depth. |
 | `segments_capped` | Segments cut short at the per-segment pixel limit. |
-| `pixels_resolved` | Hair pixels the resolve wrote into the surface targets: at most `pixels_written`. |
+| `pixels_resolved` | Hair pixels the resolve wrote into the surface targets: at most `pixels_written`. On the layered path, the pixels the composite blended hair into. |
+| `layer_rejected` | Layered path, raster: footprint pixels behind their pixel's third layer, which skipped the layer writes. `pixels_written` counts the others. |
+| `coverage_skipped` | Layered path, raster: footprint pixels whose coverage add was skipped at `coverage_saturation`. |
+| `layer_pixels` | Layered path, composite: pixels holding exactly one, two and three layers. |
+| `remainder_pixels`, `remainder_alpha` | Layered path, composite: three-layer pixels with coverage beyond the third layer, and what the remainder term added to the hair alpha, summed over pixels. |
+| `alpha_sum`, `depth_pixels` | Layered path, composite: the hair alpha summed over pixels (the hair's visible area in pixels), and the pixels that took hair's depth and motion vector. |
+| `shade_list` | Layered path, shade list: pool vertices the rasterizer marked, gathered for the shade pass. |
+| `shaded_vertices` | Layered path, shade: pool vertices lit: the list's rows. The two are equal unless a listed row is not the frame's. |
+| `volume_segments`, `volume_deposits`, `volume_outside` | Layered path, voxelize: pool segments deposited into a density volume, the voxel adds they made, and the segments of an instance with a volume whose middle is outside its box. |
+| `volume_vertices`, `volume_marches`, `volume_steps` | Layered path, shade: lit vertices whose instance has a volume, the marches made from them (one per light in range and not fully shadowed by the shadow map, and one per environment direction), and the samples of those marches. |
+| `chunks`, `raster_items`, `chunks_late`, `chunks_late_drawn`, `raster_items_overflow` | Culled rasterizer: chunks of the frame's on-screen segments; those the first pass drew; those left for the late pass; those of them the late pass found not hidden, and drew; and chunks sent to the late pass because the item list was full (they are still drawn). |
+| `pixels_tested`, `coverage_adds`, `hidden_writes`, `pixels_saturated`, `late_pixels_written` | Culled rasterizer: pixels the two passes looked at; coverage adds; hidden depths lowered by a strand that covers its pixel whole; pixels whose near coverage reached the saturation; and layer writes of the late pass, which is the hair the first pass's choice missed and the frame still drew. `pixels_occluded` then counts the footprint pixels behind the hidden depth, the opaque surface's or hair's. |
+| `hair_tiles`, `clusters_unseen`, `clusters_reduced`, `wave_iterations` | Culled rasterizer: tiles a chunk touched; kept clusters that drew no pixel in the last frames; kept clusters drawn at a detail scale under 1; and, with `raster_profile`, the lane-iterations the passes' waves ran, idle lanes included (`pixels_tested` over it is the lane occupancy). |
+| `shadow_lookups`, `shadow_coarser`, `shadow_missing`, `shadow_cleared` | Layered path, shade: the sun's shadow map lookups, and those that read a coarser clipmap than the vertex asks for, found no page (lit), or read a texel nothing was drawn into (lit). They are of the light the renderer's shadow map debug views show, the sun unless another is picked. |
+
+| `shadow_clusters_tested`, `shadow_clusters` | Shadow select: clusters looked at, and kept for lying over a shadow page drawn this frame ([Shadow casting](#shadow-casting)). |
+| `shadow_strands`, `shadow_segments`, `shadow_pool_vertices` | The kept clusters' drawn strands and segments, and the rows of the shadow pool they use. |
+| `shadow_overflow_clusters` | Kept clusters dropped because the shadow pool or the shadow list was full. |
+| `shadow_unseen_strands` | Shadow evaluate: strands of instances no view shows, drawn into the shadow map on their rigid pose. |
+| `shadow_stale_guides_drawn` | As `stale_guides_drawn`, for the shadow view's strands: 0 likewise. |
+| `shadow_segments_drawn`, `shadow_texels_covered`, `shadow_texels_written`, `shadow_segments_capped` | Shadow raster: (segment, clipmap) pairs that wrote a texel; strip texels on pages that take depth this frame, counted for each segment; those accepted and written; and segments cut short at 1,024 texels in a clipmap. |
+| `shadow_clipmap_mask` | The clipmaps any kept cluster is drawn into, a bit each. |
+| `shadow_pages_admitted`, `shadow_pages_invalidated` | The shadow map's own counts, copied while hair casts: cached pages it draws this frame, and page table entries invalidated by bounds (hair's and any other provider's). |
 
 While the LOD is frozen the selection counters are those of the frozen selection. The counters are zeroed by an upload
 at the start of the frame and read back after it.
@@ -1261,6 +2168,8 @@ place for data. It passes when:
   number of clusters, since a cluster entering the frustum adds its strands);
 - hair is rasterized and resolved in every dolly frame, no segment is capped, and the pool never overflows;
 - a frozen LOD keeps the far selection at a near camera, and `force_detail` 0.25 draws a quarter of each cluster;
+- on the layered path, with each of its two rasterizers forced in turn at one camera, the culled one is given the
+  strands the direct one is and brings hair into the same pixels to 0.5% (two checks the surface path does not make);
 - with the groom behind the camera no cluster is selected and nothing is written or resolved;
 - with a cube between the camera and the groom the clusters are still selected, no pixel is written or resolved, and
   the covered pixels are counted as occluded;
@@ -1357,6 +2266,12 @@ BasicRenderer.exe --script scenarios\hair\hair_crowd.cs --script-exit --script-f
 
 The simulation follows the view, and `hair_sim.cs` and `hair_sim_lod.cs` are about the solver and the levels: both
 check that their grooms were in view in every frame whose metrics they read.
+
+Every hair scenario passes `HAIR_PATH`, when it is set in the environment, to `hair.render` as `path`:
+`HAIR_PATH=layered` runs it on the layered path. No check differs between the paths but the two `hair_lod_sweep.cs`
+makes of the layered path's rasterizers: `pixels_resolved` is the pixels
+hair was brought into the frame in on either, and where a scenario compares pixel counters with a tolerance, the
+tolerance is the one `HAIR_COVERAGE` picks.
 
 Every hair scenario passes `HAIR_COVERAGE`, when it is set in the environment, to `hair.lod` as `coverage`:
 `HAIR_COVERAGE=off` runs it with the opaque rasterizer. With coverage on, `hair_sim.cs` compares the rigid groom's pixel
@@ -1879,7 +2794,8 @@ with distance.
 
 ### Weak points
 
-As measured for the proof of concept, before partial coverage. Points 3 and 5 are what
+As measured for the proof of concept, before partial coverage. Point 4 is partly answered on the layered path, whose
+rasterizer stops at a pixel's third layer ([Layered path measurements](#layered-path-measurements)). Points 3 and 5 are what
 [Partial coverage measurements](#partial-coverage-measurements) is about: 5 no longer holds with coverage on, and 3 can
 now be traded against with `detail_exponent`. Point 1, and the root binding of point 2, are what
 [View-following measurements](#view-following-measurements) is about: the simulation and root binding now follow the
@@ -2760,6 +3676,1224 @@ failures; the invariant counters 0 throughout. The validation messages are those
 ids), and none names a hair resource. The stage script that moves the camera is stopped by the layer's error 1047
 within a few frames (the renderer's packed buffers, as before), which is why the view was changed by field of view.
 
+## Layered path measurements
+
+Measured on 2026-11-27 for the first step of the second stage: the [layered path](#the-layered-path) (three layers and
+the summed coverage a pixel, a lit colour per strand vertex, a composite over the lit frame with hair's depth, motion
+and a reactive mask) against the surface path with stochastic coverage, which is the "on" of
+[Partial coverage measurements](#partial-coverage-measurements). Same machine, conditions and method as
+[POC measurements](#poc-measurements): raster mode, DLSS at 2560x1600 in and out, the display awake, uncapped, times
+from the statistical profiler at a 3% half-width. Counters are means over 32 consecutive frames. Image differences are
+of 8-bit luma of presented frames, after the upscaler. The grooms are those of the partial coverage measurements: the
+distance series' procedural groom (30,000 strands of 88 to 44 micrometres: the sparse one), `wCurly` and `wStraight`
+(50,000 strands each: the dense ones), the thin dolly groom, and the crowd. The scripts are not in the tree.
+
+**One thing found about the earlier measurements.** The near view's square (0.8 m) reaches under the demo's menu
+panels, whose numbers change every frame. Their pixels were in the temporal noise and fine contrast of
+[Partial coverage measurements](#partial-coverage-measurements) for that distance: with them in, this session's near
+view reads a 99th percentile of 17 to 28 levels whatever the path, and without them 3 to 7 on the surface path. Here
+those pixels are left out, so the near row is not comparable with that table's; the middle and far rows, clear of the
+menu, are, and the surface path is measured again in the same session throughout.
+
+### Does it remove the grain and the veil
+
+Yes to both.
+
+| Groom, distance | Temporal noise: surface | Layered | Layered, no mask | 99th percentile pixel: surface | Layered | Layered, no mask | Fine contrast still: surface | Layered | Swaying: surface | Layered | Layered, no mask |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Procedural, 0.8 m | 1.28 | 0.09 | 0.09 | 7.2 | 0.6 | 0.6 | 18.7 | 12.9 | 11.5 | 6.5 | 5.9 |
+| Procedural, 3.2 m | 1.22 | 0.07 | 0.06 | 7.2 | 0.4 | 0.4 | 14.9 | 8.7 | 12.4 | 6.9 | 7.0 |
+| Procedural, 12.8 m | 1.19 | 0.08 | 0.06 | 6.5 | 0.5 | 0.4 | 21.3 | 18.0 | 19.0 | 16.7 | 17.0 |
+| `wCurly`, 0.8 m | 0.42 | 0.07 | 0.06 | 3.2 | 0.5 | 0.5 | 22.9 | 18.4 | 10.9 | 9.9 | 10.8 |
+| `wCurly`, 3.2 m | 0.54 | 0.06 | 0.05 | 4.2 | 0.4 | 0.4 | 13.5 | 12.1 | 11.8 | 10.0 | 10.3 |
+| `wCurly`, 12.8 m | 0.54 | 0.11 | 0.07 | 3.9 | 0.7 | 0.5 | 22.3 | 19.4 | 20.8 | 18.3 | 18.4 |
+
+"Temporal noise" is the per-pixel standard deviation of luma over 8 captures 3 frames apart with everything still,
+averaged over the square around the groom; "fine contrast" is the standard deviation of a Laplacian, still and with the
+head swaying 2 cm to each side every two seconds. "No mask" is the layered path with `reactive` off.
+
+- **Still camera: the grain is gone.** The layered path's temporal noise is 0.06 to 0.11 levels in every view, a
+  fifteenth of the surface path's on the sparse groom and a fifth to a ninth on the dense one, with the worst hundredth
+  of the pixels at half a level where they were at 3 to 7. That is below the opaque form's own (0.13 to 0.19 in the middle and
+  far views of the earlier table): nothing in a hair pixel changes from frame to frame but the camera's jitter. In the
+  captures the translucent parts (the fringe, the scalp through thin hair) are smooth where the surface path's are
+  dotted, and single strands of the fringe are continuous thin lines where they were rows of dots.
+- **Camera motion: the veil is gone.** The slide of the earlier measurement (0.6 m a second past the sparse groom, then
+  a stop). While the camera moves, the surface path's fringe is the streaky, grainy veil described there; the layered
+  path's is soft strands over an undisturbed background, in the captures looked at. Two frames
+  after the stop the hair region is 2.95 levels from the converged image against 6.77 for the surface path,
+  and two converged captures 30 frames apart differ by 0.13 against 2.63.
+- **What it costs in the image: less fine contrast, most of all on sparse hair in motion.** Still, the sparse groom's
+  fine contrast is 15% to 42% under the surface path's and the dense one's 10% to 20%; with the head swaying, 43% under
+  at 0.8 and 3.2 m for the sparse groom and 9% to 15% for the dense one. Part of what is lost is the surface path's
+  grain, which is fine contrast too; part is real: a strand a third of a pixel wide is blended at a third of its
+  contrast where the surface path draws it in full in a third of the frames. Over the lower part of the groom in the
+  frame captured during the slide the fine contrast is 12.8 against 17.9, and two frames after the stop
+  12.0 against a converged 18.1: the hair sharpens over the following frames, as on the surface path
+  (18.6 against 23.9). A pixel that is part hair, part background has one motion vector, and whichever it
+  is, the upscaler reprojects the other part wrongly.
+- **The reactive mask** is small and local (with the head swaying: 12% of the square's pixels above 0.1, none above
+  0.5, mean 0.04). With DLSS it makes the moving hair sharper during the slide (fine contrast 12.8 with it,
+  9.8 without) and costs a little after the stop (2.95 levels from converged with it, 2.86 without).
+  With the head swaying, and with everything still (where it is all zero), it measures the same on and off. It is on by
+  default. Whether DLSS takes the hint was checked by forcing the mask to 1 on every hair pixel: DLSS's still image does not change at all (temporal noise 0.059 with, 0.061 without, twice over), so it does not simply drop its history where it is told to, while FSR's does (1.6 against 0.14). What DLSS does with the hint is its own; the difference under camera motion above held in two runs (11.8 against 9.5 in the other).
+- **No trail, second copy, halo or popping** was seen in the captures looked at: hair over the white floor and over the
+  sky has no dark or bright rim, and the swaying captures show no strand standing apart from its neighbours. This is
+  from looking at stills; nothing measures popping where two strands swap layers, and with three layers a pixel under
+  many strands changes its three with every small move (the remainder term is what keeps that from showing: below).
+
+### One strand leaving, and the dolly
+
+The two continuity measurements of [Partial coverage measurements](#partial-coverage-measurements), on the layered
+path.
+
+- **One strand leaving** (1,000 strands 0.28 pixels wide, the forced detail level swept from 0.9 to 0.5 in 160 steps, the
+  change of each 8x8 block from the step before). Layered: the largest block change in a step is 1.3 levels at the
+  median, 4.4 at the 90th percentile and 5.2 at most, against 1.2 (2.2 at most) for the same state captured twice;
+  0.36 blocks a step change by more than 4 levels. The surface path in the same session: 2.3, 4.4 and 4.5, against 2.1
+  (4.4 at most), and 0.18 blocks. The true area stays 34,246 to 34,614 pixels over the sweep. A leaving strand cannot
+  be found on either; the layered path's steps are quieter because its still image is.
+- **The dolly** (the thin groom, 2 m to 80 m, a capture at every second step), live and frozen:
+
+| LOD | Path | Strands, 2 m to 80 m | Mean difference 2-8 m | 8-20 m | 20-44 m | 44-80 m | Pairs over 1.25x | Largest ratio | Same camera twice: 2 m, 10 m, 21 m, 80 m |
+|---|---|---|---:|---:|---:|---:|---:|---:|---|
+| live | layered | 24,000 to 4,726 | 0.8007 | 0.0546 | 0.0130 | 0.0076 | 11 | 1.61 | 0.055, 0.015, 0.005, 0.006 |
+| frozen | layered | 24,000 to 24,000 | 0.8007 | 0.0558 | 0.0136 | 0.0079 | 5 | 1.50 | 0.043, 0.013, 0.006, 0.006 |
+| live | surface, coverage on (the earlier table) | 24,000 to 4,726 | 0.8983 | 0.0644 | 0.0145 | 0.0081 | 2 | 1.50 | 0.525, 0.034, 0.011, 0.007 |
+
+  Live and frozen agree to 2% in the first two bands and 4% beyond, and no outlying pair is shared between them. The
+  outliers are all beyond 24 m, where a pair differs by about a hundredth of a level, and have no correlation with the
+  strands dropped or the clusters changing vertex level (0.04 and -0.05). There are more of them than on the surface
+  path because the level they stand out from is lower: two captures of one view differ by 0.055 levels at 2 m where
+  the surface path's differ by 0.525.
+
+### Motion vectors
+
+`hair.probe` on the layered path (`Hair::CompositeProbe`), as before: a groom moving (0.01, 0.0025, 0.005) m a frame
+under a still camera, and a still groom under a camera sliding 0.01 m a frame and turning.
+
+| | Probed hair pixels | Took hair's depth and motion | Expected motion, pixels | Error at those: mean, 99th percentile, largest | The others: stored motion against hair's |
+|---|---:|---:|---|---|---|
+| Moving groom | 30,228 | 23,563 | 4.1 to 5.6 | 0.0023, 0.0054, 0.0059 | 6,665 pixels, 4.9 pixels from hair's on average | |
+| Moving camera | 56,239 | 46,827 | 3.2 to 6.9 | 0.0025, 0.0050, 0.0055 | 9,412 pixels, 4.4 pixels from hair's on average (8.8 at most) | |
+
+At the pixels that took them, the motion vector is the nearest layer's to the precision of the target, and the
+projected depth is `-M22 + M32 / depth` of the nearest key's depth to 6e-9. The pixels below the threshold hold the
+motion vector and depth of what is behind the hair: with the groom moving that is a still floor, 5 pixels a frame away
+from the hair's own motion, and it is those pixels the reactive mask is for. No pixel with an alpha under 0.498 took
+hair's (the alpha is read back from an 8-bit target).
+
+### Layers
+
+| View | Hair pixels | One layer | Two | Three | Three with a remainder | Hair alpha, summed | Of it from the remainder | Pixels taking hair's depth |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Procedural, 0.8 m | 498,778 | 6.9% | 4.9% | 88.2% | 84.0% | 365,140 | 49% | 78.7% |
+| Procedural, 3.2 m | 30,901 | 4.3% | 2.6% | 93.0% | 91.1% | 21,366 | 86% | 75.3% |
+| Procedural, 12.8 m | 1,974 | 4.0% | 2.3% | 93.7% | 91.6% | 1,324 | 90% | 73.5% |
+| `wCurly`, 0.8 m | 351,439 | 3.6% | 2.2% | 94.2% | 92.4% | 346,667 | 2% | 100.0% |
+| `wCurly`, 3.2 m | 21,192 | 2.9% | 1.6% | 95.6% | 94.6% | 19,948 | 56% | 94.3% |
+| `wCurly`, 12.8 m | 1,329 | 2.8% | 1.4% | 95.8% | 94.8% | 1,233 | 68% | 92.9% |
+| Crowd, near camera | 259,121 | 6.0% | 4.2% | 89.7% | 86.1% | 118,939 | 75% | 40.9% |
+| Crowd, far camera | 7,142 | 5.6% | 4.4% | 89.9% | 86.1% | 2,607 | 89% | 30.6% |
+| Crowd, column view | 353,588 | 9.6% | 7.9% | 82.5% | 75.0% | 163,983 | 57% | 41.9% |
+| Crowd, side view | 378,558 | 10.9% | 9.4% | 79.7% | 70.8% | 174,221 | 54% | 41.1% |
+
+- **Nearly every hair pixel holds three layers and more hair behind them.** The grooms are thin strands many deep: at
+  12.8 m the sparse groom puts 87 footprints over each of its pixels. One or two layers are the outline and the tips.
+- **What the remainder contributes follows how wide the strands are on screen.** Close to `wCurly`, whose strands are a
+  pixel wide or more, the three layers are opaque and the remainder is 2% of the hair's alpha. Where strands are a
+  fraction of a pixel wide it is half of it (the sparse groom at 0.8 m) to nine tenths (at 12.8 m, and the crowd from
+  far): there the three nearest strands are a sample of the hair's colour, and its opacity comes from the coverage sum.
+  Without the term the same views are see-through: the sparse groom keeps half of its alpha at 0.8 m (186,228 of 365,140) and 14% at 3.2 m (2,918 of 21,366), and `wCurly` 44% at 3.2 m (8,799 of 20,069): a faint haze over a bare head.
+- **The summed alpha agrees with the surface path's expected area.** The sparse groom at 0.8 m: 365,107 against a mean
+  of 369,400 pixels resolved with stochastic coverage; `wCurly` at 12.8 m: 1,233 against 1,232. Front-to-back blending
+  of what random acceptance draws from is what the exponential models.
+- **Depth.** With the threshold at 0.5, three quarters of the sparse groom's hair pixels take hair's depth and motion,
+  over nine tenths of the dense one's, and 31% to 42% of the crowd's thin hair.
+
+### Cost
+
+`ms` per pass, the surface path (stochastic coverage, no coverage target) against the layered path. "Hair passes" is
+every hair pass's time summed (simulation off). The deferred pass is listed because the surface path's hair is lit in
+it and the layered path's is not.
+
+| View | Surface: raster | Resolve | Deferred | Hair passes | Frame | Layered: raster | Shade | Composite | Deferred | Hair passes | Frame | Vertices lit, of drawn |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Procedural, 0.4 m | 0.99 | 0.73 | 9.81 | 2.08 | 18.6 | 3.37 | 1.38 | 1.00 | 7.89 | 6.12 | 20.7 | 454,796 of 990,000 |
+| Procedural, 0.8 m | 0.52 | 0.23 | 7.49 | 1.11 | 14.9 | 1.43 | 1.31 | 0.27 | 6.85 | 3.38 | 16.5 | 440,447 of 990,000 |
+| Procedural, 1.6 m | 0.32 | 0.09 | 6.77 | 0.79 | 14.1 | 0.66 | 1.17 | 0.10 | 6.62 | 2.31 | 15.1 | 353,063 of 990,000 |
+| Procedural, 3.2 m | 0.23 | 0.05 | 6.62 | 0.65 | 13.5 | 0.38 | 1.09 | 0.06 | 6.29 | 1.91 | 14.4 | 339,257 of 975,150 |
+| Procedural, 6.4 m | 0.12 | 0.05 | 6.45 | 0.30 | 13.0 | 0.21 | 0.39 | 0.06 | 6.43 | 0.78 | 13.3 | 107,978 of 318,971 |
+| Procedural, 25.6 m | 0.07 | 0.05 | 6.70 | 0.16 | 13.0 | 0.13 | 0.08 | 0.05 | 6.68 | 0.30 | 13.1 | 13,745 of 24,895 |
+| Procedural, 100.0 m | 0.07 | 0.05 | 6.62 | 0.15 | 12.9 | 0.13 | 0.04 | 0.05 | 6.65 | 0.25 | 13.1 | 1,722 of 2,884 |
+| `wStraight`, 0.4 m | 4.54 | 0.53 | 9.01 | 5.25 | 20.9 | 12.34 | 0.68 | 0.38 | 6.87 | 13.60 | 27.0 | 279,742 of 608,992 |
+| `wStraight`, 0.8 m | 1.19 | 0.15 | 6.67 | 1.53 | 14.4 | 2.75 | 0.64 | 0.12 | 6.36 | 3.70 | 16.4 | 226,411 of 608,992 |
+| `wStraight`, 1.6 m | 0.60 | 0.06 | 6.42 | 0.86 | 13.4 | 1.12 | 0.58 | 0.07 | 6.38 | 1.96 | 14.5 | 222,068 of 608,992 |
+| `wStraight`, 3.2 m | 0.34 | 0.05 | 6.37 | 0.58 | 13.1 | 0.50 | 0.50 | 0.06 | 6.36 | 1.25 | 13.8 | 130,262 of 584,382 |
+| `wStraight`, 6.4 m | 0.16 | 0.05 | 6.37 | 0.32 | 12.8 | 0.25 | 0.36 | 0.05 | 6.37 | 0.76 | 13.3 | 73,134 of 328,447 |
+| `wStraight`, 25.6 m | 0.08 | 0.05 | 6.72 | 0.17 | 13.1 | 0.15 | 0.11 | 0.05 | 6.76 | 0.36 | 13.3 | 22,992 of 52,708 |
+| `wStraight`, 100.0 m | 0.06 | 0.05 | 6.67 | 0.15 | 13.0 | 0.13 | 0.04 | 0.05 | 6.66 | 0.25 | 13.0 | 3,344 of 5,739 |
+| Crowd, near camera | 0.59 | 0.13 | 5.55 | 1.27 | 12.8 | 1.04 | 2.83 | 0.13 | 5.42 | 4.56 | 16.1 | 1,085,337 of 2,382,030 |
+| Crowd, far camera | 0.15 | 0.05 | 7.42 | 0.39 | 14.3 | 0.22 | 0.46 | 0.06 | 7.38 | 0.92 | 14.6 | 122,561 of 245,212 |
+
+- **A frame costs 0.2 to 6 ms more.** Far away the difference is 0.2 to 0.3 ms (the composite's full-screen floor,
+  0.05 ms, the rasterizer's two more clears and the shade pass). With a groom filling the view it is 2.1 ms for the
+  sparse one and 6.1 ms for `wStraight`, nearly all of it the rasterizer; for the crowd from the near camera 3.2 ms,
+  most of it shading. Those are after what the deferred pass gives back, 0.1 to 2 ms: it no longer lights hair pixels.
+- **The composite is cheap:** 0.05 ms with no hair on screen, 0.13 ms for the crowd, 1.0 ms with 1.9 million hair
+  pixels.
+- **Shading is the largest pass wherever hair is not filling the view,** and it does not follow the hair on screen: it
+  follows the vertices of the segments that reached a layer anywhere, 2.4 to 3 ns each (1.4 ms for the sparse groom's
+  455,000, 2.8 ms for the crowd's 1.1 million), each with the sun's soft shadow lookup. The rasterizer's marks cut the
+  lit vertices to under half of the drawn ones, but the pass's time by a quarter only (the sparse groom at 0.8 m: 1.79 ms
+  for all 990,000, 1.31 ms for 440,000; the crowd: 3.93 ms for 2.38 million, 2.83 ms for 1.09 million): the marked rows
+  are scattered through the pool, so most thread waves still run with some lanes idle. Compacting the marked rows into
+  a list before shading is what would make the time follow them; it was not built.
+
+**The rasterizer, and where the coverage target stands.** The earlier measurement had the coverage target at 2.1 times
+the rasterizer's cost with `wStraight` filling the view. The layered path needs that target always, and three layers:
+
+| View | Surface | Surface + coverage target | Layered | Layered, saturation 8 | Layered, no early reject | Footprint pixels | Rejected at the third layer | Adds skipped at saturation 8 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Procedural, 0.4 m | 0.99 | 1.56 | 3.37 | 3.73 | 4.29 | 15,358,581 | 6,408,454 (42%) | 760,766 (5%) |
+| Procedural, 0.8 m | 0.52 | 0.66 | 1.43 | 1.71 | 1.81 | 8,522,732 | 4,975,414 (58%) | 370,958 (4%) |
+| Procedural, 3.2 m | 0.23 | 0.25 | 0.38 | 0.47 |  | 2,097,334 | 1,543,399 (74%) | 91,782 (4%) |
+| `wStraight`, 0.4 m | 4.54 | 9.72 | 12.34 | 9.58 | 25.77 | 65,138,015 | 47,638,102 (73%) | 51,341,451 (79%) |
+| `wStraight`, 0.8 m | 1.19 | 2.00 | 2.75 | 2.72 | 4.67 | 22,745,668 | 17,914,402 (79%) | 18,222,130 (80%) |
+| `wStraight`, 3.2 m | 0.34 | 0.39 | 0.50 | 0.51 |  | 5,474,388 | 4,965,617 (91%) | 4,403,586 (80%) |
+| Crowd, near camera | 0.59 | 0.65 | 1.04 | 1.20 |  | 6,474,283 | 4,025,400 (62%) | 27 (0%) |
+| Crowd, far camera | 0.15 | 0.15 | 0.22 | 0.22 |  | 236,325 | 127,366 (54%) | 0 (0%) |
+
+- **The layered rasterizer is 2.7 times the surface path's on that view** (12.3 ms against 4.5), and 3.4 times with
+  the sparse groom filling the view (3.4 against 1.0). Per footprint pixel it reads the opaque depth and the third
+  layer, adds to the coverage target, and for the pixels the early reject lets through runs up to three atomic
+  minimums, where the surface path reads the opaque depth and runs one.
+- **The early reject does its part:** 42% to 91% of the footprint pixels stop at the third layer, the more the denser
+  the hair. Without it the pass is 25.8 ms against 12.3 on that view and 4.7 against 2.8 at 0.8 m, and 4.3 against 3.4 with the sparse groom filling the view: it halves the dense close-up, which is what the Indiana Jones deck reports for it (up to 50%).
+- **The coverage add is what is left, and nothing here removes it.** Every footprint pixel in front of the opaque
+  surface still adds, hidden or not, and on the dense close-up that is 65 million atomics a frame: the 5.2 ms it
+  measured on the surface path is in the layered path's time too. `coverage_saturation` 8 stops the adds of a pixel that
+  already holds 8 pixels' worth: it takes `wStraight` at 0.4 m from 12.3 to 9.6 ms (2.1 times the surface path's, where
+  the earlier measurement stood), does nothing at 0.8 m, and costs the sparse groom and the crowd 10% to 25% more, for a
+  load of the target that seldom finds it saturated. It is off by default. The pass is bound by its scattered memory
+  traffic: a plain load of the coverage texel costs about what the add it replaces does.
+
+**Memory.** The pooled buffers are 449 MB (417 before): `Hair.PoolColors` adds 32 MB, 8 bytes a pool row. The layered
+path's four textures are 74 MB at 2560x1600 (two layers of 31 MB, 8 MB of composite information and 4 MB of reactive
+mask), made the first time the path is used, beside the 47 MB of the visibility and coverage targets that both paths
+have.
+
+### The two caveats
+
+- **Lights.** The demo's recipe has no `ClusterLodAlphaTechnique`, so its light grid has no forward runs. With
+  `lights` `grid` the sparse groom at 0.8 m is lit only where a froxel also holds an opaque pixel at about the hair's
+  depth: over the head it is lit, and its sides and fringe, in front of the sky and the floor, are unlit in blocks the
+  size of a grid tile. `list`, the default, lights it everywhere. No core change was
+  made: the smallest correct lookup is the active light list. Its cost is a range test per light per vertex, with two
+  lights in these scenes; a scene with many lights in a recipe that builds the forward runs would want `grid`.
+- **Shadow pages.** A lookup that finds no page tries two coarser clipmaps and then returns lit; it never returns a
+  shadow that is not there. In every view measured here, including hair over the sky and the crowd from every camera,
+  no lookup of the sun's shadow read a coarser clipmap, found no page or read an undrawn texel (`shadow_coarser`,
+  `shadow_missing`, `shadow_cleared` all 0, of 42,000 to 1.1 million lookups a frame). Hair on a head is within a page
+  of the head's own pixels, and the floor's. Hair far from any opaque surface the camera sees (a long strand held out
+  against the sky, a groom with no head in view) would be lit where it should be shadowed; the counters will say when.
+
+### The rest of the frame
+
+The crowd from just in front of its first row, looking down a column: hair in front of other heads, behind a head and
+in front of the sky. One setting at a time is turned off and on, and the change of the image taken over
+the pixels that hold hair and over the rest:
+
+| Setting | Surface path: hair pixels | The rest | Layered path: hair pixels | The rest |
+|---|---:|---:|---:|---:|
+| Ambient occlusion (`enableGTAO`) | 5.75 | 0.05 | 0.34 | 0.04 | |
+| Screen-space reflections (`enableScreenSpaceReflections`) | 4.98 | 0.07 | 0.38 | 0.05 | |
+| Bloom (`enableBloom`) | 7.76 | 9.92 | 5.90 | 9.93 | |
+
+- **Ambient occlusion and reflections do not see hair on the layered path.** On the surface path both change hair
+  pixels by 5 to 6 levels: hair is in the depth and normal targets, takes ambient occlusion and the specular
+  image-based light, and occludes the scalp. On the layered path they change hair pixels by a third of a level, which
+  is the scalp and floor showing through. Hair there has no ambient occlusion and no specular environment, and the
+  scalp under it has none from the hair. This is part of why the layered groom looks flatter and lighter.
+- **Screen-space reflections** read the hardware depth and the surface targets, so hair is in no reflection on either
+  path. Turning them on rebuilds the Shading epoch's graph alone; hair is still composited after it.
+- **Bloom, exposure and tonemapping** run after the composite and treat hair as part of the scene colour on both.
+- **Depth readers after the composite** (motion vector dilation, the upscaler, the lens focus and flare passes) see
+  hair where it took the depth, and what is behind it elsewhere. There is no depth of field pass in the raster
+  pipeline.
+- **Other transparents.** The demo's recipe has none. Where a recipe has CLod alpha, its composite and hair's are both
+  blended over the scene colour with no order between them and no depth test against each other: hair is drawn over
+  glass that is in front of it, or under it, by graph order. Not addressed.
+- **FSR** takes the reactive mask too (`upscalingMode` FSR3 ran with it); its image was not measured.
+
+### What it looks like, and what is still wrong
+
+Captures of both paths, the procedural groom and `wCurly` at 0.8, 3.2 and 12.8 m:
+
+- **Fringe and outline.** The layered path's are smooth at every distance. Close up a strand of the fringe is a thin
+  continuous line where the surface path draws dots along it; in the middle view the surface path's fringe is visibly
+  grainy and the layered path's is a soft gradient; far away both are a blob, the layered one without the speckle.
+- **Shading.** The layered groom is flatter. Its brightness over the square is within 2% of the surface path's, but
+  its response is the placeholder, lit from every side: there is no self-shadowing, so the side of a groom away from
+  the sun and the hair deep inside it are as bright as the outside, and there is no ambient occlusion. `wCurly`'s
+  clumps still read, from the strands' directions, but with less depth than on the surface path, where shadows and
+  occlusion fall on the hair as on a surface. These are the next two steps' (the shading model, since built:
+  [Hair shading measurements](#hair-shading-measurements); the density volume).
+- **Still wrong, in order of what it costs the image:** no self-shadowing or multiple scattering; hair casts no shadow;
+  softness in motion from one motion vector a pixel; a strand wider than a pixel has hard edges and one colour across
+  it; no ambient occlusion or specular environment; no order against other transparents; hair is in no reflection.
+- **Still wrong, in cost:** the coverage add in the rasterizer, and shading that follows marked vertices without
+  compaction.
+
+### Scenarios and checks
+
+**Scenarios.** All five pass on the surface path, with the counters of the runs before this step, and all five pass
+with `HAIR_PATH=layered`. One check changed for the layered path, in `hair_sim.cs`: the comparison of the rigid groom's
+rasterizer counters before and after the simulation. On the layered path it leaves out `segments_drawn` and
+`pixels_written` (a write that finds three nearer strands in its pixel is skipped, and how many find them depends on
+the order the rasterizer's threads ran in: 2.0 to 2.9 million in consecutive frames of one view) and compares the
+pixels hair is blended into, which are the same from frame to frame, to one part in 10,000 as with coverage off.
+`HairCoreTests` passes.
+
+**Invariants.** `stale_guides_drawn`, `unseen_strands_drawn` and `stale_guides` are 0 in every frame of every scenario
+on both paths.
+
+**Debug layer.** A control-pipe session with the D3D12 debug layer on, on the crowd: the layered path, the reactive mask off and on, both light lookups, the coverage saturation, the depth threshold at 0.9, back to the surface path and to the layered one, a probe, every debug view, a capture, then the simulation. The layer's messages are those of a session with no hair (the same fourteen message ids), and none names a hair resource. The stage script is stopped by the layer's error 1047 within a few frames (the renderer's packed buffers, as before).
+
+## Hair shading measurements
+
+Measured on 2026-11-27 for the second step of the second stage: [the hair shading model](#the-hair-shading-model) and
+the shade list on the [layered path](#the-layered-path). Same machine, conditions and method as
+[Layered path measurements](#layered-path-measurements): raster mode, DLSS at 2560x1600 in and out, the display awake,
+uncapped, times from the statistical profiler at a 3% half-width, image differences of 8-bit luma of presented frames.
+The scripts and captures are not in the tree.
+
+### What it looks like
+
+Captures of three grooms in the black, brown, blond and red presets, at 1 m and 3 m, with the light in front of the
+camera's subject, to its side and behind it, and of each part of the response alone. The grooms: the procedural
+drooping groom, made denser and thicker than the distance series' so that it is not a haze (50,000 strands of 176 to
+88 micrometres), and Cem Yuksel's `wStraight` and `wCurly`. Defaults otherwise (`beta_m` 0.3, `beta_n` 0.3, tilt 2
+degrees).
+
+**The light is the demo's own sun** (`light1`, intensity 10, 29 degrees above the horizon), and the camera goes round the
+head instead of the light. A scenario cannot turn that light off, and the frame's exposure is fixed and suits it: with a
+scenario light bright enough to dominate it (30, 60), a white floor is far past white and black hair is mid grey in the
+capture, which says nothing about the model. A white floor is in every capture as the reference. The sky's
+image-based light is on.
+
+- **Black stays dark but is not black.** It is an even charcoal (about a quarter of the white floor's 8-bit level) from
+  every side, with a soft silver sheen where the fibres mirror the sun. All of it is R: a fibre's 6.6% reflection, on
+  every fibre of the groom at full strength, since nothing shadows anything, plus the environment's R, which is about
+  as bright as the sun's in these views (the `environment` view alone is a flat mid-dark grey over the whole groom,
+  crown to tips, inside and out). Real black hair is darker between its highlights; the missing self-shadowing and the
+  unoccluded environment are both the density volume's.
+- **Brown** is the same charcoal with a warm cast: its colour comes from TRT alone (TT is under 7% at this absorption),
+  and TRT is a dark red-brown that the white R and the environment's grey sit on top of.
+- **Blond is too dark and too grey:** a khaki beige at about two fifths of the floor's level. Its TRT is a pale tan and its TT
+  only shows against the light. The brightness and saturation of light hair in life are light scattered from fibre to
+  fibre, which this step does not have. The red preset reads as a dull tan for the same reason, not as red.
+- **Against the light the rim glows, coloured.** Where the sun comes through hair toward the camera (the crown and the
+  outline) brown glows orange-red, blond white-yellow and red gold; black gets only a thin silver rim. That is TT, and it
+  is the right behaviour in kind. In amount it is too much: there is no transmittance, so light comes through the whole
+  thickness of the groom unattenuated, and `wCurly`'s sunlit top seen from behind is blown out to white for blond
+  (it reaches 255). The rest of a backlit groom is dark, in the head's shadow and off the TT lobe.
+- **A primary and a secondary highlight exist, and at the default roughness they do not separate.** At `beta_m` 0.3 the
+  lobes are 17 degrees wide (R) and 33 (TRT) against shifts of 4 and 8: `wStraight` shows one broad sheen. At
+  `beta_m` 0.15 it shows a white band (R) and, toward the roots from it, a coloured one (TRT, red-brown on brown, tan on
+  blond); raising the tilt from 2 to 5 degrees moves them further apart, the white one toward the tips. The `lobe_r` and
+  `lobe_trt` views show each band alone.
+- **Per-strand variation** at its defaults (15% in absorption, 10% in roughness) is barely visible: in a close view of
+  the procedural groom the varied and uniform captures differ by a faint streakiness in brown and not at all in blond.
+- **The middle distance looks like the close one,** for all three grooms and all colours: the level of detail does not
+  change the shading's overall level or colour.
+- **Curls.** `wCurly` reads as curls from the strands' directions alone. Where it is backlit, single vertices in the
+  shadowed part catch the TT lobe and show as bright specks, a few pixels each, in blond and red: per-vertex shading of
+  a strand whose direction turns faster than its vertices follow (the builder's 33 points a strand on curls of 57 to
+  73). No facets are visible along highlights at the default roughness, on curls or straight hair.
+- **Also seen, not this step's:** on a backlit groom the edge of the head's shadow on the hair is stepped in blocks (the
+  shadow map's texels at the page the lookup finds; the counters report no coarser or missing page), most visible in the
+  single-lobe views.
+
+### Cost
+
+`ms` per pass on the layered path, in the stage and views of [Layered path measurements](#layered-path-measurements)
+(two shadowed directional lights, default material). "Lit" is the shade list's rows in the frame the counters were read
+from; it varies by a tenth or more between frames of one view, because which segments reach a layer depends on the
+order the rasterizer's threads run in.
+
+| View | Raster | Shade list | Shade | Composite | Hair passes | Lit, of drawn vertices | Shade in the earlier step |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Procedural, 0.4 m | 3.34 | 0.030 | 0.90 | 1.00 | 5.68 | 477,468 of 990,000 | 1.38 |
+| Procedural, 0.8 m | 1.45 | 0.029 | 0.93 | 0.28 | 3.10 | 491,240 of 990,000 | 1.31 |
+| Procedural, 1.6 m | 0.67 | 0.027 | 0.78 | 0.08 | 1.95 | 407,283 of 990,000 | 1.17 |
+| Procedural, 3.2 m | 0.38 | 0.026 | 0.65 | 0.06 | 1.51 | 352,540 of 975,150 | 1.09 |
+| Procedural, 6.4 m | 0.21 | 0.019 | 0.26 | 0.05 | 0.67 | 120,732 of 318,971 | 0.39 |
+| Procedural, 25.6 m | 0.13 | 0.016 | 0.07 | 0.05 | 0.31 | 13,434 of 24,895 | 0.08 |
+| Procedural, 100.0 m | 0.13 | 0.015 | 0.04 | 0.05 | 0.27 | 1,680 of 2,884 | 0.04 |
+| `wStraight`, 0.4 m | 12.39 | 0.020 | 0.53 | 0.79 | 13.91 | 263,329 of 608,992 | 0.68 |
+| `wStraight`, 0.8 m | 2.99 | 0.018 | 0.47 | 0.22 | 3.87 | 274,963 of 608,992 | 0.64 |
+| `wStraight`, 1.6 m | 1.14 | 0.016 | 0.35 | 0.07 | 1.76 | 182,519 of 608,992 | 0.58 |
+| `wStraight`, 3.2 m | 0.50 | 0.015 | 0.30 | 0.06 | 1.06 | 180,606 of 584,382 | 0.50 |
+| `wStraight`, 6.4 m | 0.25 | 0.014 | 0.21 | 0.05 | 0.63 | 80,776 of 328,447 | 0.36 |
+| `wStraight`, 25.6 m | 0.15 | 0.012 | 0.08 | 0.05 | 0.34 | 27,463 of 52,708 | 0.11 |
+| `wStraight`, 100.0 m | 0.13 | 0.010 | 0.03 | 0.05 | 0.26 | 3,345 of 5,739 | 0.04 |
+| Crowd, near camera | 1.03 | 0.084 | 2.04 | 0.14 | 3.80 | 1,067,855 of 2,382,030 | 2.83 |
+| Crowd, far camera | 0.22 | 0.062 | 0.33 | 0.06 | 0.86 | 123,017 of 245,212 | 0.46 |
+
+- **The shade pass is 22% to 42% cheaper than in the earlier step, with the new response in it.** Its time now follows
+  the lit vertices: 1.7 to 2.0 ns each wherever there are more than a hundred thousand (0.93 ms for 491,000, 2.04 ms
+  for 1.07 million), which is what the earlier step paid per vertex when it lit the whole pool (1.79 ms for 990,000).
+- **What the list buys, same session, same response.** With the shade pass put back to walking the pool and testing the
+  marks: 1.34 ms against 0.93 for the procedural groom at 0.8 m, 0.70 against 0.47 for `wStraight`, 2.95 against 2.04
+  for the crowd: 31% to 34% off the pass, 28% to 31% after the list's own pass (`wStraight`'s two runs lit 275,000 and
+  191,000 vertices in the frames read, so its figure is the least certain).
+- **The shade-list pass** costs 0.03 ms for a pool of 990,000 rows and 0.08 ms for the crowd's 2.4 million; 0.01 to
+  0.02 ms at the least. Both it and the shade pass dispatch over the most rows the frame's pool can use, which the CPU
+  bounds from above, and for the crowd seen from afar that bound is what the list pass's 0.06 ms is.
+- **The response itself is a few percent of the pass.** At the three near views, lit through one lobe alone the pass
+  costs within 5% of all three (procedural groom: 0.90 R, 0.91 TT, 0.88 TRT, 0.93 all with the environment). The
+  environment's four directions cost 0.02 to 0.06 ms (0.91 against 0.93, 0.42 against 0.47, 1.98 against 2.04 with and
+  without). With the lights' lobes off and the environment alone the pass is 0.17, 0.09 and 0.42 ms: what a vertex
+  costs before any light, 0.35 to 0.42 ns.
+- **A light costs 0.65 to 0.77 ns a vertex,** shadow lookup included: the two shadowed lights are 0.74 ms of the procedural
+  groom's 0.93, 0.33 of `wStraight`'s 0.47 and 1.56 of the crowd's 2.04. It is the light's evaluation and its soft
+  shadow lookup, not the response, that the pass spends its time on. (Turning `enablePunctualLighting` off did not
+  change the pass's time: its declaration reads the setting when the graph is built and the change did not rebuild it.
+  Not looked into.)
+- **Memory.** `Hair.ShadeList` adds 16 MB (4 bytes a pool row): 465 MB of pooled buffers. An instance's row grew from 96
+  to 128 bytes.
+
+### Temporal check
+
+The earlier step's two measures on the layered path, with the default material and with the one whose highlights are
+sharpest (the blond preset at `beta_m` 0.15):
+
+| Groom, distance | Temporal noise: default | Blond, smooth | 99th percentile pixel: default | Blond, smooth | Fine contrast still: default | Blond, smooth | Swaying: default | Blond, smooth |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Procedural, 0.8 m | 0.085 | 0.126 | 0.59 | 0.66 | 14.1 | 19.5 | 7.8 | 10.9 |
+| Procedural, 3.2 m | 0.063 | 0.115 | 0.43 | 0.65 | 9.3 | 16.4 | 7.4 | 11.2 |
+| Procedural, 12.8 m | 0.068 | 0.101 | 0.46 | 0.47 | 19.5 | 19.8 | 18.2 | 18.4 |
+| `wCurly`, 0.8 m | 0.075 | 0.108 | 0.76 | 0.80 | 24.0 | 30.5 | 11.8 | 15.5 |
+| `wCurly`, 3.2 m | 0.057 | 0.088 | 0.46 | 0.59 | 14.1 | 18.9 | 11.8 | 15.6 |
+| `wCurly`, 12.8 m | 0.069 | 0.103 | 0.56 | 0.55 | 25.3 | 26.3 | 24.2 | 25.0 |
+
+- **Still, highlights do not shimmer.** The default material's temporal noise is 0.06 to 0.09 levels, where the
+  placeholder's was 0.06 to 0.11, and the smooth blond's is 0.09 to 0.13 with the worst hundredth of the pixels under
+  one level. (The surface path's was 0.4 to 1.3.) The image has more fine contrast than with the placeholder (14.1
+  against 12.9 for the sparse groom at 0.8 m, 24.0 against 18.4 for `wCurly`), more still with the smooth material.
+- **The camera slide** (0.6 m a second past the sparse groom, then a stop), default material: two frames after the stop
+  the hair is 3.35 levels from the converged image (2.95 with the placeholder), two converged captures 30 frames apart
+  differ by 0.14 (0.13), and the fine contrast is 11.1 while moving and 11.7 just after the stop against 19.4 converged
+  (12.8, 12.0 and 18.1). The same softness in motion as before, from the one motion vector a pixel; nothing new.
+- Not measured: a highlight sliding along curls while the light or the head turns. The stills show specks on backlit
+  curls ([above](#what-it-looks-like)); whether they twinkle in motion was not looked at.
+
+### What the density volume changes
+
+Everything wrong in the captures but the highlights' separation is the absence of the next step: transmittance toward
+each light (backlit hair no longer lit through its whole thickness, the far side of a groom darker than the near
+side), occlusion of the environment (TT back in the environment term, the two stand-ins gone, dark hair darker), and
+the scattering between fibres that gives light hair its brightness and colour. `HairEvaluateBsdf` takes the
+transmittance already; the fibre count along the light's path and the widened lobes of dual scattering are not
+parameters yet.
+
+### Scenarios and checks
+
+**Scenarios.** All five (seven runs with their variants) pass on the surface path and with `HAIR_PATH=layered`. No
+check was changed. `HairCoreTests` passes with the scattering function's tests.
+
+**Invariants.** `stale_guides_drawn`, `unseen_strands_drawn` and `stale_guides` are 0 in every frame of every scenario on
+both paths and in the measurement runs; `shade_list` equals `shaded_vertices` in every frame read; no shadow lookup
+found no page or a coarser one.
+
+**Debug layer.** The earlier step's control-pipe session on the crowd with the D3D12 debug layer on, plus
+`hair.material` on five instances (a preset, melanin and redness, a colour, an absorption, the other parameters) and
+every new debug view: the layer's messages are the same fourteen ids as in that session, and none names a hair resource.
+
+## Self-shadowing measurements
+
+Measured on 2026-11-27 for the third step of the second stage: [the density volume](#the-density-volume) and
+[multiple scattering](#multiple-scattering) on the layered path, against the same path without them
+(`hair.volume {enabled: false}`, which is the earlier step exactly). Same machine, conditions and method as
+[Hair shading measurements](#hair-shading-measurements): raster mode, DLSS at 2560x1600 in and out, the display awake,
+uncapped, times from the statistical profiler at a 3% half-width, image differences of 8-bit luma of presented frames
+over the square around the groom (floor and sky included, so differences of the hair itself are larger than the
+numbers). The light is the demo's sun and its sky. The scripts and captures are not in the tree.
+
+### What it looks like
+
+The earlier step's cases again, each captured without and with the volume: the procedural drooping groom (50,000
+strands of 176 to 88 micrometres), `wStraight` and `wCurly`; black, brown, blond and red; the sun in front, to the side
+and behind; 1 m and 3 m.
+
+- **Hair has its colour.** Brown reads brown and blond blond from every side, where both were charcoal and khaki: the
+  backscattering lobe is most of what light hair shows when lit from the front (the `scatter_local` view alone is a
+  saturated tan for blond and black for brown and black hair), and the forward scattered light is little of any view.
+  The square's mean brightness rises by 4 to 14 levels for blond and falls by 2 to 6 for black.
+- **Lit from behind, light hair is no longer blown out.** The crown of `wCurly` and of the procedural groom, white at
+  255 before, is a bright rim; blond and red keep their colour in it. Brown's orange glow through the whole crown is
+  gone: brown lets a twelfth through a fibre.
+- **Depth.** `wCurly`'s clumps separate, with dark between them; the side of a groom away from the sun is darker than
+  the side toward it.
+- **Black is darker, and still not black.** A dark charcoal with a broad sheen, 2 to 6 levels under the earlier step's
+  over the square. What is left is the fibre's own R lobe on the hair the light reaches first, at the default
+  roughness a wide sheen, and the sky's R. Tripling the melanin changes nothing visible.
+- **The middle distance looks like the close one** for all three grooms.
+- **Still wrong.** (1) Seen against the sun, the side of light hair facing the camera is nearly as bright as lit from
+  the front: almost all of it is the environment term (the `environment` view), whose sky this stage has about as
+  bright as the sun's own lobes, with only four directions and four samples each of occlusion. Whether that is right
+  needs a reference. (2) The head's shadow on backlit hair is the shadow map's, stepped as before, and now more
+  visible, a dark shape with an edge on bright hair. (3) Backlit `wStraight` in blond shows lengthwise streaks, strands
+  of different brightness side by side. (4) Fine self-shadowing is absent: a voxel is 4 to 5 mm at best here, and what
+  is nearer than a voxel is skipped. Strands do not shadow their neighbours, locks do. (5) The outermost hair is
+  shadowed by the hair under it where light grazes a groom (below). (6) Hair still casts no shadow on the head.
+
+### Level of detail
+
+The same groom at forced detail 1, 0.5, 0.25 and 0.1 (50,000, 25,600, 13,312 and 5,120 strands) from 1 m, with the
+volume on and off: the mean of the square, and of the `transmittance` view, which is the volume's own answer without
+the response.
+
+| Case | Transmittance view, detail 1 to 0.1 | Image mean, volume on: change at 0.1 | Volume off: change at 0.1 | RMS difference from detail 1 at 0.1: on | Off |
+|---|---|---:|---:|---:|---:|
+| Procedural, sun in front, blond | 194.2, 193.4, 192.7, 192.7 | -3.0 | -2.5 | 15.0 | 17.0 |
+| Procedural, sun in front, black | 191.7, 189.6, 188.2, 187.7 | -4.6 | -3.4 | 21.5 | 20.2 |
+| Procedural, sun behind, blond | 146.5, 146.5, 145.1, 142.5 | -1.9 | -4.0 | 15.5 | 25.1 |
+| Procedural, sun behind, black | 139.7, 139.4, 138.0, 135.3 | -5.1 | -4.3 | 24.1 | 23.8 |
+| `wStraight`, sun in front, blond | 185.6, 185.4, 185.5, 185.8 | -0.7 | -1.4 | 10.5 | 11.7 |
+| `wStraight`, sun in front, black | 179.9, 178.9, 178.8, 180.1 | -1.7 | -1.8 | 15.1 | 14.2 |
+| `wStraight`, sun behind, blond | 137.5, 137.2, 136.8, 136.7 | +0.6 | -0.4 | 11.6 | 13.1 |
+| `wStraight`, sun behind, black | 133.2, 133.0, 132.7, 132.6 | -0.2 | -0.3 | 13.7 | 13.2 |
+
+**Self-shadowing does not change with the strands drawn beyond 3% of the transmittance view's mean** (0.1% to 0.6% for
+`wStraight`, 0.8% to 3.1% for the procedural groom, at a tenth of the strands), and the image changes with the level
+of detail as much with the volume as without it: the differences are the level of detail's own (fewer, wider strands).
+The voxelize pass deposits half as much work at half the strands (20.8, 10.7, 5.5 and 2.1 million voxel adds) into the
+same density.
+
+### Resolution, steps and bias
+
+The procedural groom from 1 m, with the voxels as fine as `max_resolution` allows. Differences are from a reference of
+144 voxels (3.7 mm) and 32 and 16 steps.
+
+| Voxels along the longest side | 16 | 32 | 48 | 64 | 96 | 128 |
+|---|---:|---:|---:|---:|---:|---:|
+| Voxel, mm | 33.2 | 16.6 | 11.1 | 8.3 | 5.5 | 4.2 |
+| Voxels | 2,704 | 21,632 | 73,008 | 173,056 | 569,184 | 1,357,952 |
+| RMS difference, black, sun in front | 1.2 | 1.1 | 1.0 | 0.8 | 0.7 | 0.7 |
+| ... blond, sun in front | 2.8 | 2.8 | 2.4 | 2.0 | 1.5 | 1.3 |
+| ... blond, sun behind | 10.6 | 8.1 | 7.0 | 6.1 | 5.2 | 4.9 |
+| Mean brightness, blond, sun in front | 172.8 | 172.7 | 172.6 | 172.4 | 172.2 | 171.9 |
+| `Hair::Voxelize`, ms | 1.45 | 0.96 | 0.65 | 0.57 | 0.82 | 0.93 |
+| `Hair::Shade`, ms | 1.74 | 1.84 | 1.88 | 1.90 | 1.98 | 2.05 |
+
+| Steps (light, environment) | 4, 2 | 6, 3 | 8, 4 | 8, 2 | 12, 4 | 16, 8 | 32, 16 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| RMS difference, blond, sun in front (96 voxels) | 2.0 | 1.7 | 1.5 | 2.0 | 1.6 | 1.2 | 1.1 |
+| ... blond, sun behind | 8.8 | 6.6 | 5.3 | 8.6 | 5.3 | 3.1 | 1.8 |
+| `Hair::Shade`, ms (1.13 with the volume off) | 1.85 | 1.93 | 2.04 | 1.97 | 2.11 | 2.45 | 3.29 |
+
+- **The brightness of a groom hardly moves with the resolution** (a level over a factor of eight in voxel size), which
+  is what keeps a groom the same as it recedes and its voxels grow. The image converges slowly and evenly: there is no
+  resolution below which it breaks, and none here at which it has converged. The default, 96, is where the voxel is 5
+  mm (the size the dual scattering paper used); 64 costs a quarter of a millisecond less in the voxelize pass and
+  0.5 to 0.9 levels more difference.
+- **A coarse volume costs more to fill, not less:** with 16 voxels a side every strand's deposits land in the same few
+  voxels and the atomic adds contend (1.45 ms against 0.57 at 64). Far grooms have coarse volumes and few strands.
+- **Steps matter where the light comes through hair far from the vertex** (the sun behind): the difference halves from
+  8 and 4 steps to 16 and 8, for 0.4 ms. The environment's steps count as much as the lights' there. At the default
+  the march is 0.9 ms of the shade pass for 600,000 lit vertices, most of it not the steps: 4 and 2 steps still cost
+  0.72 ms (the two interpolated samples of every march, the table, the second evaluation of the lobes).
+- **Bias** (96 voxels, RMS difference from the reference, which has the default bias of 1): 0 voxels 5.5 (black, sun in
+  front) and 7.4 (blond), darker by 3 to 4 levels; 0.5: 3.2 and 4.3; 1.5: 0.9 and 2.6; 2: 1.5 and 4.0, lighter. Before
+  the bias and the interpolated samples existed, at 48 voxels (11 mm), the `fibre_count` view had 4 to 5 fibres between
+  the sun and the outermost hair of the groom's lit side, in arches that followed the voxels: the groom is a layer 5 mm
+  thick, thinner than a voxel, and every vertex in it read the layer's own hair as in its way.
+- **What is still there of that:** where light grazes a layer (the sun on the top of a head), a ray leaves the layer
+  slowly, a voxel along the ray is less than a voxel away from the layer, and the outermost hair reads the hair beside
+  it. This is the artifact the Indiana Jones deck shows for density volumes and gives as the reason some grooms needed
+  256 voxels a side.
+- **Deposits to the nearest voxel** (`splat` `nearest`): 0.20 ms against 0.82 in the voxelize pass, 2.6 million adds
+  against 20.8 million, and 0.7 to 2.4 levels from the reference where the default is 0.6 to 1.1. Not the default:
+  the slab test has its marches twice as noisy.
+- **Directions in the volume were not built,** and nothing here measures what they would buy. The isotropic sine is
+  0.785; the sun in these captures is at about 60 degrees to hanging hair (0.87), so its fibre counts are about a
+  tenth low. A light along the hair (above a head of straight hair) would be overshadowed several times over.
+- **Without the scalp shell** the images are as far from the reference as with it in the front views (0.6 to 1.6
+  levels against 0.6 to 1.1) and a little further in the blond backlit one (5.7 against 4.7): in these views, where the
+  shadow map has the head for the sun, the shell changes little. It was not measured under a light with no shadow map.
+
+### Motion
+
+- **Still.** The temporal noise of the earlier steps' measure (per-pixel standard deviation of luma over 8 captures 3
+  frames apart) with the volume on is that without it: 0.087 against 0.085 (sparse procedural groom, 0.8 m), 0.057
+  against 0.060 (3.2 m), 0.066 against 0.064 (12.8 m), 0.069 against 0.065, 0.050 against 0.057 and 0.057 against
+  0.069 for `wCurly`. A march's offset is the vertex's own and the deposits' rounding the pool row's own, so a still
+  groom's volume and marches are the same every frame. With `jitter` `frame` the noise is 0.08 to 0.15 (blond: 0.125
+  against 0.095 at 0.8 m, 0.146 against 0.083 for `wCurly`): the upscaler does not average it away, and it is not the
+  default.
+- **A simulated groom swaying** (every guide simulated, the head moving 2 cm to each side every two seconds, 20
+  captures 6 frames apart): the square's mean brightness varies over the captures by 0.09 to 0.16 levels with the
+  volume and 0.11 to 0.17 without, and consecutive captures differ by 5.1 to 7.7 levels with it and 5.9 to 8.6
+  without. The `transmittance` view's mean varies by 0.05 levels with the sun in front and 0.2 with it behind. No
+  flicker, swimming or lag was seen in the captures or shows in these numbers: the grid moves with the head, and the
+  volume is built from the positions the frame draws. No segment was outside its volume's box.
+- **The camera slide** (0.6 m a second past the sparse groom, then a stop): two frames after the stop the hair is 3.45
+  levels from the converged image with the volume and 3.26 without, two converged captures 30 frames apart differ by
+  0.15 and 0.16, and the fine contrast while moving is 13.2 and 11.2. A volume's resolution follows the camera's
+  distance and changes by a voxel at a time as it moves; nothing of that showed.
+- Not measured: a groom crossing the distance at which its volume changes resolution, frame by frame; hair that the
+  simulation throws outside the box (the box is the rest bounds and a tenth).
+
+### Cost and memory
+
+`ms` per pass on the layered path, in the stage and views of the earlier steps (two shadowed directional lights,
+default material, the sparse procedural groom of the distance series), without and with the volume.
+
+| View | Shade, off | Hair passes, off | Voxelize | Shade | Hair passes | Frame, off | Frame | Lit vertices | Segments deposited | March samples | Volumes | Voxels | Voxel side, mm |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| Procedural, 0.4 m | 0.94 | 5.77 | 0.55 | 1.64 | 7.02 | 20.2 | 21.5 | 464,859 | 960,000 | 14,576,587 | 1 | 645,504 | 5 |
+| Procedural, 0.8 m | 0.96 | 3.15 | 0.55 | 1.68 | 4.33 | 16.2 | 17.4 | 511,568 | 960,000 | 16,007,745 | 1 | 645,504 | 5 |
+| Procedural, 1.6 m | 0.81 | 2.03 | 0.28 | 1.35 | 2.83 | 14.5 | 15.3 | 389,368 | 960,000 | 12,279,048 | 1 | 206,976 | 7 |
+| Procedural, 3.2 m | 0.66 | 1.56 | 0.46 | 1.07 | 2.43 | 14.0 | 14.8 | 312,376 | 945,600 | 9,874,797 | 1 | 25,872 | 15 |
+| Procedural, 6.4 m | 0.26 | 0.67 | 0.17 | 0.40 | 0.97 | 13.2 | 13.5 | 113,982 | 300,208 | 3,583,829 | 1 | 3,332 | 30 |
+| Procedural, 25.6 m | 0.07 | 0.30 | 0.05 | 0.07 | 0.36 | 13.2 | 13.2 | 13,094 | 19,916 | 103,005 | 1 | 80 | 120 |
+| Procedural, 100.0 m | 0.04 | 0.27 | 0.02 | 0.04 | 0.29 | 13.1 | 13.0 | 1,766 | 1,442 | 26,660 | 1 | 8 | 469 |
+| `wStraight`, 0.4 m | 0.49 | 13.67 | 0.60 | 0.87 | 14.85 | 27.1 | 28.1 | 304,337 | 558,992 | 9,113,561 | 1 | 547,200 | 4 |
+| `wStraight`, 0.8 m | 0.43 | 3.74 | 0.84 | 0.76 | 6.07 | 16.3 | 17.1 | 275,195 | 558,992 | 8,159,648 | 1 | 547,200 | 4 |
+| `wStraight`, 1.6 m | 0.36 | 1.77 | 0.58 | 0.60 | 2.58 | 14.3 | 15.1 | 261,234 | 558,992 | 7,363,192 | 1 | 110,880 | 7 |
+| `wStraight`, 3.2 m | 0.30 | 1.07 | 0.42 | 0.49 | 1.67 | 13.5 | 14.1 | 145,944 | 536,504 | 3,830,788 | 1 | 14,168 | 15 |
+| `wStraight`, 6.4 m | 0.22 | 0.64 | 0.28 | 0.30 | 1.00 | 21.6 | 13.5 | 123,332 | 301,784 | 2,996,763 | 1 | 1,848 | 30 |
+| `wStraight`, 25.6 m | 0.08 | 0.34 | 0.10 | 0.10 | 0.46 | 13.2 | 13.3 | 24,845 | 45,548 | 606,173 | 1 | 36 | 120 |
+| `wStraight`, 100.0 m | 0.03 | 0.26 | 0.01 | 0.04 | 0.28 | 13.0 | 13.2 | 3,435 | 3,556 | 68,604 | 1 | 8 | 469 |
+| Crowd, near camera | 2.06 | 3.83 | 1.14 | 3.18 | 6.09 | 15.2 | 17.4 | 1,071,262 | 2,088,192 | 25,212,926 | 73 | 175,014 | 11 to 126 |
+| Crowd, far camera | 0.33 | 0.86 | 0.08 | 0.45 | 1.06 | 14.6 | 14.8 | 122,748 | 146,208 | 2,450,351 | 100 | 808 | 250 to 357 |
+| Crowd, facing away | 0.09 | 0.42 | 0.00 | 0.09 | 0.42 | 11.5 | 11.6 | 0 | 0 | 0 | 0 | 0 | |
+
+(`wStraight` at 0.8 m with the volume has its rasterizer at 4.06 ms in this run against 2.99 without, and at 6.4 m the
+frame without it reads 21.6 ms: single readings, not looked into; the rasterizer does nothing different.)
+
+- **The volume costs a hero groom 1.2 ms** (0.55 to fill, 0.7 in the shade pass) and **the crowd from its near camera
+  2.3 ms** (1.14 and 1.12), on frames of 16 and 15 ms. Far away it is 0.02 to 0.1 ms, and **facing away from the
+  crowd nothing**: no instance is in view, no volume is planned, and the voxelize pass records nothing.
+- **Filling follows the pool's segments,** 0.5 to 0.9 ns each, the more the coarser the volume against the strands
+  (contention, above): 0.55 ms for 960,000 at 5 mm, 0.46 ms for 946,000 at 15 mm. Every selected segment deposits,
+  seen or not. **Marching follows the lit vertices:** 1.0 to 1.4 ns a vertex for six marches (two lights and four
+  environment directions), about 0.045 ns a sample.
+- **Memory.** The voxel buffer is 8.4 MB (2,097,152 voxels of 4 bytes), the volume rows 80 KB and the scatter tables
+  1.5 MB: 475 MB of pooled buffers. In use: 2.6 MB for the hero groom at 96 voxels, 0.7 MB for the crowd's 73 volumes
+  from the near camera, 3 KB for all hundred from the far camera, none facing away.
+- **A budget the volumes do not fit** (the crowd from its near camera, 175,014 voxels wanted): at 20,000 voxels every
+  voxel is 2.1 times larger (23 to 264 mm) and the passes cost 1.00 and 3.00 ms; at 2,000, 5.1 times larger, 0.56 and
+  2.96 ms; at 150, where the coarsest volumes of all 73 do not fit, the 18 largest on screen keep volumes of 8 voxels
+  and 55 are lit without one.
+
+### The two defaults the earlier step left open
+
+- **Longitudinal roughness.** `wStraight` in brown and blond at `beta_m` 0.3, 0.25, 0.2 and 0.15, with scattering:
+  0.3 and 0.25 are told apart only side by side, a broad sheen over the whole head; at 0.2 a highlight band is there,
+  and at 0.15 it is distinct and the hair reads as glossy. The default was left at 0.3: nothing here says which is
+  right, only that 0.25 would change little and 0.2 or less is a different, shinier hair. A reference is what would
+  settle it.
+- **Melanin.** Black at 4, 8 and 16 is the same image: what black hair shows is not its interior. Brown at 1, 2 and 3
+  goes from mid brown to near black, with 2 a dark brown. Blond at 0.08, 0.15 and 0.3 goes from ash to beige to dark
+  blond; 0.15 is a pale, slightly grey blond. Red (0.6, redness 0.9) is a golden light brown and at 1.0 nearer auburn:
+  it does not read as red. No preset was changed.
+
+### What was approximated, and what a reference would settle
+
+- Read: Zinke et al. 2008 in full (sections 3 and 4, equations 16, 17, 23 to 25 and the pseudo code of figure 5 from
+  rendered pages); Karis's multiple scattering slide (39: a wrapped diffuse term tinted by `(C / luma)^(1 - shadow)`
+  times the square root of the colour, an "artistic hack" by its own notes) and its notes on shadows; Tafuri's
+  slides 24 to 27 (dual scattering with fibre counts from four deep opacity map layers and an attenuation table; no
+  equations are given); the Indiana Jones deck's slides 47 to 60 and 67 to 70. Not read: Unreal's shader source,
+  pbrt's chapter beyond what the earlier step read.
+- From Zinke: the split into direct, forward scattered and backscattered light, the average attenuations and how
+  they are measured, the backscattering lobe's attenuation, shift and spread, the widening of the lobes, the density
+  factors. From the Indiana Jones deck: that a density volume gives soft, low-frequency self-shadowing with
+  self-occlusion artifacts, which is what was found. Nothing of Karis's term is used.
+- Approximated, in order of what is likely to matter: one density with no directions; every fibre on the path taken
+  to lie as the shading point's does; a voxel of 4 mm and more, with the nearest voxel skipped; expected fibre counts
+  with Poisson statistics in place of the paper's counts; the environment by four directions; the scalp as a shell of
+  voxels; the table for the instance's material and not the strand's; the backscattering lobe's shape around the
+  fibre.
+- A path-traced reference of the same grooms and materials would settle: whether light hair is as bright and as
+  saturated as it should be (the density factor 0.7 is the paper's, for its hair models); how dark the side of a groom
+  away from the light should be, under the sun and under the sky; whether black hair's residual grey is right; and the
+  roughness default.
+
+### Scenarios and checks
+
+**Scenarios.** All five (seven runs with their variants) pass with `HAIR_PATH=layered`, where the volume is on by
+default, and on the surface path, where nothing of it runs; no check was changed. One surface run of
+`hair_sim_lod.cs` failed "dollying away, the level never rises" and passed when run again: the failure the
+view-following step recorded at one run in ten. `HairCoreTests` passes with the new tests, in about seven seconds.
+
+**Invariants.** `stale_guides_drawn`, `unseen_strands_drawn` and `stale_guides` are 0 in every frame of every scenario
+on both paths and in the measurement runs; no shadow lookup found no page or a coarser one; no segment was outside its
+volume's box (`volume_outside`).
+
+**Debug layer.** The earlier steps' control-pipe session on the crowd with the D3D12 debug layer on, plus
+`hair.volume` through its controls (off and on, dual scattering off, nearest deposits, budgets of 2,000 and 150
+voxels, no scalp, per-frame jitter, 16 voxels with 16 and 8 steps) and the six new debug views: the layer's message
+ids are a subset of the earlier session's, and none names a hair resource.
+
+## Cast shadow measurements
+
+Measured 2026-11-28 for step A4 of stage 2 ([Shadow casting](#shadow-casting)), on the development machine at
+2560x1600, DLSS at native resolution, the layered path with the density volume on, the display awake and `allowTearing`
+on; times from the statistical profiler. The stage is a floor, heads of 11 cm radius 1.6 m above it and the demo's sun,
+29 degrees up; a second sun height (69 degrees) is the same stage built tilted by 40 degrees, because a scenario cannot
+move the demo's sun. Grooms: *dense* (the procedural drooping groom, 50,000 strands of 0.18 to 0.09 mm), *sparse* (the
+same with 2,500 strands), `wCurly` (50,000 strands) and a *tuft* (40 strands). The scripts are not in the tree.
+
+**The shadow map sets the scale of everything below.** In the demo's configuration (directional LOD bias 1.2 plus the
+automatic bias of its page budget) receivers within a few metres of the camera read the fifth clipmap, and the shadow
+view's own counts put its texel at about 2 cm: a dozen screen pixels at 2.5 m. 12 of the 22 clipmaps are dynamic, with
+or without hair's request.
+
+### What it looks like
+
+- **On the ground, dense hair.** The dense groom and `wCurly` cast their whole silhouette where the head alone cast a
+  small disc: as dark as the head's own shadow, with the same soft edge, and no dither noise, blocks or holes in a still
+  view. Under the low sun and the high one alike. Believable against the hair's density: light does not get through
+  these grooms.
+- **On the ground, sparse hair.** The 2,500-strand groom adds a faint, smooth veil around the head's shadow, darkest
+  where the strands hang close together: the floor under it is darker by 1.1 of 255 on average over the frame's centre,
+  against 2.9 for a 12,000-strand groom and 3.2 for `wCurly` (the head's own shadow is 26 of 255 darker than the lit
+  floor: the demo's ambient light is strong). Partial, as it should be, and without visible grain in a still view.
+- **The tuft and a single strand: nothing.** 40 strands write 1 or 2 texels a frame. A strand 0.18 mm wide covers a
+  hundredth of a 2 cm texel, and the real shadow of such a strand 1.6 m above the ground is as faint (the sun's disc
+  spreads it over 15 mm). The map cannot show a thin strand's shadow close to its receiver either: see the head.
+- **On the head, as configured: nothing.** With a light-coloured head, the skin not covered by hair has the same
+  luma with casting off and on to 0.1 of 255 (sparse: 199.6 and 199.5; `wCurly`: 183.2 and 183.3), and to 0.3 with
+  `opaque` coverage (199.2). The receiver's lookup starts two texels (4 cm) off the skin and the hair is nearer than that. No acne and no
+  detached shadow, because there is no shadow.
+- **On the head, with texels under 2 mm** (automatic bias off, bias 2: 1.7 mm). Under the sparse groom the skin is
+  darker by 4 of 255 on average, smoothly and most where the hair is densest, with `temporal` coverage; with `fixed`
+  it is a field of dark blocks, each a texel, three to five pixels across. Under `wCurly`'s fringe a shadow band lies
+  on the forehead, attached to the hairline with no gap and no acne on the lit skin, its edge stepped in texels. At
+  bias 3 the skin is 1.5 darker, at bias 1 (finer still) 5.3. `wCurly` then draws 33,500 strands and 718,000 segments
+  into the shadow map and writes 1.1 million texels a frame at bias 2 (12 million at bias 1): the shadow view's cost
+  follows the texels it is asked to fill.
+- **Crawl under a still groom.** The luma of the pixels that are not hair (skin and floor) in six captures: its
+  standard deviation over time, averaged over those pixels, is 0.2 to 0.5 of 255 with casting off, 0.3 to 0.7 with
+  `temporal` and 0.2 to 0.8 with `fixed`, at every resolution tried. The 99th percentile over pixels is 0.9 to 1.5 off;
+  under the sparse groom at the finer resolutions it is 2.3 to 4.4 with `temporal` and 1.6 to 2.3 with `fixed`; under
+  `wCurly` at the default resolution it is 6.1 and 5.6, with either pattern: there the edge of the groom's shadow on the
+  floor shimmers. So the pattern crawls a little where the shadow is partial and fine, below what a still capture shows;
+  captures are several frames apart and say nothing about single-frame flicker.
+
+### Level of detail
+
+The darkening of the floor (mean over the frame's centre, of 255; two captures with casting off differ by 0.007):
+
+| Shadow detail | sparse, 2,500 strands | 12,000 strands | `wCurly` |
+|---|---|---|---|
+| forced 1 (drawn strands 14,500 / 14,500 / 50,000) | 1.152 | 2.894 | 3.135 |
+| forced 0.5 | 1.148 | 2.907 | 3.166 |
+| forced 0.25 | 1.126 | 2.919 | 3.142 |
+| forced 0.1 | 1.183 | 2.946 | 3.161 |
+| automatic, `detail_scale` 2 (1,623 / 1,623 / 4,058) | 1.149 | 2.949 | 3.156 |
+| automatic, `detail_scale` 1 | 1.145 | 2.963 | 3.146 |
+| automatic, `detail_scale` 4 | 1.204 | 3.041 | 3.206 |
+| automatic, `detail_scale` 0.25 | 1.139 | 2.875 | 3.149 |
+
+(The two procedural grooms were in view together: their strand counts are the sum.) The automatic level is within 2%
+of full detail, and a tenth of the strands within 3%; the texels written a frame are the same at every level (885 to
+901, and 10,500 for `wCurly`). The darkening rises a little as strands get fewer and wider, as it must: wide strands
+overlap less. With the vertex level also halved by `detail_scale`, as first built, the automatic level gave 20% less
+shadow under the drooping grooms (0.92 against 1.17, 2.40 against 2.93): strands drawn along two chords cover less
+ground. That is why the vertex level ignores `detail_scale`.
+
+### Hair's own shading
+
+Hair pixels (alpha above a half) of a close view, casting on against off, in levels of 255; "noise" is off against off:
+
+| Groom, view | noise: mean, 99th | on: mean, 99th, over 8 | on without the cached-page read: mean, 99th, over 8 |
+|---|---|---|---|
+| dense, lit side | 0.16, 1.0 | 0.10, 0.7, 0 | 0.14, 1.0, 0 |
+| dense, shadowed side | 0.16, 1.0 | 0.20, 1.3, 0.004% | 0.64, 7.7, 0.9% |
+| dense, across the light | 0.17, 1.0 | 0.12, 1.0, 0 | 0.13, 1.0, 0 |
+| `wCurly`, lit side | 0.21, 1.7 | 0.13, 1.0, 0 | 0.21, 2.0, 0.07% |
+| `wCurly`, shadowed side | 0.20, 1.7 | 0.26, 3.0, 0.07% | 0.87, 10.7, 2.0% |
+| `wCurly`, across the light | 0.18, 1.7 | 0.18, 2.0, 0.008% | 0.45, 7.0, 0.7% |
+
+Hair's shading does not change with casting on, to within the captures' noise but for a few pixels in a thousand on the
+side away from the sun. Without the read of the cached pages the head's shadow on the hair behind it leaks: that is the
+last column. The heads here are rigid; a skinned head was not tested, and by the design would be the last column.
+
+### Motion and off-screen casters
+
+- **A swaying, simulated groom** (the head moving 5 cm to each side, every guide simulated): the shadow follows in every
+  capture of a strip taken through the sway, with no second copy and no patch left behind; `shadow_stale_guides_drawn`
+  and the main view's two checks are 0. The shadow map's passes cost 0.26 ms with the head still and 0.85 to 0.87 ms
+  with it swaying, the same with casting off and on: what is redrawn is the head's own pages, 5 a frame. Hair adds
+  0.11 to 0.12 ms of its own passes.
+- **The same with no dynamic clipmaps** (`clodSkinnedShadowDynamicClipmapCountOverride` 0: hair's shadow is then in
+  cached pages and lives by invalidation). With the head **still** and the groom simulated, the shadow map redraws 4
+  pages a frame and its passes go from 0.26 to 0.85 ms: a simulated groom is invalidated every frame whether its hair
+  moves or not. Swaying: 5 pages, 0.86 ms. That is what invalidation costs when hair is beyond the dynamic clipmaps;
+  within them it costs nothing.
+- **The crowd swaying** (100 heads, rigid grooms): the shadow map redraws 67 pages a frame from the near camera and 17
+  from the far one, and its passes cost 0.96 and 0.68 ms against 0.32 still, the same with casting off and on: the
+  heads' own movement. Hair enqueues 200 bounds in a frame the heads moved, none of which reach a dynamic clipmap.
+- **A groom out of view whose shadow is in view** (the camera over its shadow on the floor, the head behind it,
+  simulation on): 3,553 strands are drawn into the shadow map and none into the frame, all of them on the rigid pose
+  (`shadow_unseen_strands` 3,553), and the main view's checks stay 0. Turning the camera to the head, the floor's mean
+  difference from its final state is 0.57 of 255 in the first capture, 0.32 sixteen frames later and 0.28 to 0.31
+  from then on (two captures of a simulated groom at rest differ by about that much): the shadow settles from the
+  rigid shape to the simulated one within a quarter of a second, by a few millimetres with the default stiffness.
+- **A floor turned and turned back** (the stage tilted by 40 degrees and returned) leaves the spheres without any
+  shadow, with hair's casting off as well as on. It is the shadow map's, and not looked into; the stage is built
+  tilted instead.
+
+### Cost and memory
+
+GPU time in ms. "Shade" is the shade pass with casting off and on (the two lookups in place of one); the shadow map's
+own passes (culling, rasterization, clear, compose, mark, invalidate) are 0.31 to 0.33 ms in every row but the swaying
+ones above, off and on.
+
+| View | `ShadowSelect` | `ShadowEvaluate` | `ShadowRaster` | Sum | Shade | Clusters kept | Strands (of the main view's) | Segments | Texels written |
+|---|---|---|---|---|---|---|---|---|---|
+| dense groom, 0.8 m | 0.026 | 0.021 | 0.021 | 0.07 | 2.27 to 2.31 | 1,024 of 1,024 | 3,553 (50,000) | 14,180 | 3,164 |
+| dense groom, 3.2 m | 0.025 | 0.021 | 0.020 | 0.07 | 1.42 to 1.50 | 1,024 | 3,553 (48,509) | 14,180 | 3,155 |
+| dense groom, 25.6 m | 0.025 | 0.017 | 0.018 | 0.06 | 0.11 to 0.11 | 1,024 | 2,174 (7,684) | 4,340 | 1,092 |
+| `wStraight`, 0.8 m | 0.026 | 0.021 | 0.015 | 0.06 | 0.72 to 0.70 | 1,024 | 3,269 (50,000) | 16,774 | 10,605 |
+| `wStraight`, 25.6 m | 0.026 | 0.017 | 0.022 | 0.07 | 0.11 to 0.11 | 1,024 | 2,029 (7,160) | 5,125 | 3,808 |
+| crowd, near | 0.031 | 0.187 | 0.220 | 0.44 | 3.34 to 3.43 | 22,528 of 22,528 | 87,624 (293,838) | 244,977 | 25,395 |
+| crowd, far | 0.031 | 0.147 | 0.057 | 0.24 | 0.46 to 0.48 | 22,528 | 30,932 (99,004) | 30,932 | 3,234 |
+| crowd, facing away | 0.028 | 0.044 | 0.019 | 0.09 | 0.10 | 1,834 | 8,514 (0) | 26,038 | 1,168 |
+| crowd, facing away, shadows in view | 0.028 | 0.057 | 0.029 | 0.11 | 0.10 | 3,626 | 16,696 (0) | 51,412 | 3,629 |
+| crowd, near, simulated and swaying | 0.031 | 0.421 | 0.225 | 0.68 | 3.28 to 3.40 | 22,528 | 87,624 (293,838) | 244,977 | 25,545 |
+
+- **What it scales with.** `ShadowSelect` with the clusters of the active instances (one thread each, a constant here);
+  `ShadowEvaluate` with the strands kept, more when they are skinned to guides; `ShadowRaster` with the kept segments
+  times the clipmaps each is drawn into, and with the texels they cover. All three follow the shadow pages the frame
+  draws under hair, not the hair in view: facing away from the crowd costs 0.09 ms for the 8 grooms in a hundred whose
+  shadows share a drawn page with something in view, and 0.11 ms with the last row's shadows in view.
+- **Not zero when nothing is in view** because a page is metres across: clusters over a drawn page are kept whether
+  or not the texels they shadow are seen.
+- **The shade pass** gains up to about 0.1 ms near (the single-texel read of the cached pages per lit vertex: -0.02
+  to 0.12 ms over the rows above, with a confidence half-width of 0.03) and nothing measurable far.
+- **Memory.** Four buffers, 38.3 MB: the shadow pool 32.0 MB and its segment ids 4.0 MB, the shadow cluster list 2.0 MB
+  and its masks 0.25 MB. The pooled total is 513 MB. The crowd near the camera uses 332,600 of the pool's 1,048,576
+  rows. The list was 16,384 rows at first and the crowd overflowed it (22,528 clusters): it now has the main list's
+  65,535.
+
+### What a dithered single depth can and cannot hold
+
+- It **can** hold the shadow of hair that is dense along the light: enough strands over every texel that none stays
+  open, which is every groom here but the sparse one. The result is the silhouette's shadow at the shadow map's own
+  resolution and softness, the same at every level of detail (the table above).
+- It **can** hold a partial shadow *in aggregate*: the share of texels left open equals the light a thin layer lets
+  through, and the upscaler averages a pattern that changes every frame (1.1 of 255 under the sparse groom, smooth in a
+  still view; a little crawl, measured above). It needs the pages redrawn every frame, which the dynamic clipmaps
+  give; a cached page holds one frozen pattern, which at these texel sizes is a field of blocks (the `fixed` capture).
+  Beyond the dynamic clipmaps sparse hair's shadow is therefore blocky; nothing redraws it there, and it was not
+  measured at such a distance.
+- It **cannot** hold anything finer than a texel: no strand's own shadow, no strand-on-skin contact shadow (a texel is
+  2 cm here and the lookup starts two texels off the surface: nothing within 4 cm), no soft gradation across a
+  hairline other than through the dither.
+- It **cannot** say what is behind hair: one depth is the nearest caster's. That is why hair's own shading reads the
+  cached pages for the head, and why a skinned head, which shares the dynamic layer with hair, is not seen by its own
+  hair.
+- It **cannot** carry colour or the light hair scatters forward: the shadow of blond hair is as grey as that of black
+  hair with the same strands.
+
+### Scenarios and checks
+
+- All seven scenario runs (`hair_single.cs`, `hair_lod_sweep.cs` rigid and simulated, `hair_sim.cs` with `wStraight`,
+  `hair_sim_lod.cs`, `hair_crowd.cs` simulated and not) pass on the layered path with shadow casting on (its default)
+  and on the surface path, where hair casts nothing; no check was changed. The `hair_sim_lod.cs` dolly failure seen
+  once in ten runs earlier did not recur in these two runs. `HairCoreTests` passes.
+- In every measured view `stale_guides_drawn`, `unseen_strands_drawn`, `shadow_stale_guides_drawn` and
+  `shadow_overflow_clusters` are 0. The shadow pool does overflow when asked for more than it holds: the crowd's
+  million strands at `force_detail` 1 drop 16,749 of 22,528 clusters, counted.
+- A session under the D3D12 debug layer, driven over the control pipe (the crowd, swaying, every `hair.shadows` control
+  in turn, the shadow map without dynamic clipmaps, then simulated): no validation message names hair.
+
+## Rasterizer cost measurements
+
+Measured on 2026-11-28 for the fifth step of the second stage: [the culled rasterizer](#the-culled-rasterizer) and
+[hidden clusters](#hidden-clusters), against the direct rasterizer on the layered path. Same machine, conditions and
+method as [Layered path measurements](#layered-path-measurements): raster mode, the display awake, uncapped, times
+from the statistical profiler at a 3% half-width, counters as means over 32 consecutive frames, image differences of
+8-bit luma of presented frames. Render resolution is 2560x1600 (DLSS with render equal to output) unless a row says
+DLSS Quality, which renders 1707x1067 for the same output. `wStraight` and `wCurly` are Cem Yuksel's models (50,000
+strands each) on an 18 cm head; "0.4 m" is the camera's distance from the head's middle, at which the groom fills the
+view. The scripts are not in the tree.
+
+**What the step was asked for.** About 1.5 ms of rasterizer with `wStraight` filling the view at 2560x1600, about 1 ms
+at a normal upscaled resolution, and 2 to 3 ms for all of hair's rendering in such a close-up; before it the
+rasterizer took 12.3 ms there.
+
+**What it reached.** "Rasterizer" is `Hair::Classify` plus `Hair::Raster`; "all six" adds voxelize, shade list, shade
+and composite.
+
+| `wStraight` at 0.4 m | Direct rasterizer (before) | Culled, jitter on (in use) | Culled, jitter off | Target |
+|---|---:|---:|---:|---:|
+| Rasterizer, 2560x1600 | 12.06 | 3.63 | 1.86 | about 1.5 |
+| Rasterizer, DLSS Quality (1707x1067) | 4.89 | 1.91 | 0.95 | about 1 |
+| All six, 2560x1600 | 14.39 | 5.74 | 3.42 | 2 to 3 |
+| All six, DLSS Quality | 6.85 | 3.48 | 2.07 | 2 to 3 |
+
+**The targets are not met in use.** With the camera's jitter on, which is how every frame is drawn, the rasterizer is
+3.3 times faster than it was and 2.1 ms over its target at 2560x1600. The figures that do meet or approach
+the targets are those with the jitter off, which is what the profiler measures unless told otherwise (next section),
+and they hold only for a still camera with no upscaler jitter. Both sets hold only for hair whose strands are about a
+pixel wide on screen, which is what these two models are at this distance (0.3 mm strands, four times a real hair's);
+for hair of real width the step bought nothing ([Fine hair](#fine-hair)).
+
+### The camera's jitter, and what the profiler measures
+
+A profile run puts the renderer in its deterministic sampling mode, which turns the camera's sub-pixel jitter off
+(`Renderer::SetDeterministicSamplingMode`) and leaves it off for the rest of the session, while the `enableJitter`
+setting still reads true. **Every profiled time in this document before this section was measured without jitter.**
+That did not matter to passes whose work does not depend on the frame before. It matters to the culled rasterizer,
+whose first pass is chosen from the frames before: with jitter each frame samples the hair at different sub-pixel
+places and sees through different gaps between strands. The rows marked "jitter on" turn the setting off and on again
+just after a profile run starts, which puts the jitter back for the run.
+
+| View | Direct: raster, all six | Culled, jitter on: classify + raster, all six | Culled, jitter off: classify + raster, all six | First-pass chunks, millions: on, off | Footprint pixels past the depths, millions: direct, on, off | Late chunks drawn a frame: on, off | Strands in the pool: on, off |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `wStraight`, 0.4 m | 12.06, 14.39 | 3.63, 5.74 | 1.86, 3.42 | 2.94, 0.74 | 65.1, 7.5, 4.5 | 148,764, 31 | 46,644, 28,933 |
+| `wStraight`, 0.6 m | 4.05, 5.88 | 3.07, 4.87 | 1.63, 3.06 | 3.42, 1.23 | 30.5, 9.9, 5.3 | 55,786, 1,318 | 50,000, 43,540 |
+| `wStraight`, 0.8 m | 2.79, 4.25 | 2.89, 4.35 | 2.02, 3.24 | 3.21, 1.69 | 22.7, 15.7, 9.9 | 6,950, 2,754 | 50,000, 49,802 |
+| `wCurly`, 0.4 m | 9.95, 13.07 | 2.87, 5.46 | 1.51, 3.19 | 2.38, 0.59 | 69.5, 4.9, 3.3 | 125,248, 60 | 46,484, 31,478 |
+| `wCurly`, 0.6 m | 3.80, 6.76 | 3.39, 6.25 | 1.77, 4.00 | 4.17, 1.32 | 34.0, 11.1, 5.2 | 54,228, 3,515 | 49,998, 47,139 |
+| `wCurly`, 0.8 m | 2.57, 5.28 | 3.01, 5.69 | 1.81, 4.10 | 4.37, 1.73 | 25.4, 16.0, 8.0 | 12,637, 7,688 | 50,000, 49,729 |
+| Fine dense groom, 0.4 m | 9.22, 15.46 | 10.81, 16.83 | 10.62, 16.61 | 9.90, 9.54 | 61.6, 52.9, 51.4 | 1,341,586, 1,062,197 | 105,305, 105,194 |
+| DLSS Quality: `wStraight`, 0.4 m | 4.89, 6.85 | 1.91, 3.48 | 0.95, 2.07 | 2.25, 0.57 | 32.0, 4.5, 2.2 | 101,566, 98 | 46,898, 30,959 |
+| DLSS Quality: `wCurly`, 0.4 m | 4.06, 7.22 | 1.94, 4.57 | 1.16, 3.22 | 2.05, 0.70 | 34.4, 3.5, 2.1 | 90,065, 8,558 | 49,136, 42,382 |
+
+- **The direct rasterizer does not care**; the culled one does twice the work with the jitter on: three to four times
+  the chunks in its first pass, and 1.6 times the footprint pixels past the hidden depths.
+- Why: a tile's guess is the largest hidden depth of its 64 pixels over the last frames, and one pixel that looks
+  through a gap to a deep strand, in one jitter of the cycle, sets it. Without jitter the same gaps are there every
+  frame and the guess settles on them; with it the guess is their union over the cycle.
+- Three other guesses were built and measured under jitter on `wStraight` at 0.4 m, and none was faster: the last
+  frame's tile depths alone (`hint_decay` 0: the first pass shrinks to 2.1 million chunks and the late pass draws 1.5
+  million, 3.2 ms); tiles of 4 pixels (half the pixels walked, twice the chunks to sort, 3.5 ms and 0.65 ms of
+  classifying); and a stamp per segment, set by the rasterizer or by the composite for the segments a pixel shows,
+  with the first pass drawing those stamped in the last 24 frames (2.4 to 2.6 million chunks, 3.4 to 3.5 ms). The
+  segments shown over a jitter cycle are about three times those one frame shows, and the first pass draws them in no
+  order, so most of them pass the hidden depth before the strand that hides them is drawn. The segment stamps were
+  taken out again.
+- What would help, not built: a guess per jitter phase for a still camera (the cycle is 8 phases at this resolution
+  and repeats exactly), and a first pass in two steps, the strands shown last frame and then the rest.
+
+### What each change bought
+
+`wStraight` and `wCurly` at 0.4 m, 2560x1600, **jitter off**, one control changed at a time from the top down, on the
+build before the last change to the guess (which costs these rows about 0.1 ms). "Reference" is the culled rasterizer
+with nothing culled and every strand kept, which is what the image comparisons are against. Times in ms; "per hair
+pixel" is over the pixels that end up showing hair (1.86 million for `wStraight`, 1.21 million for `wCurly`).
+
+| `wStraight` | Classify | Raster | Voxelize | Shade | Composite | All six | Looked at / hair px | Pass the depths | Coverage adds | Image: mean, worst block |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| Reference: chunks, nothing culled | 0.29 | 11.73 | 0.60 | 0.79 | 0.88 | 14.30 | 40.5 | 35.0 | 35.0 | itself again: 0.007, 2.5 |
+| Direct rasterizer | 0.00 | 11.37 | 0.60 | 0.76 | 0.84 | 13.60 | about 114 | 35.0 | 35.0 | 0.008, 2.5 |
+| + a strand that covers its pixel hides (one pass) | 0.28 | 4.30 | 0.60 | 0.68 | 0.88 | 6.75 | 40.5 | 5.2 | 1.0 | 0.009, 2.5 |
+| + saturated coverage hides (one pass) | 0.28 | 4.37 | 0.60 | 0.67 | 0.88 | 6.82 | 40.5 | 5.0 | 0.9 | 0.009, 2.5 |
+| Two passes, first: a rank prefix | 0.24 | 4.52 | 0.60 | 0.66 | 0.88 | 6.91 | 25.8 | 4.5 | 0.8 | 0.009, 2.5 |
+| Two passes, first: what the frame before saw | 0.26 | 1.70 | 0.60 | 0.32 | 0.85 | 3.75 | 5.1 | 2.4 | 0.5 | 0.009, 2.5 |
+| Two passes, first: both | 0.27 | 2.39 | 0.60 | 0.42 | 0.86 | 4.56 | 10.1 | 3.3 | 0.6 | 0.009, 2.5 |
+| ... the frame before, without the saturation rule | 0.25 | 1.64 | 0.60 | 0.32 | 0.85 | 3.68 | 5.1 | 2.4 | 0.5 | 0.009, 2.5 |
+| + hidden clusters at a quarter (the default) | 0.21 | 1.64 | 0.34 | 0.32 | 0.85 | 3.37 | 5.1 | 2.4 | 0.5 | 0.009, 2.5 |
+
+| `wCurly` | Classify | Raster | Voxelize | Shade | Composite | All six | Looked at / hair px | Pass the depths | Coverage adds | Image: mean, worst block |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| Reference: chunks, nothing culled | 0.37 | 10.40 | 1.13 | 1.51 | 0.62 | 14.08 | 68.4 | 57.4 | 57.4 | itself again: 0.023, 3.1 |
+| Direct rasterizer | 0.00 | 10.07 | 1.13 | 1.62 | 0.61 | 13.48 | over 100 | 57.4 | 57.4 | 0.026, 3.3 |
+| + a strand that covers its pixel hides (one pass) | 0.38 | 3.49 | 1.13 | 1.23 | 0.63 | 6.90 | 68.3 | 5.8 | 1.1 | 0.028, 4.0 |
+| + saturated coverage hides (one pass) | 0.38 | 3.54 | 1.13 | 1.26 | 0.63 | 6.99 | 68.3 | 5.7 | 1.0 | 0.029, 4.1 |
+| Two passes, first: a rank prefix | 0.32 | 3.04 | 1.13 | 1.19 | 0.63 | 6.36 | 33.1 | 4.8 | 0.9 | 0.031, 4.2 |
+| Two passes, first: what the frame before saw | 0.34 | 1.33 | 1.14 | 0.60 | 0.62 | 4.07 | 6.1 | 2.7 | 0.5 | 0.032, 4.1 |
+| Two passes, first: both | 0.35 | 1.84 | 1.13 | 0.81 | 0.62 | 4.80 | 14.8 | 3.9 | 0.7 | 0.032, 4.3 |
+| ... the frame before, without the saturation rule | 0.34 | 1.33 | 1.14 | 0.61 | 0.61 | 4.07 | 6.1 | 2.8 | 0.5 | 0.033, 4.3 |
+| + hidden clusters at a quarter (the default) | 0.27 | 1.25 | 0.72 | 0.60 | 0.61 | 3.49 | 6.1 | 2.8 | 0.5 | 0.033, 4.4 |
+
+- **Chunks alone buy nothing.** One thread a chunk with every chunk drawn costs what one thread a segment did: the time
+  is in the pixels, not in idle lanes. Lane occupancy is 0.66 (`wStraight`) and 0.59 (`wCurly`) with every chunk
+  drawn, and 0.80 and 0.64 in the first pass of the last rows. The Indiana Jones rasterizer reports 0.45 rising to 0.80
+  with its pixel request stacks, for a factor of two; here the lanes were not the limit, and the stacks were not built.
+- **A strand that hides what is behind it is the largest single step**: 11.7 to 4.3 ms in one pass, with the order the
+  threads happen to run in. The pixels looked at are the same 40 a hair pixel, but 5 of them pass the hidden depth
+  where 35 did, and the coverage adds fall from 35 a hair pixel to 1: a strand that covers its pixel whole marks it and
+  adds nothing.
+- **Drawing what the frames before saw first is the second**: 4.3 to 1.7 ms. The pixels looked at fall from 40 a hair
+  pixel to 5, because a chunk the tile depths hide is not walked at all, and those that pass the hidden depth from 5 to
+  2.4. The rank prefix as the first pass does much less (4.5 ms, 26 pixels looked at): an eighth of the strands leaves
+  holes that the late pass, the slower of the two, then fills. Both together are worse than the frames before alone
+  (2.4 ms): the prefix adds chunks the frames before knew to be hidden. **With jitter on this second step is worth
+  less**: the final rasterizer is at 3.6 ms (`wStraight`) and 2.9 ms (`wCurly`), not 1.9 and 1.5.
+- **The saturation rule does nothing for these two** (their strands are opaque one by one) and costs 0.05 ms. It is
+  what culls where strands are just under a pixel wide.
+- **Hidden clusters** take three quarters of the strands of 591 of `wStraight`'s 1,024 clusters and 517 of `wCurly`'s
+  out of the pool (50,000 strands to 28,800 and 31,500): 0.26 and 0.41 ms less voxelizing, 0.05 and 0.07 ms less
+  classifying, and evaluation falls with it (0.17 to 0.09 ms, 0.60 to 0.33). With jitter on fewer clusters stay
+  hidden (about 300 of `wStraight`'s, 45,000 strands): a cluster counts as seen when any pixel of it passes the hidden
+  depth, and under jitter more are drawn before what hides them.
+- **The shade list follows the rasterizer**: 245,000 lit vertices to 80,000 (`wStraight`), 0.79 to 0.32 ms of shading,
+  because a hidden strand no longer marks its vertices.
+- **The image does not change**, to within what two captures of the reference differ by: a mean of 0.007 to 0.03
+  levels, a 99.9th percentile of 1 to 5 and a worst 16x16 block of 2.5 to 4.5 in every row, the reference's own
+  repeat included (the columns drift upward together over the run).
+
+**Coverage only where it is used** (the third required item) is the marked pixel: a strand that covers its pixel whole
+adds nothing, and the composite reads the mark. Adds fall from 35 a hair pixel to 0.5. A1's `coverage_saturation` lost
+10% to 25% on sparse hair because it paid a load of the coverage texel on every footprint pixel to save an add on few;
+here the test is the load of the hidden depth, which replaces the load of the opaque depth the rasterizer made anyway.
+For strands thinner than a pixel the adds are all still made: every one of them is used (below).
+
+### Where the final rasterizer's time is
+
+`wStraight` at 0.4 m, 2560x1600, per pixel that shows hair:
+
+| | Direct | Culled, jitter off | Culled, jitter on |
+|---|---:|---:|---:|
+| Footprint pixels looked at | about 114 | 5.1 | 19.4 |
+| ... that pass the opaque and hidden depths | 35.0 | 2.4 | 4.0 |
+| Coverage adds | 35.0 | 0.5 | |
+| Layer writes (a pixel under several strands counts for each) | 7.9 to 9.5 | 2.4 | |
+| Chunks drawn by the first pass, millions (of 4.6 to 7.2 in the frame) | | 0.74 | 2.94 |
+| Late chunks found not hidden, and drawn | | under 10,000 | 148,764 |
+
+- The first pass draws 2.4 strands a hair pixel where 1 would do, and 4 with jitter: it draws every chunk in front of
+  the *largest* hidden depth of an 8x8 tile, in no order, so the strands between the nearest and the farthest surface
+  of a tile all pass until the nearest has been drawn. With 16-pixel tiles it was 2.8 and 0.15 ms more (jitter off).
+- The late pass's tests of 3.9 million hidden chunks cost 0.03 to 0.1 ms (measured by turning it off), and the classify
+  pass 0.21 to 0.27 ms: time spent on hair that is not drawn.
+- The rest is the first pass's memory traffic: a load of the hidden depth for every pixel looked at, and for those that
+  pass an atomic minimum on it, a load of the third layer and one to three atomic minimums on the layers; then the
+  per-frame clears of five full-screen targets and the two passes over the hair's tiles.
+- **The composite's time has two values** between rows of one session, 0.39 and 0.85 ms at 2560x1600 with the same
+  hair on screen, on both rasterizers; which one a row gets was not explained. Totals carry whichever the row had.
+
+### Where it is used, and where it loses
+
+The culled rasterizer is the faster of the two only where hair hides hair strand by strand. Forced on everywhere
+against the direct one (jitter off, on an earlier build of this step, as an indication):
+
+| View | Direct: raster | All six | Culled, forced: classify + raster | All six | | Strands in the pool | Footprint pixels past the depths, millions |
+|---|---:|---:|---:|---:|---|---:|---:|
+| `wStraight`, 0.4 m | 12.76 | 14.63 | 1.82 | 2.94 | | 50,000, 29,279 | 65.1, 4.5 |
+| 0.8 m | 2.87 | 4.36 | 2.97 | 4.45 | | 50,000, 50,000 | 22.7, 16.1 |
+| 3.2 m | 0.52 | 1.46 | 0.79 | 1.69 | | 47,878, 47,878 | 5.5, 4.0 |
+| 25.6 m | 0.19 | 0.46 | 0.32 | 0.61 | | 7,160, 7,160 | 0.1, 0.1 |
+| `wCurly`, 0.4 m | 10.93 | 14.19 | 1.51 | 3.20 | | 50,000, 31,875 | 69.5, 3.3 |
+| 0.8 m | 2.83 | 5.80 | 3.27 | 6.17 | | 50,000, 50,000 | 25.4, 17.6 |
+| Sparse procedural groom, 0.4 m | 3.47 | 6.70 | 3.78 | 6.78 | | 30,000, 26,817 | 15.4, 15.4 |
+| 0.8 m | 1.48 | 3.88 | 1.83 | 4.24 | | 30,000, 28,082 | 8.5, 8.5 |
+| 3.2 m | 0.42 | 2.04 | 0.73 | 2.30 | | 29,550, 28,335 | 2.1, 2.1 |
+| 100 m | 0.17 | 0.31 | 0.30 | 0.44 | | 1,442, 1,412 | 0.0, 0.0 |
+| Fine dense groom, 0.4 m | 9.60 | 15.89 | 9.77 | 15.65 | | 120,000, 104,791 | 61.6, 46.5 |
+| 1.6 m | 1.85 | 5.83 | 2.62 | 6.22 | | 120,000, 111,265 | 17.0, 13.2 |
+| Crowd, near camera | 1.05 | 5.87 | 1.75 | 6.11 | | 293,838, 267,265 | 6.5, 6.5 |
+| Crowd, far camera | 0.26 | 0.95 | 0.46 | 1.17 | | 99,004, 90,161 | 0.2, 0.2 |
+| Crowd, facing away | 0.20 | 0.42 | 0.36 | 0.58 | | 0, 0 | 0.0, 0.0 |
+
+So `raster` `auto` picks by the strand width on screen: the culled rasterizer from `auto_width_pixels` (the groom's
+widest strand, at the distance of the middle of its bounds), the direct one below. Around the threshold, with jitter
+on: at 0.85 pixels (0.6 m) the culled rasterizer is ahead (`wStraight` 3.07 ms against 4.05, `wCurly` 3.39 against 3.80), and at 0.64 pixels (0.8 m) it is behind (2.89 against 2.79, 3.01 against 2.57), so the default is 0.75. Without jitter it is ahead at both. The rows are in the table above.
+
+With `auto`, every view outside the close-ups costs what it did (jitter off; the direct rasterizer's time does not
+depend on it):
+
+| View | Direct: raster | All six | `auto`: classify + raster | All six | Rasterizer | Strands in the pool | Footprint pixels past the depths, millions |
+|---|---:|---:|---:|---:|---|---:|---:|
+| Sparse procedural groom, 0.4 m | 3.41 | 6.70 | 3.46 | 6.74 | direct | 30,000, 30,000 | 15.4, 15.4 |
+| 0.8 m | 1.44 | 4.09 | 1.44 | 4.01 | direct | 30,000, 30,000 | 8.5, 8.5 |
+| 1.6 m | 0.69 | 2.46 | 0.70 | 2.54 | direct | 30,000, 30,000 | 4.2, 4.2 |
+| 3.2 m | 0.43 | 2.15 | 0.43 | 2.11 | direct | 29,550, 29,550 | 2.1, 2.1 |
+| 6.4 m | 0.24 | 0.90 | 0.24 | 0.92 | direct | 18,763, 18,763 | 0.7, 0.7 |
+| 25.6 m | 0.17 | 0.38 | 0.16 | 0.37 | direct | 4,979, 4,979 | 0.0, 0.0 |
+| 100 m | 0.16 | 0.30 | 0.16 | 0.30 | direct | 1,442, 1,442 | 0.0, 0.0 |
+| `wStraight`, 0.4 m | 11.74 | 13.57 | 1.82 | 2.89 | culled | 50,000, 28,823 | 65.1, 4.5 |
+| 0.8 m | 2.89 | 4.46 | 2.89 | 4.46 | direct | 50,000, 50,000 | 22.7, 22.7 |
+| 1.6 m | 1.14 | 2.46 | 1.15 | 2.50 | direct | 50,000, 50,000 | 11.4, 11.4 |
+| 3.2 m | 0.55 | 1.54 | 0.55 | 1.59 | direct | 47,878, 47,878 | 5.5, 5.5 |
+| 6.4 m | 0.28 | 0.96 | 0.28 | 0.96 | direct | 26,663, 26,663 | 1.6, 1.6 |
+| 25.6 m | 0.19 | 0.46 | 0.19 | 0.46 | direct | 7,160, 7,160 | 0.1, 0.1 |
+| 100 m | 0.17 | 0.30 | 0.16 | 0.29 | direct | 2,183, 2,183 | 0.0, 0.0 |
+| `wCurly`, 0.4 m | 10.59 | 13.79 | 1.53 | 3.18 | culled | 50,000, 31,114 | 69.5, 3.4 |
+| 0.8 m | 2.75 | 5.57 | 2.78 | 5.68 | direct | 50,000, 50,000 | 25.4, 25.4 |
+| Crowd, near camera | 1.07 | 5.95 | 1.07 | 5.96 | direct | 293,838, 293,838 | 6.5, 6.5 |
+| Crowd, far camera | 0.25 | 0.94 | 0.25 | 0.94 | direct | 99,004, 99,004 | 0.2, 0.2 |
+| Crowd, facing away | 0.20 | 0.40 | 0.19 | 0.40 | direct | 0, 0 | 0.0, 0.0 |
+| DLSS Quality: `wStraight`, 0.4 m | 4.60 | 6.45 | 0.93 | 2.05 | culled | 50,000, 30,687 | 32.0, 2.2 |
+| DLSS Quality: `wCurly`, 0.4 m | 4.20 | 7.54 | 0.98 | 2.65 | culled | 50,000, 35,975 | 34.4, 1.9 |
+| DLSS Quality: `wCurly`, 0.8 m | 1.65 | 4.02 | 1.65 | 4.03 | direct | 50,000, 50,000 | 17.0, 17.0 |
+| DLSS Quality: fine dense groom, 0.4 m | 5.65 | 10.99 | 5.53 | 10.82 | direct | 120,000, 120,000 | 41.1, 41.1 |
+| DLSS Quality: fine dense groom, 1.6 m | 1.28 | 5.38 | 1.28 | 5.51 | direct | 118,233, 118,233 | 11.3, 11.3 |
+| DLSS Quality: crowd, near camera | 0.57 | 3.52 | 0.57 | 3.54 | direct | 209,775, 209,775 | 3.5, 3.5 |
+| DLSS Quality: crowd, far camera | 0.15 | 0.65 | 0.15 | 0.65 | direct | 69,500, 69,500 | 0.1, 0.1 |
+| DLSS Quality: crowd, facing away | 0.11 | 0.30 | 0.12 | 0.30 | direct | 0, 0 | 0.0, 0.0 |
+| DLSS Quality: crowd, fly-through | 0.44 | 2.95 | 0.45 | 3.00 | direct | 77,791, 77,550 | 1.6, 1.6 |
+
+### Fine hair
+
+The two reference models have strands of 0.3 mm. A groom of 120,000 strands of 88 to 66 micrometres, about a real
+head's, at the same 0.4 m has strands a third of a pixel wide, and **costs 15 to 17 ms, with either rasterizer**:
+
+| Fine dense groom | Evaluate | Voxelize | Raster | Shade | Composite | Hair pixels | Footprint pixels past the depths | Lit vertices |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0.4 m, 2560x1600 | 1.55 | 1.98 | 9.19 | 3.53 | 0.54 | 2,091,715 | 61,563,592 | 1,016,514 |
+| 1.6 m, 2560x1600 | 1.58 | 1.22 | 1.84 | 2.52 | 0.09 | 130,136 | 17,020,621 | 749,741 |
+| 0.4 m, DLSS Quality | 1.31 | 2.02 | 5.65 | 2.99 | 0.23 | 945,364 | 41,071,265 | 864,128 |
+
+- No strand covers a pixel, so none hides anything by itself, and a pixel's opacity is the sum of some thirty strands'
+  coverage: 61.6 million footprint pixels pass the opaque depth for 2.09 million hair pixels, 29 each, at a coverage of
+  a third. The saturation rule can stop at 10 pixels' worth, which is itself 30 strands. With the culled rasterizer
+  forced, 47 million still pass and the time is the same.
+- What brings the cost down is fewer, wider strands: with the detail level forced (`hair.lod` `force_detail`), which
+  widens the kept strands by the same factor, the same view costs 13.6 ms at 0.7, 10.3 at 0.5 and 5.6 at 0.35 (jitter
+  off), where strands reach a pixel and the culled rasterizer takes hold (rasterizer 2.3 ms, 6.1 million footprint
+  pixels in place of 52 million). It also changes the picture: at 0.35 the strands are visibly coarser, at 0.5 a
+  little. This is what the Indiana Jones renderer's budgets do (2,000 segments a 64x64 tile, 2 million a frame, strand
+  count traded for thickness), and it is the change this step did not build.
+- The select pass's detail rule cannot do it as it is: it looks at how far apart a cluster's strands are across the
+  view, 3.4 pixels here, and not at how many lie behind one another.
+
+### Reveal cases
+
+The frames before are only a guess at what to draw first; what the first pass leaves out is tested against the frame's
+own hidden depths. The check is what the composite shows, under motions that make the guess as wrong as it can be,
+with the culled rasterizer (hidden clusters on) against the reference (nothing culled, every strand): the hair alpha
+summed over the frame, the pixels holding hair and the pixels taking hair's depth, as means over 320 frames. These
+runs are not profiled, so the jitter is on.
+
+| Groom | Motion | Hair alpha, culled over reference | Hair pixels | Depth pixels | Late layer writes a frame: mean, most | Footprint pixels past the depths: culled, reference | Strands in the pool, culled |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `wStraight`, 0.6 m | Still | 1.00000 | 1.00000 | 1.00000 | 1,160, 2,383 | 10.7 M, 30.5 M | 50,000 |
+| `wStraight`, 0.6 m | A cut every frame | 1.00000 | 1.00000 | 1.00000 | 4,523, 21,294 | 13.4 M, 29.9 M | 50,000 |
+| `wStraight`, 0.6 m | A cut every 3 frames | 1.00000 | 1.00000 | 1.00000 | 9,490, 100,191 | 14.0 M, 29.9 M | 49,998 |
+| `wStraight`, 0.6 m | Orbit, 6 degrees a frame | 1.00891 | 1.00885 | 1.00885 | 6,210, 46,148 | 14.9 M, 31.2 M | 49,999 |
+| `wStraight`, 0.6 m | Orbit, 20 degrees a frame | 0.99582 | 0.99584 | 0.99584 | 2,540, 16,502 | 15.7 M, 31.4 M | 50,000 |
+| `wStraight`, 0.6 m | Head turning 60 degrees each way, 40 frames a cycle | 0.99940 | 0.99943 | 0.99943 | 17,333, 442,754 | 15.6 M, 31.3 M | 49,997 |
+| `wStraight`, 0.6 m | Camera panning the groom out of view and back, 30 frames a cycle | 0.99256 | 0.99256 | 0.99255 | 69,542, 640,430 | 5.6 M, 23.1 M | 47,654 |
+| `wStraight`, 0.6 m | Simulated, head swinging 12 cm each way | 0.99988 | 0.99988 | 0.99988 | 2,153, 14,073 | 14.0 M, 30.7 M | 50,000 |
+| `wCurly`, 0.5 m | Still | 1.00000 | 1.00000 | 1.00000 | 1,300, 2,012 | 3.4 M, 44.8 M | 45,130 |
+| `wCurly`, 0.5 m | A cut every frame | 1.00000 | 1.00000 | 1.00000 | 5,343, 42,214 | 6.5 M, 37.5 M | 49,441 |
+| `wCurly`, 0.5 m | A cut every 3 frames | 1.00051 | 1.00051 | 1.00050 | 34,225, 510,112 | 6.5 M, 37.5 M | 49,500 |
+| `wCurly`, 0.5 m | Orbit, 6 degrees a frame | 1.03716 | 1.03698 | 1.03698 | 17,392, 68,807 | 6.9 M, 41.2 M | 49,512 |
+| `wCurly`, 0.5 m | Orbit, 20 degrees a frame | 0.99692 | 0.99695 | 0.99695 | 37,802, 144,756 | 7.3 M, 42.3 M | 49,928 |
+| `wCurly`, 0.5 m | Head turning 60 degrees each way, 40 frames a cycle | 1.00209 | 1.00209 | 1.00209 | 40,233, 1,031,833 | 6.6 M, 42.7 M | 49,476 |
+| `wCurly`, 0.5 m | Camera panning the groom out of view and back, 30 frames a cycle | 0.98418 | 0.98418 | 0.98418 | 17,025, 296,937 | 3.6 M, 35.8 M | 35,642 |
+| `wCurly`, 0.5 m | Simulated, head swinging 12 cm each way | 1.00268 | 1.00275 | 1.00275 | 16,225, 110,424 | 4.5 M, 45.3 M | 42,867 |
+
+- **A cut every frame** (the camera alternating between the front and a view from 140 degrees round) **gives the same
+  sums to five figures**, as the still view does. The frames are the same two in both runs, so this row is a
+  comparison of like with like; so is `cut every 3 frames` but for which of the two views the sample holds more of.
+- The orbit, turn, pan and swing rows compare two runs whose frames are not the same poses; the reference against itself, run the same way on `wStraight`, gives 1.009 (orbit at 6 degrees), 0.998 (at 20), 1.0003 (turn), 0.993 (pan) and 0.999 (swing), so `wStraight`'s rows say only that the two agree to what two such runs differ by. The reference was not run against itself on `wCurly`, whose orbit row is 3.7% off (3.3% on an earlier build of this step): the samples are 320 frames of a 60-frame orbit, and where in the orbit a run's sample starts is not controlled.
+- `late layer writes` is the hair the guess missed and the frame drew.
+- **What a reveal does cost is strands, for four frames.** A cluster that was hidden comes back with the quarter of its
+  strands it kept, at their true width, and has them all four frames later. In the cut rows the sums are equal because
+  under jitter nearly every cluster of these grooms counts as seen within a frame or two (the strand column); a cluster that has been hidden
+  for a while (the far side of a head, turned to face the camera) is thinner than it should be for those frames. With
+  `hidden_detail` 1 nothing is. The first form of this drew the kept strands wider, to carry the cluster's coverage;
+  they poked through the hair in front, were seen, were drawn thin, and were hidden again, round and round (`wCurly`:
+  1,740 late layer writes a frame and 46,755 strands in a still view without jitter, against 0 and 31,500).
+- In the captures taken in motion (`hairA5\reveal_r1`, `hairA5\reveal_r2`, `hairA5\reveal_r3` in the session's scratch
+  folder) no frame of the culled rasterizer shows a hole or a missing lock.
+
+### Temporal quality, level of detail and self-shadowing
+
+The earlier steps' measures, on the layered path with the direct rasterizer and with the culled one forced
+(`BR_HAIR_RASTER`), in separate runs, on the build before the last change to the guess. Their grooms have strands a
+fraction of a pixel wide, where `auto` picks the direct rasterizer; forcing the culled one is the harder test. The
+captures are of jittered frames.
+
+| Measure | Direct | Culled, forced |
+|---|---|---|
+| Still noise (per-pixel standard deviation of luma over 8 captures), sparse procedural groom at 0.8, 3.2 and 12.8 m | 0.088, 0.058, 0.066 | 0.087, 0.056, 0.067 |
+| ... `wCurly` | 0.083, 0.052, 0.059 | 0.076, 0.049, 0.072 |
+| Fine contrast (standard deviation of a Laplacian), still: sparse groom | 14.1, 9.0, 20.1 | 14.1, 8.9, 20.1 |
+| ... `wCurly` | 25.6, 13.6, 26.4 | 25.4, 13.5, 26.7 |
+| Fine contrast with the head swaying 2 cm: sparse groom | 7.0, 7.4, 19.1 | 7.6, 7.0, 18.9 |
+| ... `wCurly` | 12.1, 11.7, 25.2 | 13.8, 11.8, 25.1 |
+| Camera slide past the sparse groom: two frames after the stop against the converged image, levels | 3.42 | 3.29 |
+| ... two converged images 30 frames apart | 0.68 | 0.71 |
+| ... fine contrast just stopped, converged | 13.5, 18.3 | 12.8, 18.6 |
+| One strand leaving (detail swept 0.9 to 0.5): largest 8x8 block change a step, median and 90th percentile | 13.0, 50.8 | 12.3, 50.2 |
+| ... the same state captured twice | 26.6 | 26.7 |
+| ... true area over the sweep, pixels | 34,224 to 34,609 | 34,227 to 34,612 |
+| Dolly 2 m to 80 m, live LOD: mean difference between consecutive captures, culled over direct | | 1.02 |
+| Self-shadowing against forced detail (`wStraight`, sun behind, blond; mean luma at detail 1, 0.5, 0.25, 0.1) | 154.28, 154.05, 153.89, 154.81 | 154.28, 154.07, 153.90, 154.80 |
+| ... the transmittance view's mean at those | 137.05, 136.81, 136.45, 136.28 | 137.02, 136.79, 136.46, 136.28 |
+
+- Nothing separates the two columns. The still noise is that of [Layered path measurements](#layered-path-measurements)
+  (0.06 to 0.11 there).
+- The one-strand measure is not what it was in that section (1.3 at the median, 1.2 for the same state twice): the hair
+  now casts a shadow whose coverage is dithered anew each frame ([Shadow casting](#shadow-casting)), and the blocks
+  under it change by tens of levels between any two captures. A leaving strand could not be found in it on either
+  rasterizer; the measure would have to mask the shadow to be useful again.
+- The dolly's culled run starts with 22,085 of the 24,000 strands: the clusters on the far side of the head are hidden
+  and keep a quarter of theirs.
+- The forced-detail rows bypass the hidden clusters' scale (a forced level is taken as it is). What hidden clusters do
+  to the density is measured apart:
+
+| View, culled rasterizer, jitter off | Strands in the pool: hidden clusters at a quarter, all | Voxel deposits | Transmittance view, mean | ... mean difference from all | The same with all, captured again |
+|---|---:|---:|---:|---:|---:|
+| `wStraight`, 0.4 m | 35,837, 50,000 | 12.2 M, 16.7 M | 197.54, 197.61 | 0.144 | 0.150 |
+| `wStraight`, 0.6 m, from 120 degrees round | 42,083, 50,000 | 14.2 M, 16.7 M | 188.92, 188.95 | 0.108 | 0.120 |
+| `wCurly`, 0.4 m | 31,469, 50,000 | 19.7 M, 31.2 M | 207.40, 207.40 | 0.150 | 0.158 |
+
+  A third of the strands out of the pool leaves what a lit vertex sees of the volume where it was: the kept strands
+  deposit for the others. With jitter on the same three views keep 47,100, 50,000 and 46,600 strands, and differ less.
+
+### Memory
+
+The culled rasterizer adds four buffers, 52 MB (`Hair.RasterItems` 32, `Hair.PoolLate` 16, `Hair.ClusterState` 4), and
+six textures, 63 MB at 2560x1600; the two cluster lists' rows grew from 32 to 48 bytes (2 MB). Pooled buffers are
+568 MB (513 before), and the layered path's targets 184 MB (121 before).
+
+### Scenarios and checks
+
+**Builds and tests.** `HairPlugin`, `HairCoreTests` and `BasicRendererDemo` build; `HairCoreTests` passes.
+
+**Scenarios.** All five (seven runs) pass on the surface path and with `HAIR_PATH=layered`, on the final build.
+`hair_lod_sweep.cs` gained two checks on the layered path (464 where there were 462): with each rasterizer forced in turn
+at one camera, the culled one is given the strands the direct one is, and brings hair into the same pixels to 0.5%. They
+are there because `auto` picks the direct rasterizer for every scenario's groom (strands a fraction of a pixel wide), so
+that without them no scenario would run the culled one. No existing check was changed.
+
+With the culled rasterizer forced for a whole run (`BR_HAIR_RASTER=culled`) `hair_single.cs`, `hair_sim_lod.cs` and
+both crowd runs pass, and two scenarios fail checks that assume what it changes on purpose. `hair_lod_sweep.cs`, five:
+every strand drawn at the near end, the count never rising along the dolly, the frozen selection, the occluded groom
+still selected with the same strands (hidden clusters keep a quarter of their strands, so the count follows what is
+seen), and the covered pixels behind the wall counted as rejected by the opaque depth (their chunks are skipped whole
+and no pixel is counted). `hair_sim.cs`, one: the rigid groom's strand count before and after the simulation (18,724
+and 18,805, for the same reason).
+
+**Invariants.** `stale_guides_drawn`, `unseen_strands_drawn`, `overflow_clusters` and `raster_items_overflow` are 0 in
+every frame of the reveal runs and of the scenarios. There is no counter for hair that should have been drawn and was
+not: by construction a chunk is drawn by the first pass or tested by the late pass against the frame's own hidden
+depths, and the reveal table's equal sums under a cut every frame are the measurement of it.
+
+**Debug layer.** A control-pipe session with the D3D12 debug layer on, on the crowd with the culled rasterizer forced:
+every `first_pass`, the two occlusion rules off and on, `saturation` 6, `opaque_coverage` off, `hidden_detail` 1 and
+0.25, `raster_profile`, the late pass off, `direct`, `auto` with the threshold at 0 and at its default, then the
+earlier steps' session (materials, the volume's controls, shadows, every debug view, a capture, the simulation) with
+the culled rasterizer left forced. Hair is in the same pixels to 0.1% across all of them (259,000 to 259,150). The
+layer's messages are those of the earlier steps' sessions (ids 575, 579, 989, 1477, 1508, 1047, 580, 576, 572, 274,
+1281, 577, 570, 32) and none names a hair resource. The stage script is stopped by the layer within a few frames, as
+before, so the camera could not be moved to a groom of wide strands: the session ran the culled rasterizer on the
+crowd only.
+
+**Found and not fixed.** Changing the render resolution with hair loaded on the layered path (`upscaler.set` with a
+new quality) stops the demo: `HairRasterPass failed to record: Recording attempted to resolve an undeclared resource`.
+It did so before this step's changes (the first baseline run hit it). The measurements at DLSS Quality set the quality
+before loading the groom. The profiler's deterministic mode leaving the jitter off is described above.
+
+**Captures.** In the session's scratch folder `hairA5`: `pairs\sheet_pairs.png` (the reference, the culled rasterizer
+and their difference times 16 for three views; the pairs cannot be told apart, and the difference is a faint dotted
+outline of the silhouette, as between two captures of the reference), `reveal_r3\sheet_r3_culled.png` (the culled
+rasterizer in each of the eight motions; the hair is whole in all of them), `detail_t1\sheet.png` (the fine groom at
+forced detail 1, 0.5, 0.35 and 0.15).
+
 ## Units and axes
 
 - **Units.** `GroomSource`, `ScalpMesh`, `BuiltGroom` and `.groom` files are in metres. Importers convert:
@@ -2792,5 +4926,7 @@ root (`build\<preset>\BasicRenderer`).
 
 `HairCoreTests` is one executable with its own checks and no test framework:
 [`HairCoreTests.cpp`](../Plugins/Hair/tests/HairCoreTests.cpp) holds `main` and the generator, `.hair` and
-`GroomSource` tests, `GroomBuilderTests.cpp` the builder, LOD and `.groom` tests, and `AlembicGroomTests.cpp` the
-importer tests, which write their own archives with `OCurves`. Temporary files go to the system temp directory.
+`GroomSource` tests, `GroomBuilderTests.cpp` the builder, LOD and `.groom` tests, `AlembicGroomTests.cpp` the
+importer tests, which write their own archives with `OCurves`, and `HairBsdfTests.cpp` the tests of the scattering
+function ([The hair shading model](#the-hair-shading-model)), which take about five seconds, and
+`HairScatterTests.cpp` those of multiple scattering and the density volume's arithmetic. Temporary files go to the system temp directory.

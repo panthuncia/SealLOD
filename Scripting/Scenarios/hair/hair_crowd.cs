@@ -170,6 +170,7 @@ public sealed class HairCrowd : Scenario
         commands.Invoke("hair.clear");
         commands.Invoke("hair.lod", new { error_pixels = 1.0, max_width_scale = 8.0, min_detail = 0.02, force_detail = 0.0, segment_pixels = 4.0, freeze = false });
         if (Environment.GetEnvironmentVariable("HAIR_COVERAGE") is string coverage) commands.Invoke("hair.lod", new { coverage }); // off: the opaque form
+        if (Environment.GetEnvironmentVariable("HAIR_PATH") is string path) commands.Invoke("hair.render", new { path }); // layered: the composited path
         commands.Invoke("hair.debug", new { view = "off" });
         var grooms = new object[] {
             new { style = "straight", strands = 12000, seed = 21, radius = 0.5, length = 0.9, droop = 6.0, root_width = 0.0004, tip_width = 0.0002, points = 17 },

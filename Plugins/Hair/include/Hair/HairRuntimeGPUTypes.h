@@ -11,6 +11,21 @@
 #include "Hair/HairGPUTypes.h"
 
 namespace br::hair {
+
+// HLSL's float4 and uint3, for HairVolumeGPU.
+struct Float4 {
+    float x = 0.0f;
+    float y = 0.0f;
+    float z = 0.0f;
+    float w = 0.0f;
+};
+struct UInt3 {
+    std::uint32_t x = 0u;
+    std::uint32_t y = 0u;
+    std::uint32_t z = 0u;
+};
+using float4 = Float4;
+using uint3 = UInt3;
 #endif
 
 // One groom attached to one scene entity. The bases are rows of the plugin's pooled buffers; a groom's aggregates
@@ -24,12 +39,14 @@ struct HairInstanceGPU {
     uint guideCount;
     uint pointBase; // HairPackedPoint
     uint pointCount;
-    uint reserved0;
+    // The instance's first cluster in the cluster state buffer (HAIR_CLUSTER_STATE_*): what its clusters showed of
+    // themselves in the last frames. HAIR_INVALID_INDEX: it has none, and its clusters always count as in front.
+    uint clusterSeenBase;
     uint perObjectIndex;       // the entity's row of Builtin::PerObjectBuffer: model and previous model matrix
     uint skinningInstanceSlot; // row of SkinningInstanceInfo; HAIR_INVALID_INDEX: the roots follow the entity rigidly
     uint attachBone;           // every root follows this joint; HAIR_INVALID_INDEX: each root's own joints and weights
-    float3 baseColor;          // the placeholder material the resolve writes: linear base colour and perceptual roughness
-    float roughness;
+    float3 baseColor;          // the surface path's placeholder material, which the resolve writes: linear base colour
+    float roughness;           // and perceptual roughness. The layered path does not read them.
     // HairGuidePoint: the instance's guide state, one row per point of every guide. The rows are lent to an instance
     // while it is simulated or keeps a shape (HairRuntime's guide rows); HAIR_INVALID_INDEX while it has none, and then
     // HAIR_SIM_FLAG_ENABLED is never set.
@@ -41,9 +58,19 @@ struct HairInstanceGPU {
     // are simulated, and a guide of level k >= 1 when simLevel >= k + its HairGuideBinding::randomOffset. At the
     // groom's level count every guide is. 0 while HAIR_SIM_FLAG_ENABLED is set: the guides blend back to the rigid pose.
     float simLevel;
+    // The fibre's material on the layered path (HairBsdfShared.h): Chiang's parameters, as HairBsdfMaterial has them,
+    // and how far a strand's own material may be from them. A strand's absorption is sigmaA times
+    // 1 + melaninVariation * r and its longitudinal roughness betaM times 1 + roughnessVariation * r', r and r' in
+    // [-1, 1) and fixed for the strand.
+    float melaninVariation;
+    float roughnessVariation;
     uint pad0;
+    float3 sigmaA;
+    float betaM;
+    float betaN;
+    float alpha; // radians
+    float eta;
     uint pad1;
-    uint pad2;
 };
 
 // HairInstanceGPU::simFlags.
@@ -191,8 +218,171 @@ struct HairFrameGPU {
     uint coverageMode;       // HAIR_COVERAGE_*: how the rasterizer treats a strand thinner than its one-pixel footprint
     uint coverageAccumulate; // not 0: the rasterizer adds every segment's coverage into the coverage target
     float detailExponent;    // the detail level is (strand spacing / lodErrorPixels) to this power: 1 spacing, 2 area
-    uint pad0;
+    uint renderPath;         // HAIR_PATH_*: how hair gets into the frame
+    // The layered path (HAIR_PATH_LAYERED).
+    float depthAlpha;         // composite: a pixel whose hair alpha is at least this takes hair's depth and motion vector
+    float coverageSaturation; // raster: the coverage target stops taking adds at this many pixels' worth; 0: never
+    float reactiveStrength;   // composite: scale of the upscaler's reactive mask; 0: the mask is all zero
+    float reactivePixels;     // ... a hair pixel is fully reactive when hair and background motion differ by this many pixels
+    float ambientScale;       // shade: scale of the environment term
+    uint lightLookup;         // shade: HAIR_LIGHTS_*
+    uint shadeMask;           // shade: HAIR_SHADE_*, what a vertex's colour is the sum of
+    // The density volumes (HairVolumeGPU): the layered path's self-shadowing and multiple scattering.
+    uint volumeFlags;         // HAIR_VOLUME_FLAG_*; 0: no volume is built or read, and hair is lit as without one
+    uint volumeSteps;         // shade: samples of a march toward a light
+    uint volumeEnvironmentSteps; // ... and toward one of the environment's directions
+    float volumeBias;         // shade: voxels a march skips at its start, where the vertex's own neighbours are
+    float volumeDensityFactor; // shade: Zinke et al.'s d_f and d_b, the share of a fibre's surroundings that holds hair
+    uint volumeScalpDepth;    // voxelize: voxels of the opaque shell marked under every root; 0: none
+    uint volumeInstanceCount; // rows of the volume buffer in use: one per instance row
+    // Shadow casting (hairShadow.hlsl): hair in the sun's virtual shadow map.
+    uint shadowFlags;           // HAIR_SHADOW_FLAG_*; 0: hair casts no shadow, and hair is lit exactly as without
+    float shadowDetailScale;    // a shadow texel counts as this many when the shadow view picks its level of detail
+    float shadowForceDetail;    // > 0: every cluster takes this detail level in the shadow view
+    uint shadowClusterCapacity; // rows of the shadow cluster list
+    uint shadowPoolCapacity;    // rows of the shadow pool
+    float shadowReceiverBias;   // shade: metres an opaque occluder inside a groom's box must be nearer the sun than a vertex to shadow it
+    // The culled rasterizer (hairRasterCulled.hlsl), the layered path's.
+    uint rasterFlags;           // HAIR_RASTER_FLAG_*; 0: the direct rasterizer (hairRaster.hlsl) draws the layered path
+    uint rasterItemCapacity;    // rows of the first pass's item list
+    uint saturationUnits;       // HAIR_RASTER_FLAG_OCCLUDE_SATURATED: the near coverage (HAIR_COVERAGE_UNIT) at which a pixel hides what is behind its split depth
+    // Select: a cluster that drew no pixel in the last frames (behind the head, or behind hair that hides it) is drawn
+    // at this fraction of its detail level. Its scale moves toward that by detailRateDown a frame, and back to 1 by
+    // detailRateUp a frame once it draws a pixel.
+    float hiddenDetail;
+    uint clusterSeenCapacity;   // clusters the cluster state buffer holds
+    float hintDecay;            // the first pass's guess keeps this share a frame of how far it is past the newest tile depth; 0: the last frame's depths alone
+    float detailRateUp;
+    float detailRateDown;
 };
+
+// HairFrameGPU::rasterFlags.
+#define HAIR_RASTER_FLAG_CULLED 1u            // the culled rasterizer draws the layered path
+// A footprint pixel a strand covers whole (coverage 1) adds HAIR_COVERAGE_OPAQUE to the pixel's coverage, not 1: nothing
+// shows through it, so whatever is behind it adds nothing, wherever among the pixel's strands it is.
+#define HAIR_RASTER_FLAG_OPAQUE_COVERAGE 2u
+#define HAIR_RASTER_FLAG_OCCLUDE_OPAQUE 4u    // ... and it lowers the pixel's hidden depth to its own: hair behind it is skipped
+// A pixel whose coverage in front of its split depth reaches saturationUnits lowers its hidden depth to the split depth.
+#define HAIR_RASTER_FLAG_OCCLUDE_SATURATED 8u
+// Which chunks the first pass draws; the others wait for the late pass, which tests them against the hidden depths the
+// first pass left. Neither: the first pass draws every chunk and there is no late pass.
+#define HAIR_RASTER_FLAG_FIRST_PREVIOUS 16u   // chunks of clusters seen in the last frames that the last frame's hidden depths do not hide
+#define HAIR_RASTER_FLAG_FIRST_PREFIX 32u     // every chunk of the first eighth of each cluster's drawn strands
+#define HAIR_RASTER_FLAG_PROFILE 64u          // count loop iterations by wave, for the lane occupancy
+// The culled rasterizer has just taken over from the direct one: the cluster state is not this frame's, and the select
+// pass leaves every cluster's detail scale as it is.
+#define HAIR_RASTER_FLAG_HOLD_DETAIL 256u
+#define HAIR_RASTER_FLAG_SKIP_LATE 128u       // for measurement only: the late pass draws nothing, so hair the first pass left out is missing
+
+// The culled rasterizer cuts a segment into chunks of this many pixels along its major axis, aligned to the screen, and
+// keeps the largest hidden depth of every tile of this many pixels each way.
+#define HAIR_RASTER_TILE_SHIFT 3u
+#define HAIR_RASTER_TILE_SIZE 8u
+// An item of the first pass: a pool row in the low bits and one of its chunks above them.
+#define HAIR_RASTER_ITEM_ROW_BITS 22u
+// A row's late chunks are a mask: bit i is chunk i, and the last bit every chunk from that one on.
+#define HAIR_RASTER_LATE_BITS 32u
+#define HAIR_COVERAGE_OPAQUE 16.0f
+// A depth field no hair depth reaches: "nothing is hidden", "everything is in front of the split".
+#define HAIR_DEPTH_BITS_FAR 0x7FFFFFFFu
+// Hair.Occlusion's low word is the pixel's split depth, with this bit set once hair has lowered the hidden depth: the
+// pixel's hair is opaque from there on, and the composite takes its remainder as saturated without a coverage sum.
+#define HAIR_OCCLUSION_SATURATED 0x80000000u
+// Hair.SplitGuess: the next frame's split depth in the low 31 bits, and this bit while the guess is not to come nearer.
+#define HAIR_SPLIT_GUESS_HOLD 0x80000000u
+// HairVisibleCluster::flags.
+#define HAIR_VISIBLE_FLAG_SEEN 1u // the cluster drew a pixel within the last two frames (or has no state)
+
+// The cluster state buffer: HAIR_CLUSTER_STATE_WORDS uints per cluster of every instance, from
+// (HairInstanceGPU::clusterSeenBase + cluster) * HAIR_CLUSTER_STATE_WORDS. The rasterizer stamps a cluster that draws a
+// pixel the hidden depths do not hide, and the select pass keeps the scale it draws the cluster's detail level with.
+#define HAIR_CLUSTER_STATE_WORDS 4u
+#define HAIR_CLUSTER_STATE_SEEN 0u   // frame number of the last pixel drawn
+#define HAIR_CLUSTER_STATE_SCALE 2u  // asuint of the detail scale, (0, 1]
+
+// HairFrameGPU::shadowFlags.
+#define HAIR_SHADOW_FLAG_ENABLED 1u  // hair is drawn into the sun's shadow map this frame
+#define HAIR_SHADOW_FLAG_TEMPORAL 2u // the coverage dither changes every frame; off: it is the texel's and the strand's own
+#define HAIR_SHADOW_FLAG_OPAQUE 4u   // every footprint texel is written: a strand shadows as if a texel wide
+
+// A shadow segment tests at most this many texels in one clipmap.
+#define HAIR_SHADOW_MAX_TEXELS_PER_SEGMENT 1024u
+
+// HairFrameGPU::shadeMask: the lobes of the lights' response (the low bits are HAIR_LOBE_*, HairBsdfShared.h) and the
+// environment term. All of them but in the debug views that show one alone.
+#define HAIR_SHADE_ENVIRONMENT 8u
+#define HAIR_SHADE_ALL 15u
+// Debug views of the density volume's part in a vertex's colour, in the same field: the colour written is then not a lit
+// colour.
+#define HAIR_SHADE_DEBUG_SHIFT 8u
+#define HAIR_SHADE_DEBUG_MASK 0xFu
+#define HAIR_SHADE_DEBUG_NONE 0u
+#define HAIR_SHADE_DEBUG_TRANSMITTANCE 1u  // what reaches the vertex of the first light through the hair, forward scattered light included
+#define HAIR_SHADE_DEBUG_FIBRE_COUNT 2u    // the fibres between the vertex and the first light: black none, through red and yellow to white at 16
+#define HAIR_SHADE_DEBUG_SCATTER_GLOBAL 3u // lit by the lights' forward scattered light alone (global multiple scattering)
+#define HAIR_SHADE_DEBUG_SCATTER_LOCAL 4u  // lit by the lights through the backscattering lobe alone (local multiple scattering)
+#define HAIR_SHADE_DEBUG_DENSITY 5u        // the volume's density at the vertex
+
+// HairFrameGPU::volumeFlags.
+#define HAIR_VOLUME_FLAG_ENABLED 1u         // volumes are built this frame and the shade pass marches them
+#define HAIR_VOLUME_FLAG_DUAL_SCATTERING 2u // shade: forward scattered light and the backscattering lobe; off: the fibres in front only shadow
+#define HAIR_VOLUME_FLAG_TRILINEAR 4u       // voxelize: a deposit is shared by the 8 voxels around it; off: the nearest takes it
+#define HAIR_VOLUME_FLAG_JITTER_FRAME 8u    // shade: a march's offset changes every frame; off: it is the vertex's own
+
+// The density volume of one instance: a box around its groom, in the entity's space, cut into cubic voxels. Row i of the
+// volume buffer belongs to instance row i. It is planned on the CPU every frame from the groom's size on screen
+// (HairRuntime.cpp's PlanVolumes) and filled from the frame's strand pool (hairVolume.hlsl). resolution.x is 0 for an
+// instance without one (out of view, over the budget, the feature off): its hair is lit as without a volume.
+//
+// A voxel is one uint of the voxel buffer, at voxelBase + x + resolution.x * (y + resolution.y * z):
+//   bits 30..0  fibre density: the summed length times diameter of the drawn strands' segments in the voxel over the
+//               voxel's volume, in 1 / HAIR_VOLUME_DENSITY_UNIT per metre. The diameters are the pool's, which carry the
+//               LOD's width scale, so a groom drawn with fewer, wider strands leaves the same density.
+//   bit  31     scalp: the voxel is under a strand's root, inside whatever the hair grows on. A march that reads one
+//               ends there: nothing comes through.
+struct HairVolumeGPU {
+    // World to voxel coordinates: voxel = (dot(worldToGrid0.xyz, p) + worldToGrid0.w, ...). Voxel (i, j, k) covers
+    // [i, i + 1) on each axis.
+    float4 worldToGrid0;
+    float4 worldToGrid1;
+    float4 worldToGrid2;
+    uint3 resolution;
+    uint voxelBase;
+    float voxelSize; // metres along each axis, in world space
+    uint pad0;
+    uint pad1;
+    uint pad2;
+};
+
+#define HAIR_VOLUME_DENSITY_UNIT 4096.0f
+#define HAIR_VOLUME_DENSITY_MASK 0x7FFFFFFFu
+#define HAIR_VOLUME_SCALP_BIT 0x80000000u
+// A segment's deposit is made at this many points along it at most: one per voxel it is long.
+#define HAIR_VOLUME_MAX_DEPOSITS_PER_SEGMENT 4u
+// The fibres a ray crosses per metre are the density times the sine of the angle between the ray and the fibres. The
+// volume keeps no directions: this is the mean of that sine over directions, pi / 4.
+#define HAIR_VOLUME_ISOTROPIC_SINE 0.785398163f
+// The scalp shell starts this many voxels under a root, so that no voxel a root's own vertex can be in is marked.
+#define HAIR_VOLUME_SCALP_OFFSET 2.0f
+// A march's first samples, where the hair nearest the vertex is and the density changes most from voxel to voxel, are
+// interpolated between the eight voxels around them; the others read the one voxel they are in.
+#define HAIR_VOLUME_INTERPOLATED_SAMPLES 2u
+
+// HairFrameGPU::renderPath. Surface: the nearest (accepted) segment of a pixel is resolved into the canonical surface
+// and lit by the renderer's deferred pass as an opaque surface (hairResolve.hlsl). Layered: the nearest three segments of
+// a pixel are kept with the summed coverage, every drawn strand vertex is lit by the hair light loop (hairShade.hlsl),
+// and the layers are blended over the lit frame (hairComposite.hlsl).
+#define HAIR_PATH_SURFACE 0u
+#define HAIR_PATH_LAYERED 1u
+
+// HairFrameGPU::lightLookup: where the shade pass takes a vertex's lights from. List: every active light, tested by its
+// range. Grid: the forward run of the vertex's froxel in the light grid, which only a recipe with ClusterLodAlphaTechnique
+// builds; without it a vertex in front of the nearest opaque surface gets no light at all.
+#define HAIR_LIGHTS_LIST 0u
+#define HAIR_LIGHTS_GRID 1u
+
+// The hair layers a pixel keeps on the layered path: the visibility target is the nearest, then two more.
+#define HAIR_LAYER_COUNT 3u
 
 // HairFrameGPU::coverageMode. Off: a covered pixel is written, whatever share of it the strand covers. Otherwise a pixel
 // is written with the probability of the strand's coverage there, from a random number per pixel, strand and frame.
@@ -218,6 +408,14 @@ struct HairVisibleCluster {
     float boundaryWeight; // width factor of the last drawn strand (HairLodBoundaryWeight)
     uint vertexLevel;     // drawn level: every drawn strand has 2^vertexLevel segments; at most the cluster's stored level
     float geomorph;       // [0, 1): how far the odd vertices have moved to the midpoint of their neighbours
+    uint seenSlot;        // the cluster's row of the cluster state; HAIR_INVALID_INDEX: none
+    uint flags;           // HAIR_VISIBLE_FLAG_*
+    // A hidden cluster is drawn at a fraction of its detail level (HairFrameGPU::hiddenDetail). Its drawn strands keep the
+    // width they have at the level it would have in view, widthDetail: they are a subset of the strands it would draw,
+    // not fewer and wider ones. What the density volume takes from each is scaled by densityScale to make up for the
+    // others. Otherwise widthDetail is detailLevel and densityScale 1.
+    float widthDetail;
+    float densityScale;
 };
 
 // One evaluated strand vertex in world space, for this frame and for the previous frame's root frames. The pool holds
@@ -266,6 +464,28 @@ struct HairPoolVertex {
 #define HAIR_DEBUG_VIEW_RANK 4u    // the strand's rank in its groom: white is kept longest
 #define HAIR_DEBUG_VIEW_VERTEX_LEVEL 5u // the cluster's drawn vertex level and geomorph
 #define HAIR_DEBUG_VIEW_COVERAGE 6u     // the coverage target, over black: grey up to one pixel's worth, then towards red
+// The layered path's, over black, from what the composite wrote (the composite information target).
+#define HAIR_DEBUG_VIEW_LAYERS 7u       // layers a pixel holds: 1 blue, 2 green, 3 yellow, 3 with coverage beyond them red
+#define HAIR_DEBUG_VIEW_ALPHA 8u        // the composited hair alpha as a grey level
+#define HAIR_DEBUG_VIEW_REACTIVE 9u     // the reactive mask the composite wrote for the upscaler, as a grey level
+// The layered path's, drawn by the shade pass and not by the overlay: hair lit by one part of its response alone.
+#define HAIR_DEBUG_VIEW_LOBE_R 10u      // the lights' R lobe
+#define HAIR_DEBUG_VIEW_LOBE_TT 11u     // the lights' TT lobe
+#define HAIR_DEBUG_VIEW_LOBE_TRT 12u    // the lights' TRT lobe
+#define HAIR_DEBUG_VIEW_ENVIRONMENT 13u // the environment term
+#define HAIR_DEBUG_VIEW_DIRECT 14u      // the lights, all three lobes, without the environment
+// The density volume's. The first is drawn by the overlay over the whole frame, the others by the shade pass.
+#define HAIR_DEBUG_VIEW_DENSITY 15u        // the largest density along each pixel's ray through the volumes; scalp voxels blue
+#define HAIR_DEBUG_VIEW_TRANSMITTANCE 16u  // HAIR_SHADE_DEBUG_TRANSMITTANCE
+#define HAIR_DEBUG_VIEW_FIBRE_COUNT 17u    // HAIR_SHADE_DEBUG_FIBRE_COUNT
+#define HAIR_DEBUG_VIEW_SCATTER_GLOBAL 18u // HAIR_SHADE_DEBUG_SCATTER_GLOBAL
+#define HAIR_DEBUG_VIEW_SCATTER_LOCAL 19u  // HAIR_SHADE_DEBUG_SCATTER_LOCAL
+#define HAIR_DEBUG_VIEW_VERTEX_DENSITY 20u // HAIR_SHADE_DEBUG_DENSITY
+
+// The composite information target (R8G8_UNorm): x the composited hair alpha, y these bits over 255.
+#define HAIR_COMPOSITE_INFO_LAYER_MASK 3u // occupied layers, 0 to 3
+#define HAIR_COMPOSITE_INFO_REMAINDER 4u  // coverage beyond the third layer
+#define HAIR_COMPOSITE_INFO_DEPTH 8u      // the pixel took hair's depth and motion vector
 
 // Rows of the counter buffer (uint).
 #define HAIR_COUNTER_EVALUATE_DISPATCHES 0u // one per evaluate dispatch that ran on the GPU; never reset
@@ -274,7 +494,8 @@ struct HairPoolVertex {
 // (HAIR_GUIDE_STAMP), or whose instance has no guide rows. 0 unless the CPU's lending of guide rows and the passes disagree.
 #define HAIR_COUNTER_STALE_GUIDES_DRAWN 1u
 #define HAIR_COUNTER_UNSEEN_STRANDS_DRAWN 2u // evaluate: drawn strands of instances the CPU found in no view (HAIR_SIM_FLAG_UNSEEN); 0 likewise
-// Row 3 is not used.
+// Raster and shade-list passes, layered path: the rows of the shade list, the pool vertices the shade pass lights.
+#define HAIR_COUNTER_SHADE_LIST 3u
 // Selection: reset every frame the select pass runs (not while the LOD is frozen).
 #define HAIR_COUNTER_CLUSTERS_TESTED 4u
 #define HAIR_COUNTER_CLUSTERS_VISIBLE 5u  // also the visible-cluster list's allocator: it can pass the capacity
@@ -292,9 +513,66 @@ struct HairPoolVertex {
 #define HAIR_COUNTER_PIXELS_RESOLVED 16u  // resolve: hair pixels written into the surface targets; reset every frame
 // Selection: one bit per instance (HairInstanceGPU row), set when one of its clusters passes the frustum test. Reset with
 // the selection counters.
-#define HAIR_COUNTER_INSTANCE_MASK_FIRST 17u
+// The layered path: reset every frame.
+#define HAIR_COUNTER_LAYER_REJECTED 17u   // raster: covered pixels behind the pixel's third layer, which skipped the layer writes
+#define HAIR_COUNTER_COVERAGE_SKIPPED 18u // raster: covered pixels whose coverage add was skipped at HairFrameGPU::coverageSaturation
+#define HAIR_COUNTER_LAYER_PIXELS 19u     // composite, 3 rows: pixels holding exactly 1, 2 and 3 layers
+#define HAIR_COUNTER_REMAINDER_PIXELS 22u // composite: three-layer pixels with coverage beyond the third layer
+// Composite: what the remainder term added to the hair alpha, summed over pixels, and the hair alpha itself, in
+// 1 / HAIR_ALPHA_COUNTER_UNIT of a pixel.
+#define HAIR_COUNTER_REMAINDER_ALPHA 23u
+#define HAIR_COUNTER_ALPHA_SUM 24u
+#define HAIR_COUNTER_DEPTH_PIXELS 25u     // composite: pixels that took hair's depth and motion vector
+#define HAIR_COUNTER_SHADED_VERTICES 26u  // shade: pool vertices lit: the shade list's rows that are this frame's
+// Shade: the sun's virtual shadow map lookups of those vertices, and the ones that did not find the page the vertex
+// asks for: read from a coarser clipmap, found no page at all (lit), or read a texel nothing was drawn into (lit).
+#define HAIR_COUNTER_SHADOW_LOOKUPS 27u
+#define HAIR_COUNTER_SHADOW_COARSER 28u
+#define HAIR_COUNTER_SHADOW_MISSING 29u
+#define HAIR_COUNTER_SHADOW_CLEARED 30u
+// The density volumes: reset every frame.
+#define HAIR_COUNTER_VOLUME_SEGMENTS 31u  // voxelize: pool segments deposited into a volume
+#define HAIR_COUNTER_VOLUME_DEPOSITS 32u  // voxelize: the voxel adds they made
+#define HAIR_COUNTER_VOLUME_OUTSIDE 33u   // voxelize: segments of an instance with a volume whose middle is outside its box
+#define HAIR_COUNTER_VOLUME_VERTICES 34u  // shade: lit vertices whose instance has a volume
+#define HAIR_COUNTER_VOLUME_MARCHES 35u   // shade: marches from those, toward lights and environment directions
+#define HAIR_COUNTER_VOLUME_STEPS 36u     // shade: the voxel reads of those marches
+// Shadow casting (hairShadow.hlsl): reset every frame.
+#define HAIR_COUNTER_SHADOW_CLUSTERS_TESTED 37u  // shadow select: clusters looked at
+#define HAIR_COUNTER_SHADOW_CLUSTERS 38u         // ... and kept; also the shadow cluster list's allocator: it can pass the capacity
+#define HAIR_COUNTER_SHADOW_STRANDS 39u          // drawn strands of the kept clusters
+#define HAIR_COUNTER_SHADOW_SEGMENTS 40u         // ... and their segments
+#define HAIR_COUNTER_SHADOW_POOL_VERTICES 41u    // also the shadow pool's allocator: it can pass the capacity
+#define HAIR_COUNTER_SHADOW_OVERFLOW 42u         // kept clusters dropped because the shadow pool or list was full
+#define HAIR_COUNTER_SHADOW_UNSEEN_STRANDS 43u   // shadow evaluate: strands of instances no view shows, drawn on their rigid pose
+#define HAIR_COUNTER_SHADOW_STALE_GUIDES 44u     // shadow evaluate: as HAIR_COUNTER_STALE_GUIDES_DRAWN; 0 likewise
+#define HAIR_COUNTER_SHADOW_SEGMENTS_DRAWN 45u   // shadow raster: (segment, clipmap) pairs that wrote at least one texel
+#define HAIR_COUNTER_SHADOW_TEXELS_COVERED 46u   // footprint texels on pages that take depth this frame, counted for each segment
+#define HAIR_COUNTER_SHADOW_TEXELS_WRITTEN 47u   // ... and those accepted and written
+#define HAIR_COUNTER_SHADOW_SEGMENTS_CAPPED 48u  // segments cut short at HAIR_SHADOW_MAX_TEXELS_PER_SEGMENT
+#define HAIR_COUNTER_SHADOW_PAGES_ADMITTED 49u   // the shadow map's own: pages it draws this frame (cached pages redrawn)
+#define HAIR_COUNTER_SHADOW_PAGES_INVALIDATED 50u // ... and page table entries invalidated by bounds this frame, hair's among them
+#define HAIR_COUNTER_SHADOW_CLIPMAP_MASK 51u     // the clipmaps any kept cluster is drawn into, a bit each
+#define HAIR_COUNTER_SHADOW_FIRST 37u
+// The culled rasterizer (hairRasterCulled.hlsl): reset every frame.
+#define HAIR_COUNTER_RASTER_ITEMS 52u         // chunks of the first pass; also the item list's allocator: it can pass the capacity
+#define HAIR_COUNTER_RASTER_ITEMS_OVERFLOW 53u // chunks sent to the late pass because the item list was full
+#define HAIR_COUNTER_CHUNKS 54u               // chunks of the frame's on-screen segments
+#define HAIR_COUNTER_CHUNKS_LATE 55u          // ... of them left for the late pass
+#define HAIR_COUNTER_CHUNKS_LATE_DRAWN 56u    // ... of those the late pass did not find hidden, and drew
+#define HAIR_COUNTER_PIXELS_TESTED 57u        // pixels the two passes' loops looked at
+#define HAIR_COUNTER_COVERAGE_ADDS 58u        // coverage adds
+#define HAIR_COUNTER_HIDDEN_WRITES 59u        // hidden depths lowered by a strand that covers its pixel whole
+#define HAIR_COUNTER_PIXELS_SATURATED 60u     // pixels whose near coverage reached the saturation
+#define HAIR_COUNTER_LATE_PIXELS_WRITTEN 61u  // layer writes of the late pass: hair the first pass's choice missed
+#define HAIR_COUNTER_HAIR_TILES 62u           // tiles a segment's chunk touched
+#define HAIR_COUNTER_CLUSTERS_UNSEEN 63u      // select: kept clusters that drew no pixel in the last frames
+#define HAIR_COUNTER_WAVE_ITERATIONS 64u      // HAIR_RASTER_FLAG_PROFILE: loop iterations of the two passes' waves, times the wave's lanes
+#define HAIR_COUNTER_CLUSTERS_REDUCED 65u     // select: kept clusters drawn at a detail scale below 1
+#define HAIR_COUNTER_INSTANCE_MASK_FIRST 68u
 #define HAIR_COUNTER_INSTANCE_MASK_WORDS 32u // 1,024 instances
-#define HAIR_COUNTER_COUNT 49u
+#define HAIR_COUNTER_COUNT 100u
+#define HAIR_ALPHA_COUNTER_UNIT 64.0f
 #define HAIR_COUNTER_FRAME_FIRST 1u
 #define HAIR_COUNTER_SELECTION_FIRST 4u
 #define HAIR_COUNTER_RASTER_FIRST 10u
@@ -353,7 +631,7 @@ struct HairPoolVertex {
 #define HAIR_PROBE_ROW_CAPACITY 131072u
 
 #ifdef __cplusplus
-static_assert(sizeof(HairInstanceGPU) == 96u);
+static_assert(sizeof(HairInstanceGPU) == 128u);
 static_assert(sizeof(HairGuidePoint) == 80u);
 static_assert(sizeof(HairGuidePointRange) == 8u); // a plain two-uint stream, like HairPackedPoint
 static_assert(sizeof(HairColliderGPU) == 32u);
@@ -363,8 +641,10 @@ static_assert(HAIR_SIM_METRIC_LEVEL_GUIDES + HAIR_MAX_GUIDE_LEVELS == HAIR_SIM_M
 static_assert(sizeof(HairRootFrame) == 48u);
 static_assert(sizeof(HairRootFramePair) == 96u);
 static_assert(sizeof(HairRootCheckSample) == 8u);
-static_assert(sizeof(HairFrameGPU) == 48u);
-static_assert(sizeof(HairVisibleCluster) == 32u);
+static_assert(sizeof(HairFrameGPU) == 160u);
+static_assert(sizeof(HairVolumeGPU) == 80u);
+static_assert(HAIR_COUNTER_INSTANCE_MASK_FIRST + HAIR_COUNTER_INSTANCE_MASK_WORDS == HAIR_COUNTER_COUNT);
+static_assert(sizeof(HairVisibleCluster) == 48u);
 static_assert(sizeof(HairPoolVertex) == 32u);
 static_assert((1u << HAIR_VIS_STRAND_BITS) == HAIR_MAX_STRANDS_PER_CLUSTER);
 static_assert(HAIR_MAX_VERTEX_LEVEL <= HAIR_VIS_SEGMENT_BITS); // a strand has at most 2^HAIR_MAX_VERTEX_LEVEL segments

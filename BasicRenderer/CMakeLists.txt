@@ -722,6 +722,7 @@ add_library(BasicRendererPublicHeaderSmoke OBJECT
     "tests/PublicHeaders/Extensions_RenderGraphExtensionRegistration.cpp"
     "tests/PublicHeaders/Extensions_RenderDeviceAccess.cpp"
     "tests/PublicHeaders/Extensions_SceneEntityRenderState.cpp"
+    "tests/PublicHeaders/Extensions_UpscalerReactiveMask.cpp"
     "tests/PublicHeaders/Extensions_PipelineDescs.cpp"
     "tests/PublicHeaders/Extensions_ShaderCompilationTypes.cpp"
     "tests/PublicHeaders/Extensions_SettingAccess.cpp"

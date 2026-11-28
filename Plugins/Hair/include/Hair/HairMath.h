@@ -18,6 +18,7 @@ struct Float3 {
 inline Float3 operator+(Float3 a, Float3 b) { return { a.x + b.x, a.y + b.y, a.z + b.z }; }
 inline Float3 operator-(Float3 a, Float3 b) { return { a.x - b.x, a.y - b.y, a.z - b.z }; }
 inline Float3 operator*(Float3 a, float s) { return { a.x * s, a.y * s, a.z * s }; }
+inline Float3 operator*(Float3 a, Float3 b) { return { a.x * b.x, a.y * b.y, a.z * b.z }; } // per component, as HLSL
 inline bool operator==(Float3 a, Float3 b) { return a.x == b.x && a.y == b.y && a.z == b.z; }
 
 inline float Dot(Float3 a, Float3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }

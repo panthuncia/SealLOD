@@ -13,10 +13,25 @@
 //
 // The coverage target (HairFrameGPU::coverageAccumulate) gets every segment's coverage added, written or not.
 //
+// The layered path (HairFrameGPU::renderPath). A pixel keeps its three nearest segments, in the visibility target and two
+// more layers of the same key, and the coverage target always gets every segment's coverage. Nothing is accepted at
+// random: the composite (hairComposite.hlsl) works each layer's coverage out again from its segment and blends them. The
+// layers are filled by a chain of InterlockedMin: the write to a layer returns what the layer held, the larger of that
+// and the key goes on to the next layer, so the three layers end holding the three smallest keys of the pixel in order.
+// Before the chain the key is compared with the third layer by a plain load: that layer only ever falls during the
+// pass, so a key not below what is read can never be one of the pixel's three nearest, and a stale read can only fail to
+// reject (three wasted atomics), never reject wrongly. With a dense groom most covered pixels are behind three strands
+// already and stop there. Their coverage is still added, unless the pixel's sum is past
+// HairFrameGPU::coverageSaturation: also a plain load of a value that only rises, so a stale read costs an add.
+// A segment that offers a key to any pixel's layers marks its two vertices for the shade pass (hairShading.hlsli): only
+// those can be in a layer when the pass ends, since a key that ends in a layer was below the third layer when it was
+// compared. The other vertices, behind three strands everywhere or behind the opaque surface, are not lit.
+//
 // The simple form only: no tiling, no binning, and no anti-aliasing of a strand wider than a pixel. A segment tests at
 // most HAIR_RASTER_MAX_PIXELS_PER_SEGMENT pixels.
 
 #include "HairShaders/hairCommon.hlsli"
+#include "HairShaders/hairShading.hlsli"
 
 // HairRasterPass::Record. The camera and the opaque visibility buffer are bound by name.
 #define HAIR_FRAME_STATE UintRootConstant0       // StructuredBuffer<HairFrameGPU>
@@ -29,6 +44,9 @@
 #define HAIR_VISIBILITY_HEIGHT UintRootConstant7
 #define HAIR_GROUPS_PER_ROW UintRootConstant8    // the dispatch is this many groups wide: rows keep it under 65536
 #define HAIR_COVERAGE UintRootConstant9          // RWTexture2D<uint>: the coverage target
+#define HAIR_LAYER1 UintRootConstant10           // RWTexture2D<uint64_t>: the layered path's second and third layers
+#define HAIR_LAYER2 UintRootConstant11
+#define HAIR_POOL_COLORS UintRootConstant12      // RWStructuredBuffer<uint2>: the layered path's shading buffer, for the marks
 
 // PCG's output permutation (Jarzynski and Olano 2020).
 uint HairHash(uint value)
@@ -163,8 +181,11 @@ void HairRasterCS(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
     RWTexture2D<uint> hairCoverage = ResourceDescriptorHeap[HAIR_COVERAGE];
 
     // With coverage, a pixel past one of the segment's ends is the neighbouring segment's, unless the strand ends there.
-    const bool stochastic = frame.coverageMode != HAIR_COVERAGE_OFF;
-    const bool accumulate = frame.coverageAccumulate != 0u;
+    const bool layered = frame.renderPath == HAIR_PATH_LAYERED;
+    const bool stochastic = !layered && frame.coverageMode != HAIR_COVERAGE_OFF;
+    const bool accumulate = layered || frame.coverageAccumulate != 0u;
+    const uint coverageSaturation =
+        layered && frame.coverageSaturation > 0.0f ? (uint)(frame.coverageSaturation * HAIR_COVERAGE_UNIT) : 0xFFFFFFFFu;
     bool roundStart = true;
     bool roundEnd = true;
     if (stochastic || accumulate)
@@ -179,6 +200,8 @@ void HairRasterCS(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
     uint covered = 0u;
     float coverageSum = 0.0f;
     uint occluded = 0u;
+    uint layerRejected = 0u;
+    uint coverageSkipped = 0u;
     bool capped = false;
     for (int major = majorFirst; major <= majorEnd && !capped; ++major)
     {
@@ -206,7 +229,7 @@ void HairRasterCS(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
                 continue;
             }
             const bool owned = (along >= 0.0f || roundStart) && (along < 1.0f || roundEnd);
-            if (stochastic && !owned)
+            if ((stochastic || layered) && !owned)
             {
                 continue;
             }
@@ -225,8 +248,48 @@ void HairRasterCS(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
                 coverageSum += coverage;
                 if (accumulate)
                 {
-                    InterlockedAdd(hairCoverage[pixel], (uint)(coverage * HAIR_COVERAGE_UNIT + 0.5f));
+                    if (coverageSaturation != 0xFFFFFFFFu && hairCoverage[pixel] >= coverageSaturation)
+                    {
+                        ++coverageSkipped;
+                    }
+                    else
+                    {
+                        // On the layered path a strand that covers the pixel whole saturates its coverage, as in the
+                        // culled rasterizer (hairRasterCulled.hlsl): the two give the composite the same pixel.
+                        const bool saturates = layered && coverage >= 1.0f && (frame.rasterFlags & HAIR_RASTER_FLAG_OPAQUE_COVERAGE) != 0u;
+                        InterlockedAdd(hairCoverage[pixel], saturates ? (uint)(HAIR_COVERAGE_OPAQUE * HAIR_COVERAGE_UNIT) : (uint)(coverage * HAIR_COVERAGE_UNIT + 0.5f));
+                    }
                 }
+            }
+            if (layered)
+            {
+                // A strand of no width (the boundary strand at the start of its fade) is in no layer.
+                if (!(coverage > 0.0f))
+                {
+                    continue;
+                }
+                RWTexture2D<uint64_t> hairLayer1 = ResourceDescriptorHeap[HAIR_LAYER1];
+                RWTexture2D<uint64_t> hairLayer2 = ResourceDescriptorHeap[HAIR_LAYER2];
+                uint64_t key = HairPackVisKey(depthBits, segmentId);
+                if (key >= hairLayer2[pixel])
+                {
+                    ++layerRejected;
+                    continue;
+                }
+                uint64_t held;
+                InterlockedMin(hairVisibility[pixel], key, held);
+                key = max(key, held);
+                if (key != 0xFFFFFFFFFFFFFFFFull)
+                {
+                    InterlockedMin(hairLayer1[pixel], key, held);
+                    key = max(key, held);
+                    if (key != 0xFFFFFFFFFFFFFFFFull)
+                    {
+                        InterlockedMin(hairLayer2[pixel], key);
+                    }
+                }
+                ++written;
+                continue;
             }
             if (stochastic && !(HairCoverageRandom(frame.coverageMode, (uint2)pixel, strandKey, frame.frameNumber) < coverage))
             {
@@ -239,6 +302,13 @@ void HairRasterCS(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
 
     if (written != 0u)
     {
+        if (layered)
+        {
+            // Plain stores of one value: two segments that share a vertex write the same mark.
+            RWStructuredBuffer<uint2> poolColors = ResourceDescriptorHeap[HAIR_POOL_COLORS];
+            poolColors[row] = HairShadeMark(frame.frameNumber);
+            poolColors[row + 1u] = HairShadeMark(frame.frameNumber);
+        }
         InterlockedAdd(counters[HAIR_COUNTER_SEGMENTS_DRAWN], 1u);
         InterlockedAdd(counters[HAIR_COUNTER_PIXELS_WRITTEN], written);
     }
@@ -255,5 +325,13 @@ void HairRasterCS(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
     if (capped)
     {
         InterlockedAdd(counters[HAIR_COUNTER_SEGMENTS_CAPPED], 1u);
+    }
+    if (layerRejected != 0u)
+    {
+        InterlockedAdd(counters[HAIR_COUNTER_LAYER_REJECTED], layerRejected);
+    }
+    if (coverageSkipped != 0u)
+    {
+        InterlockedAdd(counters[HAIR_COUNTER_COVERAGE_SKIPPED], coverageSkipped);
     }
 }

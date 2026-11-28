@@ -213,6 +213,7 @@ public sealed class HairSim : Scenario
         commands.Invoke("hair.clear");
         commands.Invoke("hair.lod", new { error_pixels = 1.0, max_width_scale = 8.0, min_detail = 0.02, force_detail = 0.0, segment_pixels = 4.0, freeze = false });
         if (Environment.GetEnvironmentVariable("HAIR_COVERAGE") is string coverage) commands.Invoke("hair.lod", new { coverage }); // off: the opaque form
+        if (Environment.GetEnvironmentVariable("HAIR_PATH") is string path) commands.Invoke("hair.render", new { path }); // layered: the composited path
         commands.Invoke("hair.debug", new { view = "off" });
         // Every control, so an earlier session's values do not carry over. The simulation level is forced to every guide:
         // this scenario is about the solver, and hair_sim_lod.cs about the level.
@@ -337,11 +338,20 @@ public sealed class HairSim : Scenario
         // million differently from then on, with no simulation at all (the entity's row is not bit for bit what it was).
         // With coverage on the written and resolved pixels are random draws, a different pattern every frame: two frames
         // of the same view differ by a few parts in a thousand, so the comparison is only that coarse.
-        double tolerance = commands.Invoke("hair.lod", new { }).GetProperty("coverage").GetString() == "off" ? 1e-4 : 2e-2;
+        // On the layered path nothing is drawn at random, so the pixels hair is blended into are compared as closely as
+        // with coverage off. Its visibility writes are not compared: a write that finds three nearer strands in its pixel
+        // is skipped, and how many find them depends on the order the rasterizer's threads ran in, frame by frame.
+        bool layered = commands.Invoke("hair.render", new { }).GetProperty("path").GetString() == "layered";
+        double tolerance = layered || commands.Invoke("hair.lod", new { }).GetProperty("coverage").GetString() == "off" ? 1e-4 : 2e-2;
         bool Close(uint a, uint b) => Math.Abs((double)a - b) <= tolerance * Math.Max(a, b);
+        // (The frames are sorted by their counters in order, the writes before the resolved pixels: without the writes
+        // the resolved pixels are sorted on their own.)
+        var resolvedAgain = rigidAgain.Select(frame => frame.Resolved).OrderBy(pixels => pixels).ToList();
+        var resolved = rigid.Select(frame => frame.Resolved).OrderBy(pixels => pixels).ToList();
         ctx.Check(rigidAgain.Count == rigid.Count && rigidAgain.Zip(rigid).All(pair => pair.First.Strands == pair.Second.Strands &&
-                pair.First.Segments == pair.Second.Segments && Close(pair.First.Drawn, pair.Second.Drawn) &&
-                Close(pair.First.Written, pair.Second.Written) && Close(pair.First.Resolved, pair.Second.Resolved)),
+                pair.First.Segments == pair.Second.Segments && (layered || (Close(pair.First.Drawn, pair.Second.Drawn) &&
+                Close(pair.First.Written, pair.Second.Written) && Close(pair.First.Resolved, pair.Second.Resolved)))) &&
+                (!layered || resolvedAgain.Zip(resolved).All(pair => Close(pair.First, pair.Second))),
             $"with the simulation off the rasterizer's counters over 32 frames are the rigid ones again ({rigidAgain[0]} to {rigidAgain[^1]})");
         await Capture(ctx, "hair_sim_5_rigid_again");
         await Captured(ctx);
